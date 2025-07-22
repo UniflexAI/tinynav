@@ -17,7 +17,6 @@ from math_utils import rot_from_two_vector, np2msg, np2tf, msg2np
 from tf2_ros import TransformBroadcaster
 import std_msgs.msg
 import sensor_msgs_py.point_cloud2 as pc2
-from scipy.spatial.transform import Rotation as R
 
 _MIN_FEATURES = 20
 _KEYFRAME_MIN_DISTANCE = 1 # uint: meter
