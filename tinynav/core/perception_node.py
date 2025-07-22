@@ -257,25 +257,6 @@ class PerceptionNode(Node):
         T[:3, 3] = tvec.ravel()
         return True, T
 
-    def convert_to_odom_msg(self, T_curr, timestamp):
-        """Convert the transformation matrix to an Odometry message."""
-        odom_msg = Odometry()
-        odom_msg.header.stamp = timestamp
-        odom_msg.header.frame_id = "world"
-        odom_msg.child_frame_id = "camera"
-        
-        R_curr = T_curr[:3, :3]
-        t_curr = T_curr[:3, 3]
-        
-        quat = R.from_matrix(R_curr).as_quat()
-        odom_msg.pose.pose.position.x = t_curr[0]
-        odom_msg.pose.pose.position.y = t_curr[1]
-        odom_msg.pose.pose.position.z = t_curr[2]
-        odom_msg.pose.pose.orientation.x = quat[0]
-        odom_msg.pose.pose.orientation.y = quat[1]
-        odom_msg.pose.pose.orientation.z = quat[2]
-        odom_msg.pose.pose.orientation.w = quat[3]
-        return odom_msg
     # ===publish utils functions===
     def pub_disp_as_pointcloud(self, disparity, timestamp):
         fx, fy = self.K[0, 0], self.K[1, 1]
