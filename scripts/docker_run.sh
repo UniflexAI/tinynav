@@ -26,6 +26,7 @@ else
     echo "👉 You can install it with the following command:"
     echo "   sudo apt-get install -y nvidia-container-toolkit && sudo systemctl restart docker"
     echo "   Then verify with: docker info | grep Runtimes"
+    exit 1
 fi
 # Detect architecture
 ARCH=$(uname -m)
