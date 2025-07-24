@@ -12,7 +12,6 @@ dependencies = [
     "scipy",
     "matplotlib",
     "opencv-python",
-    "rerun-sdk[notebook]",
     "notebook",
     "jupyterlab",
     "lightglue @ git+https://github.com/cvg/LightGlue.git@c2f8561",
@@ -23,6 +22,7 @@ dependencies = [
     "pycuda",
     "pybind11",
     "huggingface_hub",
+    "open3d",
 ]
 
 [tool.scikit-build]
