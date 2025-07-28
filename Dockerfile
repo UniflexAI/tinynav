@@ -55,6 +55,11 @@ RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 ENV CYCLONEDDS_URI=/tinynav/scripts/cyclone_dds_localhost.xml
 ENV PATH=$PATH:/usr/src/tensorrt/bin/
 
+# install cyclonedds for unitree sdk
+RUN git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x
+RUN cd cyclonedds && mkdir build && cd build && cmake .. -DCMAKE_INSTALL_PREFIX=../install && make -j$(nproc) && make install
+ENV CYCLONEDDS_HOME="/cyclonedds/install"
+
 WORKDIR /tinynav
 
 COPY ./tinynav        /tinynav/tinynav/
