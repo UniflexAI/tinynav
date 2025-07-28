@@ -1,6 +1,6 @@
 {
   "name": "tinynav-dev",
-  "image": "uniflexai/tinynav:a86a62a",
+  "image": "uniflexai/tinynav:3a293f0",
   "context": "..",
 
   "containerEnv": {
