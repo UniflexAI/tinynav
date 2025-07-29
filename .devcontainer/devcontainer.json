@@ -3,22 +3,14 @@
   "image": "uniflexai/tinynav:3a293f0",
   "context": "..",
 
+  "initializeCommand": "if [ $(uname -m) = 'aarch64' ]; then echo '[\"--privileged\",\"--network\",\"host\"]' > /tmp/runargs.json; else echo '[\"--gpus\",\"all\",\"--privileged\",\"--network\",\"host\"]' > /tmp/runargs.json; fi",
+
+  "runArgs": ["@/tmp/runargs.json"],
+
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
     "GDK_SCALE": "2"
   },
-
-  "runArgs": [
-    "--gpus", "all",
-    "--privileged",
-    "--network", "host",
-    "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
-    "-v", "/dev:/dev",
-    "--device-cgroup-rule=c 81:* rwm",
-    "--device-cgroup-rule=c 234:* rwm",
-    "--shm-size=16gb",
-    "-v", "${localWorkspaceFolder}:/tinynav"
-  ],
 
   "workspaceFolder": "/tinynav",
   "remoteUser": "root",
@@ -26,4 +18,3 @@
   "mounts": [],
   "postCreateCommand": "echo 'Devcontainer ready.'"
 }
-
