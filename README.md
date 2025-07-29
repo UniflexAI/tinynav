@@ -63,6 +63,16 @@ The repository is organized as follows:
 ---
 
 # Getting Started
+## Prerequisites
+
+Before you begin, make sure you have the following installed:
+
+- **git** and **git-lfs** (for cloning and handling large files)
+- **Docker**
+
+**Platform-specific requirements:**
+- For **x86_64** (PC): [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (for GPU support)
+- For **Jetson Orin**: [JetPack SDK](https://developer.nvidia.com/embedded/jetpack) version 6.2 or higher
 
 ## Quick Start
 
