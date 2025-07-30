@@ -31,8 +31,6 @@ RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o 
 RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
 RUN apt-get update && apt-get install -y ros-humble-desktop \
     python3-colcon-common-extensions \
-    ros-humble-librealsense2* \
-    ros-humble-realsense2-* \
     && rm -rf /var/lib/apt/lists/*
 
 # tensorrt
@@ -59,6 +57,34 @@ ENV PATH=$PATH:/usr/src/tensorrt/bin/
 RUN git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x
 RUN cd cyclonedds && mkdir build && cd build && cmake .. -DCMAKE_INSTALL_PREFIX=../install && make -j$(nproc) && make install
 ENV CYCLONEDDS_HOME="/cyclonedds/install"
+
+WORKDIR /3rdparty
+# realsense sdk
+RUN apt update && apt install -y libudev-dev pkg-config libusb-1.0-0-dev libglfw3-dev libssl-dev libgl1-mesa-dev libglu1-mesa cmake
+RUN apt install -y libgtk-3-dev
+RUN git clone https://github.com/IntelRealSense/librealsense.git \
+    && cd librealsense \
+    && cp config/99-realsense-libusb.rules /etc/udev/rules.d/. \
+    && mkdir build \
+    && cd build \
+    && cmake ../ -DFORCE_LIBUVC=true -DCMAKE_BUILD_TYPE=release -DBUILD_EXAMPLES=true \
+    && make -j$(nproc) \
+    && make install
+    
+# realsense ros2 wrapper
+ENV ROS_DISTRO=humble
+RUN mkdir -p ros2_ws/src \
+    && cd ros2_ws/src \
+    && git clone https://github.com/IntelRealSense/realsense-ros.git -b ros2-master \
+    && cd /3rdparty/ros2_ws \
+    && apt-get install python3-rosdep -y \
+    && rosdep init \
+    && rosdep update \
+    && rosdep install -i --from-path src --rosdistro $ROS_DISTRO --skip-keys=librealsense2 -y \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build
+
+RUN echo "source /3rdparty/ros2_ws/install/local_setup.bash" >> ~/.bashrc
 
 WORKDIR /tinynav
 
