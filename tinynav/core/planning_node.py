@@ -293,13 +293,15 @@ class PlanningNode(Node):
         img_msg.header.frame_id = "map"
         self.height_map_pub.publish(img_msg)
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
-        points = []
         occupied = np.argwhere(grid3d > 0)
-        for idx in occupied:
-            x = origin[0] + idx[0] * resolution
-            y = origin[1] + idx[1] * resolution
-            z = origin[2] + idx[2] * resolution
-            points.append((x, y, z))
+        # vectorized operation to avoid for loop
+        if len(occupied) == 0:  
+            points = []
+        else:
+            origin_np = np.array(origin)
+            world_coords = origin_np + occupied * resolution
+            points = world_coords.tolist() 
+        
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = "world"
