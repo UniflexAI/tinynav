@@ -13,7 +13,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from math_utils import rot_from_two_vector, np2msg, np2tf, msg2np
+from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
 from tf2_ros import TransformBroadcaster
 import std_msgs.msg
 import sensor_msgs_py.point_cloud2 as pc2
@@ -70,8 +70,6 @@ class PerceptionNode(Node):
         self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = TimeSynchronizer([self.left_sub, self.right_sub], queue_size=1)
         self.ts.registerCallback(self.images_callback)
-        self.relocalization_sub = self.create_subscription(Odometry, "/map/relocalization", self.relocalization_callback, 10)
-        self.Tmap_odom = np.eye(4)
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
         self.disparity_pub = self.create_publisher(Image, "/slam/disparity", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
@@ -110,14 +108,6 @@ class PerceptionNode(Node):
             self.get_logger().info("Initial pose set from accelerometer data.")
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_last}")
             self.destroy_subscription(self.accel_sub)
-
-    def relocalization_callback(self, msg):
-        try:
-            index = self.keyframe_data["timestamp"].index(msg.header.stamp)
-            Todom_i = self.keyframe_data["node"][index]
-            self.Tmap_odom = msg2np(msg) @ np.linalg.inv(Todom_i)
-        except Exception:
-            logging.error(f"keyframe is delay too much {self.keyframe_data['timestamp'][0]} > {msg.header.stamp}")
 
     def images_callback(self, left_msg, right_msg):
         current_timestamp = left_msg.header.stamp.sec + left_msg.header.stamp.nanosec * 1e-9
@@ -193,7 +183,7 @@ class PerceptionNode(Node):
             self.pub_disp_as_pointcloud(disparity, self.timestamp)
 
         with Timer(text="[ComputePose] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-            state, T_pre_curr = self.estimate_pose(kpt_pre, kpt_cur, disparity)
+            state, T_pre_curr, _, _, _ = estimate_pose(kpt_pre, kpt_cur, disparity, self.K, self.baseline)
 
         if not state:
             return
@@ -203,11 +193,7 @@ class PerceptionNode(Node):
         self.T_last = T_curr
 
         # publish odometry 
-        if self.Tmap_odom is None:
-            self.odom_pub.publish(np2msg(T_curr, self.timestamp, "world", "camera"))
-        else:
-            T_curr = self.Tmap_odom @ T_curr
-            self.odom_pub.publish(np2msg(T_curr, self.timestamp, "world", "camera"))
+        self.odom_pub.publish(np2msg(T_curr, self.timestamp, "world", "camera"))
         # publish TF
         self.tf_broadcaster.sendTransform(np2tf(T_curr, self.timestamp, "world", "camera"))
 
@@ -228,33 +214,6 @@ class PerceptionNode(Node):
             self.keyframe_pose_pub.publish(np2msg(T_curr, left_msg.header.stamp, "world", "camera"))
             self.keyframe_image_pub.publish(left_msg)
             self.keyframe_disparity_pub.publish(disparity_msg)
-
-
-
-    def estimate_pose(self, kpts_prev, kpts_curr, disparity):
-        points_3d, points_2d = [], []
-        for pt_prev, pt_curr in zip(kpts_prev, kpts_curr):
-            u, v = int(pt_curr[0]), int(pt_curr[1])
-            if 0 <= v < disparity.shape[0] and 0 <= u < disparity.shape[1]:
-                disp = disparity[v, u]
-                if disp > 1:
-                    Z = self.K[0, 0] * self.baseline / disp
-                    X = (pt_curr[0] - self.K[0, 2]) * Z / self.K[0, 0]
-                    Y = (pt_curr[1] - self.K[1, 2]) * Z / self.K[1, 1]
-                    points_3d.append([X, Y, Z])
-                    points_2d.append(pt_prev)
-        if len(points_3d) < 6:
-            return False, np.eye(4)
-        points_3d = np.array(points_3d, dtype=np.float32)
-        points_2d = np.array(points_2d, dtype=np.float32)
-        success, rvec, tvec, _ = cv2.solvePnPRansac(points_3d, points_2d, self.K, None)
-        if not success:
-            return False, np.eye(4)
-        R_mat, _ = cv2.Rodrigues(rvec)
-        T = np.eye(4)
-        T[:3, :3] = R_mat
-        T[:3, 3] = tvec.ravel()
-        return True, T
 
     # ===publish utils functions===
     def pub_disp_as_pointcloud(self, disparity, timestamp):

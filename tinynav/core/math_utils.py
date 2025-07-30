@@ -3,6 +3,7 @@ from numba import njit
 from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
+import cv2
 
 @njit
 def rotvec_to_matrix(rv):
@@ -142,3 +143,31 @@ def msg2np(msg):
     T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
     return T
     
+
+def estimate_pose( kpts_prev, kpts_curr, disparity, K, baseline) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    points_3d, points_2d = [], []
+    for pt_prev, pt_curr in zip(kpts_prev, kpts_curr):
+        u, v = int(pt_curr[0]), int(pt_curr[1])
+        if 0 <= v < disparity.shape[0] and 0 <= u < disparity.shape[1]:
+            disp = disparity[v, u]
+            if disp > 1:
+                Z = K[0, 0] * baseline / disp
+                X = (pt_curr[0] - K[0, 2]) * Z / K[0, 0]
+                Y = (pt_curr[1] - K[1, 2]) * Z / K[1, 1]
+                points_3d.append([X, Y, Z])
+                points_2d.append(pt_prev)
+    if len(points_3d) < 6:
+        return False, np.eye(4), None, None, None
+    points_3d = np.array(points_3d, dtype=np.float32)
+    points_2d = np.array(points_2d, dtype=np.float32)
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None)
+    if not success:
+        return False, np.eye(4), None, None, None
+    R_mat, _ = cv2.Rodrigues(rvec)
+    T = np.eye(4)
+    T[:3, :3] = R_mat
+    T[:3, 3] = tvec.ravel()
+    inliers = inliers.flatten()
+    inliers_2d = points_2d[inliers]
+    inliers_3d = points_3d[inliers]
+    return True, T, inliers_2d, inliers_3d, inliers
