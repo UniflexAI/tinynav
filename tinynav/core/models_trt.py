@@ -35,14 +35,12 @@ class OutputAllocator(trt.IOutputAllocator):
 
 class TRTBase:
     def __init__(self, engine_path):
-        self.ctx = cuda.Device(0).make_context()
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
         self.context = self.engine.create_execution_context()
         self.output_allocator = OutputAllocator()
         self.inputs, self.outputs, self.bindings, self.stream = self.allocate_buffers()
-        self.memory_invalidate = False
 
     def allocate_buffers(self):
         inputs = []
@@ -81,24 +79,15 @@ class TRTBase:
                 outputs.append({"device": device_mem, "dtype": dtype, "name": name})
 
         return inputs, outputs, bindings, stream
-    
-    def clean_up(self):
-        self.ctx.push()
-        self.stream.synchronize()
-        self.ctx.pop()
-        self.ctx.detach()
-
-
 
 class SuperPointTRT(TRTBase):
-    def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_360x640_fp16_{platform.machine()}.plan"):
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_480x848_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
 
     # default threshold as 
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
     #
     def infer(self, input_image:np.ndarray, threshold = np.array([0.0005], dtype=np.float32)):
-        self.ctx.push()
         image = np.expand_dims(input_image, axis=0)
         np.copyto(self.inputs[0]["host"], image.ravel())
         np.copyto(self.inputs[1]["host"], threshold.ravel())
@@ -117,7 +106,6 @@ class SuperPointTRT(TRTBase):
             results[out["name"]] = np.empty(out_shape, dtype=out["dtype"])
             cuda.memcpy_dtoh_async(results[out["name"]], out_device, self.stream)
         self.stream.synchronize()
-        self.ctx.pop()
         return results
 
     def memorized_infer(self, input_image:np.ndarray, threshold = np.array([0.0005], dtype=np.float32)):
@@ -138,7 +126,6 @@ class LightGlueTRT(TRTBase):
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/lightglue.py#L333
     #
     def infer(self, kpts0, kpts1, desc0, desc1, img_shape0, img_shape1, match_threshold = np.array([0.1])):
-        self.ctx.push()
         np.copyto(self.inputs[0]["host"][: kpts0.size], kpts0.ravel())
         np.copyto(self.inputs[1]["host"][: kpts1.size], kpts1.ravel())
         np.copyto(self.inputs[2]["host"][: desc0.size], desc0.ravel())
@@ -166,7 +153,6 @@ class LightGlueTRT(TRTBase):
             results[out["name"]] = np.empty(out_shape, dtype=out["dtype"])
             cuda.memcpy_dtoh_async(results[out["name"]], out_device, self.stream)
         self.stream.synchronize()
-        self.ctx.pop()
         return results
 
 
@@ -207,7 +193,6 @@ class Dinov2TRT(TRTBase):
         return image
 
     def infer(self, image):
-        self.ctx.push()
         np.copyto(self.inputs[0]["host"], image.ravel())
         cuda.memcpy_htod_async(self.inputs[0]["device"], self.inputs[0]["host"], self.stream)
 
@@ -224,7 +209,6 @@ class Dinov2TRT(TRTBase):
             result = np.zeros_like(out["host"])
             np.copyto(result, out["host"])
             results[out["name"]] = result.reshape(out["shape"])
-        self.ctx.pop()
         return results
 
 
@@ -233,7 +217,7 @@ if __name__ == "__main__":
     superpoint = SuperPointTRT()
     light_glue = LightGlueTRT()
     # Create dummy zero inputs
-    image_shape = np.array([640, 360], dtype=np.int64)
+    image_shape = np.array([848, 480], dtype=np.int64)
     width, height = image_shape
     match_threshold = np.array([0.1], dtype=np.float32)
     threshold = np.array([0.015], dtype=np.float32)
@@ -261,6 +245,3 @@ if __name__ == "__main__":
             image_shape,
             match_threshold,
         )
-    dinov2.clean_up()
-    superpoint.clean_up()
-    light_glue.clean_up()
