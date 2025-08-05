@@ -22,7 +22,7 @@ import cv2
 from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 # === Helper functions ===
-@njit
+@njit(cache=True)
 def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
     """
     A "C-style" version of run_raycasting that uses explicit loops instead of
@@ -105,7 +105,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     return occupancy_grid
 
 
-@njit
+@njit(cache=True)
 def occupancy_grid_to_height_map(occupancy_grid, origin, resolution, threshold=0.1, method='min'):
     X, Y, Z = occupancy_grid.shape
     height_map = np.full((X, Z), np.nan, dtype=np.float32)
@@ -130,7 +130,7 @@ def max_pool_height_map(height_map, kernel_size=5):
     pooled = minimum_filter(filled, size=kernel_size, mode='nearest')
     return pooled
 
-@njit
+@njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=21, duration=5.0, dt=0.1,
     acc_std=0.00001, omega_y_std_deg=20.0,
@@ -174,6 +174,7 @@ def generate_trajectory_library_3d(
             params[k, 1] = omega_y
     return trajectories, params
 
+@njit(cache=True)
 def score_trajectories_by_heightmap(trajectories, height_map, origin, resolution):
     scores = []
     occ_points = []

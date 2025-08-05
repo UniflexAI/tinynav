@@ -5,7 +5,7 @@ from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
 
-@njit
+@njit(cache=True)
 def rotvec_to_matrix(rv):
     """Convert a rotation vector to a rotation matrix using Rodrigues' formula."""
     theta = np.linalg.norm(rv)
@@ -23,7 +23,7 @@ def rotvec_to_matrix(rv):
     ])
     return R
 
-@njit
+@njit(cache=True)
 def quat_to_matrix(q):
     """Convert a quaternion [x, y, z, w] to a rotation matrix."""
     x, y, z, w = q
@@ -48,7 +48,7 @@ def quat_to_matrix(q):
     R[2, 2] = 1 - 2 * (xx + yy)
     return R
 
-@njit
+@njit(cache=True)
 def matrix_to_quat(R):
     """Convert a rotation matrix to a quaternion [x, y, z, w]."""
     m00, m01, m02 = R[0, 0], R[0, 1], R[0, 2]
