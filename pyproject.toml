@@ -6,6 +6,7 @@ build-backend = "scikit_build_core.build"
 name = "tinynav"
 version = "0.1.0"
 description = "minimal implementation of navigation"
+requires-python = ">=3.10.12,<3.11"
 authors = [{ name = "Zhenfei Yang", email = "zhenfei.yang@deepmirror.com" }]
 dependencies = [
     "numpy==1.26.1", # for compatability with ros2's cv_bridge
