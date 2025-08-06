@@ -1,4 +1,4 @@
-trtexec --onnx=./dinvo2_base.onnx \
+trtexec --onnx=./dinov2_base.onnx \
                 --minShapes='pixel_values':1x3x224x224 \
                 --optShapes='pixel_values':1x3x224x224 \
                 --maxShapes='pixel_values':1x3x224x224 \

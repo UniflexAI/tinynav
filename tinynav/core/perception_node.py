@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
-from models_trt import LightGlueTRT, SuperPointTRT
+from models_trt import LightGlueTRT, SuperPointTRT, IGEVTRT
 from stereo_engine import StereoEngine # noqa: F401
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -39,21 +39,22 @@ class PerceptionNode(Node):
             "node": deque(maxlen=10),
         }
 
-        # stereo match: sgbm or foundation_stereo
-        self.sgbm = cv2.StereoSGBM_create(
-            minDisparity=0,
-            numDisparities=128,
-            blockSize=5,
-            P1=8 * 3 * 5**2,
-            P2=32 * 3 * 5**2,
-            disp12MaxDiff=1,
-            uniquenessRatio=10,
-            speckleWindowSize=100,
-            speckleRange=2,
-            preFilterCap=63,
-            mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
-        )
-        #self.stereo_engine = StereoEngine()
+        # stereo match: sgbm | foundation_stereo | igev
+        # self.sgbm = cv2.StereoSGBM_create(
+        #     minDisparity=0,
+        #     numDisparities=128,
+        #     blockSize=5,
+        #     P1=8 * 3 * 5**2,
+        #     P2=32 * 3 * 5**2,
+        #     disp12MaxDiff=1,
+        #     uniquenessRatio=10,
+        #     speckleWindowSize=100,
+        #     speckleRange=2,
+        #     preFilterCap=63,
+        #     mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
+        # )
+        # self.stereo_engine = StereoEngine()
+        self.igev = IGEVTRT()
         # intrinsic
         self.baseline = None
         self.K = None
@@ -127,17 +128,20 @@ class PerceptionNode(Node):
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
 
-        with Timer(text="[extract features + match] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+        with Timer(text="[extract features + match + stereo] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
             if self.left0_extract_result is None:
                 extractor_result = self.superpoint.infer(left_img)
                 if len(extractor_result["kpts"][0]) < _MIN_FEATURES:
                     return
                 self.left0_extract_result = extractor_result
                 return
+            else:
+                self.igev.infer(left_img, right_img)
 
             self.left1_extract_result = self.superpoint.infer(left_img)
             left1_keypoints = self.left1_extract_result["kpts"][0]  # (n, 2)
             if len(left1_keypoints) < _MIN_FEATURES:
+                self.igev.infer_sync()
                 return
             match_result = self.light_glue.infer(
                 self.left0_extract_result["kpts"],
@@ -157,9 +161,12 @@ class PerceptionNode(Node):
             logging.info(f"left0_pts left1_pts, match cnt: {len(left0_keypoints)}, {len(left1_keypoints)}, {len(kpt_pre)}")
             self.left0_extract_result = self.left1_extract_result
 
-        with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-            disparity = self.sgbm.compute(left_img, right_img).astype(np.float32) / 16.0
+            disparity = self.igev.infer_sync()["disp"]
             disparity[disparity < 0] = 0
+
+        # with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+        #     disparity = self.sgbm.compute(left_img, right_img).astype(np.float32) / 16.0
+        #     disparity[disparity < 0] = 0
 
         # compute disparity by foundation_stereo
         #with Timer(name='stereo', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):

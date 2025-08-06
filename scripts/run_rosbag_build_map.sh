@@ -1,5 +1,5 @@
 #!/bin/bash
-rosbag_path=$(uv run huggingface-cli download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag_d435i_01)
+rosbag_path=$(uv run huggingface-cli download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag_d435i_go2)
 
 tmux new-session \; \
   split-window -h \; \

@@ -55,4 +55,4 @@ docker run $DOCKER_ARGS \
     --device-cgroup-rule='c 81:* rmw' \
     --device-cgroup-rule='c 234:* rmw' \
     --shm-size=16gb \
-    uniflexai/tinynav:a86a62a /tinynav/scripts/run_rosbag_examples.sh
+    uniflexai/tinynav:c04d922 /tinynav/scripts/run_rosbag_examples.sh
