@@ -24,7 +24,7 @@ if docker info | grep -i 'Runtimes' | grep -q 'nvidia'; then
 else
     echo "❌ NVIDIA runtime is NOT available in Docker."
     echo "👉 You can install it with the following command:"
-    echo "   sudo apt-get install -y nvidia-container-toolkit && sudo systemctl restart docker"
+    echo "   sudo apt-get install -y nvidia-container-toolkit && sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
     echo "   Then verify with: docker info | grep Runtimes"
     exit 1
 fi
