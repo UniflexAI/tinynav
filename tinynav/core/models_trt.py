@@ -226,7 +226,7 @@ if __name__ == "__main__":
     dummy_right = np.random.randint(0, 256, (height, width, 1), dtype=np.uint8)
 
     image = dinov2.preprocess_image(dummy_left)
-    with Timer(text="[dinvo] Elapsed time: {milliseconds:.0f} ms"):
+    with Timer(text="[dinov2] Elapsed time: {milliseconds:.0f} ms"):
         embedding = dinov2.infer(image)["last_hidden_state"][:, 0, :]
         embedding = np.squeeze(embedding, axis=0)
         print(embedding.shape)
