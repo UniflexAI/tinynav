@@ -7,6 +7,7 @@ from codetiming import Timer
 from functools import lru_cache
 import platform
 import pycuda.autoinit # noqa: F401
+import asyncio
 
 def padding(img, shape):
     # Create an array with target shape and uint8 type
@@ -122,7 +123,7 @@ class SuperPointTRT(TRTBase):
     # default threshold as 
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
     #
-    def infer(self, input_image:np.ndarray, threshold = np.array([0.0005], dtype=np.float32)):
+    async def infer(self, input_image:np.ndarray, threshold = np.array([0.0005], dtype=np.float32)):
         # resize to input_size
         scale = self.input_shape[0] / input_image.shape[0]
         image = cv2.resize(input_image, (self.input_shape[1], self.input_shape[0]))
@@ -136,6 +137,11 @@ class SuperPointTRT(TRTBase):
         for i in range(self.engine.num_io_tensors):
             self.context.set_tensor_address(self.engine.get_tensor_name(i), self.bindings[i])
         self.context.execute_async_v3(stream_handle=self.stream.handle)
+
+        event = cuda.Event()
+        event.record(self.stream)
+        while not event.query():
+            await asyncio.sleep(0)
 
         results = {}
         for out in self.outputs:
@@ -165,7 +171,7 @@ class LightGlueTRT(TRTBase):
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/lightglue.py#L333
     #
-    def infer(self, kpts0, kpts1, desc0, desc1, img_shape0, img_shape1, match_threshold = np.array([0.1])):
+    async def infer(self, kpts0, kpts1, desc0, desc1, img_shape0, img_shape1, match_threshold = np.array([0.1])):
         np.copyto(self.inputs[0]["host"][: kpts0.size], kpts0.ravel())
         np.copyto(self.inputs[1]["host"][: kpts1.size], kpts1.ravel())
         np.copyto(self.inputs[2]["host"][: desc0.size], desc0.ravel())
@@ -185,6 +191,11 @@ class LightGlueTRT(TRTBase):
         for i in range(self.engine.num_io_tensors):
             self.context.set_tensor_address(self.engine.get_tensor_name(i), self.bindings[i])
         self.context.execute_async_v3(stream_handle=self.stream.handle)
+
+        event = cuda.Event()
+        event.record(self.stream)
+        while not event.query():
+            await asyncio.sleep(0)
 
         results = {}
         for out in self.outputs:
@@ -294,7 +305,7 @@ class IGEVTRT(TRTBase):
                 outputs.append({"host": host_mem, "device": device_mem, "shape": shape, "name": name})
         return inputs, outputs, bindings, stream
 
-    def infer(self, left_img:np.ndarray, right_img:np.ndarray):
+    async def infer(self, left_img:np.ndarray, right_img:np.ndarray):
         if self.raw_image_shape is None:
             self.raw_image_shape = left_img.shape
             self.resize_image_shape = (int(left_img.shape[0] * self.scale), int(left_img.shape[1] * self.scale))
@@ -312,7 +323,11 @@ class IGEVTRT(TRTBase):
             self.context.set_tensor_address(self.engine.get_tensor_name(i), self.bindings[i])
         self.context.execute_async_v3(stream_handle=self.stream.handle)
 
-    def infer_sync(self):
+        event = cuda.Event()
+        event.record(self.stream)
+        while not event.query():
+            await asyncio.sleep(0)
+
         for out in self.outputs:
             cuda.memcpy_dtoh_async(out["host"], out["device"], self.stream)
         self.stream.synchronize()

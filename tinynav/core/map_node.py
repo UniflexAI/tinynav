@@ -22,6 +22,7 @@ from std_msgs.msg import Header
 from planning_node import run_raycasting_loopy
 import logging
 from scipy.ndimage import gaussian_filter
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +232,7 @@ class MapNode(Node):
         self.depth_paths[keyframe_image_timestamp] = depth_path
 
         self.embeddings[keyframe_image_timestamp] = self.get_embeddings(image)
-        self.features[keyframe_image_timestamp]  = self.extract_super_point_features(image)
+        self.features[keyframe_image_timestamp]  = asyncio.run(self.super_point_extractor.infer(image))
 
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
@@ -273,11 +274,8 @@ class MapNode(Node):
         # shape: (1, 768)
         return self.dinov2_model.infer(processed_image)["last_hidden_state"][:, 0, :].squeeze(0)
 
-    def extract_super_point_features(self, image: np.ndarray) -> dict:
-        return self.super_point_extractor.infer(image)
-
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([640, 360], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        match_result = self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], image_shape, image_shape)
+        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
         keypoints0 = feats0["kpts"][0][valid_mask]
@@ -466,7 +464,7 @@ class MapNode(Node):
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
-        features = self.extract_super_point_features(image)
+        features = asyncio.run(self.super_point_extractor.infer(image))
         res, pose_in_camera = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug

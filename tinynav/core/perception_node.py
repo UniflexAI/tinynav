@@ -18,6 +18,8 @@ from tf2_ros import TransformBroadcaster
 import std_msgs.msg
 import sensor_msgs_py.point_cloud2 as pc2
 
+import asyncio
+
 _MIN_FEATURES = 20
 _KEYFRAME_MIN_DISTANCE = 1 # uint: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 5 # uint: degree
@@ -118,60 +120,47 @@ class PerceptionNode(Node):
         self.last_processed_timestamp = current_timestamp
         
         self.timestamp = left_msg.header.stamp
-        self.process(left_msg, right_msg)
 
-    @Timer(name="Perception Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def process(self, left_msg, right_msg):
+        with Timer(name="Perception Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            asyncio.run(self.process(left_msg, right_msg))
+
+    async def process(self, left_msg, right_msg):
         if self.K is None or self.T_last is None or self.image_shape is None:
             return
-        
+
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
 
-        with Timer(text="[extract features + match + stereo] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-            if self.left0_extract_result is None:
-                extractor_result = self.superpoint.infer(left_img)
-                if len(extractor_result["kpts"][0]) < _MIN_FEATURES:
-                    return
-                self.left0_extract_result = extractor_result
-                return
-            else:
-                self.igev.infer(left_img, right_img)
+        igev_task = asyncio.create_task(self.igev.infer(left_img, right_img))
 
-            self.left1_extract_result = self.superpoint.infer(left_img)
-            left1_keypoints = self.left1_extract_result["kpts"][0]  # (n, 2)
-            if len(left1_keypoints) < _MIN_FEATURES:
-                self.igev.infer_sync()
-                return
-            match_result = self.light_glue.infer(
+        extractor_result = await self.superpoint.infer(left_img)
+        if self.left0_extract_result is None:
+            self.left0_extract_result = extractor_result
+            return
+
+        self.left1_extract_result = extractor_result
+
+        match_result = await self.light_glue.infer(
                 self.left0_extract_result["kpts"],
-                self.left1_extract_result["kpts"],
+                extractor_result["kpts"],
                 self.left0_extract_result["descps"],
-                self.left1_extract_result["descps"],
+                extractor_result["descps"],
                 self.image_shape,
-                self.image_shape,
-            )
-            left0_keypoints = self.left0_extract_result["kpts"][0]  # (n, 2)
-            left1_keypoints = self.left1_extract_result["kpts"][0]  # (n, 2)
-            match_indices = match_result["match_indices"][0]
-            valid_mask = match_indices != -1
-            kpt_pre = left0_keypoints[valid_mask]
-            kpt_cur = left1_keypoints[match_indices[valid_mask]]
+                self.image_shape)
 
-            logging.info(f"left0_pts left1_pts, match cnt: {len(left0_keypoints)}, {len(left1_keypoints)}, {len(kpt_pre)}")
-            self.left0_extract_result = self.left1_extract_result
+        left0_keypoints = self.left0_extract_result["kpts"][0]  # (n, 2)
+        left1_keypoints = self.left1_extract_result["kpts"][0]  # (n, 2)
+        match_indices = match_result["match_indices"][0]
+        valid_mask = match_indices != -1
+        kpt_pre = left0_keypoints[valid_mask]
+        kpt_cur = left1_keypoints[match_indices[valid_mask]]
 
-            disparity = self.igev.infer_sync()["disp"]
-            disparity[disparity < 0] = 0
+        logging.info(f"left0_pts left1_pts, match cnt: {len(left0_keypoints)}, {len(left1_keypoints)}, {len(kpt_pre)}")
+        self.left0_extract_result = self.left1_extract_result
 
-        # with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-        #     disparity = self.sgbm.compute(left_img, right_img).astype(np.float32) / 16.0
-        #     disparity[disparity < 0] = 0
-
-        # compute disparity by foundation_stereo
-        #with Timer(name='stereo', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-        #    outputs, _ = self.stereo_engine.infer(left_img, right_img)
-        #    disparity = outputs[0]  # Already resized/scaled to original size
+        disparity = await igev_task
+        disparity = disparity["disp"]
+        disparity[disparity < 0] = 0
 
         # publish dispairty   
         with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
@@ -186,7 +175,7 @@ class PerceptionNode(Node):
             disp_color_msg.header = left_msg.header
             self.disparity_pub_vis.publish(disp_color_msg)
 
-        with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
             self.pub_disp_as_pointcloud(disparity, self.timestamp)
 
         with Timer(text="[ComputePose] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
