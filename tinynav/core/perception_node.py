@@ -8,7 +8,6 @@ import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
 from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
-from stereo_engine import StereoEngine # noqa: F401
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2
@@ -33,8 +32,8 @@ class PerceptionNode(Node):
         self.superpoint = SuperPointTRT()
         self.light_glue = LightGlueTRT()
 
-        self.left0_extract_result = None
-        self.left1_extract_result = None
+        self.last_left_img = None
+
         self.frame_index = 0
         self.keyframe_data = {
             "timestamp": deque(maxlen=10),
@@ -116,37 +115,35 @@ class PerceptionNode(Node):
         with Timer(name="[Model Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
             left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
             right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
+            if self.last_left_img is None:
+                self.last_left_img = left_img
+                return
 
             stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img))
 
-            extractor_result = await self.superpoint.infer(left_img)
-
-            if self.left0_extract_result is None:
-                self.left0_extract_result = extractor_result
-                return
-
-            self.left1_extract_result = extractor_result
+            current_left_extract_result = await self.superpoint.memorized_infer(left_img)
+            prev_left_extract_result = await self.superpoint.memorized_infer(self.last_left_img)
 
             match_result = await self.light_glue.infer(
-                    self.left0_extract_result["kpts"],
-                    extractor_result["kpts"],
-                    self.left0_extract_result["descps"],
-                    extractor_result["descps"],
+                    prev_left_extract_result["kpts"],
+                    current_left_extract_result["kpts"],
+                    prev_left_extract_result["descps"],
+                    current_left_extract_result["descps"],
                     self.image_shape,
                     self.image_shape)
 
-            left0_keypoints = self.left0_extract_result["kpts"][0]  # (n, 2)
-            left1_keypoints = self.left1_extract_result["kpts"][0]  # (n, 2)
+            prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
+            current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
             match_indices = match_result["match_indices"][0]
             valid_mask = match_indices != -1
-            kpt_pre = left0_keypoints[valid_mask]
-            kpt_cur = left1_keypoints[match_indices[valid_mask]]
+            kpt_pre = prev_keypoints[valid_mask]
+            kpt_cur = current_keypoints[match_indices[valid_mask]]
 
-            logging.info(f"left0_pts left1_pts, match cnt: {len(left0_keypoints)}, {len(left1_keypoints)}, {len(kpt_pre)}")
-            self.left0_extract_result = self.left1_extract_result
-
+            logging.info(f"prev_pts current_pts, match cnt: {len(prev_keypoints)}, {len(current_keypoints)}, {len(kpt_pre)}")
             disparity = await stereo_task
             disparity[disparity < 0] = 0
+
+            self.last_left_img = left_img
 
         # publish dispairty   
         with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):

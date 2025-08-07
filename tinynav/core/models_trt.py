@@ -8,6 +8,7 @@ from functools import lru_cache
 import platform
 import pycuda.autoinit # noqa: F401
 import asyncio
+from async_lru import alru_cache
 
 def padding(img, shape):
     # Create an array with target shape and uint8 type
@@ -154,14 +155,14 @@ class SuperPointTRT(TRTBase):
         results["kpts"][0] = (results["kpts"][0] + 0.5) / scale - 0.5
         return results
 
-    def memorized_infer(self, input_image:np.ndarray, threshold = np.array([0.0005], dtype=np.float32)):
+    async def memorized_infer(self, input_image:np.ndarray, threshold = np.array([0.0005], dtype=np.float32)):
         input_bytes = input_image.tobytes()
-        return self.infer_cached(input_bytes, input_image.shape, input_image.dtype.str, threshold.item())
+        return await self.infer_cached(input_bytes, input_image.shape, input_image.dtype.str, threshold.item())
 
-    @lru_cache(maxsize=128)
-    def infer_cached(self, input_bytes, shape, dtype_str, threshold):
+    @alru_cache(maxsize=128)
+    async def infer_cached(self, input_bytes, shape, dtype_str, threshold):
         input_image = np.frombuffer(input_bytes, dtype=dtype_str).reshape(shape)
-        return self.infer(input_image, np.array([threshold]))
+        return await self.infer(input_image, np.array([threshold]))
 
 
 class LightGlueTRT(TRTBase):
