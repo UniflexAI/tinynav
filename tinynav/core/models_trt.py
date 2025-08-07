@@ -337,7 +337,6 @@ class IGEVTRT(TRTBase):
             result = np.zeros_like(out["host"])
             np.copyto(result, out["host"])
             result = result.reshape(self.input_shape)
-            print(result.shape)
             results[out["name"]] = result
         results["disp"] = self.postprocess(results["disp"])
         return results

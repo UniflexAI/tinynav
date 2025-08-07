@@ -196,16 +196,14 @@ class PerceptionNode(Node):
 
         # keyframe checking
         def keyframe_check(T_curr):
-                if len(self.keyframe_data["node"]) == 0:
-                    return True
-                last_keyframe = self.keyframe_data["node"][-1]
-                T_ij = np.linalg.inv(last_keyframe) @ T_curr
-                t_diff = np.linalg.norm(T_ij[:3, 3])
-                cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
-                r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
-                return t_diff > _KEYFRAME_MIN_DISTANCE or r_diff > _KEYFRAME_MIN_ROTATE_DEGREE
+           last_keyframe = self.keyframe_data["node"][-1]
+           T_ij = np.linalg.inv(last_keyframe) @ T_curr
+           t_diff = np.linalg.norm(T_ij[:3, 3])
+           cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
+           r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
+           return t_diff > _KEYFRAME_MIN_DISTANCE or r_diff > _KEYFRAME_MIN_ROTATE_DEGREE
 
-        if keyframe_check(T_curr):
+        if len(self.keyframe_data["node"]) == 0 or keyframe_check(T_curr):
             self.keyframe_data["node"].append(T_curr)  # T_wi
             self.keyframe_data["timestamp"].append(left_msg.header.stamp)
             self.keyframe_pose_pub.publish(np2msg(T_curr, left_msg.header.stamp, "world", "camera"))
