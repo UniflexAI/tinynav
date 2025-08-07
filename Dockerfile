@@ -75,7 +75,7 @@ RUN git clone https://github.com/IntelRealSense/librealsense.git \
 ENV ROS_DISTRO=humble
 RUN mkdir -p ros2_ws/src \
     && cd ros2_ws/src \
-    && git clone https://github.com/IntelRealSense/realsense-ros.git -b ros2-master \
+    && git clone https://github.com/UniflexAI/realsense-ros.git -b ros2-master \
     && cd /3rdparty/ros2_ws \
     && apt-get install python3-rosdep -y \
     && rosdep init \

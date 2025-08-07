@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
-from models_trt import LightGlueTRT, SuperPointTRT, IGEVTRT
+from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from stereo_engine import StereoEngine # noqa: F401
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -41,22 +41,7 @@ class PerceptionNode(Node):
             "node": deque(maxlen=10),
         }
 
-        # stereo match: sgbm | foundation_stereo | igev
-        # self.sgbm = cv2.StereoSGBM_create(
-        #     minDisparity=0,
-        #     numDisparities=128,
-        #     blockSize=5,
-        #     P1=8 * 3 * 5**2,
-        #     P2=32 * 3 * 5**2,
-        #     disp12MaxDiff=1,
-        #     uniquenessRatio=10,
-        #     speckleWindowSize=100,
-        #     speckleRange=2,
-        #     preFilterCap=63,
-        #     mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
-        # )
-        # self.stereo_engine = StereoEngine()
-        self.igev = IGEVTRT()
+        self.stereo_engine = StereoEngineTRT()
         # intrinsic
         self.baseline = None
         self.K = None
@@ -132,7 +117,7 @@ class PerceptionNode(Node):
             left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
             right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
 
-            igev_task = asyncio.create_task(self.igev.infer(left_img, right_img))
+            stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img))
 
             extractor_result = await self.superpoint.infer(left_img)
 
@@ -160,7 +145,7 @@ class PerceptionNode(Node):
             logging.info(f"left0_pts left1_pts, match cnt: {len(left0_keypoints)}, {len(left1_keypoints)}, {len(kpt_pre)}")
             self.left0_extract_result = self.left1_extract_result
 
-            disparity = (await igev_task)["disp"]
+            disparity = await stereo_task
             disparity[disparity < 0] = 0
 
         # publish dispairty   

@@ -127,3 +127,7 @@ dmypy.json
 output/
 debug/
 rosbag2_*/
+
+# ros worksapce
+install/
+log/
