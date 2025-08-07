@@ -128,39 +128,40 @@ class PerceptionNode(Node):
         if self.K is None or self.T_last is None or self.image_shape is None:
             return
 
-        left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
-        right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
+        with Timer(name="[Model Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+            left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
+            right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
 
-        igev_task = asyncio.create_task(self.igev.infer(left_img, right_img))
+            igev_task = asyncio.create_task(self.igev.infer(left_img, right_img))
 
-        extractor_result = await self.superpoint.infer(left_img)
-        if self.left0_extract_result is None:
-            self.left0_extract_result = extractor_result
-            return
+            extractor_result = await self.superpoint.infer(left_img)
 
-        self.left1_extract_result = extractor_result
+            if self.left0_extract_result is None:
+                self.left0_extract_result = extractor_result
+                return
 
-        match_result = await self.light_glue.infer(
-                self.left0_extract_result["kpts"],
-                extractor_result["kpts"],
-                self.left0_extract_result["descps"],
-                extractor_result["descps"],
-                self.image_shape,
-                self.image_shape)
+            self.left1_extract_result = extractor_result
 
-        left0_keypoints = self.left0_extract_result["kpts"][0]  # (n, 2)
-        left1_keypoints = self.left1_extract_result["kpts"][0]  # (n, 2)
-        match_indices = match_result["match_indices"][0]
-        valid_mask = match_indices != -1
-        kpt_pre = left0_keypoints[valid_mask]
-        kpt_cur = left1_keypoints[match_indices[valid_mask]]
+            match_result = await self.light_glue.infer(
+                    self.left0_extract_result["kpts"],
+                    extractor_result["kpts"],
+                    self.left0_extract_result["descps"],
+                    extractor_result["descps"],
+                    self.image_shape,
+                    self.image_shape)
 
-        logging.info(f"left0_pts left1_pts, match cnt: {len(left0_keypoints)}, {len(left1_keypoints)}, {len(kpt_pre)}")
-        self.left0_extract_result = self.left1_extract_result
+            left0_keypoints = self.left0_extract_result["kpts"][0]  # (n, 2)
+            left1_keypoints = self.left1_extract_result["kpts"][0]  # (n, 2)
+            match_indices = match_result["match_indices"][0]
+            valid_mask = match_indices != -1
+            kpt_pre = left0_keypoints[valid_mask]
+            kpt_cur = left1_keypoints[match_indices[valid_mask]]
 
-        disparity = await igev_task
-        disparity = disparity["disp"]
-        disparity[disparity < 0] = 0
+            logging.info(f"left0_pts left1_pts, match cnt: {len(left0_keypoints)}, {len(left1_keypoints)}, {len(kpt_pre)}")
+            self.left0_extract_result = self.left1_extract_result
+
+            disparity = (await igev_task)["disp"]
+            disparity[disparity < 0] = 0
 
         # publish dispairty   
         with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
