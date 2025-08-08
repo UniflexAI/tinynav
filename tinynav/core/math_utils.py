@@ -171,3 +171,19 @@ def estimate_pose( kpts_prev, kpts_curr, disparity, K, baseline) -> tuple[bool, 
     inliers_2d = points_2d[inliers]
     inliers_3d = points_3d[inliers]
     return True, T, inliers_2d, inliers_3d, inliers
+
+@njit(cache=True)
+def disparity_to_pointcloud(disparity, K, baseline, step=4):
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    points = []
+    h, w = disparity.shape
+    for v in range(0, h, step):
+        for u in range(0 , w, step):
+            d = disparity[v, u]
+            if d > 1:
+                Z = fx * baseline / d
+                X = (u - cx) * Z / fx
+                Y = (v - cy) * Z / fy
+                points.append((X, Y, Z))
+    return points

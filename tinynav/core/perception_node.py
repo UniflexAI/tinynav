@@ -12,7 +12,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
+from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, disparity_to_pointcloud
 from tf2_ros import TransformBroadcaster
 import std_msgs.msg
 import sensor_msgs_py.point_cloud2 as pc2
@@ -194,18 +194,7 @@ class PerceptionNode(Node):
 
     # ===publish utils functions===
     def pub_disp_as_pointcloud(self, disparity, timestamp):
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        points = []
-        h, w = disparity.shape
-        for v in range(0, h, 16):
-            for u in range(0 , w, 16):
-                d = disparity[v, u]
-                if d > 1:
-                    Z = fx * self.baseline / d
-                    X = (u - cx) * Z / fx
-                    Y = (v - cy) * Z / fy
-                    points.append((X, Y, Z))
+        points = disparity_to_pointcloud(disparity, self.K, self.baseline)
         header = std_msgs.msg.Header(stamp=timestamp, frame_id="camera")
         pc2_msg = pc2.create_cloud_xyz32(header, points)
         self.dispairty_pointcloud_pub.publish(pc2_msg)
