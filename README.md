@@ -4,7 +4,8 @@
   <img alt="tinynav logo" src="/docs/tinynav.png" width="50%" height="50%">
 </picture>
 
-TinyNav: A lightweight, hackable system to guide your robots anywhere. Maintained by [Uniflex AI](https://x.com/UniflexAI).
+**TinyNav** /ˈtaɪni ˈnævi/: *A lightweight, hackable system to guide your robots anywhere.*
+ Maintained by [Uniflex AI](https://x.com/UniflexAI).
 
 <h3>
 
