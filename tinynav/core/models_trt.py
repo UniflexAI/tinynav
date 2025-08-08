@@ -2,7 +2,6 @@ import tensorrt as trt
 import pycuda.driver as cuda
 import numpy as np
 import cv2
-import torch
 from codetiming import Timer
 from functools import lru_cache
 import platform
@@ -239,9 +238,15 @@ class Dinov2TRT(TRTBase):
     def preprocess_image(self, image, target_size=224):
         image = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
-        image = (image - torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)) / torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
-        image = image.unsqueeze(0).numpy()
+
+        image = np.transpose(image, (2, 0, 1))  # C x H x W
+        image = image.astype(np.float32) / 255.0
+
+        mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+        std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+        image = (image - mean) / std
+
+        image = np.expand_dims(image, axis=0) # 1 x C x H x W
         return image
 
     def infer(self, image):

@@ -32,13 +32,8 @@ class PerceptionNode(Node):
         self.superpoint = SuperPointTRT()
         self.light_glue = LightGlueTRT()
 
-        self.last_left_img = None
-
-        self.frame_index = 0
-        self.keyframe_data = {
-            "timestamp": deque(maxlen=10),
-            "node": deque(maxlen=10),
-        }
+        self.last_keyframe_img = None
+        self.has_first_keyframe = False
 
         self.stereo_engine = StereoEngineTRT()
         # intrinsic
@@ -115,14 +110,14 @@ class PerceptionNode(Node):
         with Timer(name="[Model Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
             left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
             right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
-            if self.last_left_img is None:
-                self.last_left_img = left_img
+            if self.last_keyframe_img is None:
+                self.last_keyframe_img = left_img
                 return
 
             stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img))
 
+            prev_left_extract_result = await self.superpoint.memorized_infer(self.last_keyframe_img)
             current_left_extract_result = await self.superpoint.memorized_infer(left_img)
-            prev_left_extract_result = await self.superpoint.memorized_infer(self.last_left_img)
 
             match_result = await self.light_glue.infer(
                     prev_left_extract_result["kpts"],
@@ -142,8 +137,6 @@ class PerceptionNode(Node):
             logging.info(f"prev_pts current_pts, match cnt: {len(prev_keypoints)}, {len(current_keypoints)}, {len(kpt_pre)}")
             disparity = await stereo_task
             disparity[disparity < 0] = 0
-
-            self.last_left_img = left_img
 
         # publish dispairty   
         with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
@@ -169,25 +162,23 @@ class PerceptionNode(Node):
 
         # final pose
         T_curr = self.T_last @ T_pre_curr
-        self.T_last = T_curr
-
+        
         # publish odometry 
         self.odom_pub.publish(np2msg(T_curr, self.timestamp, "world", "camera"))
         # publish TF
         self.tf_broadcaster.sendTransform(np2tf(T_curr, self.timestamp, "world", "camera"))
 
         # keyframe checking
-        def keyframe_check(T_curr):
-           last_keyframe = self.keyframe_data["node"][-1]
-           T_ij = np.linalg.inv(last_keyframe) @ T_curr
+        def keyframe_check(T_ij):
            t_diff = np.linalg.norm(T_ij[:3, 3])
            cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
            r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
            return t_diff > _KEYFRAME_MIN_DISTANCE or r_diff > _KEYFRAME_MIN_ROTATE_DEGREE
 
-        if len(self.keyframe_data["node"]) == 0 or keyframe_check(T_curr):
-            self.keyframe_data["node"].append(T_curr)  # T_wi
-            self.keyframe_data["timestamp"].append(left_msg.header.stamp)
+        if not self.has_first_keyframe or keyframe_check(T_pre_curr):
+            self.last_keyframe_img = left_img
+            self.T_last = T_curr
+            self.has_first_keyframe = True
             self.keyframe_pose_pub.publish(np2msg(T_curr, left_msg.header.stamp, "world", "camera"))
             self.keyframe_image_pub.publish(left_msg)
             self.keyframe_disparity_pub.publish(disparity_msg)
