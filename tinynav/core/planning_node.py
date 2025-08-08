@@ -7,7 +7,7 @@ from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 import numpy as np
-from scipy.ndimage import minimum_filter
+from scipy.ndimage import maximum_filter
 from numba import njit
 import message_filters
 import matplotlib.pyplot as plt
@@ -106,28 +106,28 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 
 @njit(cache=True)
-def occupancy_grid_to_height_map(occupancy_grid, origin, resolution, threshold=0.1, method='min'):
+def occupancy_grid_to_height_map(occupancy_grid, origin, resolution, threshold=0.1, method='max'):
     X, Y, Z = occupancy_grid.shape
-    height_map = np.full((X, Z), np.nan, dtype=np.float32)
+    height_map = np.full((X, Y), np.nan, dtype=np.float32)
     for x in range(X):
-        for z in range(Z):
-            ys = []
-            for y in range(Y):
+        for y in range(Y):
+            zs = []
+            for z in range(Z):
                 if occupancy_grid[x, y, z] >= threshold:
-                    world_y = origin[1] + (y + 0.5) * resolution
-                    ys.append(world_y)
-            if ys:
+                    world_z = origin[1] + (z + 0.5) * resolution
+                    zs.append(world_z)
+            if zs:
                 if method == 'max':
-                    height_map[x, z] = max(ys)
+                    height_map[x, y] = max(zs)
                 elif method == 'min':
-                    height_map[x, z] = min(ys)
+                    height_map[x, y] = min(zs)
     return height_map
 
 def max_pool_height_map(height_map, kernel_size=5):
     nan_mask = np.isnan(height_map)
     filled = np.copy(height_map)
-    filled[nan_mask] = np.inf
-    pooled = minimum_filter(filled, size=kernel_size, mode='nearest')
+    filled[nan_mask] = -np.inf
+    pooled = maximum_filter(filled, size=kernel_size, mode='nearest')
     return pooled
 
 @njit(cache=True)
@@ -138,7 +138,7 @@ def generate_trajectory_library_3d(
 ):
     num_steps = int(duration / dt) + 1
 
-    max_acc = 0.1  # max acceleration in m/s^2
+    max_acc = 0.2  # max acceleration in m/s^2
     acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
     # grid sample num_samples points from 0 to pi/2
     max_omega = np.pi/8
@@ -169,6 +169,9 @@ def generate_trajectory_library_3d(
                 p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
+            #hack
+            for i in range(num_steps):
+                traj[i, 2] = traj[0, 2]
             trajectories[k] = traj
             params[k, 0] = dv
             params[k, 1] = omega_y
