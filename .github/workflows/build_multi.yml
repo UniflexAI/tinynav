@@ -11,6 +11,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS Checkout
+        run: git lfs checkout
 
       - name: Extract short commit SHA
         id: vars
@@ -47,6 +52,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS Checkout
+        run: git lfs checkout
 
       - name: Extract short commit SHA
         id: vars
