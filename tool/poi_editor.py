@@ -3,7 +3,7 @@ import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 from tqdm import tqdm
-
+import os
 class POIEditorApp:
     def __init__(self, occupancy_path, meta_path):
         self.occupancy = np.load(occupancy_path)
@@ -11,6 +11,28 @@ class POIEditorApp:
         self.occupancy_origin = occupancy_meta[:3]
         self.occupancy_resolution = occupancy_meta[3]
         self.pois = []
+
+        # Load existing POIs if a store exists (prefer NPY, fallback to TXT)
+        try:
+            if os.path.exists("tinynav_db/pois.npy"):
+                loaded = np.load("tinynav_db/pois.npy")
+            elif os.path.exists("tinynav_db/pois.txt"):
+                loaded = np.loadtxt("tinynav_db/pois.txt")
+            else:
+                loaded = None
+
+            if loaded is not None:
+                loaded = np.asarray(loaded, dtype=float)
+                if loaded.size == 0:
+                    self.pois = []
+                else:
+                    if loaded.ndim == 1:
+                        # Handle single POI stored as a 1D array of length 3
+                        loaded = loaded.reshape(1, 3)
+                    # Keep as list of numpy arrays for downstream operations
+                    self.pois = list(loaded)
+        except Exception as e:
+            print(f"Warning: Failed to load existing POIs: {e}")
         self.moving_poi_idx = None  # None if not moving, else index of POI being moved
         self.move_poi_mode = False  # Robust move POI mode
         self.dragging = False  # Track dragging state
@@ -92,6 +114,10 @@ class POIEditorApp:
 
         self.selected_poi_idx = None
         self.update_layout()
+
+        # Reflect any loaded POIs in the UI
+        self.update_poi_list()
+        self.update_poi_spheres()
 
         self.window.set_on_layout(self.update_layout)
 
@@ -311,14 +337,33 @@ class POIEditorApp:
             self.selected_poi_idx = None
 
     def save_pois(self):
-        pois_arr = np.array(self.pois)
-        np.save("tinynav_map/pois.npy", pois_arr)
-        np.savetxt("tinynav_map/pois.txt", pois_arr)
-        msgbox = gui.Dialog("Saved", "Saved POIs to pois.npy and pois.txt")
-        self.window.show_dialog(msgbox)
+        try:
+            os.makedirs("tinynav_db", exist_ok=True)
+            pois_arr = np.array(self.pois, dtype=float)
+            np.save("tinynav_db/pois.npy", pois_arr)
+            # Use a stable text format for readability
+            np.savetxt("tinynav_db/pois.txt", pois_arr, fmt="%.6f")
+            self._show_message_dialog("Save successful", "Saved POIs to tinynav_db/pois.npy and tinynav_db/pois.txt")
+        except Exception as e:
+            self._show_message_dialog("Save failed", f"Could not save POIs: {e}")
+
+    def _show_message_dialog(self, title, message):
+        dialog = gui.Dialog(title)
+        layout = gui.Vert(0, gui.Margins(20, 20, 20, 20))
+        layout.add_child(gui.Label(message))
+        ok_button = gui.Button("OK")
+        
+        def _close_dialog():
+            # Open3D's close_dialog takes no arguments
+            self.window.close_dialog()
+
+        ok_button.set_on_clicked(_close_dialog)
+        layout.add_child(ok_button)
+        dialog.add_child(layout)
+        self.window.show_dialog(dialog)
 
 if __name__ == "__main__":
-    occupancy_path = "tinynav_map/occupancy_map.npy"
-    meta_path = "tinynav_map/occupancy_map_meta.npy"
+    occupancy_path = "tinynav_db/occupancy_map.npy"
+    meta_path = "tinynav_db/occupancy_map_meta.npy"
     app = POIEditorApp(occupancy_path, meta_path)
     gui.Application.instance.run() 
