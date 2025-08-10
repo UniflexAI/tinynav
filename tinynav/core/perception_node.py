@@ -63,6 +63,10 @@ class PerceptionNode(Node):
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
 
+        # 200Hz IMU
+        self.gravity_in_camera_frame = None
+        self.is_static = False
+
     def info_callback(self, msg):
         if self.K is None:
             self.K = np.array(msg.k).reshape(3, 3)
@@ -74,10 +78,8 @@ class PerceptionNode(Node):
             self.destroy_subscription(self.camerainfo_sub)
 
     def accel_callback(self, msg):
-        if self.T_last is not None:
-            return
         self.accel_readings.append(msg.linear_acceleration)
-        if len(self.accel_readings) >= 10:
+        if len(self.accel_readings) >= 10 and self.T_last is None:
             self.T_last = np.eye(4)
 
             accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
@@ -89,11 +91,30 @@ class PerceptionNode(Node):
             self.T_last[:3, :3] = rot_from_two_vector(gravity_cam, gravity_world)
             self.get_logger().info("Initial pose set from accelerometer data.")
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_last}")
-            self.destroy_subscription(self.accel_sub)
+            #self.destroy_subscription(self.accel_sub)
+            self.gravity_in_camera_frame = gravity_cam
+            self.gravity_in_camera_frame = self.gravity_in_camera_frame.reshape(3, 1)
+        
+        if len(self.accel_readings) > 200:
+            self.accel_readings.pop(0)
+            accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
+            norms = np.linalg.norm(accel_data, axis=1)
+            norms_std = np.std(norms)
+            if norms_std > 0.2:
+                # self.get_logger().info(f"Norms std: {norms_std}")
+                self.is_static = False
+            else:
+                if not self.is_static:
+                    self.gravity_in_camera_frame = np.mean(accel_data, axis=0)
+                self.is_static = True
+
+
+        
+
 
     def images_callback(self, left_msg, right_msg):
         current_timestamp = left_msg.header.stamp.sec + left_msg.header.stamp.nanosec * 1e-9
-        if current_timestamp - self.last_processed_timestamp < 0.2:
+        if current_timestamp - self.last_processed_timestamp < 0.1:
             return
         
         self.last_processed_timestamp = current_timestamp
@@ -162,7 +183,9 @@ class PerceptionNode(Node):
 
         # final pose
         T_curr = self.T_last @ T_pre_curr
-        
+
+        self.T_last, T_curr = self.gravity_correction(self.T_last, T_curr, T_pre_curr)
+
         # publish odometry 
         self.odom_pub.publish(np2msg(T_curr, self.timestamp, "world", "camera"))
         # publish TF
@@ -189,6 +212,21 @@ class PerceptionNode(Node):
         header = std_msgs.msg.Header(stamp=timestamp, frame_id="camera")
         pc2_msg = pc2.create_cloud_xyz32(header, points)
         self.dispairty_pointcloud_pub.publish(pc2_msg)
+
+    def gravity_correction(self, T_last, T_curr, T_pre_curr):
+        if self.is_static:
+             target_gravity_world = np.array([0.0, 0.0, 1.0]).reshape(3, 1)
+             gravity_world = T_curr[:3, :3] @ self.gravity_in_camera_frame
+             gravity_world /= np.linalg.norm(gravity_world)
+             diff_angle = np.arccos((target_gravity_world.T @ gravity_world).item())
+             diff_angle = np.degrees(diff_angle)
+             if diff_angle > 2:
+                 T_rot_corrector = rot_from_two_vector(self.gravity_in_camera_frame, np.linalg.inv(T_curr[:3, :3]) @ target_gravity_world)
+                 T_curr[:3, :3] = T_curr[:3, :3] @ T_rot_corrector
+                 T_last = T_curr @ np.linalg.inv(T_pre_curr)
+                 self.get_logger().info(f"diff_angle: {diff_angle}, T_rot_corrector: {T_rot_corrector}, self.gravity_in_camera_frame: {self.gravity_in_camera_frame}")
+        return T_last, T_curr
+        
 
 def main(args=None):
     rclpy.init(args=args)
