@@ -108,13 +108,13 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 @njit(cache=True)
 def occupancy_grid_to_height_map(occupancy_grid, origin, resolution, threshold=0.1, method='max'):
     X, Y, Z = occupancy_grid.shape
-    height_map = np.full((X, Y), np.nan, dtype=np.float32)
+    height_map = np.full((X, Y), -np.nan, dtype=np.float32)
     for x in range(X):
         for y in range(Y):
             zs = []
             for z in range(Z):
                 if occupancy_grid[x, y, z] >= threshold:
-                    world_z = origin[1] + (z + 0.5) * resolution
+                    world_z = origin[2] + (z + 0.5) * resolution
                     zs.append(world_z)
             if zs:
                 if method == 'max':
@@ -186,12 +186,12 @@ def score_trajectories_by_heightmap(trajectories, height_map, origin, resolution
         valid_steps = 0
         valid_step_idx = []
         for i in range(len(traj)):
-            x_world, y_world, z_world = traj[i, 0],traj[i, 1],traj[i, 2],
+            x_world, y_world, z_world = traj[i, 0],traj[i, 1],traj[i, 2]
             x_img = int((x_world - origin[0]) / resolution)
-            z_img = int((z_world - origin[2]) / resolution)
-            if 0 <= x_img < height_map.shape[0] and 0 <= z_img < height_map.shape[1]:
-                val = height_map[x_img, z_img]
-                if not np.isnan(val) and val - 0.10 < y_world:
+            y_img = int((y_world - origin[1]) / resolution)
+            if 0 <= x_img < height_map.shape[0] and 0 <= y_img < height_map.shape[1]:
+                val = height_map[x_img, y_img]
+                if not np.isnan(val) and val > z_world:
                     valid_steps += 1
                     valid_step_idx.append(i)
         scores.append(valid_steps)
@@ -264,21 +264,24 @@ class PlanningNode(Node):
             self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camerainfo_sub)
 
-    def publish_height_map_traj(self, max_height_map, trajectories, occ_points, top_indices, scores, params, origin, resolution):
+    def publish_height_map_traj(self, pooled_map, trajectories, occ_points, top_indices, scores, params, origin, resolution):
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.imshow(max_height_map, cmap='terrain', origin='lower')
+        height_normalized = (np.nan_to_num(pooled_map, nan=0.0) + 5) * 30
+        height_uint8 = height_normalized.astype(np.uint8)
+        ax.imshow(height_uint8, cmap='jet', vmin=0, vmax=255, origin='upper', interpolation='nearest')
         for idx in top_indices:
             if scores[idx] > -1:
                 traj = trajectories[idx]
                 occ_idx = occ_points[idx]
                 x = (traj[:, 0] - origin[0]) / resolution
-                z = (traj[:, 2] - origin[2]) / resolution
-                ax.plot(z, x, label=f"S:{scores[idx]:.1f},Ω:{params[idx][1]:.1f}", alpha=0.8)
-                ax.plot(z[occ_idx], x[occ_idx], 'r*', markersize=8, label=None)
-        ax.legend()
+                y = (traj[:, 1] - origin[1]) / resolution
+                ax.plot(y, x, label=f"score:{scores[idx]:.1f}, gyro:{params[idx][1]:.1f}", alpha=0.8)
+                ax.plot(y[occ_idx], x[occ_idx], 'r*', markersize=8, label=None)
+        ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), borderaxespad=0.)
+
 
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
         buf.seek(0)
         img = np.array(PIL_Image.open(buf))[:, :, :3]  # Convert to RGB NumPy array
         buf.close()
@@ -341,9 +344,6 @@ class PlanningNode(Node):
             height_map = occupancy_grid_to_height_map(self.occupancy_grid, self.origin, self.resolution)
             pooled_map = max_pool_height_map(height_map)
 
-        #with Timer(name='vis height map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        #    self.publish_height_map(T[:3,3], pooled_map, disp_msg.header)
-
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             if self.last_T is None:
                 self.last_T = T
@@ -361,6 +361,8 @@ class PlanningNode(Node):
             top_k = 10
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
+        #with Timer(name='vis height map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        #    self.publish_height_map(T[:3,3], pooled_map, disp_msg.header)
         #with Timer(name='vis traj scores', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
         #    self.publish_height_map_traj(pooled_map, trajectories, occ_points, top_indices, scores, params, self.origin, self.resolution)
 
