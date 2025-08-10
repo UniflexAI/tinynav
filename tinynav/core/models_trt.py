@@ -350,7 +350,6 @@ if __name__ == "__main__":
     with Timer(text="[dinov2] Elapsed time: {milliseconds:.0f} ms"):
         embedding = dinov2.infer(image)["last_hidden_state"][:, 0, :]
         embedding = np.squeeze(embedding, axis=0)
-        print(embedding.shape)
 
     with Timer(text="[superpoint] Elapsed time: {milliseconds:.0f} ms"):
         left_extract_result = asyncio.run(superpoint.infer(dummy_left))
@@ -368,4 +367,3 @@ if __name__ == "__main__":
 
     with Timer(text="[stereo] Elapsed time: {milliseconds:.0f} ms"):
         results = asyncio.run(stereo_engine.infer(dummy_left, dummy_right))
-        print(results.shape)
