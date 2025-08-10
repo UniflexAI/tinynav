@@ -26,6 +26,7 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+
 TINYNAV_DB = "tinynav_db"
 TINYNAV_TEMP = "tinynav_temp"
 
@@ -125,6 +126,8 @@ class MapNode(Node):
         self.project_3d_to_2d_pub = self.create_publisher(Image, "/mapping/project_3d_to_2d", 10)
         self.matches_image_pub = self.create_publisher(Image, "/mapping/keyframe_matches_images", 10)
         self.loop_matches_image_pub = self.create_publisher(Image, "/mapping/loop_matches_images", 10)
+        self.relocation_image_pub = self.create_publisher(Image, "/mapping/relocation_images", 10)
+        self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
 
         self.global_map_pub = self.create_publisher(PointCloud2, "/mapping/global_map", 10)
         self.global_map_timer = self.create_timer(10.0, self.global_map_callback)
@@ -166,9 +169,15 @@ class MapNode(Node):
         self.map_poses = {}
         self.map_K = None
         self.relocalization_poses = {}
-        self.T_from_map_to_odom = np.eye(4)
+        self.relocalization_pose_weights = {}
+
+        self.T_from_map_to_odom = None
         self.pois = []
+        self.poi_index = -1
+
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
+        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
@@ -180,7 +189,7 @@ class MapNode(Node):
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
-            logging.info("Camera intrinsics received.")
+            logger.info("Camera intrinsics received.")
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]
@@ -197,7 +206,9 @@ class MapNode(Node):
             success, _ = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
             if success:
                 self.compute_transform_from_map_to_odom()
-                self.publish_nav_path(keyframe_image_timestamp_ns)
+
+            with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                self.try_publish_nav_path(keyframe_image_timestamp_ns)
 
             # timer or queue for publish the nav path
 
@@ -237,7 +248,6 @@ class MapNode(Node):
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
-            self.last_keyframe_timestamp = keyframe_odom_timestamp
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
             T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
@@ -249,7 +259,7 @@ class MapNode(Node):
             with Timer(name = "loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
                 self.find_loop(keyframe_image_timestamp, depth)
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
-            self.last_keyframe_timestamp = keyframe_odom_timestamp
+        self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
 
@@ -259,6 +269,8 @@ class MapNode(Node):
         """
         min_timestamp = min(self.pose_graph_used_pose.keys())
         constant_pose_index_dict = { min_timestamp : True }
+        for curr_timestamp, prev_timestamp, _, _, _ in self.relative_pose_constraint:
+            assert curr_timestamp != prev_timestamp, "current timestamp and previous timestamp should be different"
         optimized_camera_poses = pose_graph_solve(self.pose_graph_used_pose, self.relative_pose_constraint, constant_pose_index_dict)
         for timestamp, pose in optimized_camera_poses.items():
             self.pose_graph_used_pose[timestamp] = pose
@@ -361,32 +373,34 @@ class MapNode(Node):
                     reference_image_rgb = cv2.cvtColor(reference_image, cv2.COLOR_GRAY2RGB)
                     image_match_image = draw_image_match_origin(reference_image_rgb, query_image_rgb, reference_keypoints_origin, query_keypoints_origin, matches)
                     cv2.putText(image_match_image, f"similarity: {similarity:.2f}, query_keypoints: {len(query_keypoints_origin)}, reference_keypoints: {len(reference_keypoints_origin)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    cv2.imwrite(f"map/loop_matches_{timestamp}_{prev_timestamp}.png", image_match_image)
+                    # cv2.imwrite(f"map/loop_matches_{timestamp}_{prev_timestamp}.png", image_match_image)
                     self.publish_loop_matches_image(timestamp, image_match_image)
                     success, T_prev_curr_from_features, inliers_2d, inliers_3d, inliers = estimate_pose(reference_matched_keypoints, query_matched_keypoints, depth_image, self.K, self.baseline)
                     if success:
                         if len(inliers) >= 100:
                             self.relative_pose_constraint.append((timestamp, prev_timestamp, T_prev_curr_from_features, np.array([10.0, 10.0, 10.0]), np.array([10.0, 10.0, 10.0])))
-                            logging.info(f"loop detected with similarity {similarity:.2f}, inliers: {len(inliers)}")
+                            logger.info(f"loop detected with similarity {similarity:.2f}, inliers: {len(inliers)}")
                         else:
-                            logging.info(f"similarity {similarity:.2f} not enough inliers to relocalize, {len(inliers)} / {len(matches)}")
+                            logger.info(f"similarity {similarity:.2f} not enough inliers to relocalize, {len(inliers)} / {len(matches)}")
                     else:
-                        logging.info(f"similarity {similarity:.2f} failed to compute relative pose")
+                        logger.info(f"similarity {similarity:.2f} failed to compute relative pose")
         else:
-            logging.info(f"not enough similar embeddings to find loop, {len(similarity_array)}, max_similarity : {max_similarity}")
+            logger.info(f"not enough similar embeddings to find loop, {len(similarity_array)}, max_similarity : {max_similarity}")
 
 
-    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray) -> tuple[bool, np.ndarray]:
+    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray) -> tuple[bool, np.ndarray, float]:
+        if K is None:
+            return False, np.eye(4), -np.inf
         query_embedding = self.get_embeddings(keyframe)
         query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
 
-        total_timestamps = list(self.embeddings.keys())
+        total_timestamps = list(self.map_embeddings.keys())
         total_timestamps.sort()
 
         similarity_array = []
         max_similarity = 0
         for prev_timestamp in total_timestamps:
-            prev_embedding = self.embeddings[prev_timestamp]
+            prev_embedding = self.map_embeddings[prev_timestamp]
             prev_embedding_normed = prev_embedding / np.linalg.norm(prev_embedding)
             similarity = np.dot(query_embedding_normed, prev_embedding_normed.T).item()
             if similarity > max_similarity:
@@ -401,37 +415,49 @@ class MapNode(Node):
             point_2d_in_keyframe_list = []
 
             for prev_timestamp, similarity in similarity_array[:self.loop_top_k]:
-                reference_keyframe_pose = self.pose_graph_used_pose[prev_timestamp]
-                reference_features = self.features[prev_timestamp]
-                reference_depth = np.load(self.depth_paths[prev_timestamp])
+                reference_keyframe_pose = self.map_poses[prev_timestamp]
+                reference_features = self.map_features[prev_timestamp]
+                reference_depth = np.load(self.map_depth_paths[prev_timestamp])
+                reference_origin_keypoints = reference_features['kpts'].squeeze()
+                keyframe_origin_keypoints = keyframe_features['kpts'].squeeze()
 
                 reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
                 if len(matches) > 20:
                     point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.K)
                     point_3d_in_world_list = point_3d_in_world[inliers]
                     point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
+
+                    reference_image = np.load(self.map_image_paths[prev_timestamp])
+                    reference_image_rgb = cv2.cvtColor(reference_image, cv2.COLOR_GRAY2RGB)
+                    query_image = keyframe
+                    query_image_rgb = cv2.cvtColor(query_image, cv2.COLOR_GRAY2RGB)
+                    image_match_image = draw_image_match_origin(reference_image_rgb, query_image_rgb, reference_origin_keypoints, keyframe_origin_keypoints, matches)
+                    # os.makedirs("map_temp", exist_ok=True)
+                    cv2.putText(image_match_image, f"similarity: {similarity:.2f}, query_keypoints: {len(keyframe_origin_keypoints)}, reference_keypoints: {len(reference_origin_keypoints)}, matches: {len(matches)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    # cv2.imwrite(f"map_temp/relocation_image_{prev_timestamp}.png", image_match_image)
+                    self.relocation_image_pub.publish(self.bridge.cv2_to_imgmsg(image_match_image, encoding="bgr8"))
                 else:
                     print(f"not enough matched features to relocalize, {len(point_3d_in_world_list)}")
-                    return False, np.eye(4)
+                    return False, np.eye(4), -np.inf
 
-            if len(point_3d_in_world_list) > 20:
+            if len(point_3d_in_world_list) > 80:
                 point_3d_in_world_list = np.array(point_3d_in_world_list)
                 point_2d_in_keyframe_list = np.array(point_2d_in_keyframe_list)
 
                 success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, K, None)
-                if success and len(inliers) >= 20:
+                if success and len(inliers) >= 50:
                     R, _ = cv2.Rodrigues(rvec)
                     T = np.eye(4)
                     T[:3, :3] = R
                     T[:3, 3] = tvec.reshape(3)
                     print(f"relocalization pose : {T}")
-                    return True, T
+                    return True, T, len(inliers) / len(keyframe_origin_keypoints)
             else:
                 print(f"not enough landmarks to relocalize, {len(point_3d_in_world_list)}")
-                return False, np.eye(4)
+                return False, np.eye(4), -np.inf
         else:
             print(f"not enough similar embeddings to relocalize, {len(similarity_array)}, max_similarity : {max_similarity}")
-        return False, np.eye(4)
+        return False, np.eye(4), -np.inf
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
         point_in_camera = []
@@ -465,13 +491,14 @@ class MapNode(Node):
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
-        res, pose_in_camera = self.relocalize_with_depth(image, features, self.K)
+        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
+            self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
             return True, pose_in_world
         else:
             return False, np.eye(4)
@@ -479,11 +506,18 @@ class MapNode(Node):
     def load_mapping(self):
         self.map_embeddings = np.load(f"{TINYNAV_DB}/embedding.npy", allow_pickle=True).item()
         self.map_features = np.load(f"{TINYNAV_DB}/features.npy", allow_pickle=True).item()
+        print(f"len of features: {len(self.map_features)}")
         self.map_depth_paths = np.load(f"{TINYNAV_DB}/depth_paths.npy", allow_pickle=True).item()
+        self.map_image_paths = np.load(f"{TINYNAV_DB}/image_paths.npy", allow_pickle=True).item()
+        print(f"len of map_image_paths: {len(self.map_image_paths)}")
+
+        for timestamp, features in self.map_features.items():
+            assert timestamp in self.map_image_paths, f"timestamp {timestamp} not in map_image_paths"
+
         self.map_poses = np.load(f"{TINYNAV_DB}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{TINYNAV_DB}/intrinsics.npy", allow_pickle=True)
-        self.pois = np.load(f"{TINYNAV_DB}/pois.npy", allow_pickle=True)
-        logging.info("load map from mapping directory")
+        self.pois = np.loadtxt(f"{TINYNAV_DB}/pois.txt").reshape(-1, 3)
+        self.poi_index = 0 if len(self.pois) > 0 else -1
 
         # genereate point cloud from the depths
         self.point_cloud = self.genereate_point_cloud_from_depths()
@@ -505,10 +539,19 @@ class MapNode(Node):
         # self.landmark_tracker.save_to_dir("mapping")
         np.save(f"{TINYNAV_DB}/embedding.npy", self.embeddings)
         np.save(f"{TINYNAV_DB}/features.npy", self.features)
+        for timestamp, depth_path in self.depth_paths.items():
+            new_depth_path = f"{TINYNAV_DB}/depths/{timestamp}.npy"
+            np.save(new_depth_path, np.load(depth_path))
+            self.depth_paths[timestamp] = new_depth_path
         np.save(f"{TINYNAV_DB}/depth_paths.npy", self.depth_paths, allow_pickle=True)
+        for timestamp, rgb_path in self.image_paths.items():
+            new_rgb_path = f"{TINYNAV_DB}/images/{timestamp}.npy"
+            np.save(new_rgb_path, np.load(rgb_path))
+            self.image_paths[timestamp] = new_rgb_path
+        np.save(f"{TINYNAV_DB}/image_paths.npy", self.image_paths, allow_pickle=True)
         np.save(f"{TINYNAV_DB}/poses.npy", self.pose_graph_used_pose)
         np.save(f"{TINYNAV_DB}/intrinsics.npy", self.K)
-        np.save(f"{TINYNAV_DB}/pois.npy", self.pois)
+
         logging.info("save map into mapping directory")
         self.generate_occupancy_map()
 
@@ -517,17 +560,29 @@ class MapNode(Node):
             self.save_mapping()
 
     def genereate_point_cloud_from_depths(self):
+
         point_clouds = []
-        for timestamp, depth_path in self.map_depth_paths.items():
+        depth_paths = self.depth_paths
+        K = self.K
+        if not self.mapping_mode:
+            depth_paths = self.map_depth_paths
+            K = self.map_K
+        if K is None:
+            return None
+        for timestamp, depth_path in depth_paths.items():
             depth = np.load(depth_path)
-            point_cloud_in_camera = depth_to_cloud(depth, self.map_K)
+            point_cloud_in_camera = depth_to_cloud(depth, K)
             # downsample the point cloud to reduce the number of points
             point_cloud_in_camera = point_cloud_in_camera[::24]
             # filter point_cloud distance larger then 3m
             dist = np.linalg.norm(point_cloud_in_camera, axis=1)
             valid_indices = dist < 3.0
             point_cloud_in_camera_filtered = point_cloud_in_camera[valid_indices]
-            pose = self.map_poses[timestamp]
+
+            if not self.mapping_mode:
+                pose = self.map_poses[timestamp]
+            else:
+                pose = self.pose_graph_used_pose[timestamp]
             # transform point cloud to world frame
             point_cloud_in_world = transform_point_cloud(point_cloud_in_camera_filtered, pose)
             point_clouds.append(point_cloud_in_world)
@@ -596,7 +651,7 @@ class MapNode(Node):
 
     def compute_transform_from_map_to_odom(self):
         """
-        Solve the bundle adjustment problem.
+        Solve the optmization problem.
         """
         relative_pose_constraint = []
         optimized_parameters = {
@@ -608,60 +663,112 @@ class MapNode(Node):
             if timestamp in self.pose_graph_used_pose:
                 camera_in_map_world = pose
                 camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-                observation_T_from_map_to_odom =  np.linalg.inv(camera_in_odom_world) @ camera_in_map_world
-                relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, np.array([10.0, 10.0, 10.0]), np.array([10.0, 10.0, 10.0])))
-        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict)
+                observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
+                weight = self.relocalization_pose_weights[timestamp]
 
+                relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
+        relative_pose_constraint = relative_pose_constraint[-3:]
+        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict)
         self.T_from_map_to_odom = optimized_parameters[0]
 
-    def publish_nav_path(self, timestamp: int):
+
+    def try_publish_nav_path(self, timestamp: int):
+        logger.info(f"try_publish_nav_path, timestamp: {timestamp}")
+        if self.T_from_map_to_odom is None:
+            logger.info("Relocalization not successful yet, skip publishing nav path")
+            return
+
+        if self.poi_index == -1:
+            logger.info("No POI found, skip publishing nav path")
+            return
+
+        if self.poi_index >= len(self.pois):
+            logger.info("All POIs have been visited, skip publishing nav path")
+            return
+
+        poi = self.pois[self.poi_index]
+        print(f"poi: {poi}")
+        poi_pose = np.eye(4)
+        poi_pose[:3, 3] = poi
+        self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         # get the pose from the map to the odom
-        
-        if len(self.relocalization_poses) > 0:
-            pose_in_map = self.relocalization_poses[timestamp]
-            paths_in_map = self.generate_nav_path_in_map(pose_in_map)
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
-            if paths_in_map is not None:
-                # transform the paths to the odom frame
-                # TODO: use the max_speed to publish the position the robot should be after 5 seconds 
-                if len(paths_in_map) > 1:
-                    target_position = paths_in_map[len(paths_in_map) // 2]
-                else:
-                    target_position = paths_in_map[0]
+        pose_in_map_position = pose_in_map[:3, 3]
 
-                target_position_in_map = np.array([target_position[0], target_position[1], 0.0])
-                target_position_in_odom = self.T_from_map_to_odom[:3, :3] @ target_position_in_map + self.T_from_map_to_odom[:3, 3]
+        while self.poi_index < len(self.pois):
+            poi = self.pois[self.poi_index]
+            diff_position_norm = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
+            if diff_position_norm < 1.5:
+                self.poi_index += 1
                 dummy_pose = np.eye(4)
-                dummy_pose[:3, 3] = target_position_in_odom
-                self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-                path_msg = Path()
-                path_msg.header.stamp = self.get_clock().now().to_msg()
-                path_msg.header.frame_id = "world"
-                for x, y in paths_in_map:
-                    pose = PoseStamped()
-                    pose.header = path_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = 0.0
-                    pose.pose.orientation.x = 0.0
-                    pose.pose.orientation.y = 0.0
-                    pose.pose.orientation.z = 0.0
-                    pose.pose.orientation.w = 1.0
-                    path_msg.poses.append(pose)
-                    self.global_plan_pub.publish(path_msg)
+                self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
+                continue
             else:
-                print("No path found in map")
-            # publish the target_position
+                break
 
-    def generate_nav_path_in_map(self, pose_in_map: np.ndarray) -> np.ndarray:
-        poi = self.pois[0]
+        if self.poi_index >= len(self.pois):
+            logger.info("All POIs have been visited, skip publishing nav path")
+            return
+
+        target_poi = self.pois[self.poi_index]
+        print(f"current_target_poi_index : {self.poi_index}")
+        paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
+
+        if paths_in_map is not None:
+            # use the max_speed to publish the position the robot should be after 5 seconds 
+            max_speed = 1.0
+            if len(paths_in_map) > 1:
+                accumulated_distance = 0.0
+                start_point = pose_in_map_position[:2]
+                target_position = paths_in_map[-1]
+                for i in range(len(paths_in_map) - 1):
+                    accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
+                    if accumulated_distance > max_speed * 5:
+                        target_position = paths_in_map[i]
+                    else:
+                        start_point = paths_in_map[i]
+            else:
+                target_position = paths_in_map[0]
+
+            target_position_in_map = np.array([target_position[0], target_position[1], 0.0])
+            pose_in_origin_odom = self.odom[timestamp]
+            T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
+            target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+            dummy_pose = np.eye(4)
+            dummy_pose[:3, 3] = target_position_in_odom
+            logging.info(f"target_position_in_odom: {target_position_in_odom}")
+            self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+            path_msg = Path()
+            path_msg.header.stamp = self.get_clock().now().to_msg()
+            path_msg.header.frame_id = "world"
+            for x, y in paths_in_map:
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = 0.0
+                pose.pose.orientation.x = 0.0
+                pose.pose.orientation.y = 0.0
+                pose.pose.orientation.z = 0.0
+                pose.pose.orientation.w = 1.0
+                path_msg.poses.append(pose)
+                self.global_plan_pub.publish(path_msg)
+        else:
+            logging.info("No path found in map")
+
+    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
-        dummy_poi_pose[:3, 3] = poi
+        dummy_poi_pose[:3, 3] = target_poi
         self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         cost_map_origin = self.occupancy_map_meta[:2]
         resolution = self.occupancy_map_meta[3]
         start_idx = np.array([int((pose_in_map[0, 3] - cost_map_origin[0]) / resolution), int((pose_in_map[1, 3] - cost_map_origin[1]) / resolution)], dtype=np.int32)
-        goal_idx = np.array([int((poi[0] - cost_map_origin[0]) / resolution), int((poi[1] - cost_map_origin[1]) / resolution)], dtype=np.int32)
+        goal_idx = np.array([int((target_poi[0] - cost_map_origin[0]) / resolution), int((target_poi[1] - cost_map_origin[1]) / resolution)], dtype=np.int32)
+
+        if start_idx[0] < 0 or start_idx[0] >= self.cost_map.shape[0] or start_idx[1] < 0 or start_idx[1] >= self.cost_map.shape[1] or goal_idx[0] < 0 or goal_idx[0] >= self.cost_map.shape[0] or goal_idx[1] < 0 or goal_idx[1] >= self.cost_map.shape[1]:
+            return None
         path = A_star(self.cost_map, start_idx, goal_idx, obstacles_cost = 10.0)
         if len(path) > 0:
             converted_path = path * resolution + cost_map_origin
@@ -745,6 +852,10 @@ def str2bool(v):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 def main(args=None):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
     parser.add_argument("--mapping", default=False, type=str2bool)
