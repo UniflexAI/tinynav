@@ -93,15 +93,14 @@ class PerceptionNode(Node):
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_last}")
             #self.destroy_subscription(self.accel_sub)
             self.gravity_in_camera_frame = gravity_cam
-            self.gravity_in_camera_frame = self.gravity_in_camera_frame.reshape(3, 1)
         
         if len(self.accel_readings) > 200:
             self.accel_readings.pop(0)
             accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
             norms = np.linalg.norm(accel_data, axis=1)
             norms_std = np.std(norms)
-            if norms_std > 0.2:
-                # self.get_logger().info(f"Norms std: {norms_std}")
+            if norms_std > 0.3:
+                #self.get_logger().info(f"Norms std: {norms_std}")
                 self.is_static = False
             else:
                 if not self.is_static:
@@ -215,7 +214,7 @@ class PerceptionNode(Node):
 
     def gravity_correction(self, T_last, T_curr, T_pre_curr):
         if self.is_static:
-             target_gravity_world = np.array([0.0, 0.0, 1.0]).reshape(3, 1)
+             target_gravity_world = np.array([0.0, 0.0, 1.0])
              gravity_world = T_curr[:3, :3] @ self.gravity_in_camera_frame
              gravity_world /= np.linalg.norm(gravity_world)
              diff_angle = np.arccos((target_gravity_world.T @ gravity_world).item())
