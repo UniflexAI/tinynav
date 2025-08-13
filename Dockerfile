@@ -82,6 +82,12 @@ RUN git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.
 RUN cd cyclonedds && mkdir build && cd build && cmake .. -DCMAKE_INSTALL_PREFIX=../install && make -j$(nproc) && make install
 ENV CYCLONEDDS_HOME="/cyclonedds/install"
 
+# gazebo
+RUN curl https://packages.osrfoundation.org/gazebo.gpg --output /usr/share/keyrings/pkgs-osrf-archive-keyring.gpg
+RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-osrf-archive-keyring.gpg] http://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/gazebo-stable.list > /dev/null
+RUN apt-get update
+RUN apt-get install -y ignition-fortress ros-humble-ros-gz-bridge
+
 
 WORKDIR /3rdparty
 
