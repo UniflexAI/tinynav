@@ -132,16 +132,15 @@ def max_pool_height_map(height_map, kernel_size=5):
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
-    num_samples=21, duration=5.0, dt=0.1,
+    num_samples=11, duration=5.0, dt=0.1,
     acc_std=0.00001, omega_y_std_deg=20.0,
     init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
     num_steps = int(duration / dt) + 1
 
-    max_acc = 0.2  # max acceleration in m/s^2
+    max_acc = 0.2
     acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
-    # grid sample num_samples points from 0 to pi/2
-    max_omega = np.pi/8
+    max_omega = np.pi / 8
     omega_y_samples = np.linspace(-max_omega, max_omega, num_samples)
 
     num_samples = len(acc_samples) * len(omega_y_samples)
@@ -161,11 +160,15 @@ def generate_trajectory_library_3d(
             traj = np.empty((num_steps, 7))
             for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+                v_world = q @ dq.T @ q.T @ v_world
                 q = q @ dq
-                acc_body = np.array([0.0, 0.0, dv])
+
+                acc_body = q.T @ v_world
+                acc_body = acc_body / np.linalg.norm(acc_body)  # normalize
+                acc_body = acc_body * dv
+
                 acc_world = q @ acc_body
                 v_world += acc_world * dt
-                v_world = dq @ v_world
                 p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
@@ -245,8 +248,11 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_T = None
+        self.last_param = (0.0, 0.0) # acc and gyro
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
+
+        self.smoothed_T = None
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = np.array([0.0, 0.0, 0.0])
@@ -323,6 +329,7 @@ class PlanningNode(Node):
             disparity = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T = msg2np(odom_msg)
+            self.smoothed_T = T if self.smoothed_T is None else 0.9 * self.smoothed_T + 0.1 * T
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
             depth = np.zeros_like(disparity)
@@ -338,6 +345,8 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
             self.occupancy_grid += new_occ
+            self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='heightmap', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -346,19 +355,20 @@ class PlanningNode(Node):
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             if self.last_T is None:
-                self.last_T = T
+                self.last_T = self.smoothed_T
                 self.last_stamp = 0
+            init_v = (T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
             trajectories, params = generate_trajectory_library_3d(
                 init_p = T[:3, 3],
-                init_v = (T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp),
+                init_v = init_v if np.linalg.norm(init_v) > 0.01 else np.array([0, 0.1, 0]),
                 init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             )
-            self.last_T = T
+            self.last_T = self.smoothed_T
             self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             scores, occ_points = score_trajectories_by_heightmap(trajectories, pooled_map, self.origin, self.resolution)
-            top_k = 10
+            top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         #with Timer(name='vis height map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -367,14 +377,15 @@ class PlanningNode(Node):
         #    self.publish_height_map_traj(pooled_map, trajectories, occ_points, top_indices, scores, params, self.origin, self.resolution)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            def cost_function(traj, score, target_pose):
+            def cost_function(traj, param, score, target_pose):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose
                 dist = np.linalg.norm(traj_end - target_end)
-                return score * 100000 + dist
+                return score * 100000 + 10 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            self.last_param = params[top_indices[0]]
 
             # path
             path = Path()
