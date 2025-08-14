@@ -8,39 +8,6 @@ import pycuda.autoinit # noqa: F401
 import asyncio
 from async_lru import alru_cache
 
-def padding(img, shape):
-    # Create an array with target shape and uint8 type
-    filled = np.empty(shape, dtype=np.uint8)
-
-    v_shift = max(0, (shape[0] - img.shape[0]) // 2)
-    h_shift = max(0, (shape[1] - img.shape[1]) // 2)
-
-    # Fill central image area
-    filled[v_shift:v_shift + img.shape[0], h_shift:h_shift + img.shape[1]] = img
-
-    # Fill top area
-    if v_shift > 0:
-        filled[:v_shift, h_shift:h_shift + img.shape[1]] = img[0:1].repeat(v_shift, axis=0)
-
-    # Fill bottom area
-    if v_shift + img.shape[0] < shape[0]:
-        filled[v_shift + img.shape[0]:, h_shift:h_shift + img.shape[1]] = img[-1:].repeat(shape[0] - v_shift - img.shape[0], axis=0)
-
-    # Fill left area
-    if h_shift > 0:
-        filled[:, :h_shift] = filled[:, h_shift:h_shift + 1].repeat(h_shift, axis=1)
-
-    # Fill right area
-    if h_shift + img.shape[1] < shape[1]:
-        filled[:, h_shift + img.shape[1]:] = filled[:, h_shift + img.shape[1] - 1:h_shift + img.shape[1]].repeat(shape[1] - h_shift - img.shape[1], axis=1)
-
-    return filled
-        
-def unpadding(img, shape):
-    v_shift = (img.shape[0]-shape[0]) // 2
-    h_shift = (img.shape[1]-shape[1]) // 2
-    return img[v_shift:v_shift + shape[0], h_shift:h_shift + shape[1]]
-
 class OutputAllocator(trt.IOutputAllocator):
     def __init__(self):
         super().__init__()
