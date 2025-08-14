@@ -17,6 +17,25 @@
 [![X (formerly Twitter) URL](https://img.shields.io/twitter/url?url=https%3A%2F%2Fx.com%2FUniflexAI)](https://x.com/UniflexAI)
 </div>
 
+# [v0.1] What's Changed
+## Features
+* Implemented **map-based navigation** with **relocalization** and **global planning**.
+* Added support for **Unitree** robots.
+* Added support for the **Lewiki** platform.
+* **Upgraded stereo depth model** for a better speed–accuracy balance.
+* **Tuned Intel® RealSense™ exposure strategy**, optimized for robotics tasks.
+* Added **Gazebo** simulation environment
+* CI: **Docker image build & push** pipeline.
+## Improvements
+* Used **Numba JIT** to speed up key operations while keeping the code simple and maintainable.
+* Adopted **asyncio** for **concurrent model inference.**
+* Added **gravity correction** when velocity is zero.
+* Mount **/etc/localtime** by default so **ROS bag** files use local time in their names.
+* **Optimized trajectory generation.**
+## BugFix
+* Various bug fixes and stability improvements.
+
+
 # Highlight (Our Design Goals)
 We aim to make the system:
 
@@ -134,71 +153,13 @@ uv sync
 
 This will create a virtual environment and install all required dependencies.
 
-## Set up for Unitree Go2
-
-Connect your computer or Jetson to the Unitree Go2 and ensure they are on the same network segment (192.168.123.x).
-
-### Step 1: Find the Network Interface Name
-
-Run the following command to list all network interfaces:
-
-```bash
-ip addr
-```
-
-Example output:
-```
-1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
-    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
-    inet 127.0.0.1/8 scope host lo
-       valid_lft forever preferred_lft forever
-    inet6 ::1/128 scope host 
-       valid_lft forever preferred_lft forever
-2: wlP1p1s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
-    link/ether 48:8f:4b:62:b4:4c brd ff:ff:ff:ff:ff:ff
-    inet 192.168.19.115/24 brd 192.168.19.255 scope global dynamic noprefixroute wlP1p1s0
-       valid_lft 12597sec preferred_lft 12597sec
-    inet6 fe80::edfc:6e55:62ab:bfd3/64 scope link noprefixroute 
-       valid_lft forever preferred_lft forever
-3: can0: <NOARP,ECHO> mtu 16 qdisc noop state DOWN group default qlen 10
-    link/can 
-4: eno1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
-    link/ether 3c:6d:66:b2:b3:f1 brd ff:ff:ff:ff:ff:ff
-    inet 192.168.123.100/24 scope global eno1
-       valid_lft forever preferred_lft forever
-```
-
-**Note:** In this example, `eno1` is the network interface connected to the Go2 robot (IP: 192.168.123.100).
-
-### Step 2: Set a Static IP Address
-
-Configure your network interface with a static IP address in the 192.168.123.x range:
-
-```bash
-sudo ip addr add 192.168.123.100/24 dev eno1
-sudo ip link set eno1 up
-```
-
-### Step 3: Verify Connection
-
-Test the connection to the Go2 robot (default IP: 192.168.123.161):
-
-```bash
-ping 192.168.123.161
-```
-
-### Additional Resources
-
-For more detailed setup instructions, refer to the official Unitree documentation:
-https://support.unitree.com/home/en/developer/Quick_start
-
 # Next Steps
-- [ ] **LeKiwi integration**:
-      Support closed-loop control with real-time processing.
+- [ ] **High Optimization NN models**:
+      Support real-time perception processing at >= 30fps.
 - [ ] **Map module enhancement**:
-      Enable map point editing, global navigation commands, and GUI-assisted optimization.
-- [ ] **Embedded-friendly NN models**:
-      Deliver lightweight neural network models for feature matching and stereo depth, optimized for platforms like RK3588.
+      Improve consistency and accuracy for mapping and localization.
+- [ ] **End-To-End trajectories planning**:
+      Deliver robust and safe trajectories with integrated semantic information.
 
 # 📊 Line of Code
 ```
