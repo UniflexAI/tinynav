@@ -17,6 +17,11 @@
 [![X (formerly Twitter) URL](https://img.shields.io/twitter/url?url=https%3A%2F%2Fx.com%2FUniflexAI)](https://x.com/UniflexAI)
 </div>
 
+| [Unitree GO2](https://www.unitree.com/go2)  | [LeKiwi](https://github.com/SIGRobotics-UIUC/LeKiwi) |
+| ------------- | ------------- |
+| <video src="https://github.com/user-attachments/assets/f4ff4842-f0ca-4299-b3d5-5d097de1f2ba">  | <video src="https://github.com/user-attachments/assets/c9b4b949-943b-4910-92f0-0337ef26d0b0">   |
+
+
 # [v0.1] What's Changed
 ## Features
 * Implemented **map-based navigation** with **relocalization** and **global planning**.
@@ -34,7 +39,6 @@
 * **Optimized trajectory generation.**
 ## BugFix
 * Various bug fixes and stability improvements.
-
 
 # Highlight (Our Design Goals)
 We aim to make the system:
