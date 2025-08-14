@@ -14,7 +14,7 @@ jobs:
       - name: Count Lines of Code with additional options
         uses: djdefi/cloc-action@main
         with:
-          options: --exclude-lang=YAML,'Jupyter Notebook',SVG --md --report-file=cloc.md
+          options: --exclude-dir=tests,tool --exclude-lang=YAML,'Jupyter Notebook',SVG --md --report-file=cloc.md
 
       - name: Add comment to PR
         uses: actions/github-script@v6
