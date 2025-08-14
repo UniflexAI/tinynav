@@ -28,6 +28,17 @@ else
     echo "   Then verify with: docker info | grep Runtimes"
     exit 1
 fi
+
+# === Check if git-lfs is installed ===
+if ! command -v git-lfs &> /dev/null; then
+    echo "❌ Git LFS is not installed."
+    echo "👉 You can install it with the following command:"
+    echo "   sudo apt-get update && sudo apt-get install -y git-lfs && git lfs install"
+    exit 1
+else
+    echo "✅ Git LFS is installed."
+fi
+
 # Detect architecture
 ARCH=$(uname -m)
 
