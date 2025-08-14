@@ -1,6 +1,5 @@
 import logging
 import sys
-from collections import deque
 import cv2
 from message_filters import TimeSynchronizer, Subscriber
 import numpy as np

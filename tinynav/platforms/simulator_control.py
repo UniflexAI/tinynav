@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry, Path
+from nav_msgs.msg import Path
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
@@ -22,9 +22,6 @@ class SimulatorControlNode(Node):
         if self.last_path is None:
             return
         dt = 0.1  # Time step from trajectory generation
-        last_path_time = self.last_path.header.stamp.sec + self.last_path.header.stamp.nanosec * 1e-9
-        current_time = self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9
-        time_diff = current_time - last_path_time
         idx = 1
         if idx < 0 or idx >= len(self.last_path.poses):
             self.get_logger().warn("Index out of bounds for path poses, cannot publish planned velocity.")

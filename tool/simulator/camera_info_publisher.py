@@ -4,7 +4,6 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Header
-import numpy as np
 
 class CameraInfoPublisher(Node):
     def __init__(self):

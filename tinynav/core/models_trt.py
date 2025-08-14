@@ -3,7 +3,6 @@ import pycuda.driver as cuda
 import numpy as np
 import cv2
 from codetiming import Timer
-from functools import lru_cache
 import platform
 import pycuda.autoinit # noqa: F401
 import asyncio
@@ -306,12 +305,17 @@ class StereoEngineTRT:
                 tensor['device'] = cuda.mem_alloc(tensor['host'].nbytes)
 
         for inp in self.inputs:
-            if 'left' in inp['name'].lower(): inp['host'][:] = left_tensor.flatten()
-            elif 'right' in inp['name'].lower(): inp['host'][:] = right_tensor.flatten()
+            if 'left' in inp['name'].lower():
+                inp['host'][:] = left_tensor.flatten()
+            elif 'right' in inp['name'].lower():
+                inp['host'][:] = right_tensor.flatten()
 
-        for inp in self.inputs: cuda.memcpy_htod_async(inp['device'], inp['host'], self.stream)
-        for inp in self.inputs: self.context.set_tensor_address(inp['name'], int(inp['device']))
-        for out in self.outputs: self.context.set_tensor_address(out['name'], int(out['device']))
+        for inp in self.inputs:
+            cuda.memcpy_htod_async(inp['device'], inp['host'], self.stream)
+        for inp in self.inputs:
+            self.context.set_tensor_address(inp['name'], int(inp['device']))
+        for out in self.outputs:
+            self.context.set_tensor_address(out['name'], int(out['device']))
 
         self.context.execute_async_v3(stream_handle=self.stream.handle)
 
@@ -320,7 +324,8 @@ class StereoEngineTRT:
         while not event.query():
             await asyncio.sleep(0)
 
-        for out in self.outputs: cuda.memcpy_dtoh_async(out['host'], out['device'], self.stream)
+        for out in self.outputs:
+            cuda.memcpy_dtoh_async(out['host'], out['device'], self.stream)
         self.stream.synchronize()
 
         # left right consistency check
