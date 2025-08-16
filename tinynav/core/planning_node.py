@@ -160,7 +160,7 @@ def generate_trajectory_library_3d(
             traj = np.empty((num_steps, 7))
             for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
-                v_world = q @ dq.T @ q.T @ v_world
+                v_world = (q @ dq) @ q.T @ v_world
                 q = q @ dq
 
                 acc_body = q.T @ v_world
@@ -360,7 +360,7 @@ class PlanningNode(Node):
             init_v = (T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
             trajectories, params = generate_trajectory_library_3d(
                 init_p = T[:3, 3],
-                init_v = init_v if np.linalg.norm(init_v) > 0.01 else np.array([0, 0.1, 0]),
+                init_v = init_v if np.linalg.norm(init_v) > 0.05 else np.array([0, 0.1, 0]),
                 init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             )
             self.last_T = self.smoothed_T
