@@ -3,8 +3,9 @@ from numba import njit
 from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
+import cv2
 
-@njit
+@njit(cache=True)
 def rotvec_to_matrix(rv):
     """Convert a rotation vector to a rotation matrix using Rodrigues' formula."""
     theta = np.linalg.norm(rv)
@@ -22,7 +23,7 @@ def rotvec_to_matrix(rv):
     ])
     return R
 
-@njit
+@njit(cache=True)
 def quat_to_matrix(q):
     """Convert a quaternion [x, y, z, w] to a rotation matrix."""
     x, y, z, w = q
@@ -47,7 +48,7 @@ def quat_to_matrix(q):
     R[2, 2] = 1 - 2 * (xx + yy)
     return R
 
-@njit
+@njit(cache=True)
 def matrix_to_quat(R):
     """Convert a rotation matrix to a quaternion [x, y, z, w]."""
     m00, m01, m02 = R[0, 0], R[0, 1], R[0, 2]
@@ -142,3 +143,47 @@ def msg2np(msg):
     T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
     return T
     
+
+def estimate_pose( kpts_prev, kpts_curr, disparity, K, baseline) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    points_3d, points_2d = [], []
+    for pt_prev, pt_curr in zip(kpts_prev, kpts_curr):
+        u, v = int(pt_curr[0]), int(pt_curr[1])
+        if 0 <= v < disparity.shape[0] and 0 <= u < disparity.shape[1]:
+            disp = disparity[v, u]
+            if disp > 1:
+                Z = K[0, 0] * baseline / disp
+                X = (pt_curr[0] - K[0, 2]) * Z / K[0, 0]
+                Y = (pt_curr[1] - K[1, 2]) * Z / K[1, 1]
+                points_3d.append([X, Y, Z])
+                points_2d.append(pt_prev)
+    if len(points_3d) < 6:
+        return False, np.eye(4), None, None, None
+    points_3d = np.array(points_3d, dtype=np.float32)
+    points_2d = np.array(points_2d, dtype=np.float32)
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None)
+    if not success:
+        return False, np.eye(4), None, None, None
+    R_mat, _ = cv2.Rodrigues(rvec)
+    T = np.eye(4)
+    T[:3, :3] = R_mat
+    T[:3, 3] = tvec.ravel()
+    inliers = inliers.flatten()
+    inliers_2d = points_2d[inliers]
+    inliers_3d = points_3d[inliers]
+    return True, T, inliers_2d, inliers_3d, inliers
+
+@njit(cache=True)
+def disparity_to_pointcloud(disparity, K, baseline, step=4):
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    points = []
+    h, w = disparity.shape
+    for v in range(0, h, step):
+        for u in range(0 , w, step):
+            d = disparity[v, u]
+            if d > 1:
+                Z = fx * baseline / d
+                X = (u - cx) * Z / fx
+                Y = (v - cy) * Z / fy
+                points.append((X, Y, Z))
+    return points

@@ -24,10 +24,21 @@ if docker info | grep -i 'Runtimes' | grep -q 'nvidia'; then
 else
     echo "❌ NVIDIA runtime is NOT available in Docker."
     echo "👉 You can install it with the following command:"
-    echo "   sudo apt-get install -y nvidia-container-toolkit && sudo systemctl restart docker"
+    echo "   sudo apt-get install -y nvidia-container-toolkit && sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
     echo "   Then verify with: docker info | grep Runtimes"
     exit 1
 fi
+
+# === Check if git-lfs is installed ===
+if ! command -v git-lfs &> /dev/null; then
+    echo "❌ Git LFS is not installed."
+    echo "👉 You can install it with the following command:"
+    echo "   sudo apt-get update && sudo apt-get install -y git-lfs && git lfs install"
+    exit 1
+else
+    echo "✅ Git LFS is installed."
+fi
+
 # Detect architecture
 ARCH=$(uname -m)
 
@@ -55,4 +66,4 @@ docker run $DOCKER_ARGS \
     --device-cgroup-rule='c 81:* rmw' \
     --device-cgroup-rule='c 234:* rmw' \
     --shm-size=16gb \
-    uniflexai/tinynav:3a293f0 /tinynav/scripts/run_rosbag_examples.sh
+    uniflexai/tinynav:0c4332e /tinynav/scripts/run_rosbag_examples.sh

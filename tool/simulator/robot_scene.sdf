@@ -1,0 +1,760 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+    <world name="tugbot_depot_world">
+        <plugin filename="gz-sim-triggered-publisher-system"
+            name="gz::sim::systems::TriggeredPublisher">
+            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
+                <match field="data">16777234</match>
+            </input>
+            <output type="ignition.msgs.Twist" topic="/cmd_vel">
+                linear: {x: 0.0}, angular: {z: 0.5}
+            </output>
+        </plugin>
+        <plugin filename="gz-sim-triggered-publisher-system"
+            name="gz::sim::systems::TriggeredPublisher">
+            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
+                <match field="data">16777235</match>
+            </input>
+            <output type="ignition.msgs.Twist" topic="/cmd_vel">
+                linear: {x: 0.5}, angular: {z: 0.0}
+            </output>
+        </plugin>
+        <plugin filename="gz-sim-triggered-publisher-system"
+            name="gz::sim::systems::TriggeredPublisher">
+            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
+                <match field="data">16777236</match>
+            </input>
+            <output type="ignition.msgs.Twist" topic="/cmd_vel">
+                linear: {x: 0.0}, angular: {z: -0.5}
+            </output>
+        </plugin>
+        <plugin filename="gz-sim-triggered-publisher-system"
+            name="gz::sim::systems::TriggeredPublisher">
+            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
+            <match field="data">16777237</match>
+            </input>
+            <output type="ignition.msgs.Twist" topic="/cmd_vel">
+                linear: {x: -0.5}, angular: {z: 0.0}
+            </output>
+        </plugin>
+
+        <physics name="1ms" type="ignored">
+            <max_step_size>0.01</max_step_size>
+            <real_time_factor>1</real_time_factor>
+        </physics>
+        <plugin
+            filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics">
+        </plugin>
+        <plugin
+            filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands">
+        </plugin>
+        <plugin
+            filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster">
+        </plugin>
+        <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu">
+        </plugin>
+
+        <plugin
+            filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+            <render_engine>ogre2</render_engine>
+        </plugin>
+
+        <scene>
+            <ambient>1 1 1 1</ambient>
+            <background>0.3 0.7 0.9 1</background>
+            <shadows>0</shadows>
+            <grid>1</grid>
+        </scene>
+
+        <model name='ground_plane'>
+            <static>1</static>
+            <link name='link'>
+                <collision name='collision'>
+                    <geometry>
+                        <plane>
+                            <normal>0 0 1</normal>
+                            <size>1 1</size>
+                        </plane>
+                    </geometry>
+                    <surface>
+                        <friction>
+                            <ode/>
+                        </friction>
+                        <bounce/>
+                        <contact/>
+                    </surface>
+                </collision>
+            </link>
+            <pose>0 0 0 0 0 0</pose>
+        </model>
+
+        <include>
+            <uri>
+                https://fuel.ignitionrobotics.org/1.0/OpenRobotics/models/Depot
+            </uri>
+            <pose>7.19009 1.09982 0 0 0 0</pose>
+        </include>
+
+        <model name='depot_collision'>
+            <static>1</static>
+            <pose>7.19009 1.09982 0 0 0 0</pose>
+            <link name='collision_link'>
+                <pose>0 0 0 0 0 0</pose>
+                <collision name='wall1'>
+                    <pose>0 -7.6129 4.5 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>30.167 0.08 9</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='wall2'>
+                    <pose>0 7.2875 4.5 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>30.167 0.08 9</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='wall3'>
+                    <pose>-15 0 4.5 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.08 15.360 9</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='wall4'>
+                    <pose>15 0 4.5 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.08 15.360 9</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes1'>
+                    <pose>0.22268 -4.7268 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes2'>
+                    <pose>3.1727 -4.7268 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes3'>
+                    <pose>5.95268 -4.7268 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes4'>
+                    <pose>8.55887 -4.7268 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes5'>
+                    <pose>11.326 -4.7268 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes6'>
+                    <pose>0.22268 -2.37448 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes7'>
+                    <pose>3.1727 -2.37448 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes8'>
+                    <pose>5.95268 -2.37448 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes9'>
+                    <pose>8.55887 -2.37448 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes10'>
+                    <pose>11.326 -2.37448 0.68506 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='boxes11'>
+                    <pose>-1.2268 4.1557 0.68506 0 0 -1.02799893</pose>
+                    <geometry>
+                        <box>
+                            <size>1.288 1.422 1.288</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='pilar1'>
+                    <pose>-7.5402 3.6151 1 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.465 0.465 2</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='pilar2'>
+                    <pose>7.4575 3.6151 1 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.465 0.465 2</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='pilar3'>
+                    <pose>-7.5402 -3.8857 1 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.465 0.465 2</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='pilar4'>
+                    <pose>7.4575 -3.8857 1 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.465 0.465 2</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='pallet_mover1'>
+                    <pose>-0.6144 -2.389 0.41838 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.363 0.440 0.719</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='pallet_mover2'>
+                    <pose>-1.6004 4.8225 0.41838 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>0.363 0.244 0.719</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='stairs'>
+                    <pose>13.018 3.1652 0.25 0 0 0</pose>
+                    <geometry>
+                        <box>
+                            <size>1.299 0.6 0.5</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <collision name='shelfs1'>
+                    <pose>1.4662 -0.017559 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs2'>
+                    <pose>2.6483 -0.017559 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs3'>
+                    <pose>5.3247 -0.017559 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs4'>
+                    <pose>6.5063 -0.017559 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs5'>
+                    <pose>9.0758 -0.017559 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs6'>
+                    <pose>10.258 -0.017559 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs7'>
+                    <pose>1.4662 2.5664 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs8'>
+                    <pose>2.6483 2.5664 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs9'>
+                    <pose>5.3247 2.5664 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs10'>
+                    <pose>6.5063 2.5664 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs11'>
+                    <pose>9.0758 2.5664 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs12'>
+                    <pose>10.258 2.5664 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs13'>
+                    <pose>1.4662 5.1497 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs14'>
+                    <pose>2.6483 5.1497 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs15'>
+                    <pose>5.3247 5.1497 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs16'>
+                    <pose>6.5063 5.1497 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs17'>
+                    <pose>9.0758 5.1497 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+                <collision name='shelfs18'>
+                    <pose>10.258 5.1497 0.5 0 0 0</pose>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.03</radius>
+                            <length>1</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+            </link>
+        </model>
+
+        <!-- Robot Model -->
+        <model name='vehicle_blue' canonical_link='chassis'>
+            <plugin
+                filename="gz-sim-diff-drive-system"
+                name="gz::sim::systems::DiffDrive">
+                <left_joint>left_wheel_joint</left_joint>
+                <right_joint>right_wheel_joint</right_joint>
+                <wheel_separation>1.2</wheel_separation>
+                <wheel_radius>0.4</wheel_radius>
+                <odom_publish_frequency>1</odom_publish_frequency>
+                <topic>cmd_vel</topic>
+            </plugin>
+
+            <pose relative_to='world'>0 0 0 0 0 0</pose>
+            <link name='chassis'>
+
+                <sensor name="imu_sensor" type="imu">
+                    <always_on>1</always_on>
+                    <update_rate>200</update_rate>
+                    <visualize>true</visualize>
+                    <topic>/camera/camera/accel/sample</topic>
+                    <!-- Direct camera coordinate system -->
+                    <!-- Camera: x=right, y=down, z=forward -->
+                    <!-- This pose directly aligns with camera coordinates -->
+                    <pose>1.0 0 0.4 1.5708 3.14159 -1.5708</pose>
+                </sensor>
+
+                <pose relative_to='__model__'>0.5 0 0.4 0 0 0</pose>
+                <inertial> <!--inertial properties of the link mass, inertia matix-->
+                    <mass>1.14395</mass>
+                    <inertia>
+                        <ixx>0.095329</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>0.381317</iyy>
+                        <iyz>0</iyz>
+                        <izz>0.476646</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <box>
+                            <size>2.0 1.0 0.5</size>
+                        </box>
+                    </geometry>
+                    <!--let's add color to our link-->
+                    <material>
+                        <ambient>0.0 0.0 1.0 1</ambient>
+                        <diffuse>0.0 0.0 1.0 1</diffuse>
+                        <specular>0.0 0.0 1.0 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                        <geometry>
+                            <box>
+                                <size>2.0 1.0 0.5</size>
+                            </box>
+                        </geometry>
+                </collision>
+            </link>
+            
+            <!-- Infra1 Camera Link (Left) -->
+            <link name='infra1_link'>
+                <pose relative_to="chassis">1.0 0.0255 0.4 0 0 0</pose>
+                <inertial>
+                    <mass>0.1</mass>
+                    <inertia>
+                        <ixx>0.001</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>0.001</iyy>
+                        <iyz>0</iyz>
+                        <izz>0.001</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <box>
+                            <size>0.05 0.05 0.05</size>
+                        </box>
+                    </geometry>
+                    <material>
+                        <ambient>0.2 0.2 0.2 1</ambient>
+                        <diffuse>0.2 0.2 0.2 1</diffuse>
+                        <specular>0.2 0.2 0.2 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                    <geometry>
+                        <box>
+                            <size>0.05 0.05 0.05</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <sensor name="infra1" type="camera">
+                    <camera>
+                        <horizontal_fov>1.5708</horizontal_fov>
+                        <image>
+                            <width>848</width>
+                            <height>480</height>
+                            <format>L8</format>
+                        </image>
+                        <clip>
+                            <near>0.1</near>
+                            <far>100</far>
+                        </clip>
+                    </camera>
+                    <always_on>1</always_on>
+                    <update_rate>30</update_rate>
+                    <visualize>true</visualize>
+                    <topic>/camera/camera/infra1/image_rect_raw</topic>
+                </sensor>
+            </link>
+            
+            <!-- Infra2 Camera Link (Right) -->
+            <link name='infra2_link'>
+                <pose relative_to="chassis">1.0 -0.0255 0.4 0 0 0</pose>
+                <inertial>
+                    <mass>0.1</mass>
+                    <inertia>
+                        <ixx>0.001</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>0.001</iyy>
+                        <iyz>0</iyz>
+                        <izz>0.001</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <box>
+                            <size>0.05 0.05 0.05</size>
+                        </box>
+                    </geometry>
+                    <material>
+                        <ambient>0.2 0.2 0.2 1</ambient>
+                        <diffuse>0.2 0.2 0.2 1</diffuse>
+                        <specular>0.2 0.2 0.2 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                    <geometry>
+                        <box>
+                            <size>0.05 0.05 0.05</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <sensor name="infra2" type="camera">
+                    <camera>
+                        <horizontal_fov>1.5708</horizontal_fov>
+                        <image>
+                            <width>848</width>
+                            <height>480</height>
+                            <format>L8</format>
+                        </image>
+                        <clip>
+                            <near>0.1</near>
+                            <far>100</far>
+                        </clip>
+                    </camera>
+                    <always_on>1</always_on>
+                    <update_rate>30</update_rate>
+                    <visualize>true</visualize>
+                    <topic>/camera/camera/infra2/image_rect_raw</topic>
+                </sensor>
+            </link>
+            
+            <link name='left_wheel'>
+                <pose relative_to="chassis">-0.5 0.6 0 -1.5707 0 0</pose>
+                <inertial>
+                    <mass>1</mass>
+                    <inertia>
+                        <ixx>0.043333</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>0.043333</iyy>
+                        <iyz>0</iyz>
+                        <izz>0.08</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.4</radius>
+                            <length>0.2</length>
+                        </cylinder>
+                    </geometry>
+                    <material>
+                        <ambient>1.0 0.0 0.0 1</ambient>
+                        <diffuse>1.0 0.0 0.0 1</diffuse>
+                        <specular>1.0 0.0 0.0 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.4</radius>
+                            <length>0.2</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+            </link>
+            
+            <link name='right_wheel'>
+                <pose relative_to="chassis">-0.5 -0.6 0 -1.5707 0 0</pose>
+                <inertial>
+                    <mass>1</mass>
+                    <inertia>
+                        <ixx>0.043333</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>0.043333</iyy>
+                        <iyz>0</iyz>
+                        <izz>0.08</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.4</radius>
+                            <length>0.2</length>
+                        </cylinder>
+                    </geometry>
+                    <material>
+                        <ambient>1.0 0.0 0.0 1</ambient>
+                        <diffuse>1.0 0.0 0.0 1</diffuse>
+                        <specular>1.0 0.0 0.0 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.4</radius>
+                            <length>0.2</length>
+                        </cylinder>
+                    </geometry>
+                </collision>
+            </link>
+            
+            <joint name='left_wheel_joint' type='revolute'>
+                <parent>chassis</parent>
+                <child>left_wheel</child>
+                <axis>
+                    <xyz>0 0 1</xyz>
+                </axis>
+            </joint>
+            
+            <joint name='right_wheel_joint' type='revolute'>
+                <parent>chassis</parent>
+                <child>right_wheel</child>
+                <axis>
+                    <xyz>0 0 1</xyz>
+                </axis>
+            </joint>
+            
+            <frame name="caster_frame" attached_to='chassis'>
+                <pose>0.8 0 -0.2 0 0 0</pose>
+            </frame>
+            <link name='caster'>
+                <pose relative_to='caster_frame'/>
+                <inertial>
+                    <mass>1</mass>
+                    <inertia>
+                        <ixx>0.016</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>0.016</iyy>
+                        <iyz>0</iyz>
+                        <izz>0.016</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <sphere>
+                            <radius>0.2</radius>
+                        </sphere>
+                    </geometry>
+                    <material>
+                        <ambient>0.0 1 0.0 1</ambient>
+                        <diffuse>0.0 1 0.0 1</diffuse>
+                        <specular>0.0 1 0.0 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                    <geometry>
+                        <sphere>
+                            <radius>0.2</radius>
+                        </sphere>
+                    </geometry>
+                </collision>
+            </link>
+            
+            <joint name='caster_wheel' type='ball'>
+                <parent>chassis</parent>
+                <child>caster</child>
+            </joint>
+            
+            <!-- Infra1 Camera Joint -->
+            <joint name='infra1_joint' type='fixed'>
+                <parent>chassis</parent>
+                <child>infra1_link</child>
+            </joint>
+            
+            <!-- Infra2 Camera Joint -->
+            <joint name='infra2_joint' type='fixed'>
+                <parent>chassis</parent>
+                <child>infra2_link</child>
+            </joint>
+        </model>
+
+    </world>
+</sdf>

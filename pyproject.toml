@@ -6,23 +6,23 @@ build-backend = "scikit_build_core.build"
 name = "tinynav"
 version = "0.1.0"
 description = "minimal implementation of navigation"
+requires-python = ">=3.10.12,<3.11"
 authors = [{ name = "Zhenfei Yang", email = "zhenfei.yang@deepmirror.com" }]
 dependencies = [
     "numpy==1.26.1", # for compatability with ros2's cv_bridge
     "scipy",
     "matplotlib",
     "opencv-python",
-    "rerun-sdk[notebook]",
     "notebook",
     "jupyterlab",
-    "lightglue @ git+https://github.com/cvg/LightGlue.git@c2f8561",
     "codetiming",
     "numba",
-    "pypose",
     "pygame",
     "pycuda",
     "pybind11",
     "huggingface_hub",
+    "open3d==0.18.0",
+    "unitree-sdk2py @ git+https://github.com/unitreerobotics/unitree_sdk2_python.git@404fe44d76f705c002c97e773276f2a8fefb57e4",
 ]
 
 [tool.scikit-build]

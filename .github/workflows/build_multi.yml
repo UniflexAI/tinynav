@@ -1,0 +1,112 @@
+name: Build Docker Image (multi)
+
+on:
+  push:
+    branches: [docker]
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ARM64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS Checkout
+        run: git lfs checkout
+
+      - name: Extract short commit SHA
+        id: vars
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image (aarch64)
+        run: |
+          mkdir -p /home/nvidia/.buildx-cache/arm64
+          docker buildx build \
+            --platform linux/arm64 \
+            --tag uniflexai/tinynav:${SHORT_SHA}-arm64 \
+            --push \
+            --cache-from=type=local,src=/home/nvidia/.buildx-cache/arm64 \
+            --cache-to=type=local,dest=/home/nvidia/.buildx-cache/arm64,mode=max \
+            .
+
+      - name: Test TensorRT model (arm64, in-container)
+        run: |
+          docker run --rm --runtime nvidia \
+            uniflexai/tinynav:${SHORT_SHA}-arm64 \
+            uv run python tinynav/core/models_trt.py
+
+  build-amd64:
+    runs-on: X64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS Checkout
+        run: git lfs checkout
+
+      - name: Extract short commit SHA
+        id: vars
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker Image (amd64)
+        run: |
+          mkdir -p /tmp/.buildx-cache/amd64
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag uniflexai/tinynav:${SHORT_SHA}-amd64 \
+            --push \
+            --cache-from=type=local,src=/tmp/.buildx-cache/amd64 \
+            --cache-to=type=local,dest=/tmp/.buildx-cache/amd64,mode=max \
+            .
+
+      - name: Test TensorRT model (amd64, in-container)
+        run: |
+          docker run --rm --gpus all \
+            uniflexai/tinynav:${SHORT_SHA}-amd64 \
+            uv run python tinynav/core/models_trt.py
+
+  build-multiarch:
+    runs-on: ARM64
+    needs: [build-amd64, build-arm64]
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compose multi-arch manifest
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          SHORT_SHA=${SHORT_SHA::7}
+          docker buildx imagetools create \
+            -t uniflexai/tinynav:${SHORT_SHA} \
+            uniflexai/tinynav:${SHORT_SHA}-amd64 \
+            uniflexai/tinynav:${SHORT_SHA}-arm64

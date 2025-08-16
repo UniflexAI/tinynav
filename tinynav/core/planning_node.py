@@ -7,7 +7,7 @@ from nav_msgs.msg import Path, Odometry
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 import numpy as np
-from scipy.ndimage import minimum_filter
+from scipy.ndimage import maximum_filter
 from numba import njit
 import message_filters
 import matplotlib.pyplot as plt
@@ -22,7 +22,7 @@ import cv2
 from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 # === Helper functions ===
-@njit
+@njit(cache=True)
 def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
     """
     A "C-style" version of run_raycasting that uses explicit loops instead of
@@ -105,43 +105,42 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     return occupancy_grid
 
 
-@njit
-def occupancy_grid_to_height_map(occupancy_grid, origin, resolution, threshold=0.1, method='min'):
+@njit(cache=True)
+def occupancy_grid_to_height_map(occupancy_grid, origin, resolution, threshold=0.1, method='max'):
     X, Y, Z = occupancy_grid.shape
-    height_map = np.full((X, Z), np.nan, dtype=np.float32)
+    height_map = np.full((X, Y), -np.nan, dtype=np.float32)
     for x in range(X):
-        for z in range(Z):
-            ys = []
-            for y in range(Y):
+        for y in range(Y):
+            zs = []
+            for z in range(Z):
                 if occupancy_grid[x, y, z] >= threshold:
-                    world_y = origin[1] + (y + 0.5) * resolution
-                    ys.append(world_y)
-            if ys:
+                    world_z = origin[2] + (z + 0.5) * resolution
+                    zs.append(world_z)
+            if zs:
                 if method == 'max':
-                    height_map[x, z] = max(ys)
+                    height_map[x, y] = max(zs)
                 elif method == 'min':
-                    height_map[x, z] = min(ys)
+                    height_map[x, y] = min(zs)
     return height_map
 
 def max_pool_height_map(height_map, kernel_size=5):
     nan_mask = np.isnan(height_map)
     filled = np.copy(height_map)
-    filled[nan_mask] = np.inf
-    pooled = minimum_filter(filled, size=kernel_size, mode='nearest')
+    filled[nan_mask] = -np.inf
+    pooled = maximum_filter(filled, size=kernel_size, mode='nearest')
     return pooled
 
-@njit
+@njit(cache=True)
 def generate_trajectory_library_3d(
-    num_samples=21, duration=5.0, dt=0.1,
+    num_samples=11, duration=5.0, dt=0.1,
     acc_std=0.00001, omega_y_std_deg=20.0,
     init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
     num_steps = int(duration / dt) + 1
 
-    max_acc = 0.1  # max acceleration in m/s^2
+    max_acc = 0.2
     acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
-    # grid sample num_samples points from 0 to pi/2
-    max_omega = np.pi/8
+    max_omega = np.pi / 8
     omega_y_samples = np.linspace(-max_omega, max_omega, num_samples)
 
     num_samples = len(acc_samples) * len(omega_y_samples)
@@ -161,19 +160,27 @@ def generate_trajectory_library_3d(
             traj = np.empty((num_steps, 7))
             for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+                v_world = q @ dq.T @ q.T @ v_world
                 q = q @ dq
-                acc_body = np.array([0.0, 0.0, dv])
+
+                acc_body = q.T @ v_world
+                acc_body = acc_body / np.linalg.norm(acc_body)  # normalize
+                acc_body = acc_body * dv
+
                 acc_world = q @ acc_body
                 v_world += acc_world * dt
-                v_world = dq @ v_world
                 p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
+            #hack
+            for i in range(num_steps):
+                traj[i, 2] = traj[0, 2]
             trajectories[k] = traj
             params[k, 0] = dv
             params[k, 1] = omega_y
     return trajectories, params
 
+@njit(cache=True)
 def score_trajectories_by_heightmap(trajectories, height_map, origin, resolution):
     scores = []
     occ_points = []
@@ -182,12 +189,12 @@ def score_trajectories_by_heightmap(trajectories, height_map, origin, resolution
         valid_steps = 0
         valid_step_idx = []
         for i in range(len(traj)):
-            x_world, y_world, z_world = traj[i, 0],traj[i, 1],traj[i, 2],
+            x_world, y_world, z_world = traj[i, 0],traj[i, 1],traj[i, 2]
             x_img = int((x_world - origin[0]) / resolution)
-            z_img = int((z_world - origin[2]) / resolution)
-            if 0 <= x_img < height_map.shape[0] and 0 <= z_img < height_map.shape[1]:
-                val = height_map[x_img, z_img]
-                if not np.isnan(val) and val - 0.10 < y_world:
+            y_img = int((y_world - origin[1]) / resolution)
+            if 0 <= x_img < height_map.shape[0] and 0 <= y_img < height_map.shape[1]:
+                val = height_map[x_img, y_img]
+                if not np.isnan(val) and val > z_world:
                     valid_steps += 1
                     valid_step_idx.append(i)
         scores.append(valid_steps)
@@ -241,8 +248,11 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_T = None
+        self.last_param = (0.0, 0.0) # acc and gyro
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
+
+        self.smoothed_T = None
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = np.array([0.0, 0.0, 0.0])
@@ -260,21 +270,24 @@ class PlanningNode(Node):
             self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camerainfo_sub)
 
-    def publish_height_map_traj(self, max_height_map, trajectories, occ_points, top_indices, scores, params, origin, resolution):
+    def publish_height_map_traj(self, pooled_map, trajectories, occ_points, top_indices, scores, params, origin, resolution):
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.imshow(max_height_map, cmap='terrain', origin='lower')
+        height_normalized = (np.nan_to_num(pooled_map, nan=0.0) + 5) * 30
+        height_uint8 = height_normalized.astype(np.uint8)
+        ax.imshow(height_uint8, cmap='jet', vmin=0, vmax=255, origin='upper', interpolation='nearest')
         for idx in top_indices:
             if scores[idx] > -1:
                 traj = trajectories[idx]
                 occ_idx = occ_points[idx]
                 x = (traj[:, 0] - origin[0]) / resolution
-                z = (traj[:, 2] - origin[2]) / resolution
-                ax.plot(z, x, label=f"S:{scores[idx]:.1f},Ω:{params[idx][1]:.1f}", alpha=0.8)
-                ax.plot(z[occ_idx], x[occ_idx], 'r*', markersize=8, label=None)
-        ax.legend()
+                y = (traj[:, 1] - origin[1]) / resolution
+                ax.plot(y, x, label=f"score:{scores[idx]:.1f}, gyro:{params[idx][1]:.1f}", alpha=0.8)
+                ax.plot(y[occ_idx], x[occ_idx], 'r*', markersize=8, label=None)
+        ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), borderaxespad=0.)
+
 
         buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
         buf.seek(0)
         img = np.array(PIL_Image.open(buf))[:, :, :3]  # Convert to RGB NumPy array
         buf.close()
@@ -293,13 +306,15 @@ class PlanningNode(Node):
         img_msg.header.frame_id = "map"
         self.height_map_pub.publish(img_msg)
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
-        points = []
         occupied = np.argwhere(grid3d > 0)
-        for idx in occupied:
-            x = origin[0] + idx[0] * resolution
-            y = origin[1] + idx[1] * resolution
-            z = origin[2] + idx[2] * resolution
-            points.append((x, y, z))
+        # vectorized operation to avoid for loop
+        if len(occupied) == 0:  
+            points = []
+        else:
+            origin_np = np.array(origin)
+            world_coords = origin_np + occupied * resolution
+            points = world_coords.tolist() 
+        
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = "world"
@@ -314,6 +329,7 @@ class PlanningNode(Node):
             disparity = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T = msg2np(odom_msg)
+            self.smoothed_T = T if self.smoothed_T is None else 0.9 * self.smoothed_T + 0.1 * T
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
             depth = np.zeros_like(disparity)
@@ -329,44 +345,47 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
             self.occupancy_grid += new_occ
+            self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='heightmap', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             height_map = occupancy_grid_to_height_map(self.occupancy_grid, self.origin, self.resolution)
             pooled_map = max_pool_height_map(height_map)
 
-        #with Timer(name='vis height map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        #    self.publish_height_map(T[:3,3], pooled_map, disp_msg.header)
-
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             if self.last_T is None:
-                self.last_T = T
+                self.last_T = self.smoothed_T
                 self.last_stamp = 0
+            init_v = (T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
             trajectories, params = generate_trajectory_library_3d(
                 init_p = T[:3, 3],
-                init_v = (T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp),
+                init_v = init_v if np.linalg.norm(init_v) > 0.01 else np.array([0, 0.1, 0]),
                 init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             )
-            self.last_T = T
+            self.last_T = self.smoothed_T
             self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             scores, occ_points = score_trajectories_by_heightmap(trajectories, pooled_map, self.origin, self.resolution)
-            top_k = 10
+            top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
+        #with Timer(name='vis height map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        #    self.publish_height_map(T[:3,3], pooled_map, disp_msg.header)
         #with Timer(name='vis traj scores', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
         #    self.publish_height_map_traj(pooled_map, trajectories, occ_points, top_indices, scores, params, self.origin, self.resolution)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            def cost_function(traj, score, target_pose):
+            def cost_function(traj, param, score, target_pose):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose
                 dist = np.linalg.norm(traj_end - target_end)
-                return score * 100000 + dist
+                return score * 100000 + 10 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            self.last_param = params[top_indices[0]]
 
             # path
             path = Path()

@@ -4,7 +4,8 @@
   <img alt="tinynav logo" src="/docs/tinynav.png" width="50%" height="50%">
 </picture>
 
-TinyNav: A lightweight, hackable system to guide your robots anywhere. Maintained by [Uniflex AI](https://x.com/UniflexAI).
+**TinyNav** /ˈtaɪni ˈnævi/: *A lightweight, hackable system to guide your robots anywhere.*
+ Maintained by [Uniflex AI](https://x.com/UniflexAI).
 
 <h3>
 
@@ -15,6 +16,29 @@ TinyNav: A lightweight, hackable system to guide your robots anywhere. Maintaine
 [![license](https://img.shields.io/github/license/UniflexAI/tinynav)](https://github.com/UniflexAI/tinynav/blob/master/LICENSE)
 [![X (formerly Twitter) URL](https://img.shields.io/twitter/url?url=https%3A%2F%2Fx.com%2FUniflexAI)](https://x.com/UniflexAI)
 </div>
+
+| [Unitree GO2](https://www.unitree.com/go2)  | [LeKiwi](https://github.com/SIGRobotics-UIUC/LeKiwi) |
+| ------------- | ------------- |
+| <video src="https://github.com/user-attachments/assets/f4ff4842-f0ca-4299-b3d5-5d097de1f2ba">  | <video src="https://github.com/user-attachments/assets/c9b4b949-943b-4910-92f0-0337ef26d0b0">   |
+
+
+# [v0.1] What's Changed
+## Features
+* Implemented **map-based navigation** with **relocalization** and **global planning**.
+* Added support for **Unitree** robots.
+* Added support for the **Lewiki** platform.
+* **Upgraded stereo depth model** for a better speed–accuracy balance.
+* **Tuned Intel® RealSense™ exposure strategy**, optimized for robotics tasks.
+* Added **Gazebo** simulation environment
+* CI: **Docker image build & push** pipeline.
+## Improvements
+* Used **Numba JIT** to speed up key operations while keeping the code simple and maintainable.
+* Adopted **asyncio** for **concurrent model inference.**
+* Added **gravity correction** when velocity is zero.
+* Mount **/etc/localtime** by default so **ROS bag** files use local time in their names.
+* **Optimized trajectory generation.**
+## BugFix
+* Various bug fixes and stability improvements.
 
 # Highlight (Our Design Goals)
 We aim to make the system:
@@ -143,14 +167,13 @@ uv sync
 
 This will create a virtual environment and install all required dependencies.
 
-
 # Next Steps
-- [ ] **LeKiwi integration**:
-      Support closed-loop control with real-time processing.
+- [ ] **High Optimization NN models**:
+      Support real-time perception processing at >= 30fps.
 - [ ] **Map module enhancement**:
-      Enable map point editing, global navigation commands, and GUI-assisted optimization.
-- [ ] **Embedded-friendly NN models**:
-      Deliver lightweight neural network models for feature matching and stereo depth, optimized for platforms like RK3588.
+      Improve consistency and accuracy for mapping and localization.
+- [ ] **End-To-End trajectories planning**:
+      Deliver robust and safe trajectories with integrated semantic information.
 
 # 📊 Line of Code
 ```

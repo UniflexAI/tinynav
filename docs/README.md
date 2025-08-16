@@ -43,3 +43,61 @@ The mapping module is responsible for providing the robot’s global position al
 | **Map Node Publishing (Optional)**      | Publishes the path as `nav_msgs/Path`.                                                                |
 | **Global Planning (Optional)**      | Can be extended to include global path planning using cost maps and [**A\* method**](https://en.wikipedia.org/wiki/A*_search_algorithm).                                                                |
 
+
+# Set up for Unitree Go2
+
+Connect your computer or Jetson to the Unitree Go2 and ensure they are on the same network segment (192.168.123.x).
+
+### Step 1: Find the Network Interface Name
+
+Run the following command to list all network interfaces:
+
+```bash
+ip addr
+```
+
+Example output:
+```
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: wlP1p1s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    link/ether 48:8f:4b:62:b4:4c brd ff:ff:ff:ff:ff:ff
+    inet 192.168.19.115/24 brd 192.168.19.255 scope global dynamic noprefixroute wlP1p1s0
+       valid_lft 12597sec preferred_lft 12597sec
+    inet6 fe80::edfc:6e55:62ab:bfd3/64 scope link noprefixroute 
+       valid_lft forever preferred_lft forever
+3: can0: <NOARP,ECHO> mtu 16 qdisc noop state DOWN group default qlen 10
+    link/can 
+4: eno1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP group default qlen 1000
+    link/ether 3c:6d:66:b2:b3:f1 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.123.100/24 scope global eno1
+       valid_lft forever preferred_lft forever
+```
+
+**Note:** In this example, `eno1` is the network interface connected to the Go2 robot (IP: 192.168.123.100).
+
+### Step 2: Set a Static IP Address
+
+Configure your network interface with a static IP address in the 192.168.123.x range:
+
+```bash
+sudo ip addr add 192.168.123.100/24 dev eno1
+sudo ip link set eno1 up
+```
+
+### Step 3: Verify Connection
+
+Test the connection to the Go2 robot (default IP: 192.168.123.161):
+
+```bash
+ping 192.168.123.161
+```
+
+### Additional Resources
+
+For more detailed setup instructions, refer to the official Unitree documentation:
+https://support.unitree.com/home/en/developer/Quick_start
