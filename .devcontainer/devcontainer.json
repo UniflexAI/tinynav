@@ -1,8 +1,7 @@
 {
   "name": "tinynav-dev",
-  "image": "uniflexai/tinynav:c04d922",
+  "image": "uniflexai/tinynav:0c4332e",
   "context": "..",
-
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
     "GDK_SCALE": "2"
@@ -27,4 +26,3 @@
   "mounts": [],
   "postCreateCommand": "echo 'Devcontainer ready.'"
 }
-
