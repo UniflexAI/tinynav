@@ -5,7 +5,7 @@ from nav_msgs.msg import Path, Odometry
 import numpy as np
 import sys
 
-from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose
+from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, disparity_to_depth
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -228,7 +228,7 @@ class MapNode(Node):
         assert keyframe_image_timestamp == keyframe_odom_timestamp
         assert keyframe_image_timestamp == disp_timestamp
         disp = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding="32FC1")
-        depth = self.compute_depth_from_disparity(disp, self.K, self.baseline)
+        depth = disparity_to_depth(disp, self.K, self.baseline)
 
         odom = msg2np(keyframe_odom_msg)
 
@@ -275,11 +275,6 @@ class MapNode(Node):
         for timestamp, pose in optimized_camera_poses.items():
             self.pose_graph_used_pose[timestamp] = pose
         return optimized_camera_poses
-
-    def compute_depth_from_disparity(self, disparity:np.ndarray, K:np.ndarray, baseline:float) -> np.ndarray:
-        depth = np.zeros_like(disparity)
-        depth[disparity > 0] = K[0, 0] * baseline / (disparity[disparity > 0])
-        return depth
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         processed_image = self.dinov2_model.preprocess_image(image)

@@ -19,7 +19,7 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
-from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, disparity_to_depth
 
 # === Helper functions ===
 @njit(cache=True)
@@ -332,8 +332,7 @@ class PlanningNode(Node):
             self.smoothed_T = T if self.smoothed_T is None else 0.9 * self.smoothed_T + 0.1 * T
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
-            depth = np.zeros_like(disparity)
-            depth[disparity > 0] = fx * self.baseline / (disparity[disparity > 0])
+            depth = disparity_to_depth(disparity, self.K, self.baseline)
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             center = self.origin + np.array(self.grid_shape) * self.resolution / 2
