@@ -32,7 +32,7 @@ TINYNAV_TEMP = "tinynav_temp"
 
 def draw_image_match_origin(prev_image: np.ndarray, curr_image: np.ndarray, prev_keypoints: np.ndarray, curr_keypoints: np.ndarray, matches: np.ndarray):
     cv_matches = [cv2.DMatch(_queryIdx=matches[index, 0].item(), _trainIdx=matches[index, 1].item(), _imgIdx=0, _distance=0) for index in range(matches.shape[0])]
-    # convert kpts_prev and kpts_curr to cv2.KeyPoint 
+    # convert kpts_prev and kpts_curr to cv2.KeyPoint
     cv_kpts_prev = [cv2.KeyPoint(x=prev_keypoints[index, 0].item(), y=prev_keypoints[index, 1].item(), size=20) for index in range(prev_keypoints.shape[0])]
     cv_kpts_curr = [cv2.KeyPoint(x=curr_keypoints[index, 0].item(), y=curr_keypoints[index, 1].item(), size=20) for index in range(curr_keypoints.shape[0])]
     output_image = cv2.drawMatches(prev_image, cv_kpts_prev, curr_image, cv_kpts_curr, cv_matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
@@ -48,10 +48,10 @@ def depth_to_cloud(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
     h, w = depth.shape
     u, v = np.meshgrid(np.arange(w), np.arange(h))
     z = depth.flatten()
-    
+
     x = (u.flatten() - K[0, 2]) * z / K[0, 0]
     y = (v.flatten() - K[1, 2]) * z / K[1, 1]
-    
+
     points_3d = np.vstack((x, y, z)).T
     return points_3d[~np.isnan(points_3d).any(axis=1)]
 
@@ -64,7 +64,7 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
     """
     assert point_cloud.shape[1] == 3, "Point cloud must be of shape (N, 3)"
     assert T.shape == (4, 4), "Transformation matrix must be of shape (4, 4)"
-    
+
     # Convert to homogeneous coordinates
     ones = np.ones((point_cloud.shape[0], 1))
     homogeneous_points = np.hstack((point_cloud, ones))
@@ -185,7 +185,7 @@ class MapNode(Node):
         self.cost_map = None
         self.occupancy_map = None
         self.occuancy_map_meta = None
-        
+
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -212,7 +212,7 @@ class MapNode(Node):
 
             # timer or queue for publish the nav path
 
-            # and record the map pose 
+            # and record the map pose
             # compute the coordinate transform from the map pose to the keyframe pose
             # publish the nav path from the map pose to the keyframe pose with the cost map
 
@@ -529,6 +529,15 @@ class MapNode(Node):
         self.cost_map = gaussian_filter(self.cost_map, sigma=sigma)
 
     def save_mapping(self):
+        # Check if there's any meaningful map data to save
+        if (len(self.embeddings) == 0 and
+            len(self.features) == 0 and
+            len(self.depth_paths) == 0 and
+            len(self.image_paths) == 0 and
+            len(self.pose_graph_used_pose) == 0):
+            logger.warning("No map data found - not saving empty map")
+            return
+
         if not os.path.exists(TINYNAV_DB):
             os.mkdir(TINYNAV_DB)
         # self.landmark_tracker.save_to_dir("mapping")
@@ -712,7 +721,7 @@ class MapNode(Node):
         paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
 
         if paths_in_map is not None:
-            # use the max_speed to publish the position the robot should be after 5 seconds 
+            # use the max_speed to publish the position the robot should be after 5 seconds
             max_speed = 1.0
             if len(paths_in_map) > 1:
                 accumulated_distance = 0.0
@@ -770,10 +779,10 @@ class MapNode(Node):
             return converted_path
         return None
 
- 
 
 
-def reconstruct_path(came_from: dict, current:np.ndarray) -> np.ndarray:    
+
+def reconstruct_path(came_from: dict, current:np.ndarray) -> np.ndarray:
     """
     Reconstructs the path from the start to the goal.
     :param came_from: dict, mapping of nodes to their predecessors
@@ -790,7 +799,7 @@ def reconstruct_path(came_from: dict, current:np.ndarray) -> np.ndarray:
 def A_star(cost_map:np.ndarray, start:np.ndarray, goal:np.ndarray, obstacles_cost: float) -> np.ndarray:
     """
     A* algorithm to find the path from start to goal in the cost map.
-    parameters: 
+    parameters:
         cost_map: np.ndarray (H, W)
         start: tuple[int, int], x_idx, y_idx
         goal: tuple[int, int], x_idx, y_idx
@@ -861,14 +870,14 @@ def main(args=None):
         node.load_mapping()
     try:
         rclpy.spin(node)
+        node.destroy_node()
+        rclpy.shutdown()
     except KeyboardInterrupt:
         pass
     finally:
         if parsed_args.mapping:
             node.on_shutdown()
 
-    node.destroy_node()
-    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

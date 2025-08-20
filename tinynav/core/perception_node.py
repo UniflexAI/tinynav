@@ -94,7 +94,7 @@ class PerceptionNode(Node):
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_last}")
             #self.destroy_subscription(self.accel_sub)
             self.gravity_in_camera_frame = gravity_cam
-        
+
         if len(self.accel_readings) > 200:
             self.accel_readings.pop(0)
             accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
@@ -109,16 +109,16 @@ class PerceptionNode(Node):
                 self.is_static = True
 
 
-        
+
 
 
     def images_callback(self, left_msg, right_msg):
         current_timestamp = left_msg.header.stamp.sec + left_msg.header.stamp.nanosec * 1e-9
         if current_timestamp - self.last_processed_timestamp < 0.1:
             return
-        
+
         self.last_processed_timestamp = current_timestamp
-        
+
         self.timestamp = left_msg.header.stamp
 
         with Timer(name="Perception Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -159,7 +159,7 @@ class PerceptionNode(Node):
             disparity = await stereo_task
             disparity[disparity < 0] = 0
 
-        # publish dispairty   
+        # publish dispairty
         with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
             disparity_msg = self.bridge.cv2_to_imgmsg(disparity, encoding="32FC1")
             disparity_msg.header = left_msg.header
@@ -186,7 +186,7 @@ class PerceptionNode(Node):
 
         self.T_last, T_curr = self.gravity_correction(self.T_last, T_curr, T_pre_curr)
 
-        # publish odometry 
+        # publish odometry
         self.odom_pub.publish(np2msg(T_curr, self.timestamp, "world", "camera"))
         # publish TF
         self.tf_broadcaster.sendTransform(np2tf(T_curr, self.timestamp, "world", "camera"))
@@ -233,18 +233,18 @@ class PerceptionNode(Node):
                  T_last = T_curr @ np.linalg.inv(T_pre_curr)
                  self.get_logger().info(f"diff_angle: {diff_angle}, T_rot_corrector: {T_rot_corrector}, self.gravity_in_camera_frame: {self.gravity_in_camera_frame}")
         return T_last, T_curr
-        
+
 
 def main(args=None):
     rclpy.init(args=args)
     perception_node = PerceptionNode()
+
     try:
         rclpy.spin(perception_node)
-    except KeyboardInterrupt:
-        logging.info("exit")
-    finally:
         perception_node.destroy_node()
         rclpy.shutdown()
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == "__main__":
     logging.basicConfig(

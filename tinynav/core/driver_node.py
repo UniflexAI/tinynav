@@ -81,12 +81,13 @@ class KittiDriverNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = KittiDriverNode(seq_num = 5)
+
     try:
         rclpy.spin(node)
+        node.destroy_node()
+        rclpy.shutdown()
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
 
 if __name__ == '__main__':
-    main() 
+    main()

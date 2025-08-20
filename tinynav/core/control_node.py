@@ -58,7 +58,7 @@ class ControlNode(Node):
                 self.control_mode = ControlMode.MANUAL
 
         if self.control_mode == ControlMode.MANUAL:
-            self.manual_control()       
+            self.manual_control()
         elif self.control_mode == ControlMode.AUTO:
             self.auto_control()
 
@@ -82,7 +82,7 @@ class ControlNode(Node):
             return
         axis_left_forward = -self.joystick.get_axis(1)  # Left stick vertical
         axis_left_right = self.joystick.get_axis(0)  # Left stick horizontal
-        
+
         # deadzone
         axis_left_forward = 0 if abs(axis_left_forward) < 0.1 else axis_left_forward
         axis_left_right = 0 if abs(axis_left_right) < 0.1 else axis_left_right
@@ -140,11 +140,13 @@ def main(args=None):
     node = ControlNode()
     try:
         rclpy.spin(node)
+        node.destroy_node()
+        rclpy.shutdown()
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
-    pygame.quit()
+    finally:
+        pygame.quit()
+
 
 if __name__ == '__main__':
     main()

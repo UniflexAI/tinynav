@@ -31,7 +31,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     """
     occupancy_grid = np.zeros(grid_shape)
     depth_height, depth_width = depth_image.shape
-    
+
     grid_shape_x, grid_shape_y, grid_shape_z = grid_shape
     origin_x, origin_y, origin_z = origin
 
@@ -48,7 +48,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
             d = depth_image[v, u]
             if d <= 0:
                 continue
-            
+
             # Project to camera coordinates
             px = (u - cx) * d / fx
             py = (v - cy) * d / fy
@@ -101,7 +101,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
                     occupancy_grid[i, j, k] = -0.1
                 elif occupancy_grid[i, j, k] > 0.1:
                     occupancy_grid[i, j, k] = 0.1
-    
+
     return occupancy_grid
 
 
@@ -308,13 +308,13 @@ class PlanningNode(Node):
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
         occupied = np.argwhere(grid3d > 0)
         # vectorized operation to avoid for loop
-        if len(occupied) == 0:  
+        if len(occupied) == 0:
             points = []
         else:
             origin_np = np.array(origin)
             world_coords = origin_np + occupied * resolution
-            points = world_coords.tolist() 
-        
+            points = world_coords.tolist()
+
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = "world"
@@ -408,12 +408,13 @@ class PlanningNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PlanningNode()
+
     try:
         rclpy.spin(node)
+        node.destroy_node()
+        rclpy.shutdown()
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
 
 if __name__ == '__main__':
-    main() 
+    main()
