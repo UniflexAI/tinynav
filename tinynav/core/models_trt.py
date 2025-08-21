@@ -7,31 +7,7 @@ import platform
 import pycuda.autoinit # noqa: F401
 import asyncio
 from async_lru import alru_cache
-
-class OutputAllocator(trt.IOutputAllocator):
-    def __init__(self):
-        super().__init__()
-        self.buffers = {}
-        self.shapes = {}
-        self.sizes = {}
-
-    def AddItem(self, size, name, shape, ptr):
-        self.buffers[name] = ptr
-        self.sizes[name] = size
-        self.shapes[name] = shape
-
-    def reallocate_output(self, tensor_name, memory, size, alignment):
-        if self.sizes[tensor_name] < size:
-            ptr = cuda.mem_alloc(size)
-            self.sizes[tensor_name] = size
-            self.buffers[tensor_name] = ptr
-            return ptr
-        else:
-            return self.buffers[tensor_name]
-
-    def notify_shape(self, tensor_name, shape):
-        self.shapes[tensor_name] = tuple(shape)
-
+import logging
 
 class TRTBase:
     def __init__(self, engine_path):
@@ -39,7 +15,6 @@ class TRTBase:
         with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
         self.context = self.engine.create_execution_context()
-        self.output_allocator = OutputAllocator()
         self.inputs, self.outputs, self.bindings, self.stream = self.allocate_buffers()
 
     def allocate_buffers(self):
@@ -54,37 +29,24 @@ class TRTBase:
             dtype = np.dtype(trt.nptype(self.engine.get_tensor_dtype(name)))
             is_input = self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
 
-            if any(value for value in shape if value < 0):
-                if is_input:
-                    assert self.engine.num_optimization_profiles > 0
-                    profile_shape = self.engine.get_tensor_profile_shape(name, 0)
-                    assert len(profile_shape) == 3  # min,opt,max
-                    # Set the *max* profile as binding shape
-                    shape = profile_shape[2]
-                else:
-                    shape[1] = 2048
-
             size = trt.volume(shape)
             nbytes = trt.volume(shape) * dtype.itemsize
-            host_mem = None
+            host_mem = cuda.pagelocked_empty(size, dtype)
             device_mem = cuda.mem_alloc(nbytes)
             bindings.append(int(device_mem))
 
             if is_input:
-                host_mem = cuda.pagelocked_empty(size, dtype)
                 inputs.append({"host": host_mem, "device": device_mem, "shape": shape})
             else:
-                self.output_allocator.AddItem(nbytes, name, shape, device_mem)
-                self.context.set_output_allocator(name, self.output_allocator)
-                outputs.append({"device": device_mem, "dtype": dtype, "name": name})
+                outputs.append({"host": host_mem, "device": device_mem, "shape": shape, "dtype": dtype, "name": name})
 
         return inputs, outputs, bindings, stream
 
 class SuperPointTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_240x424_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
-        # model input [1,H,W,1]
-        self.input_shape = self.inputs[0]["shape"][1:3] # [H,W]
+        # model input [1,1,H,W]
+        self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
 
     # default threshold as 
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
@@ -109,13 +71,15 @@ class SuperPointTRT(TRTBase):
         while not event.query():
             await asyncio.sleep(0)
 
+        for out in self.outputs:
+            cuda.memcpy_dtoh_async(out["host"], out["device"], self.stream)
+        self.stream.synchronize()
+
         results = {}
         for out in self.outputs:
-            out_shape = self.output_allocator.shapes[out["name"]]
-            out_device = self.output_allocator.buffers[out["name"]]
-            results[out["name"]] = np.empty(out_shape, dtype=out["dtype"])
-            cuda.memcpy_dtoh_async(results[out["name"]], out_device, self.stream)
-        self.stream.synchronize()
+            result = np.zeros_like(out["host"])
+            np.copyto(result, out["host"])
+            results[out["name"]] = result.reshape(out["shape"])
 
         results["kpts"][0] = (results["kpts"][0] + 0.5) / scale - 0.5
         return results
@@ -137,22 +101,19 @@ class LightGlueTRT(TRTBase):
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/lightglue.py#L333
     #
-    async def infer(self, kpts0, kpts1, desc0, desc1, img_shape0, img_shape1, match_threshold = np.array([0.1])):
+    async def infer(self, kpts0, kpts1, desc0, desc1, mask0, mask1, img_shape0, img_shape1, match_threshold = np.array([0.1])):
         np.copyto(self.inputs[0]["host"][: kpts0.size], kpts0.ravel())
         np.copyto(self.inputs[1]["host"][: kpts1.size], kpts1.ravel())
         np.copyto(self.inputs[2]["host"][: desc0.size], desc0.ravel())
         np.copyto(self.inputs[3]["host"][: desc1.size], desc1.ravel())
-        np.copyto(self.inputs[4]["host"], img_shape0.ravel())
-        np.copyto(self.inputs[5]["host"], img_shape1.ravel())
-        np.copyto(self.inputs[6]["host"], match_threshold.ravel())
+        np.copyto(self.inputs[4]["host"][: mask0.size], mask0.ravel())
+        np.copyto(self.inputs[5]["host"][: mask1.size], mask1.ravel())
+        np.copyto(self.inputs[6]["host"], img_shape0.ravel())
+        np.copyto(self.inputs[7]["host"], img_shape1.ravel())
+        np.copyto(self.inputs[8]["host"], match_threshold.ravel())
 
         for inp in self.inputs:
             cuda.memcpy_htod_async(inp["device"], inp["host"], self.stream)
-
-        self.context.set_input_shape("kpts0", kpts0.shape)
-        self.context.set_input_shape("kpts1", kpts1.shape)
-        self.context.set_input_shape("desc0", desc0.shape)
-        self.context.set_input_shape("desc1", desc1.shape)
 
         for i in range(self.engine.num_io_tensors):
             self.context.set_tensor_address(self.engine.get_tensor_name(i), self.bindings[i])
@@ -163,43 +124,21 @@ class LightGlueTRT(TRTBase):
         while not event.query():
             await asyncio.sleep(0)
 
+        for out in self.outputs:
+            cuda.memcpy_dtoh_async(out["host"], out["device"], self.stream)
+        self.stream.synchronize()
+
         results = {}
         for out in self.outputs:
-            out_shape = self.output_allocator.shapes[out["name"]]
-            out_device = self.output_allocator.buffers[out["name"]]
-            results[out["name"]] = np.empty(out_shape, dtype=out["dtype"])
-            cuda.memcpy_dtoh_async(results[out["name"]], out_device, self.stream)
-        self.stream.synchronize()
+            result = np.zeros_like(out["host"])
+            np.copyto(result, out["host"])
+            results[out["name"]] = result.reshape(out["shape"])
         return results
 
 
 class Dinov2TRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/dinov2_base_224x224_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
-
-    def allocate_buffers(self):
-        inputs = []
-        outputs = []
-        bindings = []
-        stream = cuda.Stream()
-
-        for i in range(self.engine.num_io_tensors):
-            name = self.engine.get_tensor_name(i)
-            shape = self.context.get_tensor_shape(name)
-            dtype = np.dtype(trt.nptype(self.engine.get_tensor_dtype(name)))
-
-            size = trt.volume(shape)
-            nbytes = trt.volume(shape) * dtype.itemsize
-            host_mem = cuda.pagelocked_empty(size, dtype)
-            device_mem = cuda.mem_alloc(nbytes)
-            bindings.append(int(device_mem))
-
-            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
-                inputs.append({"host": host_mem, "device": device_mem, "shape": shape})
-            else:
-                outputs.append({"host": host_mem, "device": device_mem, "shape": shape, "dtype": dtype, "name": name})
-
-        return inputs, outputs, bindings, stream
 
     def preprocess_image(self, image, target_size=224):
         image = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
@@ -333,6 +272,8 @@ if __name__ == "__main__":
             right_extract_result["kpts"],
             left_extract_result["descps"],
             right_extract_result["descps"],
+            left_extract_result["mask"],
+            right_extract_result["mask"],
             image_shape,
             image_shape,
             match_threshold))

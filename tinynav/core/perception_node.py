@@ -108,10 +108,6 @@ class PerceptionNode(Node):
                     self.gravity_in_camera_frame = np.mean(accel_data, axis=0)
                 self.is_static = True
 
-
-
-
-
     def images_callback(self, left_msg, right_msg):
         current_timestamp = left_msg.header.stamp.sec + left_msg.header.stamp.nanosec * 1e-9
         if current_timestamp - self.last_processed_timestamp < 0.1:
@@ -137,14 +133,18 @@ class PerceptionNode(Node):
 
             stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img))
 
-            prev_left_extract_result = await self.superpoint.memorized_infer(self.last_keyframe_img)
-            current_left_extract_result = await self.superpoint.memorized_infer(left_img)
+            with Timer(name="[SuperPoint Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+                prev_left_extract_result = await self.superpoint.memorized_infer(self.last_keyframe_img)
+                current_left_extract_result = await self.superpoint.memorized_infer(left_img)
 
-            match_result = await self.light_glue.infer(
+            with Timer(name="[LightGlue Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+                match_result = await self.light_glue.infer(
                     prev_left_extract_result["kpts"],
                     current_left_extract_result["kpts"],
                     prev_left_extract_result["descps"],
                     current_left_extract_result["descps"],
+                    prev_left_extract_result["mask"],
+                    current_left_extract_result["mask"],
                     self.image_shape,
                     self.image_shape)
 
@@ -155,7 +155,7 @@ class PerceptionNode(Node):
             kpt_pre = prev_keypoints[valid_mask]
             kpt_cur = current_keypoints[match_indices[valid_mask]]
 
-            logging.info(f"prev_pts current_pts, match cnt: {len(prev_keypoints)}, {len(current_keypoints)}, {len(kpt_pre)}")
+            logging.info(f"match cnt: {len(kpt_pre)}")
             disparity = await stereo_task
             disparity[disparity < 0] = 0
 

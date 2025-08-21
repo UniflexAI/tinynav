@@ -142,20 +142,35 @@ def msg2np(msg):
     T[:3, :3] = R.from_quat(quat).as_matrix()
     T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
     return T
-    
 
-def estimate_pose( kpts_prev, kpts_curr, disparity, K, baseline) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    points_3d, points_2d = [], []
-    for pt_prev, pt_curr in zip(kpts_prev, kpts_curr):
-        u, v = int(pt_curr[0]), int(pt_curr[1])
+@njit(cache=True)
+def process_keypoints(kpts_prev, kpts_curr, disparity, K, baseline):
+    points_3d = np.empty((len(kpts_prev), 3), dtype=np.float32)
+    points_2d = np.empty((len(kpts_prev), 2), dtype=np.float32)
+    valid_count = 0
+    
+    for i in range(len(kpts_prev)):
+        u, v = int(kpts_curr[i,0]), int(kpts_curr[i,1])
         if 0 <= v < disparity.shape[0] and 0 <= u < disparity.shape[1]:
             disp = disparity[v, u]
             if disp > 1:
-                Z = K[0, 0] * baseline / disp
-                X = (pt_curr[0] - K[0, 2]) * Z / K[0, 0]
-                Y = (pt_curr[1] - K[1, 2]) * Z / K[1, 1]
-                points_3d.append([X, Y, Z])
-                points_2d.append(pt_prev)
+                Z = K[0,0] * baseline / disp
+                X = (kpts_curr[i,0] - K[0,2]) * Z / K[0,0]
+                Y = (kpts_curr[i,1] - K[1,2]) * Z / K[1,1]
+                points_3d[valid_count] = (X, Y, Z)
+                points_2d[valid_count] = kpts_prev[i]
+                valid_count += 1
+    
+    return points_3d[:valid_count], points_2d[:valid_count]
+
+def estimate_pose( kpts_prev, kpts_curr, disparity, K, baseline) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    points_3d, points_2d = process_keypoints(
+        kpts_prev.astype(np.float32), 
+        kpts_curr.astype(np.float32),
+        disparity, 
+        K.astype(np.float32),
+        np.float32(baseline)
+    )
     if len(points_3d) < 6:
         return False, np.eye(4), None, None, None
     points_3d = np.array(points_3d, dtype=np.float32)
