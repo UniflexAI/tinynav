@@ -122,6 +122,9 @@ RUN mkdir -p ros2_ws/src \
 
 RUN echo "source /3rdparty/ros2_ws/install/local_setup.bash" >> ~/.bashrc
 
+# Create a .tmux.conf file and enable mouse mode
+RUN echo 'setw -g mouse on' > /root/.tmux.conf
+
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
