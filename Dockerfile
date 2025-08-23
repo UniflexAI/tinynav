@@ -91,7 +91,9 @@ RUN apt-get install -y ignition-fortress ros-humble-ros-gz-bridge
 
 WORKDIR /3rdparty
 
-# realsense sdk
+# realsense sdk: 2.56.x
+# realsense fw: 5.17.0.10
+# reference: https://dev.realsenseai.com/docs/firmware-releases-d400#d400-series-firmware-downloads
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libudev-dev pkg-config libusb-1.0-0-dev libglfw3-dev libssl-dev libgl1-mesa-dev libglu1-mesa cmake \
     libgtk-3-dev \
