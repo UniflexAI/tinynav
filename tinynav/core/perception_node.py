@@ -124,20 +124,20 @@ class PerceptionNode(Node):
         if self.K is None or self.T_last is None or self.image_shape is None:
             return
 
+        left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
+        right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
+
         with Timer(name="[Model Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-            left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
-            right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
             if self.last_keyframe_img is None:
                 self.last_keyframe_img = left_img
                 return
 
             stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img))
 
-            with Timer(name="[SuperPoint Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+            with Timer(name="[SuperPoint && lightglue Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
                 prev_left_extract_result = await self.superpoint.memorized_infer(self.last_keyframe_img)
                 current_left_extract_result = await self.superpoint.memorized_infer(left_img)
 
-            with Timer(name="[LightGlue Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
                 match_result = await self.light_glue.infer(
                     prev_left_extract_result["kpts"],
                     current_left_extract_result["kpts"],
@@ -148,16 +148,16 @@ class PerceptionNode(Node):
                     self.image_shape,
                     self.image_shape)
 
-            prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
-            current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
-            match_indices = match_result["match_indices"][0]
-            valid_mask = match_indices != -1
-            kpt_pre = prev_keypoints[valid_mask]
-            kpt_cur = current_keypoints[match_indices[valid_mask]]
+                prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
+                current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
+                match_indices = match_result["match_indices"][0]
+                valid_mask = match_indices != -1
+                kpt_pre = prev_keypoints[valid_mask]
+                kpt_cur = current_keypoints[match_indices[valid_mask]]
+                logging.info(f"match cnt: {len(kpt_pre)}")
 
-            logging.info(f"match cnt: {len(kpt_pre)}")
-            disparity = await stereo_task
-            disparity[disparity < 0] = 0
+            with Timer(name="[stereo_task await]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+                disparity = await stereo_task
 
         # publish dispairty
         with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):

@@ -153,7 +153,7 @@ def process_keypoints(kpts_prev, kpts_curr, disparity, K, baseline):
         u, v = int(kpts_curr[i,0]), int(kpts_curr[i,1])
         if 0 <= v < disparity.shape[0] and 0 <= u < disparity.shape[1]:
             disp = disparity[v, u]
-            if disp > 1:
+            if disp > 1 and disp != np.inf:
                 Z = K[0,0] * baseline / disp
                 X = (kpts_curr[i,0] - K[0,2]) * Z / K[0,0]
                 Y = (kpts_curr[i,1] - K[1,2]) * Z / K[1,1]

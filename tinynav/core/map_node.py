@@ -279,7 +279,7 @@ class MapNode(Node):
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         processed_image = self.dinov2_model.preprocess_image(image)
         # shape: (1, 768)
-        return self.dinov2_model.infer(processed_image)["last_hidden_state"][:, 0, :].squeeze(0)
+        return asyncio.run(self.dinov2_model.infer(processed_image))
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
