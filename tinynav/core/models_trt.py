@@ -7,7 +7,7 @@ import asyncio
 from async_lru import alru_cache
 import logging
 
-from cuda import cudart, cuda
+from cuda import cudart
 import ctypes
 
 numpy_to_ctypes = {
