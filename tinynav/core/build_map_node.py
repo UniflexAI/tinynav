@@ -1,0 +1,379 @@
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Path, Odometry
+import numpy as np
+import sys
+
+from math_utils import matrix_to_quat, msg2np, estimate_pose, disparity_to_depth
+from sensor_msgs.msg import Image, CameraInfo
+from message_filters import TimeSynchronizer, Subscriber
+from cv_bridge import CvBridge
+import cv2
+from codetiming import Timer
+import os
+import argparse
+
+from tinynav.tinynav_cpp_bind import pose_graph_solve
+from models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+import sensor_msgs_py.point_cloud2 as pc2
+from std_msgs.msg import Header
+from planning_node import run_raycasting_loopy
+import logging
+import asyncio
+import shelve
+from tqdm import tqdm
+import einops
+from numba import njit
+from visualization_msgs.msg import MarkerArray
+
+logger = logging.getLogger(__name__)
+TINYNAV_DB = "tinynav_db"
+@njit(cache=True)
+def disparity_to_cloud_in_world(disparity: np.ndarray, K: np.ndarray, baseline: float, pose_in_world: np.ndarray) -> np.ndarray:
+    h, w = disparity.shape
+    points_3d = []
+    for u in range(w):
+        for v in range(h):
+            if disparity[v, u] > 0:
+                z = K[0, 0] * baseline / disparity[v, u]
+                x = (u - K[0, 2]) * z / K[0, 0]
+                y = (v - K[1, 2]) * z / K[1, 1]
+                norm = np.linalg.norm(np.array([x, y, z]))
+                if norm > 10.0 or y < -1.0:
+                    continue
+                world_x = pose_in_world[0, 0] * x + pose_in_world[0, 1] * y + pose_in_world[0, 2] * z + pose_in_world[0, 3]
+                world_y = pose_in_world[1, 0] * x + pose_in_world[1, 1] * y + pose_in_world[1, 2] * z + pose_in_world[1, 3]
+                world_z = pose_in_world[2, 0] * x + pose_in_world[2, 1] * y + pose_in_world[2, 2] * z + pose_in_world[2, 3]
+                points_3d.append([world_x, world_y, world_z])
+    return np.array(points_3d)
+
+def merge_grids(grid1:np.ndarray, grid1_origin:np.ndarray, grid2:np.ndarray, grid2_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Merge two grids into one.
+        """
+        min_x = min(grid1_origin[0], grid2_origin[0])
+        min_y = min(grid1_origin[1], grid2_origin[1])
+        min_z = min(grid1_origin[2], grid2_origin[2])
+
+        max_x = max(grid1_origin[0] + grid1.shape[0] * resolution, grid2_origin[0] + grid2.shape[0] * resolution)
+        max_y = max(grid1_origin[1] + grid1.shape[1] * resolution, grid2_origin[1] + grid2.shape[1] * resolution)
+        max_z = max(grid1_origin[2] + grid1.shape[2] * resolution, grid2_origin[2] + grid2.shape[2] * resolution)
+
+        new_shape_x = int((max_x - min_x) / resolution) + 1
+        new_shape_y = int((max_y - min_y) / resolution) + 1
+        new_shape_z = int((max_z - min_z) / resolution) + 1
+
+        new_grid = np.zeros((new_shape_x, new_shape_y, new_shape_z), dtype=np.float32)
+        new_origin = np.array([min_x, min_y, min_z], dtype=np.float32)
+        grid1_x_start = int((grid1_origin[0] - min_x) / resolution)
+        grid1_y_start = int((grid1_origin[1] - min_y) / resolution)
+        grid1_z_start = int((grid1_origin[2] - min_z) / resolution)
+        grid2_x_start = int((grid2_origin[0] - min_x) / resolution)
+        grid2_y_start = int((grid2_origin[1] - min_y) / resolution)
+        grid2_z_start = int((grid2_origin[2] - min_z) / resolution)
+        # Merge the grids
+        new_grid[grid1_x_start:grid1_x_start + grid1.shape[0],
+                  grid1_y_start:grid1_y_start + grid1.shape[1],
+                  grid1_z_start:grid1_z_start + grid1.shape[2]] += grid1
+
+        new_grid[grid2_x_start:grid2_x_start + grid2.shape[0],
+                  grid2_y_start:grid2_y_start + grid2.shape[1],
+                  grid2_z_start:grid2_z_start + grid2.shape[2]] += grid2
+        return new_grid, new_origin
+
+def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, max_iteration_num:int = 1024) -> dict:
+    """
+    Solve the bundle adjustment problem.
+    """
+    if len(relative_pose_constraint) == 0:
+        return pose_graph_used_pose
+    min_timestamp = min(pose_graph_used_pose.keys())
+    constant_pose_index_dict = { min_timestamp : True }
+
+    relative_pose_constraint = [
+        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([10.0, 10.0, 10.0])) 
+        for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
+    optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
+    return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
+
+def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarity_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
+    if len(embeddings) == 0:
+        return []
+    similarity_array = einops.einsum(target_embedding, embeddings, "d, n d -> n")
+    top_k_indices = np.argsort(similarity_array, axis = 0)[-loop_top_k:]
+    loop_list = []
+    for idx in top_k_indices:
+        if similarity_array[idx] > loop_similarity_threshold:
+            loop_list.append((idx, similarity_array[idx]))
+        if len(loop_list) >= loop_top_k:
+            break
+    return loop_list
+
+def generate_occupancy_map(poses, disparities, K, baseline, resolution = 0.05, step = 10):
+    """
+        Genereate a occupancy grid map from the depth images.
+        The occupancy grid map is a 3D grid with the following values:
+            0 : Unknown
+            1 : Free
+            2 : Occupied
+    """
+    raycast_shape = (100, 100, 20)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    global_grid = None
+    global_origin = None
+    for timestamp, odom_pose in tqdm(poses.items()):
+        disparity = disparities[timestamp]
+        depth = disparity_to_depth(disparity, K, baseline)
+        odom_translation = odom_pose[:3, 3]
+        local_origin = odom_translation - 0.5 * np.array(raycast_shape) * resolution
+        local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
+        if global_grid is None:
+            global_grid = local_grid
+            global_origin = local_origin
+        else:
+            global_grid, global_origin = merge_grids(global_grid, global_origin, local_grid, local_origin, resolution)
+    grid_type = np.zeros_like(global_grid, dtype=np.uint8)
+    grid_type[global_grid > 0] = 2  # Occupied
+    grid_type[global_grid < 0] = 1  # Free
+    x_y_plane = np.max(grid_type, axis=2)
+    x_y_plane_image = np.zeros_like(x_y_plane, dtype=np.float32)
+    x_y_plane_image[x_y_plane == 2] = 1.0
+    x_y_plane_image[x_y_plane == 1] = 0.5
+    x_y_plane_image = (x_y_plane_image * 255).astype(np.uint8)
+    return global_grid, global_origin, x_y_plane_image
+
+class IntKeyShelf:
+    def __init__(self, filename):
+        self.db = shelve.open(filename)
+
+    def __getitem__(self, key: int):
+        return self.db[str(key)]
+
+    def __setitem__(self, key: int, value):
+        self.db[str(key)] = value
+
+    def __delitem__(self, key: int):
+        del self.db[str(key)]
+
+    def __contains__(self, key: int):
+        return str(key) in self.db
+
+    def keys(self):
+        return [int(k) for k in self.db.keys()]
+    
+
+    def close(self):
+        self.db.close()
+
+class BuildMapNode(Node):
+    def __init__(self, map_save_path:str):
+        super().__init__('map_node')
+        self.super_point_extractor = SuperPointTRT()
+        self.light_glue_matcher = LightGlueTRT()
+        self.dinov2_model = Dinov2TRT()
+
+        self.bridge = CvBridge()
+
+        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+        self.disp_sub = Subscriber(self, Image, '/slam/keyframe_disparity')
+        self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
+        self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
+
+        self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
+        self.project_3d_to_2d_pub = self.create_publisher(Image, "/mapping/project_3d_to_2d", 10)
+        self.matches_image_pub = self.create_publisher(Image, "/mapping/keyframe_matches_images", 10)
+        self.loop_matches_image_pub = self.create_publisher(Image, "/mapping/loop_matches_images", 10)
+        # self.global_map_pub = self.create_publisher(PointCloud2, "/mapping/global_map", 10)
+        self.global_map_marker_pub = self.create_publisher(MarkerArray, "/mapping/global_map_marker", 10)
+        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.disp_sub], 1000)
+        self.ts.registerCallback(self.keyframe_callback)
+
+        self.K = None
+        self.baseline = None
+        self.odom = {}
+        self.pose_graph_used_pose = {}
+        self.point_cloud_publish_pose = {}
+        self.relative_pose_constraint = []
+        self.last_keyframe_timestamp = None
+
+        os.makedirs(f"{map_save_path}", exist_ok=True)
+        self.features = IntKeyShelf(f"{map_save_path}/features")
+        self.embeddings = {}
+        self.images = IntKeyShelf(f"{map_save_path}/images")
+        self.disparities = IntKeyShelf(f"{map_save_path}/disparities")
+        self.loop_similarity_threshold = 0.90
+        self.loop_top_k = 1
+
+        self.map_save_path = map_save_path
+        self._on_shutdown_callback_registered = True
+        rclpy.get_default_context().on_shutdown(self.on_shutdown)
+
+
+
+    def info_callback(self, msg:CameraInfo):
+        if self.K is None:
+            logger.info("Camera intrinsics received.")
+            self.K = np.array(msg.k).reshape(3, 3)
+            fx = self.K[0, 0]
+            Tx = msg.p[3]
+            self.baseline = -Tx / fx
+            self.destroy_subscription(self.camera_info_sub)
+
+    @Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
+    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image):
+        if self.K is None:
+            return
+        self.process(keyframe_image_msg, keyframe_odom_msg, disp_msg)
+
+    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image):
+        with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
+            disp = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding="32FC1")
+            odom = msg2np(keyframe_odom_msg)
+            image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
+        with Timer(name = "save image and disparity", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self.images[keyframe_image_timestamp] = image
+            self.disparities[keyframe_image_timestamp] = disp
+        with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self.embeddings[keyframe_image_timestamp] = self.get_embeddings(image)
+        with Timer(name = "super point extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self.features[keyframe_image_timestamp]  = asyncio.run(self.super_point_extractor.infer(image))
+
+        with Timer(name = "loop and pose graph solve", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
+                self.odom[keyframe_image_timestamp] = odom
+                self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+            else:
+                last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
+                T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
+                self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+                self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+                self.odom[keyframe_image_timestamp] = odom
+
+                def find_loop_and_pose_graph(timestamp):
+                    target_embedding = self.embeddings[timestamp]
+                    valid_timestamp = [t for t in self.embeddings.keys() if t + 10 * 1e9 < timestamp]
+                    valid_embeddings = np.array([self.embeddings[t] for t in valid_timestamp])
+                    idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
+                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                        loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
+                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                        for idx, similarity in loop_list:
+                            prev_timestamp = idx_to_timestamp[idx]
+                            curr_timestamp = timestamp
+                            prev_features = self.features[prev_timestamp]
+                            curr_features = self.features[curr_timestamp]
+                            prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
+                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, self.disparities[curr_timestamp], self.K, self.baseline)
+                            if success and len(inliers) >= 100:
+                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                                print(f"Added relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
+                find_loop_and_pose_graph(keyframe_image_timestamp)
+
+        with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+
+        self.point_cloud_publish_pose[keyframe_image_timestamp] = np.eye(4)
+
+        self.last_keyframe_timestamp = keyframe_image_timestamp
+
+
+
+    def get_embeddings(self, image: np.ndarray) -> np.ndarray:
+        processed_image = self.dinov2_model.preprocess_image(image)
+        # shape: (1, 768)
+        return self.dinov2_model.infer(processed_image)["last_hidden_state"][:, 0, :].squeeze(0)
+
+    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], image_shape, image_shape))
+        match_indices = match_result["match_indices"][0]
+        valid_mask = match_indices != -1
+        keypoints0 = feats0["kpts"][0][valid_mask]
+        keypoints1 = feats1["kpts"][0][match_indices[valid_mask]]
+        matches = []
+        for i, index in enumerate(match_indices):
+            if index != -1:
+                matches.append([i, index])
+        return keypoints0, keypoints1, np.array(matches, dtype=np.int64)
+
+    def pose_graph_trajectory_publish(self, timestamp):
+        path_msg = Path()
+        path_msg.header.stamp.sec = int(timestamp / 1e9)
+        path_msg.header.stamp.nanosec = int(timestamp % 1e9)
+        path_msg.header.frame_id = "world"
+        for t, pose_in_world in self.pose_graph_used_pose.items():
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            t = pose_in_world[:3, 3]
+            quat = matrix_to_quat(pose_in_world[:3, :3])
+            pose.pose.position.x = t[0]
+            pose.pose.position.y = t[1]
+            pose.pose.position.z = t[2]
+            pose.pose.orientation.x = quat[0]
+            pose.pose.orientation.y = quat[1]
+            pose.pose.orientation.z = quat[2]
+            pose.pose.orientation.w = quat[3]
+            path_msg.poses.append(pose)
+        self.pose_graph_trajectory_pub.publish(path_msg)
+
+    def publish_global_map(self, point_cloud:np.ndarray):
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = 'world'
+        cloud = pc2.create_cloud_xyz32(header, point_cloud.tolist())
+        self.global_map_pub.publish(cloud)
+        print(f"Published global map with {len(point_cloud)} points")
+
+    def save_mapping(self):
+        if self.K is None:
+            return
+        with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint)
+        np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
+        np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
+        np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
+        occupancy_resolution = 0.05
+        occupancy_step = 10
+        occupancy_grid, occupancy_origin, occupancy_2d_image = generate_occupancy_map(self.pose_graph_used_pose, self.disparities, self.K, self.baseline, occupancy_resolution, occupancy_step)
+        occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
+        np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
+        np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
+        cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
+        self.features.close()
+        self.images.close()
+        self.disparities.close()
+        np.save(f"{self.map_save_path}/embeddings.npy", self.embeddings)
+
+    def on_shutdown(self):
+        print("Shutdown callback triggered - saving mapping data...")
+        self.global_map_pub_thread_running = False
+        # Only join if thread was actually started
+        if hasattr(self, 'global_map_pub_thread') and self.global_map_pub_thread.is_alive():
+            self.global_map_pub_thread.join()
+        self.save_mapping()
+        print("Mapping data saved successfully.")
+
+def main(args=None):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    rclpy.init(args=args)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--map_save_path", type=str, default=TINYNAV_DB)
+    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+    node = BuildMapNode(parsed_args.map_save_path)
+    try:
+        rclpy.spin(node)
+        rclpy.shutdown()
+    except KeyboardInterrupt:
+        node.get_logger().info("Ctrl+C pressed, shutting down...")
+    finally:
+        node.on_shutdown()  # <-- you can implement a shutdown method in your node
+        node.destroy_node()
+
+if __name__ == '__main__':
+    main()

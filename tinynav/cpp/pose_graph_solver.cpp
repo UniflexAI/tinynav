@@ -105,7 +105,8 @@ public:
 std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
     std::unordered_map<int64_t, py::array_t<double>> camera_poses,
     std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>>> relative_pose_constraints,
-    std::unordered_map<int64_t, bool> constant_pose_index
+    std::unordered_map<int64_t, bool> constant_pose_index,
+    int64_t max_iteration_num
 ) {
     ceres::Problem problem;
     ceres::Solver::Options options;
@@ -160,7 +161,7 @@ std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
 
     options.linear_solver_type = ceres::SPARSE_SCHUR;
     options.minimizer_progress_to_stdout = false;
-    options.max_num_iterations = 1024;
+    options.max_num_iterations = max_iteration_num;
     options.num_threads = 1;
 
     ceres::Solve(options, &problem, &summary);

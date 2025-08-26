@@ -17,7 +17,7 @@ from tf2_ros import TransformBroadcaster
 import asyncio
 
 _MIN_FEATURES = 20
-_KEYFRAME_MIN_DISTANCE = 0.01 # uint: meter
+_KEYFRAME_MIN_DISTANCE = 1.0 # uint: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 5 # uint: degree
 
 logger = logging.getLogger(__name__)
