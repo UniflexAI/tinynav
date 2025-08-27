@@ -302,8 +302,6 @@ class PlanningNode(Node):
         color_image = cv2.applyColorMap(height_uint8, cv2.COLORMAP_JET)
         img_msg = self.bridge.cv2_to_imgmsg(color_image, encoding="bgr8")
         img_msg.header = header
-        img_msg.header.stamp = self.get_clock().now().to_msg()
-        img_msg.header.frame_id = "map"
         self.height_map_pub.publish(img_msg)
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
         occupied = np.argwhere(grid3d > 0.1)
