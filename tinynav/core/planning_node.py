@@ -306,7 +306,7 @@ class PlanningNode(Node):
         img_msg.header.frame_id = "map"
         self.height_map_pub.publish(img_msg)
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
-        occupied = np.argwhere(grid3d > 0)
+        occupied = np.argwhere(grid3d > 0.1)
         # vectorized operation to avoid for loop
         if len(occupied) == 0:
             points = []
@@ -343,6 +343,7 @@ class PlanningNode(Node):
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
+            self.occupancy_grid *= 0.99
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
