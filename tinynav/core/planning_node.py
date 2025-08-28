@@ -3,7 +3,7 @@ matplotlib.use('Agg')
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
-from nav_msgs.msg import Path, Odometry
+from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 import numpy as np
@@ -232,6 +232,7 @@ class PlanningNode(Node):
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.traj_scores_pub = self.create_publisher(Image, "/planning/score_traj", 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
+        self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.disp_sub = message_filters.Subscriber(self, Image, '/slam/disparity')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
 
@@ -303,6 +304,23 @@ class PlanningNode(Node):
         img_msg = self.bridge.cv2_to_imgmsg(color_image, encoding="bgr8")
         img_msg.header = header
         self.height_map_pub.publish(img_msg)
+
+    def publish_2d_occupancy_grid(self, height_map, origin, resolution, stamp, z_offset=0.0):
+        occupancy_grid_msg = OccupancyGrid()
+        occupancy_grid_msg.header = Header()
+        occupancy_grid_msg.header.stamp = stamp
+        occupancy_grid_msg.header.frame_id = "world"
+        occupancy_grid_msg.info.resolution = resolution
+        occupancy_grid_msg.info.width = height_map.shape[1]
+        occupancy_grid_msg.info.height = height_map.shape[0]
+        occupancy_grid_msg.info.origin.position.x = origin[0]
+        occupancy_grid_msg.info.origin.position.y = origin[1]
+        occupancy_grid_msg.info.origin.position.z = origin[2] + z_offset
+        occupancy_grid_msg.info.origin.orientation.w = 1.0
+        flat_data = np.where(np.isnan(height_map), 0, np.clip((height_map * 100).astype(int), -120, 120)).ravel(order="F").tolist()
+        occupancy_grid_msg.data = flat_data
+        self.occupancy_grid_pub.publish(occupancy_grid_msg)
+
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
         occupied = np.argwhere(grid3d > 0.1)
         # vectorized operation to avoid for loop
@@ -318,6 +336,7 @@ class PlanningNode(Node):
         header.frame_id = "world"
         pc2_msg = pc2.create_cloud_xyz32(header, points)
         self.occupancy_cloud_pub.publish(pc2_msg)
+
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, disp_msg, odom_msg):
@@ -351,6 +370,10 @@ class PlanningNode(Node):
             height_map = occupancy_grid_to_height_map(self.occupancy_grid, self.origin, self.resolution)
             pooled_map = max_pool_height_map(height_map)
 
+        with Timer(name='vis height map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self.publish_height_map(T[:3,3], pooled_map, disp_msg.header)
+            self.publish_2d_occupancy_grid(pooled_map, self.origin, self.resolution, disp_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             if self.last_T is None:
                 self.last_T = self.smoothed_T
@@ -369,8 +392,6 @@ class PlanningNode(Node):
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
-        #with Timer(name='vis height map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        #    self.publish_height_map(T[:3,3], pooled_map, disp_msg.header)
         #with Timer(name='vis traj scores', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
         #    self.publish_height_map_traj(pooled_map, trajectories, occ_points, top_indices, scores, params, self.origin, self.resolution)
 
