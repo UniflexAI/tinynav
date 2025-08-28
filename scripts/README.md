@@ -25,7 +25,7 @@ Running `docker_run.sh` will launch the example pipeline.
 TinyNav supports several key modes to fit different robotics workflows:
 
 1. **Planning Only**
-   - In this mode, TinyNav generates collision-free paths as you guide your robot using a joystick or keyboard.
+   - In this mode, TinyNav generates collision-free paths while the robot is teleoperated (e.g., using a joystick or keyboard), as illustrated with the [LeKiwi mobile robot](https://huggingface.co/docs/lerobot/lekiwi).
    - To start planning-only mode, simply run:
      ```bash
      bash scripts/run_planning.sh

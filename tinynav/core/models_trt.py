@@ -5,7 +5,6 @@ from codetiming import Timer
 import platform
 import asyncio
 from async_lru import alru_cache
-import logging
 
 from cuda import cudart
 import ctypes
