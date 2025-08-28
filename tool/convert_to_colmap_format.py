@@ -19,6 +19,41 @@ import cv2
 from typing import Dict, List, Tuple
 import shelve
 from tqdm import tqdm
+import json
+
+def convert_nerf_format(output_dir: str, poses: dict, intrinscis:np.ndarray, image_size: Tuple[int, int], T_rgb_to_infra1:np.ndarray):
+    camera_model = "PINHOLE"
+    fl_x = intrinscis[0, 0]
+    fl_y = intrinscis[1, 1]
+    cx = intrinscis[0, 2]
+    cy = intrinscis[1, 2]
+    w = image_size[1]
+    h = image_size[0]
+    frames = []
+    opencv_to_opengl_convention = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+    for timestmap, camera_to_world_pose in poses.items():
+        camera_to_world_opengl = camera_to_world_pose @ T_rgb_to_infra1 @ opencv_to_opengl_convention
+        frame = {
+            "file_path": f"images/image_{timestmap}.png",
+            "transform_matrix": camera_to_world_opengl.tolist(),
+        }
+        frames.append(frame)
+
+    data = {
+        "camera_model": camera_model,
+        "fl_x": fl_x,
+        "fl_y": fl_y,
+        "cx": cx,
+        "cy": cy,
+        "w": w,
+        "h": h,
+        "frames": frames
+    }
+
+    with open(f"{output_dir}/transforms.json", "w") as f:
+        json.dump(data, f, indent=4)
+
+
 
 class TinynavToColmapConverter:
     """Convert tinynav data to COLMAP format"""
@@ -30,72 +65,49 @@ class TinynavToColmapConverter:
         
         # Load tinynav data
         self.poses = None
-        self.intrinsics = None
-        self.images_db_path = None
-        self.features_db_path = None
-        self.disparities_db_path = None
         
-        self._load_tinynav_data()
-    
-    def _load_tinynav_data(self):
         """Load all tinynav data files"""
         print(f"Loading tinynav data from {self.input_dir}")
-        
+
         # Load poses
         self.poses = np.load(self.input_dir / "poses.npy", allow_pickle=True).item()
         assert type(self.poses) == dict
         # Load intrinsics
-        self.intrinsics = np.load(self.input_dir / "intrinsics.npy")
-        print(f"Loaded intrinsics: {self.intrinsics}")
+        self.infra1_intrinsics = np.load(self.input_dir / "intrinsics.npy")
+        self.baseline = np.load(self.input_dir / "baseline.npy")
         # Check for database files
-        self.images = shelve.open(f"{self.input_dir}/images")
-        self.features = shelve.open(f"{self.input_dir}/features")
         self.disparities = shelve.open(f"{self.input_dir}/disparities")
-        
-        
+
+        self.rgb_camera_K = np.load(self.input_dir / "rgb_camera_intrinsics.npy", allow_pickle=True)
+        self.rgb_images = shelve.open(f"{self.input_dir}/rgb_images")
+        self.T_rgb_to_infra1 = np.load(self.input_dir / "T_rgb_to_infra1.npy", allow_pickle=True)
+        self.rgb_image_size = None
    
     def _get_image_list(self) -> List[Tuple[int, str, np.ndarray]]:
         """Get list of images with their poses"""
         if self.poses is None:
             print("No poses available")
             return []
-        
         images = []
-        for i, (timestamp, pose) in enumerate(self.poses.items()):
-            # Assuming pose is 4x4 transformation matrix
-            if pose.shape == (4, 4):
-                # Extract rotation and translation
-                R_matrix = pose[:3, :3]
-                t_vector = pose[:3, 3]
-                
-                # Convert to quaternion (COLMAP format)
-                quat = R.from_matrix(R_matrix).as_quat()  # [x, y, z, w]
-                
-                image_name = f"image_{timestamp}.png"
-                
-                images.append((i, timestamp, image_name, pose))
+        for i, (timestamp, infra1_pose) in enumerate(self.poses.items()):
+            rgb_pose = infra1_pose @ self.T_rgb_to_infra1
+            image_name = f"image_{timestamp}.png"
+            images.append((i, timestamp, image_name, rgb_pose, infra1_pose))
         return images
     
     def _extract_camera_intrinsics(self) -> Dict:
-        """Extract camera intrinsics in COLMAP format"""
-        if self.intrinsics is None:
-            # Default intrinsics (you may need to adjust these)
-            raise ValueError("Intrinsics not found")
         # Assuming intrinsics is a 3x3 K matrix
-        K = self.intrinsics
-        if K.shape == (3, 3):
-            fx, fy = K[0, 0], K[1, 1]
-            cx, cy = K[0, 2], K[1, 2]
-            
-            return {
-                'camera_id': 1,
-                'model': 'PINHOLE',
-                'width': int(848),  # Approximate width
-                'height': int(480),  # Approximate height
-                'params': [fx, fy, cx, cy]
-            }
+        K = self.rgb_camera_K
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+        return {
+            'camera_id': 1,
+            'model': 'PINHOLE',
+            'width': int(self.rgb_image_size[1]),  # Approximate width
+            'height': int(self.rgb_image_size[0]),  # Approximate height
+            'params': [fx, fy, cx, cy]
+        }
         
-        return None
     
 
     
@@ -109,8 +121,8 @@ class TinynavToColmapConverter:
             return
         
         # Get image list
-        images = self._get_image_list()
-        if not images:
+        image_poses = self._get_image_list()
+        if not image_poses:
             print("No images to write")
             return
         
@@ -118,10 +130,10 @@ class TinynavToColmapConverter:
         self._write_cameras_txt(camera_data, sparse_dir)
         
         # Create images.txt
-        point2d_to_point3d = self._write_images_txt(images, camera_data, sparse_dir)
+        point2d_to_point3d = self._write_images_txt(image_poses, camera_data, sparse_dir)
         
         # Generate 3D points from images, disparities, and poses
-        points3d_data = self._generate_points3d_from_disparities(images, camera_data, point2d_to_point3d)
+        points3d_data = self._generate_points3d_from_disparities(image_poses, camera_data, point2d_to_point3d)
         
         # Create points3D.txt with actual 3D points
         self._write_points3d_txt(points3d_data, sparse_dir)
@@ -129,7 +141,7 @@ class TinynavToColmapConverter:
         # Generate PLY file from 3D points
         self._write_ply_file(points3d_data)
         
-        print(f"Created COLMAP text files with {len(images)} images and {len(points3d_data)} 3D points")
+        print(f"Created COLMAP text files with {len(self.rgb_images)} images and {len(points3d_data)} 3D points")
     
     def _write_cameras_txt(self, camera_data, sparse_dir):
         """Write cameras.txt file for COLMAP"""
@@ -147,15 +159,14 @@ class TinynavToColmapConverter:
         """Write images.txt file for COLMAP"""
         images_file = sparse_dir / "images.txt"
 
-        point2d_to_point3d = {}
         with open(images_file, 'w') as f:
             f.write("# Image list with two lines of data per image:\n")
             f.write("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n")
             f.write("#   POINTS2D[] as (X, Y, POINT3D_ID)\n")
             
-            for image_id, timestamp, image_name, pose_in_world in images:
+            for image_id, timestamp, image_name, rgb_pose_in_world, infra1_pose_in_world in images:
                 # Extract rotation and translation
-                pose_in_camera = np.linalg.inv(pose_in_world)
+                pose_in_camera = np.linalg.inv(rgb_pose_in_world)
                 R_matrix = pose_in_camera[:3, :3]
                 t_vector = pose_in_camera[:3, 3]
                 
@@ -173,7 +184,6 @@ class TinynavToColmapConverter:
                 f.write("\n")
         
         print(f"Written images.txt with {len(images)} images")
-        return point2d_to_point3d
     
     def _write_points3d_txt(self, points3d_data=None, sparse_dir=None):
         """Write points3D.txt file for COLMAP"""
@@ -237,17 +247,16 @@ class TinynavToColmapConverter:
         point_id = 0
         
         # Get camera parameters
-        K = self.intrinsics
-        baseline = self._get_baseline()  # You may need to extract this from your data
+        K = self.infra1_intrinsics
+        baseline = self.baseline
             
-        for image_id, timestamp, image_name, pose_in_world in tqdm(images, desc="Generating 3D points from disparities"):
+        for image_id, timestamp, image_name, rgb_pose_in_world, infra1_pose_in_world in tqdm(images, desc="Generating 3D points from disparities"):
             disparity = self.disparities[str(timestamp)]
             # Convert disparity to 3D points
             points_3d = self._disparity_to_points3d(
-                disparity, K, baseline, pose_in_world, 
+                disparity, K, baseline, infra1_pose_in_world, 
                 image_id, point_id, timestamp
             )
-                            
             points3d_data.extend(points_3d)
             point_id += len(points_3d)
         print(f"Generated {len(points3d_data)} total 3D points")
@@ -260,7 +269,6 @@ class TinynavToColmapConverter:
         # Sample points from disparity (every 10th pixel to avoid too many points)
         step = 64
         height, width = disparity.shape
-        
         for v in range(0, height, step):
             for u in range(0, width, step):
                 disp = disparity[v, u]
@@ -289,7 +297,7 @@ class TinynavToColmapConverter:
                 point_world = pose_in_world @ point_camera
                 
                 # Get color from image (if available)
-                color = self._get_point_color(u, v, timestamp)
+                color = self._get_infra1_point_color(u, v, timestamp)
                
                 # Create 3D point data
                 point_data = {
@@ -306,20 +314,11 @@ class TinynavToColmapConverter:
                 points3d.append(point_data)
         return points3d
     
-    def _get_baseline(self):
-        """Get stereo baseline from camera data"""
-        # This should be extracted from your camera calibration
-        # For now, using a default value
-        return 0.051  # 12cm baseline, adjust based on your camera
-    
-    def _get_point_color(self, u, v, timestamp):
+    def _get_infra1_point_color(self, u, v, timestamp):
         """Get color for a 3D point from the image"""
         # For now, return a default color
         # In a full implementation, you would read the actual image pixel
-        image = self.images[str(timestamp)]
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
-        color = image_rgb[v, u]
-        assert color.shape == (3,), f"Color shape is {color.shape}, expected (3,)"
+        color = np.array([0, 0, 0])
         return color
     
     def _extract_images_from_db(self):
@@ -328,13 +327,15 @@ class TinynavToColmapConverter:
         images_dir = self.output_dir / "images"
         images_dir.mkdir(exist_ok=True)
         # Extract images from shelve database
-        for timestamp, image in tqdm(self.images.items(), desc="Extracting images"):
+        image_size = None
+        for timestamp, image in tqdm(self.rgb_images.items(), desc="Extracting images"):
             # Convert key to string if needed
             key_str = str(timestamp)
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
             image_path = images_dir / f"image_{key_str}.png"
-            cv2.imwrite(str(image_path), rgb_image)
+            cv2.imwrite(str(image_path), image)
+            image_size = image.shape[:2]
         print("Image extraction completed")
+        return image_size
     
     def convert(self):
         """Convert tinynav data to COLMAP format"""
@@ -344,11 +345,14 @@ class TinynavToColmapConverter:
         sparse_dir = self.output_dir / "sparse" / "0"
         sparse_dir.mkdir(parents=True, exist_ok=True)
         
+        # Extract images (if database is available)
+        self.rgb_image_size = self._extract_images_from_db()
         # Create COLMAP text files in sparse/0
         self._create_colmap_text_files(sparse_dir)
+
+
+        convert_nerf_format(self.output_dir, self.poses, self.rgb_camera_K, self.rgb_image_size, self.T_rgb_to_infra1)
         
-        # Extract images (if database is available)
-        self._extract_images_from_db()
         
         print(f"Conversion complete! Output saved to {self.output_dir}")
         print("\nCOLMAP files created:")

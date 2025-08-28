@@ -8,6 +8,8 @@ from async_lru import alru_cache
 
 from cuda import cudart
 import ctypes
+import einops
+import logging
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
@@ -165,17 +167,16 @@ class Dinov2TRT(TRTBase):
         image = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
 
-        image = np.transpose(image, (2, 0, 1))  # C x H x W
+        image = einops.rearrange(image, "h w c-> 1 c h w")
         image = image.astype(np.float32) / 255.0
 
         mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
         std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
         image = (image - mean) / std
-
-        image = np.expand_dims(image, axis=0) # 1 x C x H x W
         return image
 
     async def infer(self, image):
+        image = self.preprocess_image(image)
         np.copyto(self.inputs[0]["host"], image)
         results = await self.run_graph()
         return results["last_hidden_state"][:, 0, :].squeeze(0)

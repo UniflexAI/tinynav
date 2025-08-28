@@ -5,7 +5,7 @@ from nav_msgs.msg import Path, Odometry
 import numpy as np
 import sys
 
-from math_utils import matrix_to_quat, msg2np, estimate_pose, disparity_to_depth
+from math_utils import matrix_to_quat, msg2np, estimate_pose, disparity_to_depth, tf2np
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -16,8 +16,6 @@ import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
-import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
 from planning_node import run_raycasting_loopy
 import logging
 import asyncio
@@ -26,6 +24,7 @@ from tqdm import tqdm
 import einops
 from numba import njit
 from visualization_msgs.msg import MarkerArray
+from tf2_msgs.msg import TFMessage
 
 logger = logging.getLogger(__name__)
 TINYNAV_DB = "tinynav_db"
@@ -92,7 +91,7 @@ def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, m
     constant_pose_index_dict = { min_timestamp : True }
 
     relative_pose_constraint = [
-        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([10.0, 10.0, 10.0])) 
+        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([30.0, 30.0, 30.0])) 
         for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
     optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
     return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
@@ -110,7 +109,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             break
     return loop_list
 
-def generate_occupancy_map(poses, disparities, K, baseline, resolution = 0.05, step = 10):
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10):
     """
         Genereate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -123,7 +122,7 @@ def generate_occupancy_map(poses, disparities, K, baseline, resolution = 0.05, s
     global_grid = None
     global_origin = None
     for timestamp, odom_pose in tqdm(poses.items()):
-        disparity = disparities[timestamp]
+        disparity, _, _, _, _ = db.get_disparity_embedding_features_images(timestamp)
         depth = disparity_to_depth(disparity, K, baseline)
         odom_translation = odom_pose[:3, 3]
         local_origin = odom_translation - 0.5 * np.array(raycast_shape) * resolution
@@ -161,10 +160,56 @@ class IntKeyShelf:
 
     def keys(self):
         return [int(k) for k in self.db.keys()]
-    
 
     def close(self):
         self.db.close()
+
+class TinyNavDB():
+
+    def __init__(self, map_save_path:str, is_scratch:bool = True):
+        self.map_save_path = map_save_path
+        if is_scratch:
+            if os.path.exists(f"{map_save_path}/features.db"):
+                os.remove(f"{map_save_path}/features.db")
+            if os.path.exists(f"{map_save_path}/infra1_images.db"):
+                os.remove(f"{map_save_path}/infra1_images.db")
+            if os.path.exists(f"{map_save_path}/disparities.db"):
+                os.remove(f"{map_save_path}/disparities.db")
+            if os.path.exists(f"{map_save_path}/rgb_images.db"):
+                os.remove(f"{map_save_path}/rgb_images.db")
+            if os.path.exists(f"{map_save_path}/embeddings.db"):
+                os.remove(f"{map_save_path}/embeddings.db")
+        self.features = IntKeyShelf(f"{map_save_path}/features")
+        self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
+        self.infra1_images = IntKeyShelf(f"{map_save_path}/infra1_images")
+        self.disparities = IntKeyShelf(f"{map_save_path}/disparities")
+        self.rgb_images = IntKeyShelf(f"{map_save_path}/rgb_images")
+
+    def set_entry(self, key:int,   disparity:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+        if infra1_image is not None:
+            self.infra1_images[key] = infra1_image
+        if rgb_image is not None:
+            self.rgb_images[key] = rgb_image
+        if disparity is not None:
+            self.disparities[key] = disparity
+        if embedding is not None:
+            self.embeddings[key] = embedding
+        if features is not None:
+            self.features[key] = features
+
+    def get_disparity_embedding_features_images(self, key:int):
+        return self.disparities[key], self.embeddings[key], self.features[key], self.rgb_images[key], self.infra1_images[key]
+
+    def get_embedding(self, key:int):
+        return self.embeddings[key]
+
+    def close(self):
+        self.features.close()
+        self.embeddings.close()
+        self.infra1_images.close()
+        self.disparities.close()
+        self.rgb_images.close()
+
 
 class BuildMapNode(Node):
     def __init__(self, map_save_path:str):
@@ -179,37 +224,63 @@ class BuildMapNode(Node):
         self.disp_sub = Subscriber(self, Image, '/slam/keyframe_disparity')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
+        self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
 
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.project_3d_to_2d_pub = self.create_publisher(Image, "/mapping/project_3d_to_2d", 10)
         self.matches_image_pub = self.create_publisher(Image, "/mapping/keyframe_matches_images", 10)
         self.loop_matches_image_pub = self.create_publisher(Image, "/mapping/loop_matches_images", 10)
-        # self.global_map_pub = self.create_publisher(PointCloud2, "/mapping/global_map", 10)
         self.global_map_marker_pub = self.create_publisher(MarkerArray, "/mapping/global_map_marker", 10)
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.disp_sub], 1000)
+        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.disp_sub, self.rgb_image_sub], 1000)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
         self.baseline = None
         self.odom = {}
         self.pose_graph_used_pose = {}
-        self.point_cloud_publish_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
-        self.features = IntKeyShelf(f"{map_save_path}/features")
-        self.embeddings = {}
-        self.images = IntKeyShelf(f"{map_save_path}/images")
-        self.disparities = IntKeyShelf(f"{map_save_path}/disparities")
+        self.db = TinyNavDB(map_save_path)
+
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
         self.map_save_path = map_save_path
         self._on_shutdown_callback_registered = True
         rclpy.get_default_context().on_shutdown(self.on_shutdown)
+        self.window_size = 5
+        self.keyframe_timestamp_windows = []
+        self.tf_sub = Subscriber(self, TFMessage, "/tf")
+        self.tf_sub.registerCallback(self.tf_callback)
+        self.T_rgb_to_infra1 = None
+        self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
+        self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
+        self.rgb_camera_K = None
 
+    def tf_callback(self, msg:TFMessage):
+        T_infra1_to_link = None
+        T_infra1_optical_to_infra1 = None
+        T_rgb_to_link = None
+        T_rgb_optical_to_rgb = None
+        for t in msg.transforms:
+            frame_id, child_frame_id, T = tf2np(t)
+            if frame_id == "camera_link" and child_frame_id == "camera_infra1_frame":
+                T_infra1_to_link = T
+            if frame_id == "camera_infra1_frame" and child_frame_id == "camera_infra1_optical_frame":
+                T_infra1_optical_to_infra1 = T
+            if frame_id == "camera_color_frame" and child_frame_id == "camera_color_optical_frame":
+                T_rgb_optical_to_rgb = T
+            if frame_id == "camera_color_frame" and child_frame_id == "camera_link":
+                T_rgb_to_link = T
+        if T_infra1_optical_to_infra1 is None or T_rgb_optical_to_rgb is None or T_infra1_to_link is None or T_rgb_to_link is None:
+            return
+        self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
 
+    def rgb_camera_info_callback(self, msg:CameraInfo):
+        if self.rgb_camera_K is None:
+            self.rgb_camera_K = np.array(msg.k).reshape(3, 3)
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -221,40 +292,57 @@ class BuildMapNode(Node):
             self.destroy_subscription(self.camera_info_sub)
 
     @Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image):
+    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image, rgb_image_msg:Image):
         if self.K is None:
             return
-        self.process(keyframe_image_msg, keyframe_odom_msg, disp_msg)
+        self.process(keyframe_image_msg, keyframe_odom_msg, disp_msg, rgb_image_msg)
 
-    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image):
+    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image, rgb_image_msg:Image):
         with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             disp = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding="32FC1")
             odom = msg2np(keyframe_odom_msg)
-            image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
+            infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
+            rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
+
         with Timer(name = "save image and disparity", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.images[keyframe_image_timestamp] = image
-            self.disparities[keyframe_image_timestamp] = disp
+            self.db.set_entry(keyframe_image_timestamp, disparity = disp, infra1_image = infra1_image, rgb_image = rgb_image)
+
         with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.embeddings[keyframe_image_timestamp] = self.get_embeddings(image)
+            embedding = self.get_embeddings(infra1_image)
+            self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
         with Timer(name = "super point extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.features[keyframe_image_timestamp]  = asyncio.run(self.super_point_extractor.infer(image))
+            features = asyncio.run(self.super_point_extractor.infer(infra1_image))
+            self.db.set_entry(keyframe_image_timestamp, features = features)
 
         with Timer(name = "loop and pose graph solve", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
                 self.odom[keyframe_image_timestamp] = odom
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+                self.keyframe_timestamp_windows.append(keyframe_image_timestamp)
             else:
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
                 T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
                 self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
                 self.odom[keyframe_image_timestamp] = odom
+                self.keyframe_timestamp_windows.append(keyframe_image_timestamp)
+
+                for prev_timestamp in self.keyframe_timestamp_windows[-self.window_size:-1]:
+                    _,_, prev_features, _, _= self.db.get_disparity_embedding_features_images(prev_timestamp)
+                    curr_disparity,_, curr_features, _, _ = self.db.get_disparity_embedding_features_images(keyframe_image_timestamp)
+
+                    prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
+                    success, T_prev_curr_features, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_disparity, self.K, self.baseline)
+                    if success and len(inliers) >= 100:
+                        self.relative_pose_constraint.append((keyframe_image_timestamp, prev_timestamp, T_prev_curr_features))
+                        print(f"Added relative pose constraint: {keyframe_image_timestamp} -> {prev_timestamp}")
 
                 def find_loop_and_pose_graph(timestamp):
-                    target_embedding = self.embeddings[timestamp]
-                    valid_timestamp = [t for t in self.embeddings.keys() if t + 10 * 1e9 < timestamp]
-                    valid_embeddings = np.array([self.embeddings[t] for t in valid_timestamp])
+                    target_embedding = self.db.get_embedding(timestamp)
+                    valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
+                    valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
+
                     idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
                     with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
                         loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
@@ -262,30 +350,26 @@ class BuildMapNode(Node):
                         for idx, similarity in loop_list:
                             prev_timestamp = idx_to_timestamp[idx]
                             curr_timestamp = timestamp
-                            prev_features = self.features[prev_timestamp]
-                            curr_features = self.features[curr_timestamp]
+                            prev_disparity, _, prev_features, _, _ = self.db.get_disparity_embedding_features_images(prev_timestamp)
+                            curr_disparity, _, curr_features, _, _ = self.db.get_disparity_embedding_features_images(curr_timestamp)
                             prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
-                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, self.disparities[curr_timestamp], self.K, self.baseline)
+                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_disparity, self.K, self.baseline)
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                                print(f"Added relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                                print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
                 find_loop_and_pose_graph(keyframe_image_timestamp)
 
         with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
-
-        self.point_cloud_publish_pose[keyframe_image_timestamp] = np.eye(4)
-
         self.last_keyframe_timestamp = keyframe_image_timestamp
 
 
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
-        processed_image = self.dinov2_model.preprocess_image(image)
         # shape: (1, 768)
-        return asyncio.run(self.dinov2_model.infer(processed_image))
+        return asyncio.run(self.dinov2_model.infer(image))
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
@@ -319,33 +403,25 @@ class BuildMapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
-    def publish_global_map(self, point_cloud:np.ndarray):
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = 'world'
-        cloud = pc2.create_cloud_xyz32(header, point_cloud.tolist())
-        self.global_map_pub.publish(cloud)
-        print(f"Published global map with {len(point_cloud)} points")
-
     def save_mapping(self):
         if self.K is None:
             return
-        with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "final pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint)
+
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
         occupancy_resolution = 0.05
         occupancy_step = 10
-        occupancy_grid, occupancy_origin, occupancy_2d_image = generate_occupancy_map(self.pose_graph_used_pose, self.disparities, self.K, self.baseline, occupancy_resolution, occupancy_step)
+        occupancy_grid, occupancy_origin, occupancy_2d_image = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
         occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
         np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
-        self.features.close()
-        self.images.close()
-        self.disparities.close()
-        np.save(f"{self.map_save_path}/embeddings.npy", self.embeddings)
+        np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
+        np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
+        self.db.close()
 
     def on_shutdown(self):
         print("Shutdown callback triggered - saving mapping data...")

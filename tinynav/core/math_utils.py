@@ -134,6 +134,15 @@ def np2tf(odom_np, timestamp, frame_id, child_frame_id):
     tf_msg.transform.rotation.w = odom_msg.pose.pose.orientation.w
     return tf_msg
 
+def tf2np(tf_msg:TransformStamped):
+    T = np.eye(4)
+    position = tf_msg.transform.translation
+    rot = tf_msg.transform.rotation
+    quat = [rot.x, rot.y, rot.z, rot.w]
+    T[:3, :3] = R.from_quat(quat).as_matrix()
+    T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
+    return tf_msg.header.frame_id, tf_msg.child_frame_id, T
+
 def msg2np(msg):
     T = np.eye(4)
     position = msg.pose.pose.position

@@ -24,8 +24,9 @@ dependencies = [
     "huggingface_hub",
     "open3d==0.18.0",
     "unitree-sdk2py @ git+https://github.com/unitreerobotics/unitree_sdk2_python.git@404fe44d76f705c002c97e773276f2a8fefb57e4",
+    "einops",
+    "viser",
     "lerobot[lekiwi]==0.3.3",
-    "einops"
 ]
 
 [tool.scikit-build]
