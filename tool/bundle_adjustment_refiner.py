@@ -18,6 +18,7 @@ import os
 
 
 extractor = SuperPoint(max_num_keypoints=2048).eval().cuda()  # load the extractor
+extractor.preprocess_conf = {"resize": None}
 matcher = LightGlue(features='superpoint').eval().cuda()  # load the matcher
 
 def multiview_triangulation(keypoints_list: List[np.ndarray], camera_poses: List[np.ndarray], K: np.ndarray) -> Tuple[bool, np.ndarray]:
