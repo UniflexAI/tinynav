@@ -5,7 +5,7 @@ from nav_msgs.msg import Path, Odometry
 import numpy as np
 import sys
 
-from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, disparity_to_depth
+from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, disparity_to_depth, np2tf
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -23,6 +23,7 @@ from planning_node import run_raycasting_loopy
 import logging
 from scipy.ndimage import gaussian_filter
 import asyncio
+from tf2_ros import TransformBroadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,8 @@ class MapNode(Node):
         self.cost_map = None
         self.occupancy_map = None
         self.occuancy_map_meta = None
+
+        self.tf_broadcaster = TransformBroadcaster(self)
 
 
     def info_callback(self, msg:CameraInfo):
@@ -632,7 +635,7 @@ class MapNode(Node):
     def publish_global_map(self, point_cloud:np.ndarray):
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = 'world'
+        header.frame_id = 'map'
         cloud = pc2.create_cloud_xyz32(header, point_cloud.tolist())
         self.global_map_pub.publish(cloud)
         print(f"Published global map with {len(point_cloud)} points")
@@ -755,6 +758,7 @@ class MapNode(Node):
                     accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
                     if accumulated_distance > max_speed * 5:
                         target_position = paths_in_map[i]
+                        break
                     else:
                         start_point = paths_in_map[i]
             else:
@@ -770,7 +774,7 @@ class MapNode(Node):
             self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
             path_msg = Path()
             path_msg.header.stamp = self.get_clock().now().to_msg()
-            path_msg.header.frame_id = "world"
+            path_msg.header.frame_id = "map"
             for x, y in paths_in_map:
                 pose = PoseStamped()
                 pose.header = path_msg.header
@@ -783,6 +787,7 @@ class MapNode(Node):
                 pose.pose.orientation.w = 1.0
                 path_msg.poses.append(pose)
                 self.global_plan_pub.publish(path_msg)
+            self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
             logging.info("No path found in map")
 
