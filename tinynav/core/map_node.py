@@ -170,6 +170,7 @@ class MapNode(Node):
         self.map_K = None
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
+        self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
         self.pois = []
@@ -255,7 +256,7 @@ class MapNode(Node):
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
             with Timer(name = "pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-                self.pose_graph_solve()
+                self.pose_graph_solve(max_iteration_num = 10)
             with Timer(name = "loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
                 self.find_loop(keyframe_image_timestamp, depth)
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
@@ -263,7 +264,7 @@ class MapNode(Node):
         self.last_keyframe_image = image
 
 
-    def pose_graph_solve(self):
+    def pose_graph_solve(self, max_iteration_num:int = 1024):
         """
         Solve the bundle adjustment problem.
         """
@@ -271,15 +272,14 @@ class MapNode(Node):
         constant_pose_index_dict = { min_timestamp : True }
         for curr_timestamp, prev_timestamp, _, _, _ in self.relative_pose_constraint:
             assert curr_timestamp != prev_timestamp, "current timestamp and previous timestamp should be different"
-        optimized_camera_poses = pose_graph_solve(self.pose_graph_used_pose, self.relative_pose_constraint, constant_pose_index_dict)
+        optimized_camera_poses = pose_graph_solve(self.pose_graph_used_pose, self.relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
         for timestamp, pose in optimized_camera_poses.items():
             self.pose_graph_used_pose[timestamp] = pose
         return optimized_camera_poses
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
-        processed_image = self.dinov2_model.preprocess_image(image)
         # shape: (1, 768)
-        return asyncio.run(self.dinov2_model.infer(processed_image))
+        return asyncio.run(self.dinov2_model.infer(image))
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
@@ -496,6 +496,7 @@ class MapNode(Node):
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
             return True, pose_in_world
         else:
+            self.failed_relocalizations.append(timestamp)
             return False, np.eye(4)
 
     def load_mapping(self):
@@ -556,12 +557,35 @@ class MapNode(Node):
         np.save(f"{TINYNAV_DB}/poses.npy", self.pose_graph_used_pose)
         np.save(f"{TINYNAV_DB}/intrinsics.npy", self.K)
 
-        logging.info("save map into mapping directory")
+        logging.info(f"saved map into mapping directory {TINYNAV_DB}")
         self.generate_occupancy_map()
 
+    def save_relocalization_poses(self):
+        if len(self.relocalization_poses) == 0:
+            logger.warning("No relocalization poses found - not saving")
+            return
+
+        if not os.path.exists(TINYNAV_DB):
+            os.mkdir(TINYNAV_DB)
+
+        np.save(f"{TINYNAV_DB}/relocalization_poses.npy", self.relocalization_poses, allow_pickle=True)
+        np.save(f"{TINYNAV_DB}/relocalization_pose_weights.npy", self.relocalization_pose_weights, allow_pickle=True)
+        np.save(f"{TINYNAV_DB}/failed_relocalizations.npy", self.failed_relocalizations, allow_pickle=True)
+
+        logging.info(f"Saved {len(self.relocalization_poses)} relocalization poses to {TINYNAV_DB}")
+        logging.info(f"Failed relocalizations count: {len(self.failed_relocalizations)}")
+
     def on_shutdown(self):
+        try:
+            if hasattr(self, 'global_map_timer'):
+                self.global_map_timer.cancel()
+        except Exception as e:
+            logging.debug(f"Error canceling timer: {e}")
+
         if self.mapping_mode:
             self.save_mapping()
+        else:
+            self.save_relocalization_poses()
 
     def genereate_point_cloud_from_depths(self):
 
@@ -672,7 +696,7 @@ class MapNode(Node):
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
         relative_pose_constraint = relative_pose_constraint[-3:]
-        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict)
+        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 10)
         self.T_from_map_to_odom = optimized_parameters[0]
 
 
@@ -864,7 +888,7 @@ def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--mapping", default=False, type=str2bool)
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
-    print(f"Map Node Mode : {parsed_args.mapping}")
+    logging.info(f"Map node mode : {'mapping' if parsed_args.mapping else 'relocalization'}")
     node = MapNode(mapping_mode=parsed_args.mapping)
     if not parsed_args.mapping:
         node.load_mapping()
@@ -873,10 +897,11 @@ def main(args=None):
         node.destroy_node()
         rclpy.shutdown()
     except KeyboardInterrupt:
-        pass
+        logging.info("Keyboard interrupt received, map node is shut down")
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
     finally:
-        if parsed_args.mapping:
-            node.on_shutdown()
+        node.on_shutdown()
 
 
 if __name__ == '__main__':

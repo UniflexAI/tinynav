@@ -213,7 +213,7 @@ class PerceptionNode(Node):
         depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
         depth_msg.header.stamp = timestamp
         depth_msg.header.frame_id = "camera"  # Match TF frame
-        
+
         if self.camera_info_msg is not None:
             self.camera_info_msg.header.stamp = timestamp
             self.camera_info_msg.header.frame_id = "camera"  # Match TF frame
@@ -238,13 +238,14 @@ class PerceptionNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     perception_node = PerceptionNode()
-
     try:
         rclpy.spin(perception_node)
         perception_node.destroy_node()
         rclpy.shutdown()
     except KeyboardInterrupt:
-        pass
+        logging.info("Keyboard interrupt received, perceptoin node is shut down")
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
 
 if __name__ == "__main__":
     logging.basicConfig(

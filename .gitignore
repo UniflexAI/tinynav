@@ -131,3 +131,10 @@ rosbag2_*/
 # ros worksapce
 install/
 log/
+
+# hugfacing download dir
+/datasets--*/
+
+# Output result
+tinynav_db/
+tinynav_temp/

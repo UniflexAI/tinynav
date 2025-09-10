@@ -92,7 +92,7 @@ class TRTBase:
         if "aarch64" not in platform.machine():
             for out in self.outputs:
                 cudart.cudaMemcpyAsync(out['host'].ctypes.data, out['device'], out['nbytes'], cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost, self.stream)
-        
+
         _, event = cudart.cudaEventCreate()
         cudart.cudaEventRecord(event, self.stream)
         while cudart.cudaEventQuery(event)[0] == cudart.cudaError_t.cudaErrorNotReady:
@@ -110,7 +110,7 @@ class SuperPointTRT(TRTBase):
         # model input [1,1,H,W]
         self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
 
-    # default threshold as 
+    # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
     #
     async def infer(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):

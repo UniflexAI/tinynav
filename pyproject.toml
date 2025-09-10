@@ -29,6 +29,8 @@ dependencies = [
     "tyro",
     "lightglue @ git+https://github.com/cvg/LightGlue.git",
     "lerobot[lekiwi]==0.3.3",
+    "reportlab>=4.4.3",
+    "tabulate",
     "viser",
     "plyfile",
     "nerfstudio @ git+https://github.com/junlinp/nerfstudio.git",
