@@ -9,6 +9,7 @@ pybind11_add_module(tinynav_cpp_bind
     cpp_bind_definitions.cpp
     raycast.cpp
     pose_graph_solver.cpp
+    bundle_adjustment.cpp
 )
 
 target_include_directories(tinynav_cpp_bind PRIVATE

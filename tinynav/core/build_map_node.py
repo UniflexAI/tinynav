@@ -259,6 +259,9 @@ class BuildMapNode(Node):
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
 
+
+        self.edges = set()
+
     def tf_callback(self, msg:TFMessage):
         T_infra1_to_link = None
         T_infra1_optical_to_infra1 = None
@@ -272,7 +275,7 @@ class BuildMapNode(Node):
                 T_infra1_optical_to_infra1 = T
             if frame_id == "camera_color_frame" and child_frame_id == "camera_color_optical_frame":
                 T_rgb_optical_to_rgb = T
-            if frame_id == "camera_color_frame" and child_frame_id == "camera_link":
+            if frame_id == "camera_link" and child_frame_id == "camera_color_frame":
                 T_rgb_to_link = T
         if T_infra1_optical_to_infra1 is None or T_rgb_optical_to_rgb is None or T_infra1_to_link is None or T_rgb_to_link is None:
             return
@@ -324,6 +327,7 @@ class BuildMapNode(Node):
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
                 T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
                 self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+                self.edges.add((self.last_keyframe_timestamp, keyframe_image_timestamp))
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
                 self.odom[keyframe_image_timestamp] = odom
                 self.keyframe_timestamp_windows.append(keyframe_image_timestamp)
@@ -357,6 +361,7 @@ class BuildMapNode(Node):
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                                self.edges.add((prev_timestamp, curr_timestamp))
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
                 find_loop_and_pose_graph(keyframe_image_timestamp)
@@ -419,8 +424,10 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
+        print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
+        np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
         self.db.close()
 
     def on_shutdown(self):

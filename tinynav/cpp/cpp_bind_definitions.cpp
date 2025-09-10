@@ -55,6 +55,17 @@ extern std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
     int64_t max_iteration_num);
 
 
+extern py::tuple ba_solve(
+    std::unordered_map<int64_t, py::array_t<double>> camera_poses,
+    std::unordered_map<int64_t, py::array_t<double>> point_3ds,
+    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>>> observations,
+    py::array_t<double> K,
+    std::unordered_map<int64_t, bool> constant_pose_index,
+    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>>> relative_pose_constraints
+);
+
+
+
 PYBIND11_MODULE(tinynav_cpp_bind, m) {
     m.doc() = "tinynav pybind11 binding";
     m.def("run_raycasting_cpp", &run_raycasting_cpp, "A function that performs raycasting on a depth image",
@@ -95,6 +106,34 @@ PYBIND11_MODULE(tinynav_cpp_bind, m) {
             -------
                 optimized_camera_poses : dict[int, np.ndarray (4x4)]
                     Dictionary mapping camera index to optimized 4x4 pose matrix.
+        )pbdoc"
+    );
+
+    m.def(
+        "ba_solve",
+        &ba_solve,
+        py::arg("camera_poses"),
+        py::arg("point_3ds"),
+        py::arg("observations"),
+        py::arg("K"),
+        py::arg("constant_pose_index"),
+        py::arg("relative_pose_constraints"),
+        R"pbdoc(
+            Bundle adjustment solve function.
+
+            Parameters
+            ----------
+            camera_poses : dict[int, np.ndarray (4x4)]
+                Dictionary mapping camera index to 4x4 pose matrix.
+            point_3ds : dict[int, np.ndarray (3,)]
+                Dictionary mapping point index to 3D point.
+            observations : list[tuple[int, int, np.ndarray (2,)]]
+                List of (camera_index, point_index, 2D observation).
+
+            Returns
+            -------
+            tuple
+                (optimized_camera_poses, optimized_point_3ds)
         )pbdoc"
     );
 }
