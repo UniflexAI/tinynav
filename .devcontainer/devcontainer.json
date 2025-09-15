@@ -25,6 +25,7 @@
   "remoteUser": "root",
   "features": {},
   "mounts": [],
-  "postCreateCommand": "echo 'Devcontainer ready.'"
+  "postCreateCommand": "echo 'Devcontainer ready.'",
+  "postStartCommand": "/usr/local/bin/entrypoint.sh"
 }
 

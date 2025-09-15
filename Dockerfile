@@ -145,3 +145,33 @@ RUN chmod +x /tinynav/scripts/*.sh
 
 RUN uv venv --system-site-packages
 RUN uv sync
+
+# Write auto_uv_venv.sh
+RUN cat > /usr/local/bin/auto_uv_venv.sh <<'EOF'
+#!/usr/bin/env bash
+auto_uv_venv() {
+  if [[ $PWD == "/tinynav" ]]; then
+    if [[ ! -d ".venv" ]]; then
+      echo "[auto_uv_venv] Creating virtual environment..."
+      uv venv --system-site-packages
+    else
+      echo "[auto_uv_venv] .venv already exists, skipping."
+    fi
+  fi
+}
+EOF
+
+# Write entrypoint.sh
+RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
+#!/usr/bin/env bash
+set -e
+source /usr/local/bin/auto_uv_venv.sh
+auto_uv_venv
+exec "$@"
+EOF
+
+RUN chmod +x /usr/local/bin/auto_uv_venv.sh /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["bash"]
+
