@@ -6,7 +6,7 @@ on:
 
 jobs:
   benchmark-mapping:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Checkout code
@@ -20,57 +20,36 @@ jobs:
       - name: Extract short commit SHA
         id: vars
         run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
-      - name: Install huggingface-cli
-        run: |
-          python3 -m pip install --upgrade pip
-          pip install huggingface_hub
 
-      - name: Install GitHub CLI
+
+      - name: Benchmark mapping
         run: |
-          sudo apt update
-          sudo apt install -y gh
+          docker run --rm --gpus all \
+            -v /tmp/benchmark_data_cache:/tmp/benchmark_data_cache \
+            -v ${{ github.workspace }}:/tinynav \
+            -w /tinynav \
+            uniflexai/tinynav:0c4332e \
+            bash -c "
+              set -e
+              source /opt/ros/humble/setup.bash
+              uv venv --system-site-packages
+              uv sync
+              mkdir -p /tinynav/benchmark_results/${{ env.SHORT_SHA}}
+              bag_a_path=/tmp/benchmark_data_cache/rosbag2_2025_08_08-02_18_54
+              bag_b_path=/tmp/benchmark_data_cache/rosbag2_2025_08_08-02_29_41
+              uv run python tool/benchmark/benchmark_mapping.py \
+                --bag_a \$bag_a_path \
+                --bag_b \$bag_b_path \
+                --output_dir /tinynav/benchmark_results/${{ env.SHORT_SHA}}
+            "
 
       - name: Authenticate GitHub CLI
         run: |
            gh auth login --with-token <<< "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Benchmark mapping
-        run: |
-          mkdir -p /home/benchmark_data
-          rosbag_a_path=$(huggingface-cli download --repo-type dataset \
-                --cache-dir /home/benchmark_data \
-                UniflexAI/rosbag2_go2_map_benchmark01)
-          rosbag_b_path=$(huggingface-cli download --repo-type dataset \
-                --cache-dir /home/benchmark_data \
-                UniflexAI/rosbag2_go2_map_benchmark02)
-          docker run --rm --gpus all \
-            -v /home/benchmark_data:/home/benchmark_data \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            uniflexai/tinynav:0c4332e \
-            bash -c "source /opt/ros/humble/setup.bash && uv venv --system-site-packages && uv sync &&\
-                uv run python tool/benchmark/benchmark_mapping.py \
-                --bag_a $rosbag_a_path \
-                --bag_b $rosbag_b_path \
-                --output_dir /home/benchmark_data/benchmark_results/${SHORT_SHA}"
-
       - name: Find merged PR
         run: |
           PR_NUMBER=$(gh pr list --state merged --json number,title --jq '.[0].number')
           echo "PR_NUMBER=${PR_NUMBER}" >> $GITHUB_ENV
-
-      - name: Post benchmark result as PR comment (metrics_summary.md)
-        if: env.PR_NUMBER != ''
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: benchmark-metrics_summary
-          number: ${{ env.PR_NUMBER }}
-          path: /home/benchmark_data/benchmark_results/${{ env.SHORT_SHA }}/metrics_summary.md
-
-      - name: Post benchmark result as PR comment (precision_summary.md)
-        if: env.PR_NUMBER != ''
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: benchmark-precision_summary
-          number: ${{ env.PR_NUMBER }}
-          path: /home/benchmark_data/benchmark_results/${{ env.SHORT_SHA }}/precision_summary.md
+          gh pr comment ${PR_NUMBER} --body-file ${{ github.workspace }}/benchmark_results/${{ env.SHORT_SHA }}/metrics_summary.md
+          gh pr comment ${PR_NUMBER} --body-file ${{ github.workspace }}/benchmark_results/${{ env.SHORT_SHA }}/precision_summary.md

@@ -19,6 +19,16 @@ from reportlab.platypus import (
     TableStyle,
     PageBreak,
 )
+from launch import LaunchService, LaunchDescription
+from launch_ros.actions import Node
+
+from launch import LaunchDescription
+from launch.actions import ExecuteProcess, RegisterEventHandler, EmitEvent
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch.actions import TimerAction
+from launch_ros.actions import Node
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from tabulate import tabulate
@@ -26,57 +36,41 @@ from tabulate import tabulate
 # FIXME(yuance): Update database path
 TINYNAV_DB = "tinynav_db"
 
+def generate_launch_description(bag_path: str, is_mapping_mode: bool = False, rate: float = 0.25, timeout: float = 15.0):
+    perception = ExecuteProcess(
+        cmd=['python3', '/tinynav/tinynav/core/perception_node.py'],
+        name='perception',
+        output='screen'
+    )
 
-class ProcessManager:
-    """Manage subprocesses and ensure cleanup on exit."""
+    mapping = ExecuteProcess(
+        cmd=['python3', '/tinynav/tinynav/core/map_node.py', '--mapping', str(is_mapping_mode).lower()],
+        name='mapping',
+        output='screen'
+    )
+    bag_play = ExecuteProcess(
+        cmd=['ros2', 'bag', 'play', bag_path, '--rate', str(rate), '--clock'],  # no --loop so it will exit at EOF
+        output='screen'
+    )
+    # When rosbag play exits, shut everything down after timeout
+    on_bag_exit = RegisterEventHandler(
+        OnProcessExit(
+            target_action=bag_play,
+            on_exit=[
+                TimerAction(
+                    period=timeout,
+                    actions=[EmitEvent(event=Shutdown())]
+                )
+            ]
+        )
+    )
 
-    def __init__(self):
-        self.processes = {}  # name -> Popen
-        self.cleaned_up = False
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-
-    def start_process(self, name, cmd, cwd=None, use_pgroup=True):
-        kwargs = {}
-        if use_pgroup:
-            kwargs["preexec_fn"] = os.setsid
-        proc = subprocess.Popen(cmd, cwd=cwd, **kwargs)
-        self.processes[name] = proc
-        print(f"[ProcessManager] Started {name} (pid={proc.pid})")
-        return proc
-
-    def cleanup(self):
-        if self.cleaned_up:
-            return
-        self.cleaned_up = True
-        print("[ProcessManager] Cleaning up subprocesses...")
-        for name, proc in self.processes.items():
-            if proc and proc.poll() is None:
-                try:
-                    print(f"Sending SIGINT to {name}...")
-                    os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-                except Exception as e:
-                    print(f"Error terminating {name}: {e}")
-
-        time.sleep(15)
-
-        # Force killing
-        for name, proc in self.processes.items():
-            if proc and proc.poll() is None:
-                print(f"Force killing {name}...")
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-
-        print("[ProcessManager] Cleanup done.")
-
-    def is_process_running(self, name):
-        proc = self.processes.get(name)
-        return proc and proc.poll() is None
-
-    def _signal_handler(self, signum, frame):
-        print(f"[ProcessManager] Received signal {signum}, cleaning up...")
-        self.cleanup()
-        os._exit(0)
-
+    return LaunchDescription([
+        perception,
+        mapping,
+        bag_play,
+        on_bag_exit
+    ])
 
 class BenchmarkResults:
     """Container for benchmark results and metrics."""
@@ -302,7 +296,7 @@ class BenchmarkResults:
                 f"{np.max(self.rotation_errors):.2f}",
             ],
         ]
-        stats_markdown = tabulate(stats_data, headers="firstrow", tablefmt="markdown")
+        stats_markdown = tabulate(stats_data, headers="firstrow", tablefmt="github")
         with open(f"{output_dir}/metrics_summary.md", "w") as f:
             f.write(stats_markdown)
 
@@ -335,7 +329,7 @@ class BenchmarkResults:
                 ]
             )
         precision_markdown = tabulate(
-            precision_data, headers="firstrow", tablefmt="markdown"
+            precision_data, headers="firstrow", tablefmt="github"
         )
         with open(f"{output_dir}/precision_summary.md", "w") as f:
             f.write(precision_markdown)
@@ -430,30 +424,10 @@ def extract_bag_timestamps(bag_path: str) -> List[int]:
 
 def get_bag_duration(bag_path: str) -> float:
     try:
-        reader = rosbag2_py.SequentialReader()
-        storage_options = rosbag2_py.StorageOptions(
-            uri=str(bag_path), storage_id="sqlite3"
-        )
-        converter_options = rosbag2_py.ConverterOptions(
-            input_serialization_format="cdr", output_serialization_format="cdr"
-        )
-        reader.open(storage_options, converter_options)
-
-        first_timestamp = None
-        last_timestamp = None
-
-        while reader.has_next():
-            (topic, data, timestamp) = reader.read_next()
-            if first_timestamp is None:
-                first_timestamp = timestamp
-            last_timestamp = timestamp
-
-        if first_timestamp is not None and last_timestamp is not None:
-            duration = (last_timestamp - first_timestamp) / 1e9
-            return duration
-        else:
-            return 0.0
-
+        info_reader = rosbag2_py.Info()
+        bag_metadata = info_reader.read_metadata(bag_path, 'sqlite3')
+        duration = bag_metadata.duration.nanoseconds / 1e9
+        return duration
     except Exception as e:
         print(f"Error reading bag duration {bag_path}: {e}")
         return 0.0
@@ -507,91 +481,10 @@ def select_evaluation_timestamps(
 def run_mapping_process(
     bag_path: str, is_mapping_mode: bool, rate: float = 0.25
 ) -> bool:
-    pm = ProcessManager()
-
-    if is_mapping_mode and os.path.exists(TINYNAV_DB):
-        shutil.rmtree(TINYNAV_DB)
-        print(f"Cleaned up previous map data at {TINYNAV_DB}")
-
-    print(
-        f"Running {'mapping' if is_mapping_mode else 'localization'} on {bag_path} at {rate}x speed"
-    )
-
-    # Start perception node
-    pm.start_process(
-        "perception",
-        ["uv", "run", "python", "/tinynav/tinynav/core/perception_node.py"],
-        cwd="/tinynav",
-    )
-
-    # FIXME(yuance): Remove this workaround after map_node can run properly without pois.txt
-    if not is_mapping_mode:
-        pois_file = f"{TINYNAV_DB}/pois.txt"
-        if not os.path.exists(pois_file):
-            default_pois = np.array(
-                [
-                    [2.0, 1.0, 0.0],
-                ]
-            )
-            np.savetxt(pois_file, default_pois, fmt="%.6f")
-
-    # Start map node
-    pm.start_process(
-        "map",
-        [
-            "uv",
-            "run",
-            "python",
-            "/tinynav/tinynav/core/map_node.py",
-            "--mapping",
-            str(is_mapping_mode).lower(),
-        ],
-        cwd="/tinynav",
-    )
-
-    # Wait for nodes to initialize
-    time.sleep(3)
-
-    # Play ROS bag
-    bag_proc = pm.start_process(
-        "bag",
-        ["ros2", "bag", "play", str(bag_path), "--rate", str(rate)],
-        use_pgroup=True,
-    )
-
-    bag_duration = get_bag_duration(bag_path)
-    timeout = int(bag_duration / rate + 10)
-
-    start_time = time.time()
-    while True:
-        return_code = bag_proc.poll()
-        if return_code is not None:
-            if return_code != 0:
-                print(f"Bag playback exited with code {return_code}")
-                return False
-            else:
-                print("Bag playback completed")
-                break
-
-        if not pm.is_process_running("perception") or not pm.is_process_running("map"):
-            print(
-                f"Error: {'map' if not pm.is_process_running('map') else 'perception'} node terminated unexpectedly before bag playback ends"
-            )
-            pm.cleanup()
-            bag_proc.kill()
-            return False
-
-        if time.time() - start_time > timeout:
-            print("Bag playback timed out")
-            bag_proc.kill()
-            return False
-
-        time.sleep(1)
-
-    print("Waiting for processing...")
-    time.sleep(10)
-
-    pm.cleanup()
+    ld = generate_launch_description(bag_path, is_mapping_mode, rate)
+    ls = LaunchService()
+    ls.include_launch_description(ld)
+    ls.run()
     return True
 
 
@@ -777,22 +670,9 @@ def main():
         print("Error: Rate must be positive")
         return 1
 
-    try:
-        rclpy.init()
-        benchmark_return = run_benchmark(
-            args.bag_a, args.bag_b, args.output_dir, args.rate
-        )
-    except KeyboardInterrupt:
-        print("\nBenchmark interrupted by user")
-    except Exception as e:
-        print(f"Benchmark failed with error: {e}")
-        return 1
-    finally:
-        try:
-            rclpy.shutdown()
-        except:
-            pass
-
+    benchmark_return = run_benchmark(
+        args.bag_a, args.bag_b, args.output_dir, args.rate
+    )
     if benchmark_return:
         print("\nBenchmark completed!")
     else:
