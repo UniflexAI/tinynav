@@ -183,24 +183,20 @@ class Dinov2TRT(TRTBase):
 
 
 class StereoEngineTRT(TRTBase):
-    def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_4_480x848_{platform.machine()}.plan"):
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_480x848_{platform.machine()}.plan"):
         super().__init__(engine_path)
 
-    async def infer(self, left_img, right_img):
-        left_tensor = left_img.astype(np.float32)[None,:,:,None]
-        right_tensor = right_img.astype(np.float32)[None,:,:,None]
+    async def infer(self, left_img, right_img, baseline, focal_length):
+        left_tensor = left_img[None, None, :, :]
+        right_tensor = right_img[None, None, :, :]
 
         np.copyto(self.inputs[0]["host"], left_tensor)
         np.copyto(self.inputs[1]["host"], right_tensor)
+        np.copyto(self.inputs[2]["host"], baseline)
+        np.copyto(self.inputs[3]["host"], focal_length)
 
         results = await self.run_graph()
-
-        # left right consistency check
-        out_map = results['disparity'][0, :, :, 0]
-        yy, xx = np.meshgrid(np.arange(out_map.shape[0]), np.arange(out_map.shape[1]), indexing='ij')
-        invalid = (xx - out_map) < 0
-        out_map[invalid] = np.inf
-        return out_map
+        return results['disp'][0, 0, :, :], results['depth'][0, 0, :, :]
 
 if __name__ == "__main__":
     dinov2 = Dinov2TRT()
@@ -217,10 +213,8 @@ if __name__ == "__main__":
     dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
     dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
 
-    image = dinov2.preprocess_image(dummy_left)
     with Timer(text="[dinov2] Elapsed time: {milliseconds:.0f} ms"):
-        embedding = asyncio.run(dinov2.infer(image))["last_hidden_state"][:, 0, :]
-        embedding = np.squeeze(embedding, axis=0)
+        embedding = asyncio.run(dinov2.infer(dummy_left))
 
     with Timer(text="[superpoint] Elapsed time: {milliseconds:.0f} ms"):
         left_extract_result = asyncio.run(superpoint.infer(dummy_left))
@@ -239,4 +233,6 @@ if __name__ == "__main__":
             match_threshold))
 
     with Timer(text="[stereo] Elapsed time: {milliseconds:.0f} ms"):
-        results = asyncio.run(stereo_engine.infer(dummy_left, dummy_right))
+        baseline = np.array([[0.05]])
+        focal_length = np.array([[323.0]])
+        disp, depth = asyncio.run(stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length))

@@ -19,7 +19,7 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
-from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, disparity_to_depth
+from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 # === Helper functions ===
 @njit(cache=True)
@@ -266,10 +266,10 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.disp_sub = message_filters.Subscriber(self, Image, '/slam/disparity')
+        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
 
-        self.ts = message_filters.TimeSynchronizer([self.disp_sub, self.pose_sub], queue_size=10)
+        self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
@@ -400,11 +400,11 @@ class PlanningNode(Node):
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def sync_callback(self, disp_msg, odom_msg):
+    def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            disparity = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding='32FC1')
+            depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T = msg2np(odom_msg)
             if self.smoothed_T is None:
@@ -413,7 +413,6 @@ class PlanningNode(Node):
             self.smoothed_T[:3,:3] = T[:3,:3]
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
-            depth = disparity_to_depth(disparity, self.K, self.baseline)
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             center = self.origin + np.array(self.grid_shape) * self.resolution / 2
@@ -437,8 +436,8 @@ class PlanningNode(Node):
 
         with Timer(name='vis heighmap and esdf', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
-            self.publish_height_map(T[:3,3], ESDF_map, disp_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, disp_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
+            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             if self.last_T is None:
@@ -474,13 +473,13 @@ class PlanningNode(Node):
 
             # path
             path = Path()
-            path.header = disp_msg.header
+            path.header = depth_msg.header
             path.header.frame_id = "world"
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
                     pose = PoseStamped()
-                    pose.header = disp_msg.header
+                    pose.header = depth_msg.header
                     pose.pose.position.x = x
                     pose.pose.position.y = y
                     pose.pose.position.z = z

@@ -5,7 +5,7 @@ from nav_msgs.msg import Path, Odometry
 import numpy as np
 import sys
 
-from math_utils import matrix_to_quat, msg2np, estimate_pose, disparity_to_depth, tf2np
+from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -29,13 +29,13 @@ from tf2_msgs.msg import TFMessage
 logger = logging.getLogger(__name__)
 TINYNAV_DB = "tinynav_db"
 @njit(cache=True)
-def disparity_to_cloud_in_world(disparity: np.ndarray, K: np.ndarray, baseline: float, pose_in_world: np.ndarray) -> np.ndarray:
-    h, w = disparity.shape
+def depth_to_cloud_in_world(depth: np.ndarray, K: np.ndarray, baseline: float, pose_in_world: np.ndarray) -> np.ndarray:
+    h, w = depth.shape
     points_3d = []
     for u in range(w):
         for v in range(h):
-            if disparity[v, u] > 0:
-                z = K[0, 0] * baseline / disparity[v, u]
+            if 0.1 < depth[v, u] and depth[v, u] < 10.0:
+                z = depth[v, u]
                 x = (u - K[0, 2]) * z / K[0, 0]
                 y = (v - K[1, 2]) * z / K[1, 1]
                 norm = np.linalg.norm(np.array([x, y, z]))
@@ -122,8 +122,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10)
     global_grid = None
     global_origin = None
     for timestamp, odom_pose in tqdm(poses.items()):
-        disparity, _, _, _, _ = db.get_disparity_embedding_features_images(timestamp)
-        depth = disparity_to_depth(disparity, K, baseline)
+        depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
         odom_translation = odom_pose[:3, 3]
         local_origin = odom_translation - 0.5 * np.array(raycast_shape) * resolution
         local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
@@ -173,8 +172,8 @@ class TinyNavDB():
                 os.remove(f"{map_save_path}/features.db")
             if os.path.exists(f"{map_save_path}/infra1_images.db"):
                 os.remove(f"{map_save_path}/infra1_images.db")
-            if os.path.exists(f"{map_save_path}/disparities.db"):
-                os.remove(f"{map_save_path}/disparities.db")
+            if os.path.exists(f"{map_save_path}/depths.db"):
+                os.remove(f"{map_save_path}/depths.db")
             if os.path.exists(f"{map_save_path}/rgb_images.db"):
                 os.remove(f"{map_save_path}/rgb_images.db")
             if os.path.exists(f"{map_save_path}/embeddings.db"):
@@ -182,23 +181,23 @@ class TinyNavDB():
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
         self.infra1_images = IntKeyShelf(f"{map_save_path}/infra1_images")
-        self.disparities = IntKeyShelf(f"{map_save_path}/disparities")
+        self.depths = IntKeyShelf(f"{map_save_path}/depths")
         self.rgb_images = IntKeyShelf(f"{map_save_path}/rgb_images")
 
-    def set_entry(self, key:int,   disparity:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
             self.infra1_images[key] = infra1_image
         if rgb_image is not None:
             self.rgb_images[key] = rgb_image
-        if disparity is not None:
-            self.disparities[key] = disparity
+        if depth is not None:
+            self.depths[key] = depth
         if embedding is not None:
             self.embeddings[key] = embedding
         if features is not None:
             self.features[key] = features
 
-    def get_disparity_embedding_features_images(self, key:int):
-        return self.disparities[key], self.embeddings[key], self.features[key], self.rgb_images[key], self.infra1_images[key]
+    def get_depth_embedding_features_images(self, key:int):
+        return self.depths[key], self.embeddings[key], self.features[key], self.rgb_images[key], self.infra1_images[key]
 
     def get_embedding(self, key:int):
         return self.embeddings[key]
@@ -207,7 +206,7 @@ class TinyNavDB():
         self.features.close()
         self.embeddings.close()
         self.infra1_images.close()
-        self.disparities.close()
+        self.depths.close()
         self.rgb_images.close()
 
 
@@ -221,7 +220,7 @@ class BuildMapNode(Node):
         self.bridge = CvBridge()
 
         self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
-        self.disp_sub = Subscriber(self, Image, '/slam/keyframe_disparity')
+        self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
         self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
@@ -231,7 +230,7 @@ class BuildMapNode(Node):
         self.matches_image_pub = self.create_publisher(Image, "/mapping/keyframe_matches_images", 10)
         self.loop_matches_image_pub = self.create_publisher(Image, "/mapping/loop_matches_images", 10)
         self.global_map_marker_pub = self.create_publisher(MarkerArray, "/mapping/global_map_marker", 10)
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.disp_sub, self.rgb_image_sub], 1000)
+        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
@@ -295,21 +294,21 @@ class BuildMapNode(Node):
             self.destroy_subscription(self.camera_info_sub)
 
     @Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image, rgb_image_msg:Image):
+    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
         if self.K is None:
             return
-        self.process(keyframe_image_msg, keyframe_odom_msg, disp_msg, rgb_image_msg)
+        self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
 
-    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image, rgb_image_msg:Image):
+    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
         with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
-            disp = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding="32FC1")
+            depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
-        with Timer(name = "save image and disparity", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.db.set_entry(keyframe_image_timestamp, disparity = disp, infra1_image = infra1_image, rgb_image = rgb_image)
+        with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
         with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             embedding = self.get_embeddings(infra1_image)
@@ -333,11 +332,11 @@ class BuildMapNode(Node):
                 self.keyframe_timestamp_windows.append(keyframe_image_timestamp)
 
                 for prev_timestamp in self.keyframe_timestamp_windows[-self.window_size:-1]:
-                    _,_, prev_features, _, _= self.db.get_disparity_embedding_features_images(prev_timestamp)
-                    curr_disparity,_, curr_features, _, _ = self.db.get_disparity_embedding_features_images(keyframe_image_timestamp)
+                    _,_, prev_features, _, _= self.db.get_depth_embedding_features_images(prev_timestamp)
+                    curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(keyframe_image_timestamp)
 
                     prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
-                    success, T_prev_curr_features, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_disparity, self.K, self.baseline)
+                    success, T_prev_curr_features, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                     if success and len(inliers) >= 100:
                         self.relative_pose_constraint.append((keyframe_image_timestamp, prev_timestamp, T_prev_curr_features))
                         print(f"Added relative pose constraint: {keyframe_image_timestamp} -> {prev_timestamp}")
@@ -354,10 +353,10 @@ class BuildMapNode(Node):
                         for idx, similarity in loop_list:
                             prev_timestamp = idx_to_timestamp[idx]
                             curr_timestamp = timestamp
-                            prev_disparity, _, prev_features, _, _ = self.db.get_disparity_embedding_features_images(prev_timestamp)
-                            curr_disparity, _, curr_features, _, _ = self.db.get_disparity_embedding_features_images(curr_timestamp)
+                            prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
+                            curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
                             prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
-                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_disparity, self.K, self.baseline)
+                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")

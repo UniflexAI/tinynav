@@ -31,7 +31,6 @@ dependencies = [
     "lerobot[lekiwi]==0.3.3",
     "reportlab>=4.4.3",
     "tabulate",
-    "viser",
     "plyfile",
     "nerfstudio @ git+https://github.com/junlinp/nerfstudio.git",
     "pymeshlab==2022.2.post4",

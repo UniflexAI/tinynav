@@ -76,7 +76,7 @@ class TinynavToColmapConverter:
         self.infra1_intrinsics = np.load(self.input_dir / "intrinsics.npy")
         self.baseline = np.load(self.input_dir / "baseline.npy")
         # Check for database files
-        self.disparities = shelve.open(f"{self.input_dir}/disparities")
+        self.depths = shelve.open(f"{self.input_dir}/depths")
 
         self.rgb_camera_K = np.load(self.input_dir / "rgb_camera_intrinsics.npy", allow_pickle=True)
         self.rgb_images = shelve.open(f"{self.input_dir}/rgb_images")
@@ -132,8 +132,8 @@ class TinynavToColmapConverter:
         # Create images.txt
         point2d_to_point3d = self._write_images_txt(image_poses, camera_data, sparse_dir)
         
-        # Generate 3D points from images, disparities, and poses
-        points3d_data = self._generate_points3d_from_disparities(image_poses, camera_data, point2d_to_point3d)
+        # Generate 3D points from images, depth, and poses
+        points3d_data = self._generate_points3d_from_depth(image_poses, camera_data, point2d_to_point3d)
         
         # Create points3D.txt with actual 3D points
         self._write_points3d_txt(points3d_data, sparse_dir)
@@ -239,9 +239,9 @@ class TinynavToColmapConverter:
         
         print(f"Written PLY file: {ply_file}")
     
-    def _generate_points3d_from_disparities(self, images, camera_data, point2d_to_point3d):
-        """Generate 3D points from disparities and poses"""
-        print("Generating 3D points from disparities...")
+    def _generate_points3d_from_depth(self, images, camera_data, point2d_to_point3d):
+        """Generate 3D points from depth and poses"""
+        print("Generating 3D points from depth...")
         
         points3d_data = []
         point_id = 0
@@ -250,11 +250,11 @@ class TinynavToColmapConverter:
         K = self.infra1_intrinsics
         baseline = self.baseline
             
-        for image_id, timestamp, image_name, rgb_pose_in_world, infra1_pose_in_world in tqdm(images, desc="Generating 3D points from disparities"):
-            disparity = self.disparities[str(timestamp)]
-            # Convert disparity to 3D points
-            points_3d = self._disparity_to_points3d(
-                disparity, K, baseline, infra1_pose_in_world, 
+        for image_id, timestamp, image_name, rgb_pose_in_world, infra1_pose_in_world in tqdm(images, desc="Generating 3D points from depth"):
+            depth = self.depths[str(timestamp)]
+            # Convert depth to 3D points
+            points_3d = self._depth_to_points3d(
+                depth, K, infra1_pose_in_world, 
                 image_id, point_id, timestamp
             )
             points3d_data.extend(points_3d)
@@ -262,23 +262,16 @@ class TinynavToColmapConverter:
         print(f"Generated {len(points3d_data)} total 3D points")
         return points3d_data
     
-    def _disparity_to_points3d(self, disparity, K, baseline, pose_in_world, image_id, start_point_id, timestamp):
-        """Convert disparity map to 3D points"""
+    def _depth_to_points3d(self, depth, K, pose_in_world, image_id, start_point_id, timestamp):
+        """Convert depth map to 3D points"""
         points3d = []
         
-        # Sample points from disparity (every 10th pixel to avoid too many points)
+        # Sample points from depth (every 10th pixel to avoid too many points)
         step = 64
-        height, width = disparity.shape
+        height, width = depth.shape
         for v in range(0, height, step):
             for u in range(0, width, step):
-                disp = disparity[v, u]
-                
-                # Skip invalid disparities
-                if disp <= 1 or disp > 100:  # Adjust threshold as needed
-                    continue
-                
-                # Convert disparity to depth
-                Z = K[0, 0] * baseline / disp
+                Z = depth[v, u]
                 
                 # Skip points too close or too far
                 if Z < 0.1 or Z > 3.0:  # Adjust range as needed

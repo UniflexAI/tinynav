@@ -11,7 +11,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, disparity_to_depth
+from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
 from tf2_ros import TransformBroadcaster
 
 import asyncio
@@ -50,13 +50,12 @@ class PerceptionNode(Node):
         self.ts = TimeSynchronizer([self.left_sub, self.right_sub], queue_size=1)
         self.ts.registerCallback(self.images_callback)
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
-        self.disparity_pub = self.create_publisher(Image, "/slam/disparity", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
-        self.keyframe_disparity_pub = self.create_publisher(Image, "/slam/keyframe_disparity", 10)
+        self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -132,7 +131,7 @@ class PerceptionNode(Node):
                 self.last_keyframe_img = left_img
                 return
 
-            stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img))
+            stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]])))
 
             with Timer(name="[SuperPoint && lightglue Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
                 prev_left_extract_result = await self.superpoint.memorized_infer(self.last_keyframe_img)
@@ -157,13 +156,7 @@ class PerceptionNode(Node):
                 logging.info(f"match cnt: {len(kpt_pre)}")
 
             with Timer(name="[stereo_task await]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-                disparity = await stereo_task
-
-        # publish dispairty
-        with Timer(text="[ComputeDisparity] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-            disparity_msg = self.bridge.cv2_to_imgmsg(disparity, encoding="32FC1")
-            disparity_msg.header = left_msg.header
-            self.disparity_pub.publish(disparity_msg)
+                disparity, depth = await stereo_task
 
         with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
             disp_vis = disparity.copy().astype(np.uint8)
@@ -173,10 +166,17 @@ class PerceptionNode(Node):
             self.disparity_pub_vis.publish(disp_color_msg)
 
         with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-            self.pub_disp_as_depth(disparity, self.timestamp)
+            # publish depth image and camera info for depth topic (required by DepthCloud)
+            depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
+            depth_msg.header.stamp = self.timestamp
+            depth_msg.header.frame_id = "camera"  # Match TF frame
+            self.camera_info_msg.header.stamp = self.timestamp
+            self.camera_info_msg.header.frame_id = "camera"  # Match TF frame
+            self.slam_camera_info_pub.publish(self.camera_info_msg)
+            self.depth_pub.publish(depth_msg)
 
         with Timer(text="[ComputePose] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
-            state, T_pre_curr, _, _, _ = estimate_pose(kpt_pre, kpt_cur, disparity, self.K, self.baseline)
+            state, T_pre_curr, _, _, _ = estimate_pose(kpt_pre, kpt_cur, depth, self.K)
 
         if not state:
             return
@@ -204,21 +204,7 @@ class PerceptionNode(Node):
             self.has_first_keyframe = True
             self.keyframe_pose_pub.publish(np2msg(T_curr, left_msg.header.stamp, "world", "camera"))
             self.keyframe_image_pub.publish(left_msg)
-            self.keyframe_disparity_pub.publish(disparity_msg)
-
-    # ===publish utils functions===
-    # publish depth image and camera info for depth topic (required by DepthCloud)
-    def pub_disp_as_depth(self, disparity, timestamp):
-        depth = disparity_to_depth(disparity, self.K, self.baseline)
-        depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
-        depth_msg.header.stamp = timestamp
-        depth_msg.header.frame_id = "camera"  # Match TF frame
-
-        if self.camera_info_msg is not None:
-            self.camera_info_msg.header.stamp = timestamp
-            self.camera_info_msg.header.frame_id = "camera"  # Match TF frame
-            self.slam_camera_info_pub.publish(self.camera_info_msg)
-        self.depth_pub.publish(depth_msg)
+            self.keyframe_depth_pub.publish(depth_msg)
 
     def gravity_correction(self, T_last, T_curr, T_pre_curr):
         if self.is_static:

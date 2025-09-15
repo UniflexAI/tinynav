@@ -5,7 +5,7 @@ from nav_msgs.msg import Path, Odometry
 import numpy as np
 import sys
 
-from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, disparity_to_depth, np2tf
+from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -116,7 +116,7 @@ class MapNode(Node):
 
         self.bridge = CvBridge()
 
-        self.disp_sub = Subscriber(self, Image, '/slam/keyframe_disparity')
+        self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
 
@@ -134,7 +134,7 @@ class MapNode(Node):
         self.global_map_timer = self.create_timer(10.0, self.global_map_callback)
         self.point_cloud = None
 
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.disp_sub], 1000)
+        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 1000)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
@@ -201,8 +201,8 @@ class MapNode(Node):
             self.destroy_subscription(self.camera_info_sub)
 
 
-    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image):
-        self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, disp_msg)
+    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
+        self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
         if not self.mapping_mode:
             image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
@@ -223,16 +223,15 @@ class MapNode(Node):
 
 
     @Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def keyframe_mapping(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, disp_msg:Image):
+    def keyframe_mapping(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         if self.K is None:
             return
         keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
-        disp_timestamp = int(disp_msg.header.stamp.sec * 1e9) + int(disp_msg.header.stamp.nanosec)
+        depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
         assert keyframe_image_timestamp == keyframe_odom_timestamp
-        assert keyframe_image_timestamp == disp_timestamp
-        disp = self.bridge.imgmsg_to_cv2(disp_msg, desired_encoding="32FC1")
-        depth = disparity_to_depth(disp, self.K, self.baseline)
+        assert keyframe_image_timestamp == depth_timestamp
+        depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
 
         odom = msg2np(keyframe_odom_msg)
 
@@ -373,7 +372,7 @@ class MapNode(Node):
                     cv2.putText(image_match_image, f"similarity: {similarity:.2f}, query_keypoints: {len(query_keypoints_origin)}, reference_keypoints: {len(reference_keypoints_origin)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                     # cv2.imwrite(f"map/loop_matches_{timestamp}_{prev_timestamp}.png", image_match_image)
                     self.publish_loop_matches_image(timestamp, image_match_image)
-                    success, T_prev_curr_from_features, inliers_2d, inliers_3d, inliers = estimate_pose(reference_matched_keypoints, query_matched_keypoints, depth_image, self.K, self.baseline)
+                    success, T_prev_curr_from_features, inliers_2d, inliers_3d, inliers = estimate_pose(reference_matched_keypoints, query_matched_keypoints, depth_image, self.K)
                     if success:
                         if len(inliers) >= 100:
                             self.relative_pose_constraint.append((timestamp, prev_timestamp, T_prev_curr_from_features, np.array([10.0, 10.0, 10.0]), np.array([10.0, 10.0, 10.0])))

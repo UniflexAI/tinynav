@@ -153,17 +153,16 @@ def msg2np(msg):
     return T
 
 @njit(cache=True)
-def process_keypoints(kpts_prev, kpts_curr, disparity, K, baseline):
+def process_keypoints(kpts_prev, kpts_curr, depth, K):
     points_3d = np.empty((len(kpts_prev), 3), dtype=np.float32)
     points_2d = np.empty((len(kpts_prev), 2), dtype=np.float32)
     valid_count = 0
     
     for i in range(len(kpts_prev)):
         u, v = int(kpts_curr[i,0]), int(kpts_curr[i,1])
-        if 0 <= v < disparity.shape[0] and 0 <= u < disparity.shape[1]:
-            disp = disparity[v, u]
-            if disp > 1 and disp != np.inf:
-                Z = K[0,0] * baseline / disp
+        if 0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]:
+            Z = depth[v, u]
+            if Z > 0.1 and Z < 10.0:
                 X = (kpts_curr[i,0] - K[0,2]) * Z / K[0,0]
                 Y = (kpts_curr[i,1] - K[1,2]) * Z / K[1,1]
                 points_3d[valid_count] = (X, Y, Z)
@@ -172,13 +171,12 @@ def process_keypoints(kpts_prev, kpts_curr, disparity, K, baseline):
     
     return points_3d[:valid_count], points_2d[:valid_count]
 
-def estimate_pose( kpts_prev, kpts_curr, disparity, K, baseline) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def estimate_pose( kpts_prev, kpts_curr, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     points_3d, points_2d = process_keypoints(
         kpts_prev.astype(np.float32), 
         kpts_curr.astype(np.float32),
-        disparity, 
-        K.astype(np.float32),
-        np.float32(baseline)
+        depth, 
+        K.astype(np.float32)
     )
     if len(points_3d) < 6:
         return False, np.eye(4), None, None, None
@@ -195,8 +193,3 @@ def estimate_pose( kpts_prev, kpts_curr, disparity, K, baseline) -> tuple[bool, 
     inliers_2d = points_2d[inliers]
     inliers_3d = points_3d[inliers]
     return True, T, inliers_2d, inliers_3d, inliers
-
-def disparity_to_depth(disparity, K, baseline):
-    depth = np.zeros_like(disparity)
-    depth[disparity > 0] = K[0, 0] * baseline / (disparity[disparity > 0])
-    return depth
