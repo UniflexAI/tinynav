@@ -1,5 +1,6 @@
 #!/bin/bash
 ros2 bag record \
+    --max-cache-size 2147483648\
     /camera/camera/infra1/camera_info \
     /camera/camera/infra1/image_rect_raw \
     /camera/camera/infra1/metadata \
