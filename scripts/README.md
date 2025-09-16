@@ -2,15 +2,6 @@
 
 This document provides an overview of the key scripts in the `scripts/` directory and how to use them for different TinyNav workflows.
 
-# docker_run.sh
-
-We provide pre-built [Docker images](https://hub.docker.com/r/uniflexai/tinynav/tags) to support both PC (x86_64) and NVIDIA Jetson (aarch64) environments. These images allow you to quickly launch the full TinyNav stack with all dependencies, whether you are developing on a desktop or deploying on an embedded platform.
-
-- **PC (x86_64):** Use this image for standard desktop and laptop computers.
-- **Jetson (aarch64):** Use this image for NVIDIA Jetson devices (e.g., Xavier, Nano) with ARM architecture.
-
-Running `docker_run.sh` will launch the example pipeline.
-
 # Development Inside Container
 
 | Script                        | Description                                                                                   |

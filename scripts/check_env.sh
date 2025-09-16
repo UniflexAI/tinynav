@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # === Check if Docker is installed ===
 if ! command -v docker &> /dev/null; then
@@ -16,6 +17,8 @@ if ! docker info &> /dev/null; then
     echo "👉 Try running: sudo systemctl start docker"
     echo "   Or ensure your user is in the 'docker' group."
     exit 1
+else
+    echo "✅ Docker daemon is running and accessible."
 fi
 
 # === Check if 'nvidia' runtime is available ===
@@ -39,31 +42,16 @@ else
     echo "✅ Git LFS is installed."
 fi
 
-# Detect architecture
-ARCH=$(uname -m)
-
-# Default Docker arguments
-DOCKER_ARGS="-it --rm"
-
-# Use NVIDIA GPU differently depending on platform: https://forums.developer.nvidia.com/t/whats-difference-between-gpus-and-runtime-nvidia-for-the-docker-container/283468/3
-if [[ "$ARCH" == "aarch64" ]]; then
-    # Jetson (ARM)
-    echo "🟢 Detected Jetson (ARM64) platform"
-    DOCKER_ARGS+=" --runtime nvidia"
+# === Architecture-specific devcontainer patch ===
+ARCH="$(uname -m)"
+if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" || "$ARCH" == arm* ]]; then
+    if [[ -f .devcontainer/devcontainer.json ]]; then
+        sed -i '12s/.*/    "--runtime", "nvidia",/' .devcontainer/devcontainer.json
+        echo "✅ devcontainer.json patched for your ARM platform."
+    else
+        echo "⚠️  ARM platform detected but devcontainer.json not found in current directory."
+    fi
 else
-    # x86_64 or others
-    echo "🔵 Detected x86_64 platform"
-    DOCKER_ARGS+=" --gpus all"
+    echo "✅ devcontainer.json patched for your x86 platform."
 fi
 
-docker run $DOCKER_ARGS \
-    --privileged \
-    -e DISPLAY=$DISPLAY \
-    -e GDK_SCALE=2 \
-    -v /tmp/.X11-unix:/tmp/.X11-unix \
-    --network host \
-     -v /dev:/dev \
-    --device-cgroup-rule='c 81:* rmw' \
-    --device-cgroup-rule='c 234:* rmw' \
-    --shm-size=16gb \
-    uniflexai/tinynav:0c4332e /tinynav/scripts/run_rosbag_examples.sh

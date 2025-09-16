@@ -97,34 +97,57 @@ Before you begin, make sure you have the following installed:
 **Platform-specific requirements:**
 - For **x86_64** (PC): [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (for GPU support)
 - For **Jetson Orin**: [JetPack SDK](https://developer.nvidia.com/embedded/jetpack) version 6.2 or higher
-## Quick Start
-```bash
-git clone https://github.com/UniflexAI/tinynav.git
-cd tinynav
-bash scripts/docker_run.sh
-```
 
-You should see an RViz window displaying the live planning process.  
-<p align="center">
-  <img alt="tinynav logo" src="/docs/docker_run_rviz.png" width="50%" height="50%">
-<p/>
+## 🚀 Quick Start
+
+1. **Check the environment**
+   ```bash
+   git clone https://github.com/UniflexAI/tinynav.git
+   cd tinynav
+   bash scripts/check_env.sh
+   ```
+   Follow the instructions to fix any environment issues until you see:
+   ```bash
+   ✅ Docker is installed.
+   ✅ Docker daemon is running and accessible.
+   ✅ NVIDIA runtime is available in Docker.
+   ✅ Git LFS is installed.
+   ✅ devcontainer.json patched for your x86 platform.
+   ```
+
+2. **Open the project in VS Code**  
+   - Launch VS Code and open the `tinynav` folder.  
+   - Install the **Dev Containers** extension if prompted.  
+   - Reopen the folder inside the container.  
+
+3. **Run the example**  
+   Once inside the container, start the demo:
+   ```bash
+   bash /tinynav/scripts/run_rosbag_examples.sh
+   ```
+   You should see an **RViz** window displaying the live planning process:  
+
+   <p align="center">
+     <img alt="tinynav logo" src="/docs/docker_run_rviz.png" width="50%" height="50%">
+   </p>
 
 ---
 
-## What `docker_run.sh` Does
+## 📜 What `run_rosbag_examples.sh` Does
 
-The `docker_run.sh` script:
+The script automates the entire demo workflow:
 
-1. Checks the required environment (e.g., Docker with NVIDIA GPU support).
-2. Launches the `run_rosbag_examples.sh` script, which:
-   - Plays a recorded dataset from [this ROS bag](https://huggingface.co/datasets/UniflexAI/rosbag_d435i_01).
-   - Runs the full TinyNav pipeline:
-     - `perception_node.py`: Performs localization and builds the local map.
-     - `planning_node.py`: Computes an optimal path for the robot.
-     - RViz: Visualizes the robot's state and planned path in real time.
+1. **Plays dataset**  
+   Streams a recorded dataset from [this ROS bag](https://huggingface.co/datasets/UniflexAI/rosbag2_go2_exposure_1k).
+
+2. **Runs TinyNav pipeline**  
+   - **`perception_node.py`** → Performs localization and builds the local map.  
+   - **`planning_node.py`** → Computes the robot’s optimal path.  
+   - **RViz** → Visualizes the robot’s state and planned trajectory in real time.  
 
 ---
 
+✨ With these steps, you’ll have the full TinyNav system up and running in minutes.
 # Developer Guide
 
 ## Using Dev Containers
