@@ -136,16 +136,6 @@ USER root
 RUN curl -LsSf https://astral.sh/uv/0.7.3/install.sh | sh
 ENV PATH=$PATH:/root/.local/bin/
 
-COPY ./tinynav        /tinynav/tinynav/
-COPY ./scripts        /tinynav/scripts/
-COPY ./docs           /tinynav/docs/
-COPY ./pyproject.toml /tinynav/
-COPY ./uv.lock        /tinynav/
-RUN chmod +x /tinynav/scripts/*.sh
-
-RUN uv venv --system-site-packages
-RUN uv sync
-
 # Write auto_uv_venv.sh
 RUN cat > /usr/local/bin/auto_uv_venv.sh <<'EOF'
 #!/usr/bin/env bash
@@ -159,6 +149,37 @@ auto_uv_venv() {
     fi
   fi
 }
+maybe_build_models() {
+  MODEL_DIR="/tinynav/tinynav/models"
+  PLAN_COUNT=$(ls "$MODEL_DIR"/*.plan 2>/dev/null | wc -l || true)
+
+  if [[ "$PLAN_COUNT" -eq 0 ]]; then
+    echo
+    echo "======================================================"
+    echo " Model Optimization for Your Platform"
+    echo "======================================================"
+    echo "No TensorRT engine (*.plan) files found in:"
+    echo "  $MODEL_DIR"
+    echo
+    echo "This step will run 'make all' to generate them."
+    echo "It may take 5–10 minutes."
+    echo "This only needs to happen once per platform — we'll reuse '*_${ARCH}.plan' next time."
+    echo
+    read -p "Do you want to generate models now? [y/N]: " reply
+    case "$reply" in
+      [yY]|[yY][eE][sS])
+        echo "[entrypoint] Starting model build..."
+        make -C "$MODEL_DIR" all
+        echo "[entrypoint] Model build finished."
+        ;;
+      *)
+        echo "[entrypoint] Skipping model build."
+        ;;
+    esac
+  else
+    echo "[entrypoint] Found $PLAN_COUNT plan file(s), skipping model build prompt."
+  fi
+}
 EOF
 
 # Write entrypoint.sh
@@ -167,6 +188,7 @@ RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
 set -e
 source /usr/local/bin/auto_uv_venv.sh
 auto_uv_venv
+maybe_build_models
 exec "$@"
 EOF
 
