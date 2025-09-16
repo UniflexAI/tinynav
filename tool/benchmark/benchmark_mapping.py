@@ -481,6 +481,24 @@ def select_evaluation_timestamps(
 def run_mapping_process(
     bag_path: str, is_mapping_mode: bool, rate: float = 0.25
 ) -> bool:
+    if is_mapping_mode and os.path.exists(TINYNAV_DB):
+        shutil.rmtree(TINYNAV_DB)
+        print(f"Cleaned up previous map data at {TINYNAV_DB}")
+
+    print(
+        f"Running {'mapping' if is_mapping_mode else 'localization'} on {bag_path} at {rate}x speed"
+    )
+     # FIXME(yuance): Remove this workaround after map_node can run properly without pois.txt
+    if not is_mapping_mode:
+        pois_file = f"{TINYNAV_DB}/pois.txt"
+        if not os.path.exists(pois_file):
+            default_pois = np.array(
+                [
+                    [2.0, 1.0, 0.0],
+                ]
+            )
+            np.savetxt(pois_file, default_pois, fmt="%.6f")
+
     ld = generate_launch_description(bag_path, is_mapping_mode, rate)
     ls = LaunchService()
     ls.include_launch_description(ld)
