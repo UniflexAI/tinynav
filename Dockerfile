@@ -145,7 +145,12 @@ auto_uv_venv() {
       echo "[auto_uv_venv] Creating virtual environment..."
       uv venv --system-site-packages
     else
-      echo "[auto_uv_venv] .venv already exists, skipping."
+         if [[ $(cat ".venv/pyvenv.cfg") == *"include-system-site-packages = true"* ]]; then
+            echo "[auto_uv_venv] .venv/pyvenv.cfg already exists, skipping."
+         else
+            echo "[auto_uv_venv] .venv/pyvenv.cfg already exists, but include-system-site-packages is false, creating virtual environment..."
+            uv venv --system-site-packages
+         fi
     fi
   fi
 }
