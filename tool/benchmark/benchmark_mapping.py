@@ -548,7 +548,7 @@ def run_benchmark(
     print("\nStep 2: Localizing bag B in map A...")
     if not run_localization_process(
         bag_a_path,
-        tinynav_db_path=map_result_dir_b,
+        tinynav_db_path=map_result_dir_a,
         rate=rate,
     ):
         print("Error: Failed to localize bag B in map A")
@@ -556,7 +556,7 @@ def run_benchmark(
 
     print("\nStep 3: Selecting evaluation timestamps from map B keyframes as ground truth...")
     ground_truth_poses = select_evaluation_timestamps(
-        map_result_dir_b + "/graph_poses.npy",
+        map_result_dir_a + "/graph_poses.npy",
         100,
     )
 
@@ -569,10 +569,10 @@ def run_benchmark(
     print(f"Extracted {len(ground_truth_poses)} ground truth poses")
     # Extract localization results for the same timestamps
     localization_poses = extract_relocalization_poses(
-        map_result_dir_b + "/relocalization_poses.npy", evaluation_timestamps
+        map_result_dir_a + "/relocalization_poses.npy", evaluation_timestamps
     )
     print(f"Extracted {len(localization_poses)} localization poses")
-    failed_reloc_timestamps = extract_failed_localization_timestamps(map_result_dir_b)
+    failed_reloc_timestamps = extract_failed_localization_timestamps(map_result_dir_a)
     print(f"Extracted {len(failed_reloc_timestamps)} failed relocalizations")
 
     print("\nStep 4: Computing coordinate transformation between map A and map B...")
