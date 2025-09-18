@@ -1,15 +1,9 @@
 import os
 import argparse
-import subprocess
-import time
-import signal
 import json
 from typing import Dict, List, Optional
-import shutil
 
 import numpy as np
-import rclpy
-import rosbag2_py
 import matplotlib.pyplot as plt
 from reportlab.platypus import (
     SimpleDocTemplate,
@@ -20,14 +14,11 @@ from reportlab.platypus import (
     PageBreak,
 )
 from launch import LaunchService, LaunchDescription
-from launch_ros.actions import Node
 
-from launch import LaunchDescription
 from launch.actions import ExecuteProcess, RegisterEventHandler, EmitEvent
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.actions import TimerAction
-from launch_ros.actions import Node
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -36,16 +27,16 @@ from tabulate import tabulate
 # FIXME(yuance): Update database path
 TINYNAV_DB = "tinynav_db"
 
-def generate_launch_description(bag_path: str, is_mapping_mode: bool = False, rate: float = 0.25, timeout: float = 15.0):
+def generate_launch_description_localization(bag_path: str, tinynav_db_path: str, rate: float = 0.25, timeout: float = 15.0, task_name: str = ""):
     perception = ExecuteProcess(
         cmd=['python3', '/tinynav/tinynav/core/perception_node.py'],
-        name='perception',
+        name=f'{task_name}_perception',
         output='screen'
     )
 
-    mapping = ExecuteProcess(
-        cmd=['python3', '/tinynav/tinynav/core/map_node.py', '--mapping', str(is_mapping_mode).lower()],
-        name='mapping',
+    localization = ExecuteProcess(
+        cmd=['python3', '/tinynav/tinynav/core/map_node.py', '--tinynav_db_path', str(tinynav_db_path)],
+        name=f'{task_name}_localization',
         output='screen'
     )
     bag_play = ExecuteProcess(
@@ -64,7 +55,42 @@ def generate_launch_description(bag_path: str, is_mapping_mode: bool = False, ra
             ]
         )
     )
+    return LaunchDescription([
+        perception,
+        localization,
+        bag_play,
+        on_bag_exit
+    ])
 
+
+
+def generate_launch_description_mapping(bag_path: str, map_save_path: str, rate: float = 0.25, timeout: float = 15.0, task_name: str = ""):
+    perception = ExecuteProcess(
+        cmd=['python3', '/tinynav/tinynav/core/perception_node.py'],
+        name=f'{task_name}_perception',
+        output='screen'
+    )
+    mapping = ExecuteProcess(
+        cmd=['python3', '/tinynav/tinynav/core/build_map_node.py', '--map_save_path', str(map_save_path)],
+        name=f'{task_name}_mapping',
+        output='screen'
+    )
+    bag_play = ExecuteProcess(
+        cmd=['ros2', 'bag', 'play', bag_path, '--rate', str(rate), '--clock'],  # no --loop so it will exit at EOF
+        output='screen'
+    )
+    # When rosbag play exits, shut everything down after timeout
+    on_bag_exit = RegisterEventHandler(
+        OnProcessExit(
+            target_action=bag_play,
+            on_exit=[
+                TimerAction(
+                    period=timeout,
+                    actions=[EmitEvent(event=Shutdown())]
+                )
+            ]
+        )
+    )
     return LaunchDescription([
         perception,
         mapping,
@@ -387,52 +413,6 @@ class BenchmarkResults:
 
         print(f"Results saved to {output_dir}")
 
-
-def extract_bag_timestamps(bag_path: str) -> List[int]:
-    """Extract all image timestamps from ROS bag."""
-    timestamps = []
-
-    try:
-        reader = rosbag2_py.SequentialReader()
-        storage_options = rosbag2_py.StorageOptions(
-            uri=str(bag_path), storage_id="sqlite3"
-        )
-        converter_options = rosbag2_py.ConverterOptions(
-            input_serialization_format="cdr", output_serialization_format="cdr"
-        )
-        reader.open(storage_options, converter_options)
-
-        topic_types = reader.get_all_topics_and_types()
-        type_map = {topic.name: topic.type for topic in topic_types}
-
-        # Read messages
-        while reader.has_next():
-            (topic, data, timestamp) = reader.read_next()
-
-            # Look for image topics (common patterns)
-            if "/image" in topic or "/camera" in topic:
-                if "sensor_msgs/msg/Image" in type_map.get(topic, ""):
-                    timestamps.append(timestamp)
-
-    except Exception as e:
-        print(f"Error reading bag {bag_path}: {e}")
-        return []
-
-    timestamps.sort()
-    return timestamps
-
-
-def get_bag_duration(bag_path: str) -> float:
-    try:
-        info_reader = rosbag2_py.Info()
-        bag_metadata = info_reader.read_metadata(bag_path, 'sqlite3')
-        duration = bag_metadata.duration.nanoseconds / 1e9
-        return duration
-    except Exception as e:
-        print(f"Error reading bag duration {bag_path}: {e}")
-        return 0.0
-
-
 def select_evaluation_timestamps(
     poses_file: str,
     sample_cnt: int = 100,
@@ -479,45 +459,28 @@ def select_evaluation_timestamps(
 
 
 def run_mapping_process(
-    bag_path: str, is_mapping_mode: bool, rate: float = 0.25
+    bag_path: str, map_save_path: str, rate: float = 0.25, task_name: str = ""
 ) -> bool:
-    if is_mapping_mode and os.path.exists(TINYNAV_DB):
-        shutil.rmtree(TINYNAV_DB)
-        print(f"Cleaned up previous map data at {TINYNAV_DB}")
 
-    print(
-        f"Running {'mapping' if is_mapping_mode else 'localization'} on {bag_path} at {rate}x speed"
-    )
-     # FIXME(yuance): Remove this workaround after map_node can run properly without pois.txt
-    if not is_mapping_mode:
-        pois_file = f"{TINYNAV_DB}/pois.txt"
-        if not os.path.exists(pois_file):
-            default_pois = np.array(
-                [
-                    [2.0, 1.0, 0.0],
-                ]
-            )
-            np.savetxt(pois_file, default_pois, fmt="%.6f")
-
-    ld = generate_launch_description(bag_path, is_mapping_mode, rate)
+    # FIXME(yuance): Remove this workaround after map_node can run properly without pois.txt
+    pois_file = f"{map_save_path}/pois.json"
+    if not os.path.exists(pois_file):
+        json.dump({}, open(pois_file, "w"))
+    ld = generate_launch_description_mapping(bag_path, map_save_path, rate)
     ls = LaunchService()
     ls.include_launch_description(ld)
     ls.run()
     return True
 
 
-def copy_map_result(from_dir: str, to_dir: str) -> bool:
-    try:
-        if os.path.exists(to_dir):
-            print(f"Removing existing directory at {to_dir}")
-            shutil.rmtree(to_dir)
-        shutil.copytree(from_dir, to_dir)
-        print(f"Copied from {from_dir} to {to_dir}")
-        return True
-    except Exception as e:
-        print(f"Error copying map: {e}")
-        return False
-
+def run_localization_process(
+    bag_path: str, tinynav_db_path: str, rate: float = 0.25, task_name: str = ""
+) -> bool:
+    ld = generate_launch_description_localization(bag_path, tinynav_db_path, rate)
+    ls = LaunchService()
+    ls.include_launch_description(ld)
+    ls.run()
+    return True
 
 def extract_relocalization_poses(
     poses_file: str, timestamps: List[int]
@@ -553,8 +516,8 @@ def extract_relocalization_poses(
     return poses
 
 
-def extract_failed_localization_timestamps() -> List[int]:
-    failed_reloc_file = TINYNAV_DB + "/failed_relocalizations.npy"
+def extract_failed_localization_timestamps(tinynav_db_path: str) -> List[int]:
+    failed_reloc_file = tinynav_db_path + "/failed_relocalizations.npy"
 
     if not os.path.exists(failed_reloc_file):
         raise Exception(f"No failed relocalizations file found at {failed_reloc_file}")
@@ -572,17 +535,28 @@ def run_benchmark(
 
     map_result_dir_b = f"{output_dir}/benchmark_map_b"
     os.makedirs(map_result_dir_b, exist_ok=True)
+    map_result_dir_a = f"{output_dir}/benchmark_map_a"
+    os.makedirs(map_result_dir_a, exist_ok=True)
 
     results = BenchmarkResults()
 
-    print("\nStep 1: Creating ground truth map B from bag B...")
-    if not run_mapping_process(bag_b_path, is_mapping_mode=True, rate=rate):
-        print("Error: Failed to create map B")
+    print("\nStep 1: Creating map A from bag A as reference...")
+    if not run_mapping_process(bag_a_path, map_save_path=map_result_dir_a, rate=rate, task_name="mapping_a"):
+        print("Error: Failed to create map A")
         return False
 
-    print("\nStep 2: Selecting evaluation timestamps from map B keyframes...")
+    print("\nStep 2: Localizing bag B in map A...")
+    if not run_localization_process(
+        bag_a_path,
+        tinynav_db_path=map_result_dir_b,
+        rate=rate,
+    ):
+        print("Error: Failed to localize bag B in map A")
+        return False
+
+    print("\nStep 3: Selecting evaluation timestamps from map B keyframes as ground truth...")
     ground_truth_poses = select_evaluation_timestamps(
-        TINYNAV_DB + "/poses.npy",
+        map_result_dir_b + "/graph_poses.npy",
         100,
     )
 
@@ -593,32 +567,15 @@ def run_benchmark(
     # Extract timestamps and ground truth poses
     evaluation_timestamps = list(ground_truth_poses.keys())
     print(f"Extracted {len(ground_truth_poses)} ground truth poses")
-
-    copy_map_result(TINYNAV_DB, map_result_dir_b)
-
-    print("\nStep 3: Creating map A from bag A...")
-    if not run_mapping_process(bag_a_path, is_mapping_mode=True, rate=rate):
-        print("Error: Failed to create map A")
-        return False
-
-    print("\nStep 4: Localizing bag B in map A...")
-    if not run_mapping_process(
-        bag_b_path,
-        is_mapping_mode=False,
-        rate=rate,
-    ):
-        print("Error: Failed to localize bag B in map A")
-        return False
-
     # Extract localization results for the same timestamps
     localization_poses = extract_relocalization_poses(
-        TINYNAV_DB + "/relocalization_poses.npy", evaluation_timestamps
+        map_result_dir_b + "/relocalization_poses.npy", evaluation_timestamps
     )
     print(f"Extracted {len(localization_poses)} localization poses")
-    failed_reloc_timestamps = extract_failed_localization_timestamps()
+    failed_reloc_timestamps = extract_failed_localization_timestamps(map_result_dir_b)
     print(f"Extracted {len(failed_reloc_timestamps)} failed relocalizations")
 
-    print("\nStep 5: Computing coordinate transformation...")
+    print("\nStep 4: Computing coordinate transformation between map A and map B...")
     for timestamp in evaluation_timestamps:
         if timestamp in localization_poses and timestamp in ground_truth_poses:
             results.add_pose_pair(
@@ -633,7 +590,7 @@ def run_benchmark(
         print("Error: Failed to compute coordinate transformation")
         return False
 
-    print("\nStep 6: Evaluating localization accuracy...")
+    print("\nStep 5: Evaluating localization accuracy...")
     results.evaluate_accuracy()
 
     os.makedirs(output_dir, exist_ok=True)
@@ -664,8 +621,8 @@ def main():
     parser.add_argument(
         "--rate",
         type=float,
-        default=0.25,
-        help="Playback rate for ROS bags (default: 0.25x)",
+        default=1.0,
+        help="Playback rate for ROS bags (default: 1.0x)",
     )
     parser.add_argument(
         "--timeout",

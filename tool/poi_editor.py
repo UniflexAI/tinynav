@@ -4,7 +4,8 @@ import time
 from pathlib import Path
 from typing import TypedDict
 import shelve
-
+from nav_msgs.msg import Odometry
+import nav_msgs
 import numpy as np
 import numpy.typing as npt
 import tyro
@@ -13,6 +14,9 @@ import  viser.transforms as vtf
 import viser
 from viser import transforms as tf
 import json
+from rclpy.node import Node
+import rclpy
+
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -97,9 +101,7 @@ def load_ply_file(ply_file_path: Path, center: bool = False) -> SplatFile:
     }
     
 def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphere_handle:viser.SceneHandle):
-
     with poi_list_container:
-
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
             gui_vector3 = server.gui.add_vector3(
                 "Position",
@@ -140,20 +142,60 @@ def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphe
         poi_container.remove()
         sphere_handle.remove()
         gizmo.remove()
+
+class RelocalizationPose(Node):
+    def __init__(self, viser_server: viser.ViserServer):
+        super().__init__('relocalization_pose')
+        self.viser_server = viser_server
+        self.relocalization_pose_sub = self.create_subscription(Odometry, '/map/relocalization', self.relocalization_pose_callback, 10)
+        self.global_plan_sub = self.create_subscription(nav_msgs.msg.Path, '/mapping/global_plan', self.global_plan_callback, 10)
+
+    def relocalization_pose_callback(self, msg: Odometry):
+        position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        self.viser_server.scene.add_icosphere(
+            "/relocalization_pose",
+            color=(255, 0, 0),
+            position=position,
+            radius=0.1
+        )
+
+    def global_plan_callback(self, msg: Path):
+        points = []
+        for pose in msg.poses:
+            position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
+            points.append(position)
+        if len(points) < 2:
+            print("Not enough points to draw line segments")
+            return
+        line_segments= []
+        for i in range(1, len(points)):
+            line_segments.append(np.array([points[i-1], points[i]]))
+        line_segments = np.array(line_segments)
+        N = line_segments.shape[0]
+        colors = np.zeros((N, 2, 3))
+        colors[:, 0, :] = (0, 255, 0)
+        colors[:, 1, :] = (0, 255, 0)
+        self.viser_server.scene.add_line_segments(
+            "/global_plan",
+            points=np.array(line_segments),
+            colors=colors,
+            line_width=3
+        )
+
+
 def main(
     tinynav_db_path: Path,
 ) -> None:
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
-
     
     # POI management
     poi_points = {}
     poi_id_counter = 0
     
     # Add POI management UI
-    with server.gui.add_folder("Points of Interest (POI)") as poi_folder:
+    with server.gui.add_folder("Points of Interest (POI)") as _:
         add_poi_button = server.gui.add_button("Add POI Point")
         add_save_poi_button = server.gui.add_button("Save POI")
 
@@ -194,15 +236,15 @@ def main(
     T_rgb_to_infra1 = np.load(tinynav_db_path / "T_rgb_to_infra1.npy", allow_pickle=True)
 
     splat_paths = list([Path(f"{tinynav_db_path}/splat.ply")])
-    fx, fy, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
-    with server.gui.add_folder("cameras") as camera_images_folder:
+    fx, _, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
+    with server.gui.add_folder("cameras") as _:
         for timestamp, rgb_pose in poses.items():
             rgb_pose = rgb_pose @ T_rgb_to_infra1 
             rgb_image = rgb_images[str(timestamp)]
-            image_size = rgb_image.shape[:2]
+            _ = rgb_image.shape[:2]
             R = vtf.SO3.from_matrix(rgb_pose[:3, :3])
             t = rgb_pose[:3, 3]
-            camera_handle = server.scene.add_camera_frustum(
+            _ = server.scene.add_camera_frustum(
                 name=f"/cameras/camera_{timestamp}",
                 fov=float(2 * np.arctan((cx / fx))),
                 scale=0.01,
@@ -236,8 +278,15 @@ def main(
             gs_handle.remove()
             remove_button.remove()
 
-    while True:
-        time.sleep(1.0)
+    rclpy.init()
+    relocalization_pose_node = RelocalizationPose(server)
+    try:
+        rclpy.spin(relocalization_pose_node)
+        relocalization_pose_node.destroy_node()
+        rclpy.shutdown()
+    except KeyboardInterrupt:
+        pass
+
 
 if __name__ == "__main__":
     tyro.cli(main)

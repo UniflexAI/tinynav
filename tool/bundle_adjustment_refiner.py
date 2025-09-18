@@ -6,15 +6,11 @@ import os
 import cv2
 import einops
 from lightglue import LightGlue, SuperPoint
-from lightglue.utils import load_image, rbd
-from tqdm import tqdm
+from lightglue.utils import rbd
 from tinynav.tinynav_cpp_bind import ba_solve
 from typing import Dict, List, Tuple
-from typing import Dict, List, Tuple, Optional, Set
 from dataclasses import dataclass
-from collections import defaultdict
-import json
-import os
+from convert_to_colmap_format import convert_nerf_format
 
 
 extractor = SuperPoint(max_num_keypoints=2048).eval().cuda()  # load the extractor
@@ -341,8 +337,6 @@ def match_images(image0, image1):
     matches01 = matcher({'image0': feats0, 'image1': feats1})
     feats0, feats1, matches01 = [rbd(x) for x in [feats0, feats1, matches01]]  # remove batch dimension
     matches = matches01['matches']  # indices with shape (K,2)
-    points0 = feats0['keypoints'][matches[..., 0]]  # coordinates in image #0, shape (K,2)
-    points1 = feats1['keypoints'][matches[..., 1]]  # coordinates in image #1, shape (K,2)
     descriptors0 = feats0['descriptors']
     descriptors1 = feats1['descriptors']
     return feats0['keypoints'], feats1['keypoints'], matches, descriptors0, descriptors1
@@ -366,9 +360,12 @@ def main(tinynav_db_path: str):
         rgb_poses[timestamp] = infra1_poses[timestamp] @ T_rgb_to_infra1
     keypoints_matches = {}
     landmark_tracker = LandmarkTracker()
+    rgb_image_size = None
     for prev_timestamp, curr_timestamp in edges:
         prev_rgb_image = rgb_images[str(prev_timestamp)]
         curr_rgb_image = rgb_images[str(curr_timestamp)]
+        if rgb_image_size is None:
+            rgb_image_size = prev_rgb_image.shape[:2]
         keypoints0, keypoints1, matches, descriptors0, descriptors1 = match_images(prev_rgb_image, curr_rgb_image)
         points0 = keypoints0[matches[..., 0]]  # coordinates in image #0, shape (K,2)
         points1 = keypoints1[matches[..., 1]]  # coordinates in image #1, shape (K,2)
@@ -420,6 +417,8 @@ def main(tinynav_db_path: str):
     }
     np.save(os.path.join(tinynav_db_path, "poses.npy"), optimized_infra1_poses, allow_pickle=True)
     print(f"save refined poses to {os.path.join(tinynav_db_path, 'poses.npy')}")
+    convert_nerf_format(tinynav_db_path, optimized_infra1_poses, rgb_intrinsics, rgb_image_size, T_rgb_to_infra1)
+    print(f"save refined poses to {os.path.join(tinynav_db_path, 'transforms.json')}")
 
 if __name__ == "__main__":
     tyro.cli(main)

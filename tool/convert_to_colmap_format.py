@@ -71,7 +71,6 @@ class TinynavToColmapConverter:
 
         # Load poses
         self.poses = np.load(self.input_dir / "poses.npy", allow_pickle=True).item()
-        assert type(self.poses) == dict
         # Load intrinsics
         self.infra1_intrinsics = np.load(self.input_dir / "intrinsics.npy")
         self.baseline = np.load(self.input_dir / "baseline.npy")
@@ -248,7 +247,6 @@ class TinynavToColmapConverter:
         
         # Get camera parameters
         K = self.infra1_intrinsics
-        baseline = self.baseline
             
         for image_id, timestamp, image_name, rgb_pose_in_world, infra1_pose_in_world in tqdm(images, desc="Generating 3D points from depth"):
             depth = self.depths[str(timestamp)]

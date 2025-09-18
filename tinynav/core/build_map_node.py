@@ -22,30 +22,44 @@ import asyncio
 import shelve
 from tqdm import tqdm
 import einops
-from numba import njit
 from visualization_msgs.msg import MarkerArray
 from tf2_msgs.msg import TFMessage
+from typing import Tuple
+import json
 
 logger = logging.getLogger(__name__)
-TINYNAV_DB = "tinynav_db"
-@njit(cache=True)
-def depth_to_cloud_in_world(depth: np.ndarray, K: np.ndarray, baseline: float, pose_in_world: np.ndarray) -> np.ndarray:
-    h, w = depth.shape
-    points_3d = []
-    for u in range(w):
-        for v in range(h):
-            if 0.1 < depth[v, u] and depth[v, u] < 10.0:
-                z = depth[v, u]
-                x = (u - K[0, 2]) * z / K[0, 0]
-                y = (v - K[1, 2]) * z / K[1, 1]
-                norm = np.linalg.norm(np.array([x, y, z]))
-                if norm > 10.0 or y < -1.0:
-                    continue
-                world_x = pose_in_world[0, 0] * x + pose_in_world[0, 1] * y + pose_in_world[0, 2] * z + pose_in_world[0, 3]
-                world_y = pose_in_world[1, 0] * x + pose_in_world[1, 1] * y + pose_in_world[1, 2] * z + pose_in_world[1, 3]
-                world_z = pose_in_world[2, 0] * x + pose_in_world[2, 1] * y + pose_in_world[2, 2] * z + pose_in_world[2, 3]
-                points_3d.append([world_x, world_y, world_z])
-    return np.array(points_3d)
+
+def convert_nerf_format(output_dir: str, infra1_poses: dict, rgb_intrinscis:np.ndarray, image_size: Tuple[int, int], T_rgb_to_infra1:np.ndarray):
+    camera_model = "PINHOLE"
+    fl_x = rgb_intrinscis[0, 0]
+    fl_y = rgb_intrinscis[1, 1]
+    cx = rgb_intrinscis[0, 2]
+    cy = rgb_intrinscis[1, 2]
+    w = image_size[1]
+    h = image_size[0]
+    frames = []
+    opencv_to_opengl_convention = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
+    for timestmap, camera_to_world_pose in infra1_poses.items():
+        camera_to_world_opengl = camera_to_world_pose @ T_rgb_to_infra1 @ opencv_to_opengl_convention
+        frame = {
+            "file_path": f"images/image_{timestmap}.png",
+            "transform_matrix": camera_to_world_opengl.tolist(),
+        }
+        frames.append(frame)
+
+    data = {
+        "camera_model": camera_model,
+        "fl_x": fl_x,
+        "fl_y": fl_y,
+        "cx": cx,
+        "cy": cy,
+        "w": w,
+        "h": h,
+        "frames": frames
+    }
+
+    with open(f"{output_dir}/transforms.json", "w") as f:
+        json.dump(data, f, indent=4)
 
 def merge_grids(grid1:np.ndarray, grid1_origin:np.ndarray, grid2:np.ndarray, grid2_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -100,14 +114,12 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
     if len(embeddings) == 0:
         return []
     similarity_array = einops.einsum(target_embedding, embeddings, "d, n d -> n")
-    top_k_indices = np.argsort(similarity_array, axis = 0)[-loop_top_k:]
+    top_k_indices = np.argsort(similarity_array, axis = 0)
     loop_list = []
     for idx in top_k_indices:
         if similarity_array[idx] > loop_similarity_threshold:
             loop_list.append((idx, similarity_array[idx]))
-        if len(loop_list) >= loop_top_k:
-            break
-    return loop_list
+    return loop_list[-loop_top_k:]
 
 def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10):
     """
@@ -139,7 +151,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10)
     x_y_plane_image[x_y_plane == 2] = 1.0
     x_y_plane_image[x_y_plane == 1] = 0.5
     x_y_plane_image = (x_y_plane_image * 255).astype(np.uint8)
-    return global_grid, global_origin, x_y_plane_image
+    return grid_type, global_origin, x_y_plane_image
 
 class IntKeyShelf:
     def __init__(self, filename):
@@ -249,8 +261,6 @@ class BuildMapNode(Node):
         self.map_save_path = map_save_path
         self._on_shutdown_callback_registered = True
         rclpy.get_default_context().on_shutdown(self.on_shutdown)
-        self.window_size = 5
-        self.keyframe_timestamp_windows = []
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
         self.T_rgb_to_infra1 = None
@@ -321,7 +331,6 @@ class BuildMapNode(Node):
             if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
                 self.odom[keyframe_image_timestamp] = odom
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
-                self.keyframe_timestamp_windows.append(keyframe_image_timestamp)
             else:
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
                 T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
@@ -329,17 +338,7 @@ class BuildMapNode(Node):
                 self.edges.add((self.last_keyframe_timestamp, keyframe_image_timestamp))
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
                 self.odom[keyframe_image_timestamp] = odom
-                self.keyframe_timestamp_windows.append(keyframe_image_timestamp)
 
-                for prev_timestamp in self.keyframe_timestamp_windows[-self.window_size:-1]:
-                    _,_, prev_features, _, _= self.db.get_depth_embedding_features_images(prev_timestamp)
-                    curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(keyframe_image_timestamp)
-
-                    prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
-                    success, T_prev_curr_features, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
-                    if success and len(inliers) >= 100:
-                        self.relative_pose_constraint.append((keyframe_image_timestamp, prev_timestamp, T_prev_curr_features))
-                        print(f"Added relative pose constraint: {keyframe_image_timestamp} -> {prev_timestamp}")
 
                 def find_loop_and_pose_graph(timestamp):
                     target_embedding = self.db.get_embedding(timestamp)
@@ -427,6 +426,15 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
         np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
+
+        image_size = None
+        os.makedirs(f"{self.map_save_path}/images", exist_ok=True)
+        for timestamp, infra1_pose in self.pose_graph_used_pose.items():
+            _, _, _, rgb_image, _ = self.db.get_depth_embedding_features_images(timestamp)
+            if image_size is None:
+                image_size = rgb_image.shape[:2]
+            cv2.imwrite(f"{self.map_save_path}/images/image_{timestamp}.png", rgb_image)
+        convert_nerf_format(self.map_save_path, self.pose_graph_used_pose, self.rgb_camera_K, image_size, self.T_rgb_to_infra1)
         self.db.close()
 
     def on_shutdown(self):
@@ -445,7 +453,7 @@ def main(args=None):
     )
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--map_save_path", type=str, default=TINYNAV_DB)
+    parser.add_argument("--map_save_path", type=str, default="tinynav_db")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = BuildMapNode(parsed_args.map_save_path)
     try:
@@ -454,7 +462,7 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info("Ctrl+C pressed, shutting down...")
     finally:
-        node.on_shutdown()  # <-- you can implement a shutdown method in your node
+        node.on_shutdown()
         node.destroy_node()
 
 if __name__ == '__main__':
