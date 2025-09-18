@@ -1,6 +1,7 @@
 #!/bin/bash
-data_path=tinynav_db
-output_path=tinynav_db
+uv pip install .[3dgs]
+data_path=/tinynav/output/map_color_benchmark01
+output_path=/tinynav/output/map_color_benchmark01
 MAX_JOBS=1 ns-train splatfacto \
       --output-dir $output_path \
       --experiment-name experiment \

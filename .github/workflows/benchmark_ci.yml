@@ -35,8 +35,8 @@ jobs:
               uv venv --system-site-packages
               uv sync
               mkdir -p /tinynav/benchmark_results/${{ env.SHORT_SHA}}
-              bag_a_path=/tmp/benchmark_data_cache/rosbag2_2025_08_08-02_18_54
-              bag_b_path=/tmp/benchmark_data_cache/rosbag2_2025_08_08-02_29_41
+              bag_a_path=/tmp/benchmark_data_cache/rosbag2_2025_09_17-16_27_38
+              bag_b_path=/tmp/benchmark_data_cache/rosbag2_2025_09_17-16_31_03
               cd /tinynav/tinynav/models
               make
               cd /tinynav

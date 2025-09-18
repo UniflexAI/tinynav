@@ -1,6 +1,6 @@
 #!/bin/bash
-rosbag_path=$(uv run huggingface-cli download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_exposure_1k)
-map_save_path=/tinynav/rosbag2_go2_exposure_1k_map
+rosbag_path=$(uv run huggingface-cli download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_map_color_benchmark01)
+map_save_path=/tinynav/output/map_color_benchmark01
 
 tmux new-session \; \
   split-window -h \; \
