@@ -37,10 +37,14 @@ jobs:
               mkdir -p /tinynav/benchmark_results/${{ env.SHORT_SHA}}
               bag_a_path=/tmp/benchmark_data_cache/rosbag2_2025_08_08-02_18_54
               bag_b_path=/tmp/benchmark_data_cache/rosbag2_2025_08_08-02_29_41
+              cd /tinynav/tinynav/models
+              make
+              cd /tinynav
               uv run python tool/benchmark/benchmark_mapping.py \
                 --bag_a \$bag_a_path \
                 --bag_b \$bag_b_path \
                 --output_dir /tinynav/benchmark_results/${{ env.SHORT_SHA}}
+              chmod -R 777 /tinynav
             "
 
       - name: Authenticate GitHub CLI
