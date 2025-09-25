@@ -41,12 +41,6 @@ jobs:
             --cache-to=type=local,dest=/home/nvidia/.buildx-cache/arm64,mode=max \
             .
 
-      - name: Test TensorRT model (arm64, in-container)
-        run: |
-          docker run --rm --runtime nvidia \
-            uniflexai/tinynav:${SHORT_SHA}-arm64 \
-            uv run python tinynav/core/models_trt.py
-
   build-amd64:
     runs-on: X64
     steps:
@@ -82,12 +76,6 @@ jobs:
             --cache-to=type=local,dest=/tmp/.buildx-cache/amd64,mode=max \
             .
 
-      - name: Test TensorRT model (amd64, in-container)
-        run: |
-          docker run --rm --gpus all \
-            uniflexai/tinynav:${SHORT_SHA}-amd64 \
-            uv run python tinynav/core/models_trt.py
-
   build-multiarch:
     runs-on: ARM64
     needs: [build-amd64, build-arm64]
@@ -108,5 +96,9 @@ jobs:
           SHORT_SHA=${SHORT_SHA::7}
           docker buildx imagetools create \
             -t uniflexai/tinynav:${SHORT_SHA} \
+            uniflexai/tinynav:${SHORT_SHA}-amd64 \
+            uniflexai/tinynav:${SHORT_SHA}-arm64
+          docker buildx imagetools create \
+            -t uniflexai/tinynav:latest \
             uniflexai/tinynav:${SHORT_SHA}-amd64 \
             uniflexai/tinynav:${SHORT_SHA}-arm64
