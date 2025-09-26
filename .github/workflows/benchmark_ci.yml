@@ -6,7 +6,7 @@ on:
 
 jobs:
   benchmark-mapping:
-    runs-on: self-hosted
+    runs-on: X64
 
     steps:
       - name: Checkout code
@@ -20,7 +20,6 @@ jobs:
       - name: Extract short commit SHA
         id: vars
         run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
-
 
       - name: Benchmark mapping
         run: |
