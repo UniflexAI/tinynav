@@ -1,0 +1,25 @@
+name: cpp build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    runs-on: ARM64
+    container:
+      image: uniflexai/tinynav:latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Build for ARM64
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build
