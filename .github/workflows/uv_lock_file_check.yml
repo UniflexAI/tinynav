@@ -1,0 +1,23 @@
+name: UV lock file check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: X64
+    container:
+      image: uniflexai/tinynav:latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - name: Lock file check
+        run: |
+          uv lock --check
