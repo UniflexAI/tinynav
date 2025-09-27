@@ -547,7 +547,7 @@ def run_benchmark(
 
     print("\nStep 2: Localizing bag B in map A...")
     if not run_localization_process(
-        bag_a_path,
+        bag_b_path,
         tinynav_db_path=map_result_dir_a,
         rate=rate,
     ):
