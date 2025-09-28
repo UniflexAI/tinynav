@@ -24,9 +24,36 @@
 | [Navigation with 3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) |
 | ----------------------|
 | <video src="https://github.com/user-attachments/assets/5e0d5846-ab3f-4a57-8bdd-067473e758a9"> |
+# [v0.2] What's Changed
+## 🚀 Features
+- **3D Gaussian Splatting (3DGS) Map Representation**  
+  Provides high-quality visualization and an intuitive map editor, making it easy to inspect map details and place target POIs with precision.
+
+- **ESDF-based Obstacle Avoidance**  
+  Enables more human-like navigation. Robots not only avoid obstacles but also keep a safe distance, improving path quality.
+
+- **Localization Benchmark**  
+  Adds a benchmark for map-based localization, allowing clear and quantitative evaluation of improvements across versions.
+
+- **CUDA Graph Optimization**  
+  Reduces inference overhead and achieves >20Hz on Jetson Nano, lowering latency for real-time closed-loop navigation.
+
+## 🔧 Improvements
+- **Simplified First-Time Setup**  
+  The `postStartCommand` command in the dev container now auto-generates platform-specific models, reducing errors and making setup more user-friendly.
+
+- **Expanded CI Testing**  
+  Broader continuous integration coverage ensures higher build stability and code quality.
+
+- **Map Storage with KV Database**  
+  Maps are now stored using `shelve`, resulting in shorter code and better performance.
+
+## 🐞 Bug Fixes
+- Over **50 pull requests** merged since the last release, delivering numerous fixes and stability improvements.
+
 
 # [v0.1] What's Changed
-## Features
+## 🚀 Features
 * Implemented **map-based navigation** with **relocalization** and **global planning**.
 * Added support for **Unitree** robots.
 * Added support for the **Lewiki** platform.
@@ -34,13 +61,13 @@
 * **Tuned Intel® RealSense™ exposure strategy**, optimized for robotics tasks.
 * Added **Gazebo** simulation environment
 * CI: **Docker image build & push** pipeline.
-## Improvements
+## 🔧 Improvements
 * Used **Numba JIT** to speed up key operations while keeping the code simple and maintainable.
 * Adopted **asyncio** for **concurrent model inference.**
 * Added **gravity correction** when velocity is zero.
 * Mount **/etc/localtime** by default so **ROS bag** files use local time in their names.
 * **Optimized trajectory generation.**
-## BugFix
+## 🐞 BugFix
 * Various bug fixes and stability improvements.
 
 # Highlight (Our Design Goals)
