@@ -21,6 +21,9 @@
 | ------------- | ------------- |
 | <video src="https://github.com/user-attachments/assets/f4ff4842-f0ca-4299-b3d5-5d097de1f2ba">  | <video src="https://github.com/user-attachments/assets/c9b4b949-943b-4910-92f0-0337ef26d0b0">   |
 
+| [Navigation with 3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) |
+| ----------------------|
+| <video src="https://github.com/user-attachments/assets/5e0d5846-ab3f-4a57-8bdd-067473e758a9"> |
 
 # [v0.1] What's Changed
 ## Features
