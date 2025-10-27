@@ -52,6 +52,36 @@ uv run python tool/benchmark/benchmark_mapping.py \
     --output_dir benchmark_results/
 ```
 
+#### Command Line Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bag_a` | Required | Path to ROS bag A (for creating reference map) |
+| `--bag_b` | Required | Path to ROS bag B (for localization and ground truth) |
+| `--output_dir` | `output/benchmark_results` | Output directory for results |
+| `--num_images` | `100` | Number of evaluation samples |
+| `--rate` | `1.0` | Playback rate for ROS bags (e.g., 2.0 for 2x speed) |
+| `--timeout` | `60` | Timeout for each mapping process (seconds) |
+| `--verbose_timer` | - | Enable verbose timer output for all nodes |
+| `--no_verbose_timer` | - | Disable verbose timer output (cleaner logs) |
+
+#### Timer Output Control
+
+By default, the benchmark runs in quiet mode with minimal timer output for cleaner logs. You can control the verbosity:
+
+```bash
+# Default behavior - quiet mode (recommended for production)
+uv run python tool/benchmark/benchmark_mapping.py --bag_a bag_a --bag_b bag_b
+
+# Enable verbose timing for debugging/development
+uv run python tool/benchmark/benchmark_mapping.py --bag_a bag_a --bag_b bag_b --verbose_timer
+
+# Explicit quiet mode (same as default)
+uv run python tool/benchmark/benchmark_mapping.py --bag_a bag_a --bag_b bag_b --no_verbose_timer
+```
+
+**Note**: Verbose timer mode shows detailed timing information from perception, mapping, and localization nodes, which can be helpful for performance analysis but produces significantly more log output.
+
 ### Output
 
 The benchmark generates:

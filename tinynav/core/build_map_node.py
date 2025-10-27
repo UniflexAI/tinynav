@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
+from std_msgs.msg import Bool
 import numpy as np
 import sys
 
@@ -24,7 +25,7 @@ from tqdm import tqdm
 import einops
 from visualization_msgs.msg import MarkerArray
 from tf2_msgs.msg import TFMessage
-from typing import Tuple
+from typing import Tuple, Dict
 import json
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, m
     constant_pose_index_dict = { min_timestamp : True }
 
     relative_pose_constraint = [
-        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([30.0, 30.0, 30.0])) 
+        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([30.0, 30.0, 30.0]))
         for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
     optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
     return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
@@ -175,8 +176,60 @@ class IntKeyShelf:
     def close(self):
         self.db.close()
 
-class TinyNavDB():
 
+class OdomPoseRecorder:
+    """
+    Utility class to record continuous odometry data to disk.
+    Saves timestamp-pose pairs for later timestamp-based queries.
+    """
+
+    def __init__(self, save_path: str, prefix: str = "poses"):
+        self.save_path = save_path
+        self.prefix = prefix
+        self.file_save_path = os.path.join(save_path, f"{prefix}_continuous_odom.npy")
+        self.poses: Dict[int, np.ndarray] = {}  # timestamp_ns -> 4x4 pose matrix
+
+        os.makedirs(save_path, exist_ok=True)
+
+    def record_odometry_msg(self, odom_msg: Odometry) -> None:
+        timestamp_ns = int(odom_msg.header.stamp.sec * 1e9) + int(
+            odom_msg.header.stamp.nanosec
+        )
+        pose_matrix = msg2np(odom_msg)
+        self.poses[timestamp_ns] = pose_matrix
+
+    def save_to_disk(self) -> None:
+        if not self.poses:
+            logger.warning(f"No continuous odom poses to save for {self.prefix}")
+            return
+
+        logger.info(f"{self.prefix}: Saved {len(self.poses)} continuous odom poses")
+        # Create a copy of the dict for saving to avoid any typing issues
+        poses_to_save = dict(self.poses)
+        np.save(self.file_save_path, poses_to_save, allow_pickle=True)  # type: ignore
+
+        logger.info(f"Saved {len(self.poses)} poses to {self.file_save_path}")
+
+    def load_from_disk(self) -> bool:
+        if not os.path.exists(self.file_save_path):
+            logger.warning(f"Pose file not found: {self.file_save_path}")
+            return False
+
+        try:
+            self.poses = np.load(self.file_save_path, allow_pickle=True).item()
+            logger.info(
+                f"[PoseRecorder] Loaded {len(self.poses)} poses from {self.file_save_path}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load poses from {self.file_save_path}: {e}")
+            return False
+
+    def clear(self) -> None:
+        self.poses.clear()
+
+
+class TinyNavDB():
     def __init__(self, map_save_path:str, is_scratch:bool = True):
         self.map_save_path = map_save_path
         if is_scratch:
@@ -223,8 +276,11 @@ class TinyNavDB():
 
 
 class BuildMapNode(Node):
-    def __init__(self, map_save_path:str):
+    def __init__(self, map_save_path:str, verbose_timer: bool = True):
         super().__init__('map_node')
+        self.verbose_timer = verbose_timer
+        self.logger = logging.getLogger(__name__)
+        self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
@@ -236,12 +292,17 @@ class BuildMapNode(Node):
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
         self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
+        self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
 
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.project_3d_to_2d_pub = self.create_publisher(Image, "/mapping/project_3d_to_2d", 10)
         self.matches_image_pub = self.create_publisher(Image, "/mapping/keyframe_matches_images", 10)
         self.loop_matches_image_pub = self.create_publisher(Image, "/mapping/loop_matches_images", 10)
         self.global_map_marker_pub = self.create_publisher(MarkerArray, "/mapping/global_map_marker", 10)
+
+        # Add stop signal subscription and save finished publisher
+        self.mapping_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.mapping_stop_callback, 10)
+        self.mapping_save_finished_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
         self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000)
         self.ts.registerCallback(self.keyframe_callback)
 
@@ -251,6 +312,7 @@ class BuildMapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
+        self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
         self.db = TinyNavDB(map_save_path)
@@ -259,15 +321,13 @@ class BuildMapNode(Node):
         self.loop_top_k = 1
 
         self.map_save_path = map_save_path
-        self._on_shutdown_callback_registered = True
-        rclpy.get_default_context().on_shutdown(self.on_shutdown)
+        self._save_completed = False
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
         self.T_rgb_to_infra1 = None
         self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
-
 
         self.edges = set()
 
@@ -296,38 +356,61 @@ class BuildMapNode(Node):
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
-            logger.info("Camera intrinsics received.")
+            self.get_logger().info("Camera intrinsics received.")
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]
             self.baseline = -Tx / fx
             self.destroy_subscription(self.camera_info_sub)
 
-    @Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
+    def continuous_odom_callback(self, odom_msg: Odometry):
+        self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+
+    def mapping_stop_callback(self, msg: Bool):
+        if msg.data:
+            self.get_logger().info("Received benchmark stop signal, starting save process...")
+            try:
+                self.save_mapping()
+                self.get_logger().info("Mapping save completed successfully")
+
+                # Publish save finished signal
+                save_finished_msg = Bool()
+                save_finished_msg.data = True
+                self.mapping_save_finished_pub.publish(save_finished_msg)
+                self.get_logger().info("Published data save finished signal")
+
+            except Exception as e:
+                self.get_logger().error(f"Error during mapping save: {e}")
+                # Still publish completion signal even if there was an error
+                save_finished_msg = Bool()
+                save_finished_msg.data = False
+                self.mapping_save_finished_pub.publish(save_finished_msg)
+
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
-        if self.K is None:
-            return
-        self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
+        with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            if self.K is None:
+                return
+            self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
 
     def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
-        with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
-        with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
-        with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             embedding = self.get_embeddings(infra1_image)
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
-        with Timer(name = "super point extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "super point extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
 
-        with Timer(name = "loop and pose graph solve", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "loop and pose graph solve", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
                 self.odom[keyframe_image_timestamp] = odom
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
@@ -346,9 +429,9 @@ class BuildMapNode(Node):
                     valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
 
                     idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
-                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
-                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         for idx, similarity in loop_list:
                             prev_timestamp = idx_to_timestamp[idx]
                             curr_timestamp = timestamp
@@ -360,15 +443,13 @@ class BuildMapNode(Node):
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                                 self.edges.add((prev_timestamp, curr_timestamp))
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
                 find_loop_and_pose_graph(keyframe_image_timestamp)
 
-        with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_image_timestamp
-
-
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
@@ -407,14 +488,31 @@ class BuildMapNode(Node):
         self.pose_graph_trajectory_pub.publish(path_msg)
 
     def save_mapping(self):
-        if self.K is None:
+        if self._save_completed:
+            self.get_logger().info("Mapping data already saved, skipping duplicate save")
             return
-        with Timer(name = "final pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+
+        if self.K is None:
+            self.get_logger().info("No camera intrinsics available, skipping save")
+            return
+
+        self.get_logger().info("Saving mapping data...")
+
+        # Save continuous poses
+        self.continuous_odom_recorder.save_to_disk()
+
+        with Timer(name = "final pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint)
 
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
+        print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
+        np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
+        np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
+        np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
+
+        # Generate occupancy map
         occupancy_resolution = 0.05
         occupancy_step = 10
         occupancy_grid, occupancy_origin, occupancy_2d_image = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
@@ -422,10 +520,6 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
-        print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
-        np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
-        np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
-        np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
 
         image_size = None
         os.makedirs(f"{self.map_save_path}/images", exist_ok=True)
@@ -437,33 +531,44 @@ class BuildMapNode(Node):
         convert_nerf_format(self.map_save_path, self.pose_graph_used_pose, self.rgb_camera_K, image_size, self.T_rgb_to_infra1)
         self.db.close()
 
-    def on_shutdown(self):
-        print("Shutdown callback triggered - saving mapping data...")
-        self.global_map_pub_thread_running = False
-        # Only join if thread was actually started
-        if hasattr(self, 'global_map_pub_thread') and self.global_map_pub_thread.is_alive():
-            self.global_map_pub_thread.join()
-        self.save_mapping()
-        print("Mapping data saved successfully.")
+        self._save_completed = True
+        self.get_logger().info("Full mapping data saved successfully")
+
+    def destroy_node(self):
+        try:
+            self.save_mapping()
+            super().destroy_node()
+        except Exception:
+            # Ignore errors during destruction as resources may already be freed
+            pass
+
 
 def main(args=None):
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
     )
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
     parser.add_argument("--map_save_path", type=str, default="tinynav_db")
+    parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
+    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
-    node = BuildMapNode(parsed_args.map_save_path)
+    node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
+
     try:
         rclpy.spin(node)
-        rclpy.shutdown()
     except KeyboardInterrupt:
-        node.get_logger().info("Ctrl+C pressed, shutting down...")
+        logging.info("Keyboard interrupt received, build map node is shut down")
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
     finally:
-        node.on_shutdown()
-        node.destroy_node()
+        try:
+            node.destroy_node()
+            rclpy.shutdown()
+        except Exception as e:
+            logging.error(f"Error occurred: {e}")
 
 if __name__ == '__main__':
     main()
