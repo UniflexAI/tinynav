@@ -182,7 +182,7 @@ def estimate_pose( kpts_prev, kpts_curr, depth, K) -> tuple[bool, np.ndarray, np
         return False, np.eye(4), None, None, None
     points_3d = np.array(points_3d, dtype=np.float32)
     points_2d = np.array(points_2d, dtype=np.float32)
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None)
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None, reprojectionError=2.0, confidence=0.999, flags=cv2.SOLVEPNP_EPNP)
     if not success:
         return False, np.eye(4), None, None, None
     R_mat, _ = cv2.Rodrigues(rvec)

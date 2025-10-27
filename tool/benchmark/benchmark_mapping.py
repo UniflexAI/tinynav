@@ -1,10 +1,13 @@
 import os
 import argparse
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
+import rosbag2_py
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 from reportlab.platypus import (
     SimpleDocTemplate,
     Image,
@@ -18,91 +21,401 @@ from launch import LaunchService, LaunchDescription
 from launch.actions import ExecuteProcess, RegisterEventHandler, EmitEvent
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
-from launch.actions import TimerAction
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from tabulate import tabulate
 
+
+class BagMetadataExtractor:
+    """
+    Utility to extract metadata from ROS2 bags, particularly timing information
+    for timestamp-based pose sampling.
+    """
+
+    @staticmethod
+    def get_bag_time_range(bag_path: str) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Extract start and end timestamps from a ROS2 bag.
+
+        Args:
+            bag_path: Path to the ROS2 bag directory
+
+        Returns:
+            Tuple of (start_time_ns, end_time_ns) or (None, None) if failed
+        """
+        try:
+            info = rosbag2_py.Info()
+            metadata = info.read_metadata(bag_path, "")
+
+            start_ns = metadata.starting_time.nanoseconds
+            end_ns = start_ns + metadata.duration.nanoseconds
+
+            print(
+                f"Bag time range: {start_ns} to {end_ns} ns ({(end_ns - start_ns) / 1e9:.1f} seconds)"
+            )
+            return start_ns, end_ns
+
+        except Exception as e:
+            print(f"Failed to extract bag metadata from {bag_path}: {e}")
+            return None, None
+
+    @staticmethod
+    def sample_timestamps_evenly(
+        start_ns: int, end_ns: int, num_samples: int
+    ) -> np.ndarray:
+        """
+        Generate evenly spaced timestamps between start and end.
+
+        Args:
+            start_ns: Start timestamp in nanoseconds
+            end_ns: End timestamp in nanoseconds
+            num_samples: Number of timestamps to generate
+
+        Returns:
+            Array of evenly spaced timestamps in nanoseconds
+        """
+        if start_ns >= end_ns:
+            print(f"Invalid time range: start={start_ns}, end={end_ns}")
+            return np.array([], dtype=np.int64)
+
+        if num_samples <= 0:
+            print(f"Invalid number of samples: {num_samples}")
+            return np.array([], dtype=np.int64)
+
+        # Generate evenly spaced timestamps
+        timestamps = np.linspace(start_ns, end_ns, num_samples, dtype=np.int64)
+
+        print(f"Generated {len(timestamps)} evenly spaced timestamps")
+        print(f"Time range: {(end_ns - start_ns) / 1e9:.1f} seconds")
+        print(f"Sample interval: {(timestamps[1] - timestamps[0]) / 1e9:.3f} seconds")
+
+        return timestamps
+
+
+class PoseQueryEngine:
+    """
+    Query system for timestamp-based pose lookup with SLERP interpolation for rotations.
+    """
+
+    def __init__(self):
+        self.continuous_poses: Dict[int, np.ndarray] = (
+            {}
+        )  # timestamp_ns -> 4x4 pose matrix
+
+    def load_continuous_poses(self, poses_file: str) -> bool:
+        """
+        Load continuous poses from a saved file.
+
+        Args:
+            poses_file: Path to the continuous poses .npy file
+
+        Returns:
+            True if loaded successfully, False otherwise
+        """
+        try:
+            loaded_poses = np.load(poses_file, allow_pickle=True).item()
+            self.continuous_poses.update(loaded_poses)
+            print(f"Loaded {len(loaded_poses)} continuous poses from {poses_file}")
+            return True
+        except Exception as e:
+            print(f"Failed to load continuous poses from {poses_file}: {e}")
+            return False
+
+    def find_closest_poses(
+        self, target_timestamp: int, poses_dict: Dict[int, np.ndarray]
+    ) -> Tuple[Optional[Tuple[int, np.ndarray]], Optional[Tuple[int, np.ndarray]]]:
+        """
+        Find the two closest poses (before and after) to the target timestamp.
+
+        Args:
+            target_timestamp: Target timestamp in nanoseconds
+            poses_dict: Dictionary of timestamp -> pose matrix
+
+        Returns:
+            Tuple of (before_pose, after_pose) where each is (timestamp, pose_matrix) or None
+        """
+        if not poses_dict:
+            return None, None
+
+        timestamps = sorted(poses_dict.keys())
+
+        # Find insertion point
+        idx = np.searchsorted(timestamps, target_timestamp)
+
+        before_pose = None
+        after_pose = None
+
+        if idx > 0:
+            before_ts = timestamps[idx - 1]
+            before_pose = (before_ts, poses_dict[before_ts])
+
+        if idx < len(timestamps):
+            after_ts = timestamps[idx]
+            after_pose = (after_ts, poses_dict[after_ts])
+
+        return before_pose, after_pose
+
+    def interpolate_pose(
+        self,
+        timestamp1: int,
+        pose1: np.ndarray,
+        timestamp2: int,
+        pose2: np.ndarray,
+        target_timestamp: int,
+    ) -> np.ndarray:
+        """
+        Interpolate pose at target timestamp using SLERP for rotation and linear interpolation for translation.
+
+        Args:
+            timestamp1: First timestamp in nanoseconds
+            pose1: First 4x4 pose matrix
+            timestamp2: Second timestamp in nanoseconds
+            pose2: Second 4x4 pose matrix
+            target_timestamp: Target timestamp in nanoseconds
+
+        Returns:
+            Interpolated 4x4 pose matrix
+        """
+        if timestamp1 == timestamp2:
+            return pose1.copy()
+
+        # Calculate interpolation factor
+        t = (target_timestamp - timestamp1) / (timestamp2 - timestamp1)
+        t = np.clip(t, 0.0, 1.0)
+
+        # Extract rotations and translations
+        R1 = pose1[:3, :3]
+        R2 = pose2[:3, :3]
+        t1 = pose1[:3, 3]
+        t2 = pose2[:3, 3]
+
+        # SLERP for rotation
+        try:
+            # Create SLERP interpolator
+            key_times = [0, 1]
+            key_rots = R.from_matrix([R1, R2])
+            slerp = Slerp(key_times, key_rots)
+
+            # Interpolate rotation
+            interpolated_rot = slerp(t)
+            interpolated_R = interpolated_rot.as_matrix()
+
+        except Exception as e:
+            print(f"SLERP failed, using linear interpolation for rotation: {e}")
+            # Fallback to linear interpolation for rotation matrix
+            interpolated_R = (1 - t) * R1 + t * R2
+            # Re-orthogonalize using SVD
+            U, _, Vt = np.linalg.svd(interpolated_R)
+            interpolated_R = U @ Vt
+
+        # Linear interpolation for translation
+        interpolated_t = (1 - t) * t1 + t * t2
+
+        # Construct interpolated pose
+        interpolated_pose = np.eye(4)
+        interpolated_pose[:3, :3] = interpolated_R
+        interpolated_pose[:3, 3] = interpolated_t
+
+        return interpolated_pose
+
+    def query_pose_at_timestamp(
+        self, target_timestamp: int, max_time_diff_ns: int = 1000000000
+    ) -> Optional[np.ndarray]:
+        """
+        Query pose at a specific timestamp with interpolation.
+
+        Args:
+            target_timestamp: Target timestamp in nanoseconds
+            max_time_diff_ns: Maximum time difference for interpolation (default 1 second)
+
+        Returns:
+            4x4 pose matrix at target timestamp, or None if not found
+        """
+        if not self.continuous_poses:
+            return None
+
+        before_pose, after_pose = self.find_closest_poses(
+            target_timestamp, self.continuous_poses
+        )
+
+        # Check if we can interpolate
+        if before_pose and after_pose:
+            before_ts, before_matrix = before_pose
+            after_ts, after_matrix = after_pose
+
+            # Check time difference constraints
+            if (after_ts - before_ts) <= max_time_diff_ns:
+                return self.interpolate_pose(
+                    before_ts, before_matrix, after_ts, after_matrix, target_timestamp
+                )
+
+        # Try exact match or closest pose
+        if before_pose:
+            before_ts, before_matrix = before_pose
+            if abs(target_timestamp - before_ts) <= max_time_diff_ns:
+                return before_matrix.copy()
+
+        if after_pose:
+            after_ts, after_matrix = after_pose
+            if abs(target_timestamp - after_ts) <= max_time_diff_ns:
+                return after_matrix.copy()
+
+        print(f"No pose found for timestamp {target_timestamp}")
+        return None
+
+
 # FIXME(yuance): Update database path
 TINYNAV_DB = "tinynav_db"
 
-def generate_launch_description_localization(bag_path: str, tinynav_db_path: str, rate: float = 0.25, timeout: float = 15.0, task_name: str = ""):
+
+def generate_launch_description_localization(
+    bag_path: str,
+    tinynav_db_path: str,
+    tinynav_map_path: str,
+    rate: float,
+    data_saving_timeout: float,
+    task_name: str,
+    verbose_timer: bool,
+):
+    perception_cmd = ["python3", "/tinynav/tinynav/core/perception_node.py"]
+    if not verbose_timer:
+        perception_cmd.append("--no_verbose_timer")
+
     perception = ExecuteProcess(
-        cmd=['python3', '/tinynav/tinynav/core/perception_node.py'],
-        name=f'{task_name}_perception',
-        output='screen'
+        cmd=perception_cmd,
+        name=f"{task_name}_perception",
+        output="screen",
     )
+
+    localization_cmd = [
+        "python3",
+        "/tinynav/tinynav/core/map_node.py",
+        "--tinynav_db_path",
+        str(tinynav_db_path),
+        "--tinynav_map_path",
+        str(tinynav_map_path),
+    ]
+    if not verbose_timer:
+        localization_cmd.append("--no_verbose_timer")
 
     localization = ExecuteProcess(
-        cmd=['python3', '/tinynav/tinynav/core/map_node.py', '--tinynav_db_path', str(tinynav_db_path)],
-        name=f'{task_name}_localization',
-        output='screen'
+        cmd=localization_cmd,
+        name=f"{task_name}_localization",
+        output="screen",
     )
     bag_play = ExecuteProcess(
-        cmd=['ros2', 'bag', 'play', bag_path, '--rate', str(rate), '--clock'],  # no --loop so it will exit at EOF
-        output='screen'
+        cmd=[
+            "ros2",
+            "bag",
+            "play",
+            bag_path,
+            "--rate",
+            str(rate),
+            "--clock",
+        ],  # no --loop so it will exit at EOF
+        output="screen",
     )
-    # When rosbag play exits, shut everything down after timeout
+    coordinator = ExecuteProcess(
+        cmd=[
+            "python3",
+            "/tinynav/tool/benchmark/data_saving_coordinator.py",
+            str(data_saving_timeout),
+        ],
+        name=f"{task_name}_coordinator",
+        output="screen",
+    )
+
+    # When rosbag play exits, trigger the coordinator and then shutdown
     on_bag_exit = RegisterEventHandler(
-        OnProcessExit(
-            target_action=bag_play,
-            on_exit=[
-                TimerAction(
-                    period=timeout,
-                    actions=[EmitEvent(event=Shutdown())]
-                )
-            ]
-        )
+        OnProcessExit(target_action=bag_play, on_exit=[coordinator])
     )
-    return LaunchDescription([
-        perception,
-        localization,
-        bag_play,
-        on_bag_exit
-    ])
+
+    # Shutdown everything when coordinator finishes
+    on_coordinator_exit = RegisterEventHandler(
+        OnProcessExit(target_action=coordinator, on_exit=[EmitEvent(event=Shutdown())])
+    )
+
+    return LaunchDescription(
+        [perception, localization, bag_play, on_bag_exit, on_coordinator_exit]
+    )
 
 
+def generate_launch_description_mapping(
+    bag_path: str,
+    map_save_path: str,
+    rate: float,
+    data_saving_timeout: float,
+    task_name: str,
+    verbose_timer: bool,
+):
+    perception_cmd = ["python3", "/tinynav/tinynav/core/perception_node.py"]
+    if not verbose_timer:
+        perception_cmd.append("--no_verbose_timer")
 
-def generate_launch_description_mapping(bag_path: str, map_save_path: str, rate: float = 0.25, timeout: float = 15.0, task_name: str = ""):
     perception = ExecuteProcess(
-        cmd=['python3', '/tinynav/tinynav/core/perception_node.py'],
-        name=f'{task_name}_perception',
-        output='screen'
+        cmd=perception_cmd,
+        name=f"{task_name}_perception",
+        output="screen",
     )
+
+    mapping_cmd = [
+        "python3",
+        "/tinynav/tinynav/core/build_map_node.py",
+        "--map_save_path",
+        str(map_save_path),
+    ]
+    if not verbose_timer:
+        mapping_cmd.append("--no_verbose_timer")
+
     mapping = ExecuteProcess(
-        cmd=['python3', '/tinynav/tinynav/core/build_map_node.py', '--map_save_path', str(map_save_path)],
-        name=f'{task_name}_mapping',
-        output='screen'
+        cmd=mapping_cmd,
+        name=f"{task_name}_mapping",
+        output="screen",
     )
     bag_play = ExecuteProcess(
-        cmd=['ros2', 'bag', 'play', bag_path, '--rate', str(rate), '--clock'],  # no --loop so it will exit at EOF
-        output='screen'
+        cmd=[
+            "ros2",
+            "bag",
+            "play",
+            bag_path,
+            "--rate",
+            str(rate),
+            "--clock",
+        ],  # no --loop so it will exit at EOF
+        output="screen",
     )
-    # When rosbag play exits, shut everything down after timeout
+
+    # Coordinator node that will handle the stop signal and wait for completion
+    coordinator_script_path = os.path.join(
+        os.path.dirname(__file__), "data_saving_coordinator.py"
+    )
+    coordinator = ExecuteProcess(
+        cmd=["python3", coordinator_script_path, str(data_saving_timeout)],
+        name=f"{task_name}_coordinator",
+        output="screen",
+    )
+
+    # When rosbag play exits, trigger the coordinator and then shutdown
     on_bag_exit = RegisterEventHandler(
-        OnProcessExit(
-            target_action=bag_play,
-            on_exit=[
-                TimerAction(
-                    period=timeout,
-                    actions=[EmitEvent(event=Shutdown())]
-                )
-            ]
-        )
+        OnProcessExit(target_action=bag_play, on_exit=[coordinator])
     )
-    return LaunchDescription([
-        perception,
-        mapping,
-        bag_play,
-        on_bag_exit
-    ])
+
+    # Shutdown everything when coordinator finishes
+    on_coordinator_exit = RegisterEventHandler(
+        OnProcessExit(target_action=coordinator, on_exit=[EmitEvent(event=Shutdown())])
+    )
+
+    return LaunchDescription(
+        [perception, mapping, bag_play, on_bag_exit, on_coordinator_exit]
+    )
+
 
 class BenchmarkResults:
     """Container for benchmark results and metrics."""
 
     def __init__(self):
-        self.total_images = 0
+        self.total_poses = 0
         self.successful_localizations = 0
         self.localization_poses = {}  # timestamp -> pose from localizing B in map A
         self.ground_truth_poses = {}  # timestamp -> pose from map B
@@ -123,10 +436,10 @@ class BenchmarkResults:
     ):
         self.localization_poses[timestamp] = localization_pose
         self.ground_truth_poses[timestamp] = ground_truth_pose
-        self.total_images += 1
+        self.total_poses += 1
 
     def add_failed_localization(self, timestamps: List[int]):
-        self.total_images += len(timestamps)
+        self.total_poses += len(timestamps)
 
     # TODO(yuance): Make estimation based on 6DoF instead of translation only
     def compute_transformation(self) -> bool:
@@ -343,14 +656,12 @@ class BenchmarkResults:
         precision_data = [["Precision", "Count/Total", "Percentage"]]
         for precision, stats in self.precision_stats.items():
             pct = (
-                (stats["count"] / self.total_images) * 100
-                if self.total_images > 0
-                else 0
+                (stats["count"] / self.total_poses) * 100 if self.total_poses > 0 else 0
             )
             precision_data.append(
                 [
                     precision.capitalize(),
-                    f"{stats['count']}/{self.total_images}",
+                    f"{stats['count']}/{self.total_poses}",
                     f"{pct:.1f}% (≤{stats['threshold_trans']*100:.0f}cm, ≤{stats['threshold_rot']:.0f}°)",
                 ]
             )
@@ -395,7 +706,7 @@ class BenchmarkResults:
         os.makedirs(output_dir, exist_ok=True)
 
         summary = {
-            "total_images": self.total_images,
+            "total_poses": self.total_poses,
             "successful_localizations": self.successful_localizations,
             "transformation_matrix": self.transformation_matrix.tolist(),
             "translation_errors": self.translation_errors,
@@ -413,60 +724,145 @@ class BenchmarkResults:
 
         print(f"Results saved to {output_dir}")
 
-def select_evaluation_timestamps(
-    poses_file: str,
-    sample_cnt: int = 100,
-) -> Dict[int, np.ndarray]:
-    """Select evenly spaced timestamps and poses from actual saved keyframes."""
+
+def sample_timestamps_from_bag(bag_path: str, num_samples: int) -> np.ndarray:
+    start_time, end_time = BagMetadataExtractor.get_bag_time_range(bag_path)
+
+    if None in [start_time, end_time]:
+        raise RuntimeError("Failed to extract time ranges from bags")
+
+    timestamps = BagMetadataExtractor.sample_timestamps_evenly(
+        start_time, end_time, num_samples
+    )
+    print(f"Sampled {len(timestamps)} timestamps from overlapping time range")
+    print(f"Time range: {(end_time - start_time) / 1e9:.1f} seconds")
+
+    return timestamps
+
+
+def query_poses_at_timestamps(
+    timestamps: np.ndarray, map_result_dir_b: str
+) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
+    """
+    Query poses at the specified timestamps using keyframe/relocalization poses + odom deltas.
+
+    Args:
+        timestamps: Array of timestamps to query
+        map_result_dir_b: Directory containing bag B's mapping and localization results
+
+    Returns:
+        Tuple of (ground_truth_poses, localization_poses) dictionaries
+        - ground_truth_poses: From bag B's mapping (keyframe + odom delta)
+        - localization_poses: From bag B's localization in map A (relocalization + odom delta)
+    """
+    ground_truth_poses = {}
+    localization_poses = {}
+
     try:
-        if not os.path.exists(poses_file):
-            print(f"Error: Poses file not found at {poses_file}")
-            return {}
+        # Load continuous odom poses
+        continuous_odom_file = f"{map_result_dir_b}/localization_continuous_odom.npy"
+        if not os.path.exists(continuous_odom_file):
+            print(f"Error: Continuous odom file not found: {continuous_odom_file}")
+            return ground_truth_poses, localization_poses
 
-        saved_poses = np.load(poses_file, allow_pickle=True).item()
-        all_timestamps = sorted(saved_poses.keys())
-
-        if len(all_timestamps) == 0:
-            print("Error: No poses found in saved map")
-            return {}
-
-        if len(all_timestamps) < sample_cnt:
-            print(f"Warning: Only {len(all_timestamps)} keyframes available, using all")
-            # Return all available timestamp-pose pairs
-            return {ts: saved_poses[ts] for ts in all_timestamps}
-
-        if len(all_timestamps) < 2 * sample_cnt:
+        # Create pose query engine for odom interpolation
+        odom_query = PoseQueryEngine()
+        odom_loaded = odom_query.load_continuous_poses(continuous_odom_file)
+        if not odom_loaded:
             print(
-                f"Warning: Too few keyframes to select: {len(all_timestamps)}, only the first {sample_cnt} will be used."
+                f"Error: Continuous odom poses file not loaded: {continuous_odom_file}"
+            )
+            return ground_truth_poses, localization_poses
+
+        continuous_odom_poses = np.load(continuous_odom_file, allow_pickle=True).item()
+        print(f"Loaded {len(continuous_odom_poses)} continuous odom poses")
+
+        # Load keyframe poses (ground truth from bag B's mapping)
+        keyframe_poses_file = f"{map_result_dir_b}/poses.npy"
+        if not os.path.exists(keyframe_poses_file):
+            print(f"Error: Keyframe poses file not found: {keyframe_poses_file}")
+            return ground_truth_poses, localization_poses
+
+        keyframe_poses = np.load(keyframe_poses_file, allow_pickle=True).item()
+        print(f"Loaded {len(keyframe_poses)} keyframe poses")
+
+        # Load relocalization poses (from localizing bag B in map A)
+        relocalization_poses_file = f"{map_result_dir_b}/relocalization_poses.npy"
+        if not os.path.exists(relocalization_poses_file):
+            print(
+                f"Error: Relocalization poses file not found: {relocalization_poses_file}"
+            )
+            return ground_truth_poses, localization_poses
+
+        relocalization_poses = np.load(
+            relocalization_poses_file, allow_pickle=True
+        ).item()
+        print(f"Loaded {len(relocalization_poses)} relocalization poses")
+
+        # Process each timestamp
+        for timestamp in timestamps:
+            timestamp_int = int(timestamp)
+
+            # === GROUND TRUTH POSE ===
+            closest_keyframe_ts, closest_keyframe_pose = find_closest_pose(
+                timestamp_int, keyframe_poses
             )
 
-        # Select evenly spaced keyframe timestamps
-        indices = np.linspace(0, len(all_timestamps) - 1, sample_cnt, dtype=int)
-        selected_timestamp_pose_pairs = {}
+            if closest_keyframe_ts is not None:
+                odom_at_keyframe = odom_query.query_pose_at_timestamp(
+                    closest_keyframe_ts
+                )
+                odom_at_target = odom_query.query_pose_at_timestamp(timestamp_int)
 
-        for i in indices:
-            timestamp = all_timestamps[i]
-            selected_timestamp_pose_pairs[timestamp] = saved_poses[timestamp]
+                if odom_at_keyframe is not None and odom_at_target is not None:
+                    odom_delta = np.linalg.inv(odom_at_keyframe) @ odom_at_target
+                    ground_truth_poses[timestamp_int] = (
+                        closest_keyframe_pose @ odom_delta
+                    )
 
-        print(
-            f"Selected {len(selected_timestamp_pose_pairs)} timestamp-pose pairs from {len(all_timestamps)} keyframes"
-        )
-        return selected_timestamp_pose_pairs
+            # === LOCALIZATION POSE ===
+            closest_reloc_ts, closest_reloc_pose = find_closest_pose(
+                timestamp_int, relocalization_poses
+            )
+
+            if closest_reloc_ts is not None:
+                odom_at_reloc = odom_query.query_pose_at_timestamp(closest_reloc_ts)
+                odom_at_target = odom_query.query_pose_at_timestamp(timestamp_int)
+
+                if odom_at_reloc is not None and odom_at_target is not None:
+                    odom_delta = np.linalg.inv(odom_at_reloc) @ odom_at_target
+                    localization_poses[timestamp_int] = closest_reloc_pose @ odom_delta
+
+        print(f"Successfully computed {len(ground_truth_poses)} ground truth poses")
+        print(f"Successfully computed {len(localization_poses)} localization poses")
 
     except Exception as e:
-        print(f"Error selecting timestamps from saved map: {e}")
-        return {}
+        print(f"Error querying poses: {e}")
+
+    return ground_truth_poses, localization_poses
+
+
+def find_closest_pose(
+    target_timestamp: int, poses_dict: Dict[int, np.ndarray]
+) -> Tuple[Optional[int], Optional[np.ndarray]]:
+    if not poses_dict:
+        return None, None
+
+    timestamps = list(poses_dict.keys())
+    closest_ts = min(timestamps, key=lambda ts: abs(ts - target_timestamp))
+    return closest_ts, poses_dict[closest_ts]
 
 
 def run_mapping_process(
-    bag_path: str, map_save_path: str, rate: float = 0.25, task_name: str = ""
+    bag_path: str,
+    map_save_path: str,
+    rate: float,
+    data_saving_timeout: float,
+    verbose_timer: bool,
 ) -> bool:
-
-    # FIXME(yuance): Remove this workaround after map_node can run properly without pois.txt
-    pois_file = f"{map_save_path}/pois.json"
-    if not os.path.exists(pois_file):
-        json.dump({}, open(pois_file, "w"))
-    ld = generate_launch_description_mapping(bag_path, map_save_path, rate)
+    ld = generate_launch_description_mapping(
+        bag_path, map_save_path, rate, data_saving_timeout, "mapping", verbose_timer
+    )
     ls = LaunchService()
     ls.include_launch_description(ld)
     ls.run()
@@ -474,115 +870,113 @@ def run_mapping_process(
 
 
 def run_localization_process(
-    bag_path: str, tinynav_db_path: str, rate: float = 0.25, task_name: str = ""
+    bag_path: str,
+    tinynav_db_path: str,
+    tinynav_map_path: str,
+    rate: float,
+    data_saving_timeout: float,
+    verbose_timer: bool,
 ) -> bool:
-    ld = generate_launch_description_localization(bag_path, tinynav_db_path, rate)
+    ld = generate_launch_description_localization(
+        bag_path,
+        tinynav_db_path,
+        tinynav_map_path,
+        rate,
+        data_saving_timeout,
+        "localization",
+        verbose_timer=verbose_timer,
+    )
     ls = LaunchService()
     ls.include_launch_description(ld)
     ls.run()
     return True
 
-def extract_relocalization_poses(
-    poses_file: str, timestamps: List[int]
-) -> Dict[int, np.ndarray]:
-    poses = {}
-
-    try:
-        if not os.path.exists(poses_file):
-            print(f"Error: Relocalization poses file not found at {poses_file}")
-            return poses
-
-        saved_poses = np.load(poses_file, allow_pickle=True).item()
-
-        # Match timestamps (approximate matching)
-        for target_ts in timestamps:
-            best_match = None
-            min_diff = float("inf")
-
-            for saved_ts, pose in saved_poses.items():
-                diff = abs(saved_ts - target_ts)
-                if diff < min_diff:
-                    min_diff = diff
-                    best_match = pose
-
-            if min_diff < 50_000_000:  # Allow 50 ms tolerance
-                poses[target_ts] = best_match
-
-        print(f"Extracted {len(poses)} poses from saved map ({poses_file})")
-
-    except Exception as e:
-        print(f"Error extracting poses from saved map ({poses_file}): {e}")
-
-    return poses
-
-
-def extract_failed_localization_timestamps(tinynav_db_path: str) -> List[int]:
-    failed_reloc_file = tinynav_db_path + "/failed_relocalizations.npy"
-
-    if not os.path.exists(failed_reloc_file):
-        raise Exception(f"No failed relocalizations file found at {failed_reloc_file}")
-
-    return np.load(failed_reloc_file, allow_pickle=True).tolist()
-
 
 def run_benchmark(
-    bag_a_path: str, bag_b_path: str, output_dir: str, rate: float = 1.0
+    bag_a_path: str,
+    bag_b_path: str,
+    output_dir: str,
+    rate: float,
+    num_samples: int,
+    timeout: float,
+    verbose_timer: bool = False,
 ) -> bool:
-    print("Starting TinyNav Mapping Benchmark")
+    """
+    Run benchmark using timestamp-based sampling instead of keyframe-based.
+
+    Args:
+        bag_a_path: Path to bag A (for creating reference map)
+        bag_b_path: Path to bag B (for localization and ground truth)
+        output_dir: Output directory for results
+        rate: Playback rate for bags
+        num_samples: Number of timestamps to sample for evaluation
+
+    Returns:
+        True if successful, False otherwise
+    """
+    print("Starting TinyNav Timestamp-Based Mapping Benchmark")
     print(f"Bag A: {bag_a_path}")
     print(f"Bag B: {bag_b_path}")
     print(f"Playback rate: {rate}x")
+    print(f"Number of samples: {num_samples}")
 
-    map_result_dir_b = f"{output_dir}/benchmark_map_b"
-    os.makedirs(map_result_dir_b, exist_ok=True)
     map_result_dir_a = f"{output_dir}/benchmark_map_a"
     os.makedirs(map_result_dir_a, exist_ok=True)
+    map_result_dir_b = f"{output_dir}/benchmark_map_b"
+    os.makedirs(map_result_dir_b, exist_ok=True)
 
     results = BenchmarkResults()
 
     print("\nStep 1: Creating map A from bag A as reference...")
-    if not run_mapping_process(bag_a_path, map_save_path=map_result_dir_a, rate=rate, task_name="mapping_a"):
+    if not run_mapping_process(
+        bag_a_path,
+        map_save_path=map_result_dir_a,
+        rate=rate,
+        data_saving_timeout=timeout,
+        verbose_timer=verbose_timer,
+    ):
         print("Error: Failed to create map A")
         return False
 
     print("\nStep 2: Localizing bag B in map A...")
     if not run_localization_process(
         bag_b_path,
-        tinynav_db_path=map_result_dir_a,
+        tinynav_db_path=map_result_dir_b,
+        tinynav_map_path=map_result_dir_a,
         rate=rate,
+        data_saving_timeout=timeout,
+        verbose_timer=verbose_timer,
     ):
         print("Error: Failed to localize bag B in map A")
         return False
 
-    print("\nStep 3: Selecting evaluation timestamps from map B keyframes as ground truth...")
-    ground_truth_poses = select_evaluation_timestamps(
-        map_result_dir_a + "/graph_poses.npy",
-        100,
-    )
+    print(f"\nStep 3: Sampling {num_samples} timestamps from bag time ranges...")
+    sampled_timestamps = sample_timestamps_from_bag(bag_b_path, num_samples)
 
-    if len(ground_truth_poses) == 0:
-        print("Error: No keyframes extracted from saved map B")
+    if sampled_timestamps is None or len(sampled_timestamps) == 0:
+        print("Error: Timestamp sampling failed")
         return False
 
-    # Extract timestamps and ground truth poses
-    evaluation_timestamps = list(ground_truth_poses.keys())
-    print(f"Extracted {len(ground_truth_poses)} ground truth poses")
-    # Extract localization results for the same timestamps
-    localization_poses = extract_relocalization_poses(
-        map_result_dir_a + "/relocalization_poses.npy", evaluation_timestamps
+    print(f"\nStep 4: Querying poses at sampled timestamps...")
+    ground_truth_poses, localization_poses = query_poses_at_timestamps(
+        sampled_timestamps, map_result_dir_b
     )
-    print(f"Extracted {len(localization_poses)} localization poses")
-    failed_reloc_timestamps = extract_failed_localization_timestamps(map_result_dir_a)
-    print(f"Extracted {len(failed_reloc_timestamps)} failed relocalizations")
 
-    print("\nStep 4: Computing coordinate transformation between map A and map B...")
-    for timestamp in evaluation_timestamps:
-        if timestamp in localization_poses and timestamp in ground_truth_poses:
-            results.add_pose_pair(
-                timestamp, localization_poses[timestamp], ground_truth_poses[timestamp]
-            )
+    if len(ground_truth_poses) == 0 or len(localization_poses) == 0:
+        print("Error: Pose querying failed")
+        return False
 
-    if results.total_images == 0:
+    print(f"\nStep 5: Computing coordinate transformation...")
+    # Find common timestamps
+    common_timestamps = set(ground_truth_poses.keys()) & set(localization_poses.keys())
+    print(f"Found {len(common_timestamps)} matching pose pairs")
+
+    for timestamp in common_timestamps:
+        results.add_pose_pair(
+            timestamp, localization_poses[timestamp], ground_truth_poses[timestamp]
+        )
+
+    if results.total_poses == 0:
         print("Error: No matching pose pairs found")
         return False
 
@@ -590,13 +984,17 @@ def run_benchmark(
         print("Error: Failed to compute coordinate transformation")
         return False
 
-    print("\nStep 5: Evaluating localization accuracy...")
+    print("\nStep 6: Evaluating localization accuracy...")
     results.evaluate_accuracy()
 
     os.makedirs(output_dir, exist_ok=True)
     results.dump_visualization(output_dir)
     results.save_results(output_dir)
 
+    print(f"\nTimestamp-based benchmark completed successfully!")
+    print(
+        f"Evaluated {len(common_timestamps)} poses sampled over {(sampled_timestamps[-1] - sampled_timestamps[0]) / 1e9:.1f} seconds"
+    )
     return True
 
 
@@ -616,7 +1014,10 @@ def main():
         help="Output directory for results",
     )
     parser.add_argument(
-        "--num_images", type=int, default=100, help="Number of evaluation images"
+        "--num_images",
+        type=int,
+        default=100,
+        help="Number of evaluation samples (default: 100)",
     )
     parser.add_argument(
         "--rate",
@@ -627,9 +1028,21 @@ def main():
     parser.add_argument(
         "--timeout",
         type=int,
-        default=None,
-        help="Timeout for each mapping process (seconds). If not specified, calculated from bag duration and rate",
+        default=60,
+        help="Timeout for each mapping process (seconds).",
     )
+    parser.add_argument(
+        "--verbose_timer",
+        action="store_true",
+        help="Enable verbose timer output for nodes",
+    )
+    parser.add_argument(
+        "--no_verbose_timer",
+        dest="verbose_timer",
+        action="store_false",
+        help="Disable verbose timer output for nodes (default)",
+    )
+    parser.set_defaults(verbose_timer=False)
 
     args = parser.parse_args()
 
@@ -646,7 +1059,13 @@ def main():
         return 1
 
     benchmark_return = run_benchmark(
-        args.bag_a, args.bag_b, args.output_dir, args.rate
+        args.bag_a,
+        args.bag_b,
+        args.output_dir,
+        args.rate,
+        args.num_images,
+        args.timeout,
+        args.verbose_timer,
     )
     if benchmark_return:
         print("\nBenchmark completed!")

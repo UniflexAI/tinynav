@@ -1,3 +1,4 @@
+import argparse
 import logging
 import sys
 import cv2
@@ -23,8 +24,11 @@ _KEYFRAME_MIN_ROTATE_DEGREE = 5 # uint: degree
 logger = logging.getLogger(__name__)
 
 class PerceptionNode(Node):
-    def __init__(self):
+    def __init__(self, verbose_timer: bool = True):
         super().__init__("perception_node")
+        self.verbose_timer = verbose_timer
+        self.logger = logging.getLogger(__name__)
+        self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         # model
         self.superpoint = SuperPointTRT()
         self.light_glue = LightGlueTRT()
@@ -65,6 +69,8 @@ class PerceptionNode(Node):
         self.is_static = False
 
         self.camera_info_msg = None
+
+        self.timer_logger("PerceptionNode initialized.")
 
     def info_callback(self, msg):
         if self.K is None:
@@ -116,7 +122,7 @@ class PerceptionNode(Node):
 
         self.timestamp = left_msg.header.stamp
 
-        with Timer(name="Perception Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name="Perception Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             asyncio.run(self.process(left_msg, right_msg))
 
     async def process(self, left_msg, right_msg):
@@ -126,14 +132,14 @@ class PerceptionNode(Node):
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
 
-        with Timer(name="[Model Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+        with Timer(name="[Model Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             if self.last_keyframe_img is None:
                 self.last_keyframe_img = left_img
                 return
 
             stereo_task = asyncio.create_task(self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]])))
 
-            with Timer(name="[SuperPoint && lightglue Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+            with Timer(name="[SuperPoint && lightglue Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 prev_left_extract_result = await self.superpoint.memorized_infer(self.last_keyframe_img)
                 current_left_extract_result = await self.superpoint.memorized_infer(left_img)
 
@@ -153,19 +159,19 @@ class PerceptionNode(Node):
                 valid_mask = match_indices != -1
                 kpt_pre = prev_keypoints[valid_mask]
                 kpt_cur = current_keypoints[match_indices[valid_mask]]
-                logging.info(f"match cnt: {len(kpt_pre)}")
+                logging.debug(f"match cnt: {len(kpt_pre)}")
 
-            with Timer(name="[stereo_task await]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+            with Timer(name="[stereo_task await]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 disparity, depth = await stereo_task
 
-        with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+        with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             disp_vis = disparity.copy().astype(np.uint8)
             disp_color = cv2.applyColorMap(disp_vis * 4, cv2.COLORMAP_PLASMA)
             disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding='bgr8')
             disp_color_msg.header = left_msg.header
             self.disparity_pub_vis.publish(disp_color_msg)
 
-        with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+        with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             # publish depth image and camera info for depth topic (required by DepthCloud)
             depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
             depth_msg.header.stamp = self.timestamp
@@ -175,7 +181,7 @@ class PerceptionNode(Node):
             self.slam_camera_info_pub.publish(self.camera_info_msg)
             self.depth_pub.publish(depth_msg)
 
-        with Timer(text="[ComputePose] Elapsed time: {milliseconds:.0f} ms", logger=logger.info):
+        with Timer(text="[ComputePose] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             state, T_pre_curr, _, _, _ = estimate_pose(kpt_pre, kpt_cur, depth, self.K)
 
         if not state:
@@ -222,22 +228,30 @@ class PerceptionNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    perception_node = PerceptionNode()
-    try:
-        rclpy.spin(perception_node)
-        perception_node.destroy_node()
-        rclpy.shutdown()
-    except KeyboardInterrupt:
-        logging.info("Keyboard interrupt received, perceptoin node is shut down")
-    except Exception as e:
-        logging.error(f"Error occurred: {e}")
-
-if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("odom.log")],
     )
+
+    rclpy.init(args=args)
+    parser = argparse.ArgumentParser()
+    parser.set_defaults(verbose_timer=True)
+    parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
+    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+    print(f"Verbose timer: {parsed_args.verbose_timer}")
+
+    perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
+    try:
+        rclpy.spin(perception_node)
+        perception_node.destroy_node()
+        rclpy.shutdown()
+    except KeyboardInterrupt:
+        logging.info("Keyboard interrupt received, perception node is shut down")
+    except Exception as e:
+        logging.error(f"Error occurred: {e}")
+
+if __name__ == "__main__":
     main()

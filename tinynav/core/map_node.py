@@ -2,6 +2,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
+from std_msgs.msg import Bool
 import numpy as np
 import sys
 import json
@@ -24,6 +25,8 @@ from tf2_ros import TransformBroadcaster
 from build_map_node import TinyNavDB
 from build_map_node import find_loop, solve_pose_graph
 import einops
+from build_map_node import OdomPoseRecorder
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,9 +118,17 @@ def compute_cost_map(occupancy_map: np.ndarray, Unknown_cost: float = 15.0, Free
     return gaussian_filter(cost_map, sigma=sigma)
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str):
+    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
+        """Initialization
 
+        Args:
+            tinynav_db_path (str): Directory to store output data.
+            tinynav_map_path (str): Directory to load the pre-built map.
+            verbose_timer (bool): Whether to use verbose timer output.
+        """
         super().__init__('map_node')
+        self.logger = logging.getLogger(__name__)
+        self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
@@ -128,15 +139,22 @@ class MapNode(Node):
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
+        self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
+
+        # Add stop signal subscription and data saved publisher
+        self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
+        self.localization_data_saved_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
         self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 1000)
         self.ts.registerCallback(self.keyframe_callback)
+
         self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
         self.K = None
         self.baseline = None
         self.last_keyframe_image = None
+        self.continuous_odom_recorder = OdomPoseRecorder(tinynav_db_path, "localization")
 
         self.odom = {}
         self.pose_graph_used_pose = {}
@@ -151,11 +169,14 @@ class MapNode(Node):
 
         os.makedirs(f"{TINYNAV_TEMP}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{TINYNAV_TEMP}/nav_temp", is_scratch=True)
-        self.map_poses = np.load(f"{tinynav_db_path}/poses.npy", allow_pickle=True).item()
-        self.map_K = np.load(f"{tinynav_db_path}/intrinsics.npy")
-        self.db = TinyNavDB(tinynav_db_path, is_scratch=False)
+        self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
+        self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
+        self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
         self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
         self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
+        self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
+        self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
+        self.cost_map = compute_cost_map(self.occupancy_map, Unknown_cost=15.0, Free_cost=0.0, Occupied_cost=10.0, sigma=5.0)
 
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
@@ -163,8 +184,10 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
 
-
-        self.pois = json.load(open(f"{tinynav_db_path}/pois.json"))
+        if os.path.exists(f"{tinynav_db_path}/pois.json"):
+            self.pois = json.load(open(f"{tinynav_db_path}/pois.json"))
+        else:
+            self.pois = {}
         self.poi_index = len(self.pois) - 1
         pois_dict = {}
         for key, value in self.pois.items():
@@ -178,20 +201,41 @@ class MapNode(Node):
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
 
-        self.occupancy_map = np.load(f"{tinynav_db_path}/occupancy_grid.npy")
-        self.occupancy_map_meta = np.load(f"{tinynav_db_path}/occupancy_meta.npy")
-        self.cost_map = compute_cost_map(self.occupancy_map, Unknown_cost=15.0, Free_cost=0.0, Occupied_cost=10.0, sigma=5.0)
         self.tf_broadcaster = TransformBroadcaster(self)
+
+        self._save_completed = False
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
-            logger.info("Camera intrinsics received.")
+            self.get_logger().info("Camera intrinsics received.")
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]
             self.baseline = -Tx / fx
             self.destroy_subscription(self.camera_info_sub)
 
+    def continuous_odom_callback(self, odom_msg: Odometry):
+        self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+
+    def localization_stop_callback(self, msg: Bool):
+        if msg.data:
+            self.get_logger().info("Received benchmark stop signal, starting save process...")
+            try:
+                self.save_relocalization_poses()
+                self.get_logger().info("Localization save completed successfully")
+
+                # Publish save finished signal
+                save_finished_msg = Bool()
+                save_finished_msg.data = True
+                self.localization_data_saved_pub.publish(save_finished_msg)
+                self.get_logger().info("Published data save finished signal")
+
+            except Exception as e:
+                self.get_logger().error(f"Error during localization save: {e}")
+                # Still publish completion signal even if there was an error
+                save_finished_msg = Bool()
+                save_finished_msg.data = False
+                self.localization_data_saved_pub.publish(save_finished_msg)
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
@@ -202,14 +246,17 @@ class MapNode(Node):
         if success:
             self.compute_transform_from_map_to_odom()
 
-        with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
             # timer or queue for publish the nav path
             # and record the map pose
             # compute the coordinate transform from the map pose to the keyframe pose
             # publish the nav path from the map pose to the keyframe pose with the cost map
 
-    @Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
+    def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
+        with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
+
     def keyframe_mapping(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         if self.K is None:
             return
@@ -244,9 +291,9 @@ class MapNode(Node):
                     valid_embeddings = np.array([self.nav_temp_db.get_embedding(t) for t in valid_timestamp])
 
                     idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
-                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
-                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         for idx, similarity in loop_list:
                             prev_timestamp = idx_to_timestamp[idx]
                             curr_timestamp = timestamp
@@ -257,7 +304,7 @@ class MapNode(Node):
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
             find_loop_and_pose_graph(keyframe_image_timestamp)
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
@@ -390,27 +437,34 @@ class MapNode(Node):
             return False, np.eye(4)
 
     def save_relocalization_poses(self):
+        if self._save_completed:
+            self.get_logger().info("Relocalization data already saved, skipping duplicate save")
+            return
+
+        print("saving localization data...")
+        self.continuous_odom_recorder.save_to_disk()
+
         if len(self.relocalization_poses) == 0:
-            logger.warning("No relocalization poses found - not saving")
+            self.get_logger().warning("No relocalization poses found - not saving")
             return
 
         np.save(f"{self.tinynav_db_path}/relocalization_poses.npy", self.relocalization_poses, allow_pickle=True)
         np.save(f"{self.tinynav_db_path}/relocalization_pose_weights.npy", self.relocalization_pose_weights, allow_pickle=True)
         np.save(f"{self.tinynav_db_path}/failed_relocalizations.npy", self.failed_relocalizations, allow_pickle=True)
-        np.save(f"{self.tinynav_db_path}/graph_poses.npy", self.pose_graph_used_pose, allow_pickle=True)
+        np.save(f"{self.tinynav_db_path}/poses.npy", self.pose_graph_used_pose, allow_pickle=True)
 
         logging.info(f"Saved {len(self.relocalization_poses)} relocalization poses to {self.tinynav_db_path}")
         logging.info(f"Failed relocalizations count: {len(self.failed_relocalizations)}")
 
-    def on_shutdown(self):
-        try:
-            if hasattr(self, 'global_map_timer'):
-                self.global_map_timer.cancel()
-        except Exception as e:
-            logging.debug(f"Error canceling timer: {e}")
+        self._save_completed = True
 
-        # benchmark used
-        self.save_relocalization_poses()
+    def destroy_node(self):
+        try:
+            self.save_relocalization_poses()
+            super().destroy_node()
+        except Exception:
+            # Ignore errors during destruction as resources may already be freed
+            pass
 
 
     def compute_transform_from_map_to_odom(self):
@@ -437,17 +491,17 @@ class MapNode(Node):
 
 
     def try_publish_nav_path(self, timestamp: int):
-        logger.info(f"try_publish_nav_path, timestamp: {timestamp}")
+        self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
         if self.T_from_map_to_odom is None:
-            logger.info("Relocalization not successful yet, skip publishing nav path")
+            self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
             return
 
         if self.poi_index == -1:
-            logger.info("No POI found, skip publishing nav path")
+            self.get_logger().info("No POI found, skip publishing nav path")
             return
 
         if self.poi_index >= len(self.pois):
-            logger.info("All POIs have been visited, skip publishing nav path")
+            self.get_logger().info("All POIs have been visited, skip publishing nav path")
             return
 
         poi = self.pois[self.poi_index]
@@ -473,7 +527,7 @@ class MapNode(Node):
                 break
 
         if self.poi_index >= len(self.pois):
-            logger.info("All POIs have been visited, skip publishing nav path")
+            self.get_logger().info("All POIs have been visited, skip publishing nav path")
             return
 
         target_poi = self.pois[self.poi_index]
@@ -609,24 +663,32 @@ def A_star(cost_map:np.ndarray, start:np.ndarray, goal:np.ndarray, obstacles_cos
 def main(args=None):
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
     )
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tinynav_db_path", type=str, default="tinynav_db")
+    parser.add_argument("--tinynav_db_path", type=str, default="tinynav_db", required=True)
+    parser.add_argument("--tinynav_map_path", type=str, required=True)
+    parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
+    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
-    node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path)
+    node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
+                   tinynav_map_path=parsed_args.tinynav_map_path,
+                   verbose_timer=parsed_args.verbose_timer)
 
     try:
         rclpy.spin(node)
-        node.destroy_node()
-        rclpy.shutdown()
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, map node is shut down")
     except Exception as e:
         logging.error(f"Error occurred: {e}")
     finally:
-        node.on_shutdown()
+        try:
+            node.destroy_node()
+            rclpy.shutdown()
+        except Exception as e:
+            logging.error(f"Error occurred: {e}")
 
 
 if __name__ == '__main__':
