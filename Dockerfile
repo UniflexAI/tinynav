@@ -125,6 +125,11 @@ RUN echo "source /3rdparty/ros2_ws/install/local_setup.bash" >> ~/.bashrc
 # Create a .tmux.conf file and enable mouse mode
 RUN echo 'setw -g mouse on' > /root/.tmux.conf
 
+# clang-tidy
+RUN apt-get update && \
+    apt-get install -y clang-tidy ros-humble-ament-clang-tidy ros-humble-ament-lint \
+    && rm -rf /var/lib/apt/lists/*
+
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
