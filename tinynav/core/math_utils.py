@@ -171,7 +171,7 @@ def process_keypoints(kpts_prev, kpts_curr, depth, K):
     
     return points_3d[:valid_count], points_2d[:valid_count]
 
-def estimate_pose( kpts_prev, kpts_curr, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def estimate_pose(kpts_prev, kpts_curr, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     points_3d, points_2d = process_keypoints(
         kpts_prev.astype(np.float32), 
         kpts_curr.astype(np.float32),

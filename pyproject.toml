@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core", "pybind11", "numpy"]
+requires = ["scikit-build-core", "pybind11", "numpy", "pyparsing"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -27,14 +27,12 @@ dependencies = [
     "reportlab>=4.4.3",
     "tabulate",
     "viser",
+    "gtsam==4.3.0a0",
 ]
 
 [tool.scikit-build]
 cmake.source-dir = "tinynav/cpp"
 wheel.install-dir = "tinynav"
-
-
-[tool.uv]
 
 [dependency-groups]
 dev = [
