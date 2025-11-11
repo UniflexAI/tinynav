@@ -118,7 +118,7 @@ class PerceptionNode(Node):
         self.landmark_id = None
         self.kGravity = 9.81
 
-        self.update_explicitly_iterations = 5
+        self.update_explicitly_iterations = 1
         # Noise model (continuous-time)
         # for Realsense D435i
         accel_noise_density = 0.25     # [m/s^2/√Hz]
@@ -324,13 +324,6 @@ class PerceptionNode(Node):
             self.camera_info_msg.header.frame_id = "camera"  # Match TF frame
             self.slam_camera_info_pub.publish(self.camera_info_msg)
             self.depth_pub.publish(depth_msg)
-        with Timer(name="Compute Pose", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-            success, T_pre_curr, inliers_2d, inliers_3d, inliers = estimate_pose(kpt_pre, kpt_cur, depth, self.K)
-            if not success:
-                self.logger.warning("Failed to estimate pose")
-                return
-            T_body_curr = self.T_body_last @ np.linalg.inv(self.T_imu_body_to_camera) @ T_pre_curr @ self.T_imu_body_to_camera
-
 
         with Timer(name="[ISAM Processing]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
             symbol_to_timestamp = {}
