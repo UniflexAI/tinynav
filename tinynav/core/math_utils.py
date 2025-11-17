@@ -193,3 +193,93 @@ def estimate_pose(kpts_prev, kpts_curr, depth, K) -> tuple[bool, np.ndarray, np.
     inliers_2d = points_2d[inliers]
     inliers_3d = points_3d[inliers]
     return True, T, inliers_2d, inliers_3d, inliers
+
+@njit(cache=True)
+def process_keypoints2(kpts_prev, kpts_curr, idx_valid, depth, K):
+    points_3d = np.empty((len(kpts_prev), 3), dtype=np.float32)
+    points_2d = np.empty((len(kpts_prev), 2), dtype=np.float32)
+    valid_idx = np.empty(len(kpts_prev), dtype=np.int32)
+    valid_count = 0
+    
+    for i in range(len(kpts_prev)):
+        u, v = int(kpts_curr[i,0]), int(kpts_curr[i,1])
+        if 0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]:
+            Z = depth[v, u]
+            if Z > 0.1 and Z < 10.0:
+                X = (kpts_curr[i,0] - K[0,2]) * Z / K[0,0]
+                Y = (kpts_curr[i,1] - K[1,2]) * Z / K[1,1]
+                points_3d[valid_count] = (X, Y, Z)
+                points_2d[valid_count] = kpts_prev[i]
+                valid_idx[valid_count] = idx_valid[i]
+                valid_count += 1
+    
+    return points_3d[:valid_count], points_2d[:valid_count], valid_idx[:valid_count]
+
+def estimate_pose2(kpts_prev, kpts_curr, idx_valid, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    points_3d, points_2d, idx_valid = process_keypoints2(
+        kpts_prev.astype(np.float32), 
+        kpts_curr.astype(np.float32),
+        idx_valid,
+        depth, 
+        K.astype(np.float32)
+    )
+    if len(points_3d) < 6:
+        return False, np.eye(4), None, None, None
+    points_3d = np.array(points_3d, dtype=np.float32)
+    points_2d = np.array(points_2d, dtype=np.float32)
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None, reprojectionError=2.0, confidence=0.999, flags=cv2.SOLVEPNP_EPNP)
+    if not success:
+        return False, np.eye(4), None, None, None
+    R_mat, _ = cv2.Rodrigues(rvec)
+    T = np.eye(4)
+    T[:3, :3] = R_mat
+    T[:3, 3] = tvec.ravel()
+    inliers = inliers.flatten()
+    inliers_2d = points_2d[inliers]
+    inliers_3d = points_3d[inliers]
+    inlier_idx_original = idx_valid[inliers]
+    return True, T, inliers_2d, inliers_3d, inlier_idx_original
+
+# Disjoint Set (Union-Find) implementation with path compression and union by rank
+@njit(cache=True)
+def uf_init(n):
+    parent = np.empty(n, np.int64)
+    rank = np.zeros(n, np.int64)
+    for i in range(n):
+        parent[i] = i
+    return parent, rank
+
+@njit(cache=True)
+def uf_find(i, parent):
+    root = i
+    while parent[root] != root:
+        root = parent[root]
+    while parent[i] != i:
+        p = parent[i]
+        parent[i] = root
+        i = p
+    return root
+
+@njit(cache=True)
+def uf_union(a, b, parent, rank):
+    ra = uf_find(a, parent)
+    rb = uf_find(b, parent)
+    if ra == rb:
+        return ra
+    if rank[ra] < rank[rb]:
+        parent[ra] = rb
+        return rb
+    elif rank[ra] > rank[rb]:
+        parent[rb] = ra
+        return ra
+    else:
+        parent[rb] = ra
+        rank[ra] += 1
+        return ra
+
+def uf_all_sets_list(parent):
+    root_to_members = {}
+    for i in range(len(parent)):
+        r = parent[i]
+        root_to_members.setdefault(r, []).append(i)
+    return list(root_to_members.values())
