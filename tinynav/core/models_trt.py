@@ -6,6 +6,7 @@ from codetiming import Timer
 import platform
 import asyncio
 from async_lru import alru_cache
+from func import alru_cache_numpy
 
 from cuda import cudart
 import ctypes
@@ -276,10 +277,12 @@ class SuperPointTRT(TRTBase):
         super().__init__(engine_path)
         # model input [1,1,H,W]
         self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
+        self.real_infer_cnt = 0
 
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
     #
+    @alru_cache_numpy(maxsize=128)
     async def infer(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):
         # resize to input_size
         scale = self.input_shape[0] / input_image.shape[0]
@@ -295,24 +298,16 @@ class SuperPointTRT(TRTBase):
         results["mask"] = results["mask"][:, :, None]
         return results
 
-    async def memorized_infer(self, input_image:np.ndarray, threshold = np.array([0.0005], dtype=np.float32)):
-        input_bytes = input_image.tobytes()
-        return await self.infer_cached(input_bytes, input_image.shape, input_image.dtype.str, threshold.item())
-
-    @alru_cache(maxsize=128)
-    async def infer_cached(self, input_bytes, shape, dtype_str, threshold):
-        input_image = np.frombuffer(input_bytes, dtype=dtype_str).reshape(shape)
-        return await self.infer(input_image, np.array([threshold]))
-
-
 class LightGlueTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/lightglue_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
+        self.real_infer_cnt = 0
 
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/lightglue.py#L333
     #
-    async def infer(self, kpts0, kpts1, desc0, desc1, mask0, mask1, img_shape0, img_shape1, match_threshold = np.array([[0.1]])):
+    @alru_cache_numpy(maxsize=128)
+    async def infer(self, kpts0, kpts1, desc0, desc1, mask0, mask1, img_shape0, img_shape1, match_threshold = np.array([[0.1]], dtype=np.float32)):
         np.copyto(self.inputs[0]["host"], kpts0)
         np.copyto(self.inputs[1]["host"], kpts1)
         np.copyto(self.inputs[2]["host"], desc0)
@@ -324,7 +319,6 @@ class LightGlueTRT(TRTBase):
         np.copyto(self.inputs[8]["host"], match_threshold)
 
         return await self.run_graph()
-
 
 class Dinov2TRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/dinov2_base_224x224_fp16_{platform.machine()}.plan"):
