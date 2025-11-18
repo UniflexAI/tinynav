@@ -5,6 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
+        - /TF1
         - /Image1
         - /Perception Group1/DepthCloud1/Auto Size1
         - /Perception Group1/DepthCloud1/Occlusion Compensation1
@@ -13,9 +14,8 @@ Panels:
         - /Planning Group1/3DGridMap1/Autocompute Value Bounds1
         - /Planning Group1/TrajScores1
         - /Planning Group1/PointCloud21
-        - /Mapping Group1
       Splitter Ratio: 0.5
-    Tree Height: 1167
+    Tree Height: 1923
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -33,7 +33,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: 3DGridMap
+    SyncSource: DepthCloud
 Visualization Manager:
   Class: ""
   Displays:
@@ -57,26 +57,242 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/TF
       Enabled: true
-      Frame Timeout: 15
+      Frame Timeout: 10000
       Frames:
         All Enabled: true
         camera:
+          Value: true
+        camera_1758097670713920654:
+          Value: true
+        camera_1758097670847347412:
+          Value: true
+        camera_1758097671114201172:
+          Value: true
+        camera_1758097671681275146:
+          Value: true
+        camera_1758097671814706055:
+          Value: true
+        camera_1758097671948136963:
+          Value: true
+        camera_1758097672081567871:
+          Value: true
+        camera_1758097672214999268:
+          Value: true
+        camera_1758097672581916016:
+          Value: true
+        camera_1758097672982183594:
+          Value: true
+        camera_1758097673382454346:
+          Value: true
+        camera_1758097673749379883:
+          Value: true
+        camera_1758097674082948975:
+          Value: true
+        camera_1758097674449869873:
+          Value: true
+        camera_1758097674816783203:
+          Value: true
+        camera_1758097675116984863:
+          Value: true
+        camera_1758097675417188965:
+          Value: true
+        camera_1758097675717397217:
+          Value: true
+        camera_1758097676017605957:
+          Value: true
+        camera_1758097676351187256:
+          Value: true
+        camera_1758097676651469482:
+          Value: true
+        camera_1758097677018486816:
+          Value: true
+        camera_1758097677385477051:
+          Value: true
+        camera_1758097677719023438:
+          Value: true
+        camera_1758097678052568604:
+          Value: true
+        camera_1758097678386114258:
+          Value: true
+        camera_1758097678686308838:
+          Value: true
+        camera_1758097679019857666:
+          Value: true
+        camera_1758097679320052979:
+          Value: true
+        camera_1758097679653634521:
+          Value: true
+        camera_1758097680087291504:
+          Value: true
+        camera_1758097680387504150:
+          Value: true
+        camera_1758097680721039063:
+          Value: true
+        camera_1758097681021218994:
+          Value: true
+        camera_1758097681354753662:
+          Value: true
+        camera_1758097681688303467:
+          Value: true
+        camera_1758097682021852539:
+          Value: true
+        camera_1758097682355399902:
+          Value: true
+        camera_1758097682655589355:
+          Value: true
+        camera_1758097682955777588:
+          Value: true
+        camera_1758097683255965088:
+          Value: true
+        camera_1758097683556152832:
+          Value: true
+        camera_1758097683856339844:
+          Value: true
+        camera_1758097684156525391:
+          Value: true
+        camera_1758097684456721924:
+          Value: true
+        camera_1758097684590147461:
+          Value: true
+        camera_1758097684723573242:
+          Value: true
+        camera_accel_frame:
+          Value: true
+        camera_accel_optical_frame:
+          Value: true
+        camera_aligned_depth_to_infra1_frame:
+          Value: true
+        camera_color_frame:
+          Value: true
+        camera_color_optical_frame:
+          Value: true
+        camera_depth_frame:
+          Value: true
+        camera_depth_optical_frame:
+          Value: true
+        camera_gyro_frame:
+          Value: true
+        camera_gyro_optical_frame:
+          Value: true
+        camera_infra1_frame:
+          Value: true
+        camera_infra1_optical_frame:
+          Value: true
+        camera_infra2_frame:
+          Value: true
+        camera_infra2_optical_frame:
+          Value: true
+        camera_link:
           Value: true
         world:
           Value: true
       Marker Scale: 1
       Name: TF
-      Show Arrows: true
+      Show Arrows: false
       Show Axes: true
       Show Names: false
       Tree:
         world:
           camera:
             {}
+          camera_1758097670713920654:
+            {}
+          camera_1758097670847347412:
+            {}
+          camera_1758097671114201172:
+            {}
+          camera_1758097671681275146:
+            {}
+          camera_1758097671814706055:
+            {}
+          camera_1758097671948136963:
+            {}
+          camera_1758097672081567871:
+            {}
+          camera_1758097672214999268:
+            {}
+          camera_1758097672581916016:
+            {}
+          camera_1758097672982183594:
+            {}
+          camera_1758097673382454346:
+            {}
+          camera_1758097673749379883:
+            {}
+          camera_1758097674082948975:
+            {}
+          camera_1758097674449869873:
+            {}
+          camera_1758097674816783203:
+            {}
+          camera_1758097675116984863:
+            {}
+          camera_1758097675417188965:
+            {}
+          camera_1758097675717397217:
+            {}
+          camera_1758097676017605957:
+            {}
+          camera_1758097676351187256:
+            {}
+          camera_1758097676651469482:
+            {}
+          camera_1758097677018486816:
+            {}
+          camera_1758097677385477051:
+            {}
+          camera_1758097677719023438:
+            {}
+          camera_1758097678052568604:
+            {}
+          camera_1758097678386114258:
+            {}
+          camera_1758097678686308838:
+            {}
+          camera_1758097679019857666:
+            {}
+          camera_1758097679320052979:
+            {}
+          camera_1758097679653634521:
+            {}
+          camera_1758097680087291504:
+            {}
+          camera_1758097680387504150:
+            {}
+          camera_1758097680721039063:
+            {}
+          camera_1758097681021218994:
+            {}
+          camera_1758097681354753662:
+            {}
+          camera_1758097681688303467:
+            {}
+          camera_1758097682021852539:
+            {}
+          camera_1758097682355399902:
+            {}
+          camera_1758097682655589355:
+            {}
+          camera_1758097682955777588:
+            {}
+          camera_1758097683255965088:
+            {}
+          camera_1758097683556152832:
+            {}
+          camera_1758097683856339844:
+            {}
+          camera_1758097684156525391:
+            {}
+          camera_1758097684456721924:
+            {}
+          camera_1758097684590147461:
+            {}
+          camera_1758097684723573242:
+            {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -88,11 +304,11 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /camera/camera/infra1/image_rect_raw
-      Value: true
+      Value: false
     - Class: rviz_common/Group
       Displays:
         - Class: rviz_default_plugins/Image
-          Enabled: true
+          Enabled: false
           Max Value: 1
           Median window: 5
           Min Value: 0
@@ -104,7 +320,7 @@ Visualization Manager:
             History Policy: Keep Last
             Reliability Policy: Reliable
             Value: /slam/disparity_vis
-          Value: true
+          Value: false
         - Alpha: 1
           Auto Size:
             Auto Size Factor: 1
@@ -376,11 +592,23 @@ Visualization Manager:
       Name: Planning Group
     - Class: rviz_common/Group
       Displays:
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: MarkerArray
+          Namespaces:
+            pointcloud: true
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /mapping/pointcloud_markers
+          Value: true
         - Alpha: 1
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
-            Max Value: 4.689828872680664
-            Min Value: 1.3115265369415283
+            Max Value: 1.9213783740997314
+            Min Value: -0.31803208589553833
             Value: true
           Axis: Z
           Channel Name: intensity
@@ -388,7 +616,7 @@ Visualization Manager:
           Color: 255; 255; 255
           Color Transformer: AxisColor
           Decay Time: 0
-          Enabled: true
+          Enabled: false
           Invert Rainbow: false
           Max Color: 255; 255; 255
           Max Intensity: 4096
@@ -398,7 +626,7 @@ Visualization Manager:
           Position Transformer: XYZ
           Selectable: true
           Size (Pixels): 3
-          Size (m): 0.009999999776482582
+          Size (m): 1
           Style: Flat Squares
           Topic:
             Depth: 5
@@ -409,7 +637,7 @@ Visualization Manager:
             Value: /mapping/global_map
           Use Fixed Frame: true
           Use rainbow: true
-          Value: true
+          Value: false
         - Alpha: 1
           Buffer Length: 1
           Class: rviz_default_plugins/Path
@@ -514,25 +742,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/ThirdPersonFollower
-      Distance: 28.82337760925293
+      Distance: 28.660680770874023
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.45880430936813354
-        Y: 0.19027316570281982
-        Z: 0.2679900527000427
-      Focal Shape Fixed Size: true
+        X: 0
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8447990417480469
+      Pitch: 1.3397963047027588
       Target Frame: camera
       Value: ThirdPersonFollower (rviz_default_plugins)
-      Yaw: 5.798030376434326
+      Yaw: 1.150397539138794
     Saved: ~
 Window Geometry:
   Displays:
@@ -541,10 +769,10 @@ Window Geometry:
   HeightMap:
     collapsed: false
   Hide Left Dock: false
-  Hide Right Dock: true
+  Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000004000000000000033200000871fc020000000efb0000001200530065006c0065006300740069006f006e00000001e10000009b000000ab00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c00610079007301000000690000057d0000017800fffffffb0000000a0049006d00610067006501000005f2000001610000004500fffffffb0000000a0049006d006100670065010000075f0000017b0000004500fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000014005400720061006a00530063006f0072006500730000000225000000280000004500fffffffb0000000a0049006d006100670065010000065a000000eb0000000000000000fb0000000a0049006d0061006700650100000326000000ca0000000000000000fb00000012004800650069006700680074004d006100700000000241000001450000004500ffffff00000001000002a40000034bfc0200000004fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003b0000034b0000012300fffffffb0000000a0049006d0061006700650100000198000002580000000000000000fb0000001200530065006c0065006300740069006f006e010000025a000000b20000000000000000000000020000073a000000a9fc0100000002fb0000000a0049006d0061006700650300000571000000e2000001da0000014afb0000000a00560069006500770073030000004e00000080000002e1000001970000000300000f0000000051fc0100000002fb0000000800540069006d0065010000000000000f000000046000fffffffb0000000800540069006d0065010000000000000450000000000000000000000bc20000087100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000004000000000000021a00000871fc020000000efb0000001200530065006c0065006300740069006f006e00000001e10000009b000000ab00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c0061007900730100000069000008710000017800fffffffb0000000a0049006d006100670065000000004dfffffff20000004500fffffffb0000000a0049006d0061006700650000000031fffffff20000004500fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000014005400720061006a00530063006f0072006500730000000225000000280000004500fffffffb0000000a0049006d006100670065010000065a000000eb0000000000000000fb0000000a0049006d0061006700650100000326000000ca0000000000000000fb00000012004800650069006700680074004d006100700000000241000001450000004500ffffff000000010000028200000871fc0200000004fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a005600690065007700730100000069000008710000012300fffffffb0000000a0049006d0061006700650100000198000002580000000000000000fb0000001200530065006c0065006300740069006f006e010000025a000000b20000000000000000000000020000073a000000a9fc0100000002fb0000000a0049006d0061006700650300000571000000e2000001da0000014afb0000000a00560069006500770073030000004e00000080000002e1000001970000000300000f0000000051fc0100000002fb0000000800540069006d0065010000000000000f000000046000fffffffb0000000800540069006d0065010000000000000450000000000000000000000a4c0000087100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:
@@ -554,7 +782,7 @@ Window Geometry:
   TrajScores:
     collapsed: false
   Views:
-    collapsed: true
+    collapsed: false
   Width: 3840
   X: 0
   Y: 0

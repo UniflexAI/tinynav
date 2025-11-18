@@ -6,7 +6,13 @@ from std_msgs.msg import Bool
 import numpy as np
 import sys
 
-from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
+from sensor_msgs.msg import PointCloud2
+import sensor_msgs_py.point_cloud2 as pc2
+from std_msgs.msg import Header
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import ColorRGBA
+
+from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -28,7 +34,28 @@ from tf2_msgs.msg import TFMessage
 from typing import Tuple, Dict
 import json
 
+from tf2_ros import TransformBroadcaster
+from geometry_msgs.msg import TransformStamped,Point
+from scipy.spatial.transform import Rotation as R
+
 logger = logging.getLogger(__name__)
+
+def z_value_to_color(z, z_min, z_max):
+    color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)
+    normalized_z = (z - z_min) / (z_max - z_min)
+    if normalized_z < 0.25:
+        color.g = normalized_z * 4.0
+        color.b = 1.0
+    elif normalized_z < 0.5:
+        color.g = 1.0
+        color.b = 1.0 - (normalized_z - 0.25) * 4.0
+    elif normalized_z < 0.75:
+        color.r = (normalized_z - 0.5) * 4.0
+        color.g = 1.0
+    else:
+        color.r = 1.0
+        color.g = 1.0 - (normalized_z - 0.75) * 4.0
+    return color
 
 def convert_nerf_format(output_dir: str, infra1_poses: dict, rgb_intrinscis:np.ndarray, image_size: Tuple[int, int], T_rgb_to_infra1:np.ndarray):
     camera_model = "PINHOLE"
@@ -124,7 +151,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
 
 def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10):
     """
-        Genereate a occupancy grid map from the depth images.
+        Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
             0 : Unknown
             1 : Free
@@ -287,6 +314,8 @@ class BuildMapNode(Node):
 
         self.bridge = CvBridge()
 
+        self.tf_broadcaster = TransformBroadcaster(self)
+
         self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
@@ -294,6 +323,8 @@ class BuildMapNode(Node):
         self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
 
+        self.marker_pub = self.create_publisher(MarkerArray, '/mapping/pointcloud_markers', 10)
+        self.local_map_pub = self.create_publisher(PointCloud2, "/mapping/local_map", 10)
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.project_3d_to_2d_pub = self.create_publisher(Image, "/mapping/project_3d_to_2d", 10)
         self.matches_image_pub = self.create_publisher(Image, "/mapping/keyframe_matches_images", 10)
@@ -316,6 +347,8 @@ class BuildMapNode(Node):
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
         self.db = TinyNavDB(map_save_path)
+
+        self.marker_id = 0
 
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
@@ -387,7 +420,7 @@ class BuildMapNode(Node):
                 self.mapping_save_finished_pub.publish(save_finished_msg)
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
-        with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with Timer(name="Mapping Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.timer_logger):
             if self.K is None:
                 return
             self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
@@ -446,6 +479,13 @@ class BuildMapNode(Node):
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
                 find_loop_and_pose_graph(keyframe_image_timestamp)
+
+        with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            cloud = depth_to_cloud(depth, self.K, 30, 3)
+            self.publish_local_map(cloud, 'camera_'+str(keyframe_image_timestamp))
+
+        with Timer(name = "tf publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            self.publish_all_transforms()
 
         with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
@@ -533,6 +573,96 @@ class BuildMapNode(Node):
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
+
+
+    def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
+        marker_array = MarkerArray()
+        
+        # Create point cloud Marker
+        marker = Marker()
+        marker.header.frame_id = frame_id
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "pointcloud"
+        marker.id = self.marker_id
+        self.marker_id = self.marker_id + 1
+
+        marker.type = Marker.POINTS
+        marker.action = Marker.ADD
+        
+        # Set Marker properties
+        marker.scale.x = 0.03  # Point width
+        marker.scale.y = 0.03  # Point height
+        marker.scale.z = 0.0   # For POINTS type, z is not used
+        
+        # Set orientation (unit quaternion)
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        
+        # Set position
+        marker.pose.position.x = 0.0
+        marker.pose.position.y = 0.0
+        marker.pose.position.z = 0.0
+        
+        # Set points
+        marker.points = []
+        for point in points:
+            p = Point()
+            p.x = float(point[0])
+            p.y = float(point[1])
+            p.z = float(point[2])
+            if (p.y > 0):
+                marker.points.append(p)
+                c = z_value_to_color(float(point[1]), -3, 1)
+                marker.colors.append(c)
+        
+        # Set lifetime (0 means never expire)
+        marker.lifetime.sec = 0
+        marker.frame_locked = True
+        
+        marker_array.markers.append(marker) 
+        
+        return marker_array
+
+    def publish_local_map(self, point_cloud, frame_id):
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = frame_id
+        marker_array = self.pointcloud_to_marker_array(point_cloud.tolist(), frame_id)
+        self.marker_pub.publish(marker_array)
+
+    def publish_all_transforms(self):
+        """Publish all pose TF transforms"""
+        if not self.pose_graph_used_pose:
+            return
+            
+        transforms = []        
+                
+        for time, pose_in_world in self.pose_graph_used_pose.items():
+            transform = TransformStamped()
+            
+            # Set header
+            transform.header.stamp = self.get_clock().now().to_msg()
+            transform.header.frame_id = 'world'
+            transform.child_frame_id = 'camera_' + str(time)
+            
+            # Set position
+            t = pose_in_world[:3, 3]
+            transform.transform.translation.x = t[0]
+            transform.transform.translation.y = t[1]
+            transform.transform.translation.z = t[2]
+            qx,qy,qz,qw =  R.from_matrix(pose_in_world[:3, :3]).as_quat()
+            transform.transform.rotation.x = qx
+            transform.transform.rotation.y = qy
+            transform.transform.rotation.z = qz
+            transform.transform.rotation.w = qw
+
+            transforms.append(transform)
+        
+        # Publish all TF transforms
+        self.tf_broadcaster.sendTransform(transforms)
+        
 
     def destroy_node(self):
         try:
