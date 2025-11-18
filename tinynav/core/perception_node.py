@@ -499,7 +499,7 @@ class PerceptionNode(Node):
 
 
             if keyframe_check(self.keyframe_queue[-2].pose, self.keyframe_queue[-1].pose):
-                #self.keyframe_pose_pub.publish(np2msg(self.last_keyframe_pose @ self.T_camera_to_imu, self.last_ros_timestamp, "world", "camera"))
+                self.keyframe_pose_pub.publish(np2msg(self.keyframe_queue[-1].pose, left_msg.header.stamp, "world", "camera"))
                 self.keyframe_image_pub.publish(left_msg)
                 self.keyframe_depth_pub.publish(depth_msg)
             else:

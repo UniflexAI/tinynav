@@ -153,6 +153,28 @@ def msg2np(msg):
     return T
 
 @njit(cache=True)
+def depth_to_cloud(depth, K, step=10, max_dist=1e9):
+    h, w = depth.shape
+
+    fx = K[0, 0]
+    fy = K[1, 1]
+    cx = K[0, 2]
+    cy = K[1, 2]
+
+    pts = []  # numba-typed list
+
+    for v in range(0, h, step):
+        for u in range(0, w, step):
+            z = depth[v, u]
+            if z > 0.0 and z <= max_dist:
+                x = (u - cx) * z / fx
+                y = (v - cy) * z / fy
+                pts.append((x, y, z))   # tuples are allowed
+
+    # convert typed list → ndarray
+    return np.array(pts)
+
+@njit(cache=True)
 def process_keypoints(kpts_prev, kpts_curr, depth, K):
     points_3d = np.empty((len(kpts_prev), 3), dtype=np.float32)
     points_2d = np.empty((len(kpts_prev), 2), dtype=np.float32)
