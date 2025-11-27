@@ -38,6 +38,14 @@ from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped,Point
 from scipy.spatial.transform import Rotation as R
 
+from rclpy.executors import SingleThreadedExecutor
+from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
+from rosidl_runtime_py.utilities import get_message
+from rosgraph_msgs.msg import Clock
+from rclpy.serialization import deserialize_message
+
+
+
 logger = logging.getLogger(__name__)
 
 def z_value_to_color(z, z_min, z_max):
@@ -301,6 +309,62 @@ class TinyNavDB():
         self.depths.close()
         self.rgb_images.close()
 
+class BagPlayer(Node):
+    def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
+    ):
+        super().__init__("rosbag_player")
+
+        self._storage_options = StorageOptions(uri=bag_uri, storage_id="sqlite3",)
+        self._converter_options = ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr",)
+
+        self._reader = SequentialReader()
+        self._reader.open(self._storage_options, self._converter_options)
+
+        # topic -> (publisher, msg_type)
+        self._topic_publishers = {}
+
+        # Build publishers for all topics in the bag
+        for topic_info in self._reader.get_all_topics_and_types():
+            msg_type = get_message(topic_info.type)
+            pub = self.create_publisher(msg_type, topic_info.name, 10)
+            self._topic_publishers[topic_info.name] = (pub, msg_type)
+
+        # /clock publisher (for use_sim_time)
+        self._clock_pub = self.create_publisher(Clock, "/clock", 10)
+
+        self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
+
+    def play_next(self) -> bool:
+        """
+        Publish the next message from the bag.
+        Returns False when there are no more messages.
+        """
+        if not self._reader.has_next():
+            return False
+
+        topic, serialized_msg, timestamp_ns = self._reader.read_next()
+
+        # Find publisher + msg type for this topic
+        pub_and_type = self._topic_publishers.get(topic)
+        if pub_and_type is None:
+            # No publisher (should not really happen, but don't crash playback)
+            self.get_logger().warn(f"No publisher for topic '{topic}'")
+            return True
+
+        pub, msg_type = pub_and_type
+
+        # Deserialize and publish actual message
+        msg = deserialize_message(serialized_msg, msg_type)
+        pub.publish(msg)
+
+        # Publish /clock with the same timestamp (for use_sim_time)
+        if self._clock_pub is not None:
+            clock_msg = Clock()
+            clock_msg.clock.sec = int(timestamp_ns // 1_000_000_000)
+            clock_msg.clock.nanosec = int(timestamp_ns % 1_000_000_000)
+            self._clock_pub.publish(clock_msg)
+
+        return True
 
 class BuildMapNode(Node):
     def __init__(self, map_save_path:str, verbose_timer: bool = True):
@@ -680,25 +744,24 @@ def main(args=None):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     rclpy.init(args=args)
+
+
     parser = argparse.ArgumentParser()
+    parser.add_argument("--bag_file", type=str, default="tinynav_db")
     parser.add_argument("--map_save_path", type=str, default="tinynav_db")
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
-    node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
 
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        logging.info("Keyboard interrupt received, build map node is shut down")
-    except Exception as e:
-        logging.error(f"Error occurred: {e}")
-    finally:
-        try:
-            node.destroy_node()
-            rclpy.shutdown()
-        except Exception as e:
-            logging.error(f"Error occurred: {e}")
+    exec_ = SingleThreadedExecutor()
+    player_node = BagPlayer(parsed_args.bag_file)
+    map_node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
+
+    exec_.add_node(player_node)
+    exec_.add_node(map_node)
+
+    while rclpy.ok() and player_node.play_next():
+        exec_.spin_once(timeout_sec=0.001)
 
 if __name__ == '__main__':
     main()
