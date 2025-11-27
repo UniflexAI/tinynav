@@ -5,17 +5,15 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
-        - /TF1
-        - /Image1
-        - /Perception Group1/DepthCloud1/Auto Size1
-        - /Perception Group1/DepthCloud1/Occlusion Compensation1
-        - /Perception Group1/DepthCloud1/Autocompute Value Bounds1
-        - /Planning Group1/3DGridMap1
-        - /Planning Group1/3DGridMap1/Autocompute Value Bounds1
-        - /Planning Group1/TrajScores1
-        - /Planning Group1/PointCloud21
+        - /Perception1/DepthCloud1/Auto Size1
+        - /Perception1/DepthCloud1/Occlusion Compensation1
+        - /Perception1/DepthCloud1/Autocompute Value Bounds1
+        - /Planning1/3DGridMap1
+        - /Planning1/3DGridMap1/Autocompute Value Bounds1
+        - /Planning1/TrajScores1
+        - /Planning1/PointCloud21
       Splitter Ratio: 0.5
-    Tree Height: 1923
+    Tree Height: 1436
   - Class: rviz_common/Selection
     Name: Selection
   - Class: rviz_common/Tool Properties
@@ -62,11 +60,135 @@ Visualization Manager:
         All Enabled: true
         camera:
           Value: true
-        camera_1758097670713920654:
+        camera_1758097663008658447:
           Value: true
-        camera_1758097670847347412:
+        camera_1758097663142082520:
           Value: true
-        camera_1758097671114201172:
+        camera_1758097663275506348:
+          Value: true
+        camera_1758097663408929443:
+          Value: true
+        camera_1758097663542352295:
+          Value: true
+        camera_1758097663675775391:
+          Value: true
+        camera_1758097663809198242:
+          Value: true
+        camera_1758097663942621338:
+          Value: true
+        camera_1758097664076044189:
+          Value: true
+        camera_1758097664209467285:
+          Value: true
+        camera_1758097664342890381:
+          Value: true
+        camera_1758097664476313477:
+          Value: true
+        camera_1758097664609736816:
+          Value: true
+        camera_1758097664743159912:
+          Value: true
+        camera_1758097664876583252:
+          Value: true
+        camera_1758097665010006348:
+          Value: true
+        camera_1758097665143429688:
+          Value: true
+        camera_1758097665276852783:
+          Value: true
+        camera_1758097665410277100:
+          Value: true
+        camera_1758097665543701172:
+          Value: true
+        camera_1758097665677125488:
+          Value: true
+        camera_1758097665810549805:
+          Value: true
+        camera_1758097665943974121:
+          Value: true
+        camera_1758097666077398438:
+          Value: true
+        camera_1758097666210822998:
+          Value: true
+        camera_1758097666344247803:
+          Value: true
+        camera_1758097666477673340:
+          Value: true
+        camera_1758097666611098633:
+          Value: true
+        camera_1758097666744524414:
+          Value: true
+        camera_1758097666877949951:
+          Value: true
+        camera_1758097667011375488:
+          Value: true
+        camera_1758097667144801270:
+          Value: true
+        camera_1758097667278226807:
+          Value: true
+        camera_1758097667411650879:
+          Value: true
+        camera_1758097667545074707:
+          Value: true
+        camera_1758097667678498779:
+          Value: true
+        camera_1758097667811922607:
+          Value: true
+        camera_1758097667945346436:
+          Value: true
+        camera_1758097668078770508:
+          Value: true
+        camera_1758097668212194336:
+          Value: true
+        camera_1758097668345622070:
+          Value: true
+        camera_1758097668479051025:
+          Value: true
+        camera_1758097668612479980:
+          Value: true
+        camera_1758097668745909180:
+          Value: true
+        camera_1758097668879338379:
+          Value: true
+        camera_1758097669012767822:
+          Value: true
+        camera_1758097669146197510:
+          Value: true
+        camera_1758097669279625732:
+          Value: true
+        camera_1758097669413046875:
+          Value: true
+        camera_1758097669546468018:
+          Value: true
+        camera_1758097669679889160:
+          Value: true
+        camera_1758097669813310059:
+          Value: true
+        camera_1758097669946730957:
+          Value: true
+        camera_1758097670080151855:
+          Value: true
+        camera_1758097670213572754:
+          Value: true
+        camera_1758097670346997559:
+          Value: true
+        camera_1758097670480424072:
+          Value: true
+        camera_1758097670613850830:
+          Value: true
+        camera_1758097670747277344:
+          Value: true
+        camera_1758097670880704102:
+          Value: true
+        camera_1758097671014131104:
+          Value: true
+        camera_1758097671147557861:
+          Value: true
+        camera_1758097671280984131:
+          Value: true
+        camera_1758097671414414307:
+          Value: true
+        camera_1758097671547844727:
           Value: true
         camera_1758097671681275146:
           Value: true
@@ -78,83 +200,1503 @@ Visualization Manager:
           Value: true
         camera_1758097672214999268:
           Value: true
-        camera_1758097672581916016:
+        camera_1758097672348426514:
           Value: true
-        camera_1758097672982183594:
+        camera_1758097672481849121:
           Value: true
-        camera_1758097673382454346:
+        camera_1758097672615271729:
           Value: true
-        camera_1758097673749379883:
+        camera_1758097672748694092:
+          Value: true
+        camera_1758097672882116699:
+          Value: true
+        camera_1758097673015539063:
+          Value: true
+        camera_1758097673148961670:
+          Value: true
+        camera_1758097673282383789:
+          Value: true
+        camera_1758097673415811279:
+          Value: true
+        camera_1758097673549238525:
+          Value: true
+        camera_1758097673682666016:
+          Value: true
+        camera_1758097673816093750:
+          Value: true
+        camera_1758097673949521240:
           Value: true
         camera_1758097674082948975:
           Value: true
-        camera_1758097674449869873:
+        camera_1758097674216376953:
           Value: true
-        camera_1758097674816783203:
+        camera_1758097674349802490:
           Value: true
-        camera_1758097675116984863:
+        camera_1758097674483225586:
+          Value: true
+        camera_1758097674616648682:
+          Value: true
+        camera_1758097674750071777:
+          Value: true
+        camera_1758097674883494629:
+          Value: true
+        camera_1758097675016917725:
+          Value: true
+        camera_1758097675150340576:
+          Value: true
+        camera_1758097675283763184:
           Value: true
         camera_1758097675417188965:
           Value: true
-        camera_1758097675717397217:
+        camera_1758097675550614746:
           Value: true
-        camera_1758097676017605957:
+        camera_1758097675684040771:
+          Value: true
+        camera_1758097675817466797:
+          Value: true
+        camera_1758097675950892822:
+          Value: true
+        camera_1758097676084319092:
+          Value: true
+        camera_1758097676217745361:
           Value: true
         camera_1758097676351187256:
           Value: true
-        camera_1758097676651469482:
+        camera_1758097676484645508:
+          Value: true
+        camera_1758097676618104492:
+          Value: true
+        camera_1758097676751564453:
+          Value: true
+        camera_1758097676885025146:
           Value: true
         camera_1758097677018486816:
           Value: true
-        camera_1758097677385477051:
+        camera_1758097677151949219:
           Value: true
-        camera_1758097677719023438:
+        camera_1758097677285412842:
           Value: true
-        camera_1758097678052568604:
+        camera_1758097677418831787:
           Value: true
-        camera_1758097678386114258:
+        camera_1758097677552250488:
           Value: true
-        camera_1758097678686308838:
+        camera_1758097677685668945:
+          Value: true
+        camera_1758097677819087158:
+          Value: true
+        camera_1758097677952505127:
+          Value: true
+        camera_1758097678085923096:
+          Value: true
+        camera_1758097678219340576:
+          Value: true
+        camera_1758097678352759277:
+          Value: true
+        camera_1758097678486179199:
+          Value: true
+        camera_1758097678619599121:
+          Value: true
+        camera_1758097678753018799:
+          Value: true
+        camera_1758097678886438232:
           Value: true
         camera_1758097679019857666:
           Value: true
-        camera_1758097679320052979:
+        camera_1758097679153276855:
           Value: true
-        camera_1758097679653634521:
+        camera_1758097679286694824:
+          Value: true
+        camera_1758097679420127441:
+          Value: true
+        camera_1758097679553559814:
+          Value: true
+        camera_1758097679686992676:
+          Value: true
+        camera_1758097679820425537:
+          Value: true
+        camera_1758097679953858398:
           Value: true
         camera_1758097680087291504:
           Value: true
-        camera_1758097680387504150:
+        camera_1758097680220724854:
           Value: true
-        camera_1758097680721039063:
+        camera_1758097680354150635:
+          Value: true
+        camera_1758097680487564941:
+          Value: true
+        camera_1758097680620978760:
+          Value: true
+        camera_1758097680754392578:
+          Value: true
+        camera_1758097680887805908:
           Value: true
         camera_1758097681021218994:
           Value: true
-        camera_1758097681354753662:
+        camera_1758097681154631836:
+          Value: true
+        camera_1758097681288043457:
+          Value: true
+        camera_1758097681421463623:
+          Value: true
+        camera_1758097681554883789:
           Value: true
         camera_1758097681688303467:
           Value: true
-        camera_1758097682021852539:
+        camera_1758097681821723145:
+          Value: true
+        camera_1758097681955142822:
+          Value: true
+        camera_1758097682088562012:
+          Value: true
+        camera_1758097682221981201:
           Value: true
         camera_1758097682355399902:
           Value: true
-        camera_1758097682655589355:
+        camera_1758097682488817627:
           Value: true
-        camera_1758097682955777588:
+        camera_1758097682622235107:
           Value: true
-        camera_1758097683255965088:
+        camera_1758097682755652344:
+          Value: true
+        camera_1758097682889069336:
+          Value: true
+        camera_1758097683022486084:
+          Value: true
+        camera_1758097683155902588:
+          Value: true
+        camera_1758097683289319092:
+          Value: true
+        camera_1758097683422736084:
           Value: true
         camera_1758097683556152832:
           Value: true
-        camera_1758097683856339844:
+        camera_1758097683689569336:
           Value: true
-        camera_1758097684156525391:
+        camera_1758097683822985840:
           Value: true
-        camera_1758097684456721924:
+        camera_1758097683956401855:
           Value: true
-        camera_1758097684590147461:
+        camera_1758097684089817627:
           Value: true
-        camera_1758097684723573242:
+        camera_1758097684223233154:
+          Value: true
+        camera_1758097684356652588:
+          Value: true
+        camera_1758097684490078369:
+          Value: true
+        camera_1758097684623503906:
+          Value: true
+        camera_1758097684756929932:
+          Value: true
+        camera_1758097684890355713:
+          Value: true
+        camera_1758097685023781494:
+          Value: true
+        camera_1758097685157207520:
+          Value: true
+        camera_1758097685290634277:
+          Value: true
+        camera_1758097685424054443:
+          Value: true
+        camera_1758097685557474365:
+          Value: true
+        camera_1758097685690894287:
+          Value: true
+        camera_1758097685824313965:
+          Value: true
+        camera_1758097685957733398:
+          Value: true
+        camera_1758097686091152588:
+          Value: true
+        camera_1758097686224571533:
+          Value: true
+        camera_1758097686357990479:
+          Value: true
+        camera_1758097686491408691:
+          Value: true
+        camera_1758097686624826904:
+          Value: true
+        camera_1758097686758244873:
+          Value: true
+        camera_1758097686891662598:
+          Value: true
+        camera_1758097687025080322:
+          Value: true
+        camera_1758097687158497559:
+          Value: true
+        camera_1758097687291913818:
+          Value: true
+        camera_1758097687425338623:
+          Value: true
+        camera_1758097687558763184:
+          Value: true
+        camera_1758097687692187744:
+          Value: true
+        camera_1758097687825612549:
+          Value: true
+        camera_1758097687959037354:
+          Value: true
+        camera_1758097688092461914:
+          Value: true
+        camera_1758097688225886719:
+          Value: true
+        camera_1758097688359309326:
+          Value: true
+        camera_1758097688492727783:
+          Value: true
+        camera_1758097688626145752:
+          Value: true
+        camera_1758097688759563721:
+          Value: true
+        camera_1758097688892981201:
+          Value: true
+        camera_1758097689026398682:
+          Value: true
+        camera_1758097689159815918:
+          Value: true
+        camera_1758097689293232422:
+          Value: true
+        camera_1758097689426652344:
+          Value: true
+        camera_1758097689560072266:
+          Value: true
+        camera_1758097689693491943:
+          Value: true
+        camera_1758097689826911621:
+          Value: true
+        camera_1758097689960331055:
+          Value: true
+        camera_1758097690093750488:
+          Value: true
+        camera_1758097690227169922:
+          Value: true
+        camera_1758097690360588867:
+          Value: true
+        camera_1758097690494007324:
+          Value: true
+        camera_1758097690627425293:
+          Value: true
+        camera_1758097690760843262:
+          Value: true
+        camera_1758097690894260986:
+          Value: true
+        camera_1758097691027678711:
+          Value: true
+        camera_1758097691161095947:
+          Value: true
+        camera_1758097691294512939:
+          Value: true
+        camera_1758097691427931152:
+          Value: true
+        camera_1758097691561349365:
+          Value: true
+        camera_1758097691694767090:
+          Value: true
+        camera_1758097691828184814:
+          Value: true
+        camera_1758097691961602295:
+          Value: true
+        camera_1758097692095019531:
+          Value: true
+        camera_1758097692228436523:
+          Value: true
+        camera_1758097692361859619:
+          Value: true
+        camera_1758097692495296143:
+          Value: true
+        camera_1758097692628733643:
+          Value: true
+        camera_1758097692762171875:
+          Value: true
+        camera_1758097692895611084:
+          Value: true
+        camera_1758097693029050781:
+          Value: true
+        camera_1758097693162491455:
+          Value: true
+        camera_1758097693295935791:
+          Value: true
+        camera_1758097693429359863:
+          Value: true
+        camera_1758097693562784180:
+          Value: true
+        camera_1758097693696208252:
+          Value: true
+        camera_1758097693829632324:
+          Value: true
+        camera_1758097693963056396:
+          Value: true
+        camera_1758097694096480469:
+          Value: true
+        camera_1758097694229904541:
+          Value: true
+        camera_1758097694363327637:
+          Value: true
+        camera_1758097694496749023:
+          Value: true
+        camera_1758097694630170410:
+          Value: true
+        camera_1758097694763591553:
+          Value: true
+        camera_1758097694897012695:
+          Value: true
+        camera_1758097695030433838:
+          Value: true
+        camera_1758097695163854736:
+          Value: true
+        camera_1758097695297273926:
+          Value: true
+        camera_1758097695430703613:
+          Value: true
+        camera_1758097695564133545:
+          Value: true
+        camera_1758097695697563721:
+          Value: true
+        camera_1758097695830994385:
+          Value: true
+        camera_1758097695964425293:
+          Value: true
+        camera_1758097696097856445:
+          Value: true
+        camera_1758097696231288086:
+          Value: true
+        camera_1758097696364716797:
+          Value: true
+        camera_1758097696498138916:
+          Value: true
+        camera_1758097696631560547:
+          Value: true
+        camera_1758097696764982422:
+          Value: true
+        camera_1758097696898403809:
+          Value: true
+        camera_1758097697031825439:
+          Value: true
+        camera_1758097697165246826:
+          Value: true
+        camera_1758097697298667236:
+          Value: true
+        camera_1758097697432092773:
+          Value: true
+        camera_1758097697565518311:
+          Value: true
+        camera_1758097697698943848:
+          Value: true
+        camera_1758097697832369385:
+          Value: true
+        camera_1758097697965795166:
+          Value: true
+        camera_1758097698099220947:
+          Value: true
+        camera_1758097698232646729:
+          Value: true
+        camera_1758097698366072021:
+          Value: true
+        camera_1758097698499495361:
+          Value: true
+        camera_1758097698632918945:
+          Value: true
+        camera_1758097698766342529:
+          Value: true
+        camera_1758097698899765869:
+          Value: true
+        camera_1758097699033189209:
+          Value: true
+        camera_1758097699166612549:
+          Value: true
+        camera_1758097699300035889:
+          Value: true
+        camera_1758097699433461670:
+          Value: true
+        camera_1758097699566887695:
+          Value: true
+        camera_1758097699833739258:
+          Value: true
+        camera_1758097699967165283:
+          Value: true
+        camera_1758097700100591064:
+          Value: true
+        camera_1758097700234017090:
+          Value: true
+        camera_1758097700367442871:
+          Value: true
+        camera_1758097700500870117:
+          Value: true
+        camera_1758097700634297363:
+          Value: true
+        camera_1758097700767724854:
+          Value: true
+        camera_1758097700901152588:
+          Value: true
+        camera_1758097701034580322:
+          Value: true
+        camera_1758097701168008057:
+          Value: true
+        camera_1758097701301436035:
+          Value: true
+        camera_1758097701434863281:
+          Value: true
+        camera_1758097701568290283:
+          Value: true
+        camera_1758097701701717529:
+          Value: true
+        camera_1758097701835145020:
+          Value: true
+        camera_1758097701968572510:
+          Value: true
+        camera_1758097702102000244:
+          Value: true
+        camera_1758097702235427979:
+          Value: true
+        camera_1758097702368855225:
+          Value: true
+        camera_1758097702502284180:
+          Value: true
+        camera_1758097702635713379:
+          Value: true
+        camera_1758097702769142578:
+          Value: true
+        camera_1758097702902572021:
+          Value: true
+        camera_1758097703036001465:
+          Value: true
+        camera_1758097703169431152:
+          Value: true
+        camera_1758097703302860840:
+          Value: true
+        camera_1758097703436291016:
+          Value: true
+        camera_1758097703569721680:
+          Value: true
+        camera_1758097703703152344:
+          Value: true
+        camera_1758097703836583496:
+          Value: true
+        camera_1758097703970014648:
+          Value: true
+        camera_1758097704103446045:
+          Value: true
+        camera_1758097704236877686:
+          Value: true
+        camera_1758097704370308594:
+          Value: true
+        camera_1758097704503737061:
+          Value: true
+        camera_1758097704637165527:
+          Value: true
+        camera_1758097704770594238:
+          Value: true
+        camera_1758097704904022949:
+          Value: true
+        camera_1758097705037451660:
+          Value: true
+        camera_1758097705170880615:
+          Value: true
+        camera_1758097705304309814:
+          Value: true
+        camera_1758097705437735352:
+          Value: true
+        camera_1758097705571159668:
+          Value: true
+        camera_1758097705704583740:
+          Value: true
+        camera_1758097705838008057:
+          Value: true
+        camera_1758097705971432373:
+          Value: true
+        camera_1758097706104856445:
+          Value: true
+        camera_1758097706238280762:
+          Value: true
+        camera_1758097706371705811:
+          Value: true
+        camera_1758097706505133789:
+          Value: true
+        camera_1758097706638562012:
+          Value: true
+        camera_1758097706771990234:
+          Value: true
+        camera_1758097706905418457:
+          Value: true
+        camera_1758097707038846924:
+          Value: true
+        camera_1758097707172275146:
+          Value: true
+        camera_1758097707305703613:
+          Value: true
+        camera_1758097707439143311:
+          Value: true
+        camera_1758097707572586914:
+          Value: true
+        camera_1758097707706030762:
+          Value: true
+        camera_1758097707839475342:
+          Value: true
+        camera_1758097707972920166:
+          Value: true
+        camera_1758097708106365479:
+          Value: true
+        camera_1758097708239811279:
+          Value: true
+        camera_1758097708373250977:
+          Value: true
+        camera_1758097708506671631:
+          Value: true
+        camera_1758097708640092041:
+          Value: true
+        camera_1758097708773512451:
+          Value: true
+        camera_1758097708906932617:
+          Value: true
+        camera_1758097709040352539:
+          Value: true
+        camera_1758097709173772217:
+          Value: true
+        camera_1758097709307191895:
+          Value: true
+        camera_1758097709440613281:
+          Value: true
+        camera_1758097709574034180:
+          Value: true
+        camera_1758097709707455078:
+          Value: true
+        camera_1758097709840875732:
+          Value: true
+        camera_1758097709974296387:
+          Value: true
+        camera_1758097710107717041:
+          Value: true
+        camera_1758097710241137451:
+          Value: true
+        camera_1758097710374557617:
+          Value: true
+        camera_1758097710507976807:
+          Value: true
+        camera_1758097710641395752:
+          Value: true
+        camera_1758097710774814453:
+          Value: true
+        camera_1758097710908233154:
+          Value: true
+        camera_1758097711041651367:
+          Value: true
+        camera_1758097711175069580:
+          Value: true
+        camera_1758097711308487549:
+          Value: true
+        camera_1758097711441907227:
+          Value: true
+        camera_1758097711575327148:
+          Value: true
+        camera_1758097711708747070:
+          Value: true
+        camera_1758097711842166748:
+          Value: true
+        camera_1758097711975586182:
+          Value: true
+        camera_1758097712109005371:
+          Value: true
+        camera_1758097712242424561:
+          Value: true
+        camera_1758097712375843750:
+          Value: true
+        camera_1758097712509263672:
+          Value: true
+        camera_1758097712642683350:
+          Value: true
+        camera_1758097712776102783:
+          Value: true
+        camera_1758097712909522217:
+          Value: true
+        camera_1758097713042941406:
+          Value: true
+        camera_1758097713176360352:
+          Value: true
+        camera_1758097713309779053:
+          Value: true
+        camera_1758097713443214355:
+          Value: true
+        camera_1758097713576658447:
+          Value: true
+        camera_1758097713710102783:
+          Value: true
+        camera_1758097713843547852:
+          Value: true
+        camera_1758097713976993164:
+          Value: true
+        camera_1758097714110439209:
+          Value: true
+        camera_1758097714243885498:
+          Value: true
+        camera_1758097714377327637:
+          Value: true
+        camera_1758097714510745605:
+          Value: true
+        camera_1758097714644163086:
+          Value: true
+        camera_1758097714777580566:
+          Value: true
+        camera_1758097714910997803:
+          Value: true
+        camera_1758097715044414795:
+          Value: true
+        camera_1758097715177831299:
+          Value: true
+        camera_1758097715311247803:
+          Value: true
+        camera_1758097715444666260:
+          Value: true
+        camera_1758097715578085693:
+          Value: true
+        camera_1758097715711504883:
+          Value: true
+        camera_1758097715844924072:
+          Value: true
+        camera_1758097715978342773:
+          Value: true
+        camera_1758097716111761475:
+          Value: true
+        camera_1758097716245180176:
+          Value: true
+        camera_1758097716378598389:
+          Value: true
+        camera_1758097716512016357:
+          Value: true
+        camera_1758097716645434082:
+          Value: true
+        camera_1758097716778851318:
+          Value: true
+        camera_1758097716912268555:
+          Value: true
+        camera_1758097717045685547:
+          Value: true
+        camera_1758097717179102295:
+          Value: true
+        camera_1758097717312518799:
+          Value: true
+        camera_1758097717445937988:
+          Value: true
+        camera_1758097717579358643:
+          Value: true
+        camera_1758097717712779053:
+          Value: true
+        camera_1758097717846199463:
+          Value: true
+        camera_1758097717979619629:
+          Value: true
+        camera_1758097718113039795:
+          Value: true
+        camera_1758097718246459473:
+          Value: true
+        camera_1758097718379879639:
+          Value: true
+        camera_1758097718513301270:
+          Value: true
+        camera_1758097718646722900:
+          Value: true
+        camera_1758097718780144531:
+          Value: true
+        camera_1758097718913565918:
+          Value: true
+        camera_1758097719046987305:
+          Value: true
+        camera_1758097719180408691:
+          Value: true
+        camera_1758097719313830078:
+          Value: true
+        camera_1758097719447250977:
+          Value: true
+        camera_1758097719580671875:
+          Value: true
+        camera_1758097719714092773:
+          Value: true
+        camera_1758097719847513428:
+          Value: true
+        camera_1758097719980934082:
+          Value: true
+        camera_1758097720114354736:
+          Value: true
+        camera_1758097720247775146:
+          Value: true
+        camera_1758097720381196045:
+          Value: true
+        camera_1758097720514621826:
+          Value: true
+        camera_1758097720648047607:
+          Value: true
+        camera_1758097720781473389:
+          Value: true
+        camera_1758097720914899414:
+          Value: true
+        camera_1758097721048325195:
+          Value: true
+        camera_1758097721181751221:
+          Value: true
+        camera_1758097721315177246:
+          Value: true
+        camera_1758097721448599854:
+          Value: true
+        camera_1758097721582020264:
+          Value: true
+        camera_1758097721715440430:
+          Value: true
+        camera_1758097721848860596:
+          Value: true
+        camera_1758097721982280518:
+          Value: true
+        camera_1758097722115700195:
+          Value: true
+        camera_1758097722249119873:
+          Value: true
+        camera_1758097722382539795:
+          Value: true
+        camera_1758097722515962402:
+          Value: true
+        camera_1758097722649385010:
+          Value: true
+        camera_1758097722782807861:
+          Value: true
+        camera_1758097722916230469:
+          Value: true
+        camera_1758097723049652832:
+          Value: true
+        camera_1758097723183075439:
+          Value: true
+        camera_1758097723316498047:
+          Value: true
+        camera_1758097723449926758:
+          Value: true
+        camera_1758097723583360352:
+          Value: true
+        camera_1758097723716794434:
+          Value: true
+        camera_1758097723850229248:
+          Value: true
+        camera_1758097723983664307:
+          Value: true
+        camera_1758097724117099854:
+          Value: true
+        camera_1758097724250535889:
+          Value: true
+        camera_1758097724383971924:
+          Value: true
+        camera_1758097724517398682:
+          Value: true
+        camera_1758097724650825439:
+          Value: true
+        camera_1758097724784252197:
+          Value: true
+        camera_1758097724917678955:
+          Value: true
+        camera_1758097725051105957:
+          Value: true
+        camera_1758097725184532715:
+          Value: true
+        camera_1758097725317959717:
+          Value: true
+        camera_1758097725451383789:
+          Value: true
+        camera_1758097725584805664:
+          Value: true
+        camera_1758097725718227539:
+          Value: true
+        camera_1758097725851649170:
+          Value: true
+        camera_1758097725985070801:
+          Value: true
+        camera_1758097726118492188:
+          Value: true
+        camera_1758097726251913574:
+          Value: true
+        camera_1758097726385334717:
+          Value: true
+        camera_1758097726518756348:
+          Value: true
+        camera_1758097726652177979:
+          Value: true
+        camera_1758097726785599121:
+          Value: true
+        camera_1758097726919020508:
+          Value: true
+        camera_1758097727052441650:
+          Value: true
+        camera_1758097727185862549:
+          Value: true
+        camera_1758097727319283447:
+          Value: true
+        camera_1758097727452705566:
+          Value: true
+        camera_1758097727586128418:
+          Value: true
+        camera_1758097727719551025:
+          Value: true
+        camera_1758097727852973877:
+          Value: true
+        camera_1758097727986396484:
+          Value: true
+        camera_1758097728119819092:
+          Value: true
+        camera_1758097728253241455:
+          Value: true
+        camera_1758097728386663818:
+          Value: true
+        camera_1758097728520085205:
+          Value: true
+        camera_1758097728653506348:
+          Value: true
+        camera_1758097728786927246:
+          Value: true
+        camera_1758097728920348145:
+          Value: true
+        camera_1758097729053769043:
+          Value: true
+        camera_1758097729187189697:
+          Value: true
+        camera_1758097729320610107:
+          Value: true
+        camera_1758097729454038086:
+          Value: true
+        camera_1758097729587473389:
+          Value: true
+        camera_1758097729720909180:
+          Value: true
+        camera_1758097729854345703:
+          Value: true
+        camera_1758097729987782715:
+          Value: true
+        camera_1758097730121220215:
+          Value: true
+        camera_1758097730254658203:
+          Value: true
+        camera_1758097730388096436:
+          Value: true
+        camera_1758097730521520996:
+          Value: true
+        camera_1758097730654945557:
+          Value: true
+        camera_1758097730788370117:
+          Value: true
+        camera_1758097730921794678:
+          Value: true
+        camera_1758097731055219238:
+          Value: true
+        camera_1758097731188643799:
+          Value: true
+        camera_1758097731322068115:
+          Value: true
+        camera_1758097731455492432:
+          Value: true
+        camera_1758097731588916016:
+          Value: true
+        camera_1758097731722339844:
+          Value: true
+        camera_1758097731855763428:
+          Value: true
+        camera_1758097731989187012:
+          Value: true
+        camera_1758097732122610596:
+          Value: true
+        camera_1758097732256034180:
+          Value: true
+        camera_1758097732389457764:
+          Value: true
+        camera_1758097732522882324:
+          Value: true
+        camera_1758097732656307129:
+          Value: true
+        camera_1758097732789731689:
+          Value: true
+        camera_1758097732923156250:
+          Value: true
+        camera_1758097733056580811:
+          Value: true
+        camera_1758097733190005371:
+          Value: true
+        camera_1758097733323429688:
+          Value: true
+        camera_1758097733456857178:
+          Value: true
+        camera_1758097733590287842:
+          Value: true
+        camera_1758097733723718506:
+          Value: true
+        camera_1758097733857149414:
+          Value: true
+        camera_1758097733990580322:
+          Value: true
+        camera_1758097734124011475:
+          Value: true
+        camera_1758097734257442871:
+          Value: true
+        camera_1758097734390874268:
+          Value: true
+        camera_1758097734524300293:
+          Value: true
+        camera_1758097734657726318:
+          Value: true
+        camera_1758097734791152588:
+          Value: true
+        camera_1758097734924578613:
+          Value: true
+        camera_1758097735058004639:
+          Value: true
+        camera_1758097735191430908:
+          Value: true
+        camera_1758097735324857178:
+          Value: true
+        camera_1758097735458286377:
+          Value: true
+        camera_1758097735591718994:
+          Value: true
+        camera_1758097735725151855:
+          Value: true
+        camera_1758097735858584961:
+          Value: true
+        camera_1758097735992018066:
+          Value: true
+        camera_1758097736125451416:
+          Value: true
+        camera_1758097736258884766:
+          Value: true
+        camera_1758097736392318359:
+          Value: true
+        camera_1758097736525747803:
+          Value: true
+        camera_1758097736659177246:
+          Value: true
+        camera_1758097736792606689:
+          Value: true
+        camera_1758097736926036621:
+          Value: true
+        camera_1758097737059466553:
+          Value: true
+        camera_1758097737192896484:
+          Value: true
+        camera_1758097737326326660:
+          Value: true
+        camera_1758097737459756104:
+          Value: true
+        camera_1758097737593184570:
+          Value: true
+        camera_1758097737726613037:
+          Value: true
+        camera_1758097737860041748:
+          Value: true
+        camera_1758097737993470459:
+          Value: true
+        camera_1758097738126899170:
+          Value: true
+        camera_1758097738260328125:
+          Value: true
+        camera_1758097738393756836:
+          Value: true
+        camera_1758097738527228271:
+          Value: true
+        camera_1758097738660700439:
+          Value: true
+        camera_1758097738794174072:
+          Value: true
+        camera_1758097738927648682:
+          Value: true
+        camera_1758097739061124512:
+          Value: true
+        camera_1758097739194601563:
+          Value: true
+        camera_1758097739328079590:
+          Value: true
+        camera_1758097739461527588:
+          Value: true
+        camera_1758097739594944824:
+          Value: true
+        camera_1758097739728362061:
+          Value: true
+        camera_1758097739861779053:
+          Value: true
+        camera_1758097739995195557:
+          Value: true
+        camera_1758097740128612061:
+          Value: true
+        camera_1758097740262028076:
+          Value: true
+        camera_1758097740395444824:
+          Value: true
+        camera_1758097740528864746:
+          Value: true
+        camera_1758097740662284424:
+          Value: true
+        camera_1758097740795703857:
+          Value: true
+        camera_1758097740929123291:
+          Value: true
+        camera_1758097741062542480:
+          Value: true
+        camera_1758097741195961426:
+          Value: true
+        camera_1758097741329380371:
+          Value: true
+        camera_1758097741462800293:
+          Value: true
+        camera_1758097741596221680:
+          Value: true
+        camera_1758097741729642822:
+          Value: true
+        camera_1758097741863063721:
+          Value: true
+        camera_1758097741996484619:
+          Value: true
+        camera_1758097742129905273:
+          Value: true
+        camera_1758097742263325684:
+          Value: true
+        camera_1758097742396746582:
+          Value: true
+        camera_1758097742530163818:
+          Value: true
+        camera_1758097742663580811:
+          Value: true
+        camera_1758097742796997559:
+          Value: true
+        camera_1758097742930413818:
+          Value: true
+        camera_1758097743063830078:
+          Value: true
+        camera_1758097743197245850:
+          Value: true
+        camera_1758097743330661377:
+          Value: true
+        camera_1758097743464078613:
+          Value: true
+        camera_1758097743597497559:
+          Value: true
+        camera_1758097743730916016:
+          Value: true
+        camera_1758097743864334473:
+          Value: true
+        camera_1758097743997752686:
+          Value: true
+        camera_1758097744131170654:
+          Value: true
+        camera_1758097744264588379:
+          Value: true
+        camera_1758097744398006104:
+          Value: true
+        camera_1758097744531423096:
+          Value: true
+        camera_1758097744664840088:
+          Value: true
+        camera_1758097744798256592:
+          Value: true
+        camera_1758097744931672852:
+          Value: true
+        camera_1758097745065088867:
+          Value: true
+        camera_1758097745198504639:
+          Value: true
+        camera_1758097745331919922:
+          Value: true
+        camera_1758097745465336670:
+          Value: true
+        camera_1758097745598754639:
+          Value: true
+        camera_1758097745732172607:
+          Value: true
+        camera_1758097745865590332:
+          Value: true
+        camera_1758097745999007568:
+          Value: true
+        camera_1758097746132424561:
+          Value: true
+        camera_1758097746265841553:
+          Value: true
+        camera_1758097746399258057:
+          Value: true
+        camera_1758097746532674316:
+          Value: true
+        camera_1758097746666089844:
+          Value: true
+        camera_1758097746799505371:
+          Value: true
+        camera_1758097746932920654:
+          Value: true
+        camera_1758097747066335449:
+          Value: true
+        camera_1758097747199750000:
+          Value: true
+        camera_1758097747333164063:
+          Value: true
+        camera_1758097747466579834:
+          Value: true
+        camera_1758097747599997070:
+          Value: true
+        camera_1758097747733414063:
+          Value: true
+        camera_1758097747866830811:
+          Value: true
+        camera_1758097748000247070:
+          Value: true
+        camera_1758097748133663330:
+          Value: true
+        camera_1758097748267079102:
+          Value: true
+        camera_1758097748400494629:
+          Value: true
+        camera_1758097748533912842:
+          Value: true
+        camera_1758097748667330811:
+          Value: true
+        camera_1758097748800748535:
+          Value: true
+        camera_1758097748934166016:
+          Value: true
+        camera_1758097749067583252:
+          Value: true
+        camera_1758097749201000244:
+          Value: true
+        camera_1758097749334416992:
+          Value: true
+        camera_1758097749467834717:
+          Value: true
+        camera_1758097749601254883:
+          Value: true
+        camera_1758097749734675049:
+          Value: true
+        camera_1758097749868094727:
+          Value: true
+        camera_1758097750001514648:
+          Value: true
+        camera_1758097750134934082:
+          Value: true
+        camera_1758097750268353760:
+          Value: true
+        camera_1758097750401774170:
+          Value: true
+        camera_1758097750535187012:
+          Value: true
+        camera_1758097750668599365:
+          Value: true
+        camera_1758097750802011475:
+          Value: true
+        camera_1758097750935423340:
+          Value: true
+        camera_1758097751068834717:
+          Value: true
+        camera_1758097751202245850:
+          Value: true
+        camera_1758097751335656494:
+          Value: true
+        camera_1758097751469072021:
+          Value: true
+        camera_1758097751602497314:
+          Value: true
+        camera_1758097751735922363:
+          Value: true
+        camera_1758097751869347656:
+          Value: true
+        camera_1758097752002773193:
+          Value: true
+        camera_1758097752136198486:
+          Value: true
+        camera_1758097752269624023:
+          Value: true
+        camera_1758097752403050293:
+          Value: true
+        camera_1758097752536471924:
+          Value: true
+        camera_1758097752669893555:
+          Value: true
+        camera_1758097752803315186:
+          Value: true
+        camera_1758097752936736816:
+          Value: true
+        camera_1758097753070158203:
+          Value: true
+        camera_1758097753203579590:
+          Value: true
+        camera_1758097753337000732:
+          Value: true
+        camera_1758097753470422607:
+          Value: true
+        camera_1758097753603845703:
+          Value: true
+        camera_1758097753737268799:
+          Value: true
+        camera_1758097753870691895:
+          Value: true
+        camera_1758097754004114746:
+          Value: true
+        camera_1758097754137537842:
+          Value: true
+        camera_1758097754270960693:
+          Value: true
+        camera_1758097754404379395:
+          Value: true
+        camera_1758097754537827393:
+          Value: true
+        camera_1758097754671276611:
+          Value: true
+        camera_1758097754804727051:
+          Value: true
+        camera_1758097754938178955:
+          Value: true
+        camera_1758097755071631836:
+          Value: true
+        camera_1758097755205086182:
+          Value: true
+        camera_1758097755338541748:
+          Value: true
+        camera_1758097755471989258:
+          Value: true
+        camera_1758097755605418701:
+          Value: true
+        camera_1758097755738848145:
+          Value: true
+        camera_1758097755872277832:
+          Value: true
+        camera_1758097756005707520:
+          Value: true
+        camera_1758097756139137207:
+          Value: true
+        camera_1758097756272567139:
+          Value: true
+        camera_1758097756405997559:
+          Value: true
+        camera_1758097756539423828:
+          Value: true
+        camera_1758097756672850342:
+          Value: true
+        camera_1758097756806276611:
+          Value: true
+        camera_1758097756939703125:
+          Value: true
+        camera_1758097757073129395:
+          Value: true
+        camera_1758097757206555908:
+          Value: true
+        camera_1758097757339982422:
+          Value: true
+        camera_1758097757473408936:
+          Value: true
+        camera_1758097757606835449:
+          Value: true
+        camera_1758097757740261963:
+          Value: true
+        camera_1758097757873688721:
+          Value: true
+        camera_1758097758007115479:
+          Value: true
+        camera_1758097758140542480:
+          Value: true
+        camera_1758097758273969482:
+          Value: true
+        camera_1758097758407396729:
+          Value: true
+        camera_1758097758540822021:
+          Value: true
+        camera_1758097758674247314:
+          Value: true
+        camera_1758097758807672607:
+          Value: true
+        camera_1758097758941097900:
+          Value: true
+        camera_1758097759074523193:
+          Value: true
+        camera_1758097759207948486:
+          Value: true
+        camera_1758097759341373779:
+          Value: true
+        camera_1758097759474799316:
+          Value: true
+        camera_1758097759608226318:
+          Value: true
+        camera_1758097759741653076:
+          Value: true
+        camera_1758097759875079834:
+          Value: true
+        camera_1758097760008506836:
+          Value: true
+        camera_1758097760141933838:
+          Value: true
+        camera_1758097760275360840:
+          Value: true
+        camera_1758097760408788330:
+          Value: true
+        camera_1758097760542214111:
+          Value: true
+        camera_1758097760675639893:
+          Value: true
+        camera_1758097760809065674:
+          Value: true
+        camera_1758097760942491699:
+          Value: true
+        camera_1758097761075917480:
+          Value: true
+        camera_1758097761209343506:
+          Value: true
+        camera_1758097761342769287:
+          Value: true
+        camera_1758097761476194336:
+          Value: true
+        camera_1758097761609617188:
+          Value: true
+        camera_1758097761743039795:
+          Value: true
+        camera_1758097761876462646:
+          Value: true
+        camera_1758097762009885254:
+          Value: true
+        camera_1758097762143307861:
+          Value: true
+        camera_1758097762276730225:
+          Value: true
+        camera_1758097762410152832:
+          Value: true
+        camera_1758097762543579834:
+          Value: true
+        camera_1758097762677007080:
+          Value: true
+        camera_1758097762810434082:
+          Value: true
+        camera_1758097762943861328:
+          Value: true
+        camera_1758097763077288574:
+          Value: true
+        camera_1758097763210715820:
+          Value: true
+        camera_1758097763344143066:
+          Value: true
+        camera_1758097763477569824:
+          Value: true
+        camera_1758097763610996094:
+          Value: true
+        camera_1758097763877848877:
+          Value: true
+        camera_1758097764011275146:
+          Value: true
+        camera_1758097764278127930:
+          Value: true
+        camera_1758097764411554443:
+          Value: true
+        camera_1758097764544980957:
+          Value: true
+        camera_1758097764678407715:
+          Value: true
+        camera_1758097764811834473:
+          Value: true
+        camera_1758097764945261230:
+          Value: true
+        camera_1758097765078688232:
+          Value: true
+        camera_1758097765212115234:
+          Value: true
+        camera_1758097765345541992:
+          Value: true
+        camera_1758097765478976074:
+          Value: true
+        camera_1758097765612430420:
+          Value: true
+        camera_1758097765745885742:
+          Value: true
+        camera_1758097765879341797:
+          Value: true
+        camera_1758097766012798584:
+          Value: true
+        camera_1758097766146256104:
+          Value: true
+        camera_1758097766279714355:
+          Value: true
+        camera_1758097766413173340:
+          Value: true
+        camera_1758097766546607178:
+          Value: true
+        camera_1758097766680032715:
+          Value: true
+        camera_1758097766813458008:
+          Value: true
+        camera_1758097766946883301:
+          Value: true
+        camera_1758097767080308350:
+          Value: true
+        camera_1758097767213733398:
+          Value: true
+        camera_1758097767347158203:
+          Value: true
+        camera_1758097767480582275:
+          Value: true
+        camera_1758097767614003906:
+          Value: true
+        camera_1758097767747425537:
+          Value: true
+        camera_1758097767880846924:
+          Value: true
+        camera_1758097768014268311:
+          Value: true
+        camera_1758097768147689453:
+          Value: true
+        camera_1758097768281110596:
+          Value: true
+        camera_1758097768414531494:
+          Value: true
+        camera_1758097768547952393:
+          Value: true
+        camera_1758097768681373291:
+          Value: true
+        camera_1758097768814793701:
+          Value: true
+        camera_1758097768948214355:
+          Value: true
+        camera_1758097769081634521:
+          Value: true
+        camera_1758097769215054688:
+          Value: true
+        camera_1758097769348474609:
+          Value: true
+        camera_1758097769481896729:
+          Value: true
+        camera_1758097769615326660:
+          Value: true
+        camera_1758097769748756348:
+          Value: true
+        camera_1758097769882186523:
+          Value: true
+        camera_1758097770015616455:
+          Value: true
+        camera_1758097770149046631:
+          Value: true
+        camera_1758097770282476807:
+          Value: true
+        camera_1758097770415906982:
+          Value: true
+        camera_1758097770549341553:
+          Value: true
+        camera_1758097770682777832:
+          Value: true
+        camera_1758097770816214355:
+          Value: true
+        camera_1758097770949651123:
+          Value: true
+        camera_1758097771083087891:
+          Value: true
+        camera_1758097771216525146:
+          Value: true
+        camera_1758097771349962402:
+          Value: true
+        camera_1758097771483397217:
+          Value: true
+        camera_1758097771616823486:
+          Value: true
+        camera_1758097771750249756:
+          Value: true
+        camera_1758097771883676270:
+          Value: true
+        camera_1758097772017102539:
+          Value: true
+        camera_1758097772150529053:
+          Value: true
+        camera_1758097772283955322:
+          Value: true
+        camera_1758097772417381836:
+          Value: true
+        camera_1758097772550803711:
           Value: true
         camera_accel_frame:
           Value: true
@@ -195,11 +1737,135 @@ Visualization Manager:
         world:
           camera:
             {}
-          camera_1758097670713920654:
+          camera_1758097663008658447:
             {}
-          camera_1758097670847347412:
+          camera_1758097663142082520:
             {}
-          camera_1758097671114201172:
+          camera_1758097663275506348:
+            {}
+          camera_1758097663408929443:
+            {}
+          camera_1758097663542352295:
+            {}
+          camera_1758097663675775391:
+            {}
+          camera_1758097663809198242:
+            {}
+          camera_1758097663942621338:
+            {}
+          camera_1758097664076044189:
+            {}
+          camera_1758097664209467285:
+            {}
+          camera_1758097664342890381:
+            {}
+          camera_1758097664476313477:
+            {}
+          camera_1758097664609736816:
+            {}
+          camera_1758097664743159912:
+            {}
+          camera_1758097664876583252:
+            {}
+          camera_1758097665010006348:
+            {}
+          camera_1758097665143429688:
+            {}
+          camera_1758097665276852783:
+            {}
+          camera_1758097665410277100:
+            {}
+          camera_1758097665543701172:
+            {}
+          camera_1758097665677125488:
+            {}
+          camera_1758097665810549805:
+            {}
+          camera_1758097665943974121:
+            {}
+          camera_1758097666077398438:
+            {}
+          camera_1758097666210822998:
+            {}
+          camera_1758097666344247803:
+            {}
+          camera_1758097666477673340:
+            {}
+          camera_1758097666611098633:
+            {}
+          camera_1758097666744524414:
+            {}
+          camera_1758097666877949951:
+            {}
+          camera_1758097667011375488:
+            {}
+          camera_1758097667144801270:
+            {}
+          camera_1758097667278226807:
+            {}
+          camera_1758097667411650879:
+            {}
+          camera_1758097667545074707:
+            {}
+          camera_1758097667678498779:
+            {}
+          camera_1758097667811922607:
+            {}
+          camera_1758097667945346436:
+            {}
+          camera_1758097668078770508:
+            {}
+          camera_1758097668212194336:
+            {}
+          camera_1758097668345622070:
+            {}
+          camera_1758097668479051025:
+            {}
+          camera_1758097668612479980:
+            {}
+          camera_1758097668745909180:
+            {}
+          camera_1758097668879338379:
+            {}
+          camera_1758097669012767822:
+            {}
+          camera_1758097669146197510:
+            {}
+          camera_1758097669279625732:
+            {}
+          camera_1758097669413046875:
+            {}
+          camera_1758097669546468018:
+            {}
+          camera_1758097669679889160:
+            {}
+          camera_1758097669813310059:
+            {}
+          camera_1758097669946730957:
+            {}
+          camera_1758097670080151855:
+            {}
+          camera_1758097670213572754:
+            {}
+          camera_1758097670346997559:
+            {}
+          camera_1758097670480424072:
+            {}
+          camera_1758097670613850830:
+            {}
+          camera_1758097670747277344:
+            {}
+          camera_1758097670880704102:
+            {}
+          camera_1758097671014131104:
+            {}
+          camera_1758097671147557861:
+            {}
+          camera_1758097671280984131:
+            {}
+          camera_1758097671414414307:
+            {}
+          camera_1758097671547844727:
             {}
           camera_1758097671681275146:
             {}
@@ -211,100 +1877,1506 @@ Visualization Manager:
             {}
           camera_1758097672214999268:
             {}
-          camera_1758097672581916016:
+          camera_1758097672348426514:
             {}
-          camera_1758097672982183594:
+          camera_1758097672481849121:
             {}
-          camera_1758097673382454346:
+          camera_1758097672615271729:
             {}
-          camera_1758097673749379883:
+          camera_1758097672748694092:
+            {}
+          camera_1758097672882116699:
+            {}
+          camera_1758097673015539063:
+            {}
+          camera_1758097673148961670:
+            {}
+          camera_1758097673282383789:
+            {}
+          camera_1758097673415811279:
+            {}
+          camera_1758097673549238525:
+            {}
+          camera_1758097673682666016:
+            {}
+          camera_1758097673816093750:
+            {}
+          camera_1758097673949521240:
             {}
           camera_1758097674082948975:
             {}
-          camera_1758097674449869873:
+          camera_1758097674216376953:
             {}
-          camera_1758097674816783203:
+          camera_1758097674349802490:
             {}
-          camera_1758097675116984863:
+          camera_1758097674483225586:
+            {}
+          camera_1758097674616648682:
+            {}
+          camera_1758097674750071777:
+            {}
+          camera_1758097674883494629:
+            {}
+          camera_1758097675016917725:
+            {}
+          camera_1758097675150340576:
+            {}
+          camera_1758097675283763184:
             {}
           camera_1758097675417188965:
             {}
-          camera_1758097675717397217:
+          camera_1758097675550614746:
             {}
-          camera_1758097676017605957:
+          camera_1758097675684040771:
+            {}
+          camera_1758097675817466797:
+            {}
+          camera_1758097675950892822:
+            {}
+          camera_1758097676084319092:
+            {}
+          camera_1758097676217745361:
             {}
           camera_1758097676351187256:
             {}
-          camera_1758097676651469482:
+          camera_1758097676484645508:
+            {}
+          camera_1758097676618104492:
+            {}
+          camera_1758097676751564453:
+            {}
+          camera_1758097676885025146:
             {}
           camera_1758097677018486816:
             {}
-          camera_1758097677385477051:
+          camera_1758097677151949219:
             {}
-          camera_1758097677719023438:
+          camera_1758097677285412842:
             {}
-          camera_1758097678052568604:
+          camera_1758097677418831787:
             {}
-          camera_1758097678386114258:
+          camera_1758097677552250488:
             {}
-          camera_1758097678686308838:
+          camera_1758097677685668945:
+            {}
+          camera_1758097677819087158:
+            {}
+          camera_1758097677952505127:
+            {}
+          camera_1758097678085923096:
+            {}
+          camera_1758097678219340576:
+            {}
+          camera_1758097678352759277:
+            {}
+          camera_1758097678486179199:
+            {}
+          camera_1758097678619599121:
+            {}
+          camera_1758097678753018799:
+            {}
+          camera_1758097678886438232:
             {}
           camera_1758097679019857666:
             {}
-          camera_1758097679320052979:
+          camera_1758097679153276855:
             {}
-          camera_1758097679653634521:
+          camera_1758097679286694824:
+            {}
+          camera_1758097679420127441:
+            {}
+          camera_1758097679553559814:
+            {}
+          camera_1758097679686992676:
+            {}
+          camera_1758097679820425537:
+            {}
+          camera_1758097679953858398:
             {}
           camera_1758097680087291504:
             {}
-          camera_1758097680387504150:
+          camera_1758097680220724854:
             {}
-          camera_1758097680721039063:
+          camera_1758097680354150635:
+            {}
+          camera_1758097680487564941:
+            {}
+          camera_1758097680620978760:
+            {}
+          camera_1758097680754392578:
+            {}
+          camera_1758097680887805908:
             {}
           camera_1758097681021218994:
             {}
-          camera_1758097681354753662:
+          camera_1758097681154631836:
+            {}
+          camera_1758097681288043457:
+            {}
+          camera_1758097681421463623:
+            {}
+          camera_1758097681554883789:
             {}
           camera_1758097681688303467:
             {}
-          camera_1758097682021852539:
+          camera_1758097681821723145:
+            {}
+          camera_1758097681955142822:
+            {}
+          camera_1758097682088562012:
+            {}
+          camera_1758097682221981201:
             {}
           camera_1758097682355399902:
             {}
-          camera_1758097682655589355:
+          camera_1758097682488817627:
             {}
-          camera_1758097682955777588:
+          camera_1758097682622235107:
             {}
-          camera_1758097683255965088:
+          camera_1758097682755652344:
+            {}
+          camera_1758097682889069336:
+            {}
+          camera_1758097683022486084:
+            {}
+          camera_1758097683155902588:
+            {}
+          camera_1758097683289319092:
+            {}
+          camera_1758097683422736084:
             {}
           camera_1758097683556152832:
             {}
-          camera_1758097683856339844:
+          camera_1758097683689569336:
             {}
-          camera_1758097684156525391:
+          camera_1758097683822985840:
             {}
-          camera_1758097684456721924:
+          camera_1758097683956401855:
             {}
-          camera_1758097684590147461:
+          camera_1758097684089817627:
             {}
-          camera_1758097684723573242:
+          camera_1758097684223233154:
+            {}
+          camera_1758097684356652588:
+            {}
+          camera_1758097684490078369:
+            {}
+          camera_1758097684623503906:
+            {}
+          camera_1758097684756929932:
+            {}
+          camera_1758097684890355713:
+            {}
+          camera_1758097685023781494:
+            {}
+          camera_1758097685157207520:
+            {}
+          camera_1758097685290634277:
+            {}
+          camera_1758097685424054443:
+            {}
+          camera_1758097685557474365:
+            {}
+          camera_1758097685690894287:
+            {}
+          camera_1758097685824313965:
+            {}
+          camera_1758097685957733398:
+            {}
+          camera_1758097686091152588:
+            {}
+          camera_1758097686224571533:
+            {}
+          camera_1758097686357990479:
+            {}
+          camera_1758097686491408691:
+            {}
+          camera_1758097686624826904:
+            {}
+          camera_1758097686758244873:
+            {}
+          camera_1758097686891662598:
+            {}
+          camera_1758097687025080322:
+            {}
+          camera_1758097687158497559:
+            {}
+          camera_1758097687291913818:
+            {}
+          camera_1758097687425338623:
+            {}
+          camera_1758097687558763184:
+            {}
+          camera_1758097687692187744:
+            {}
+          camera_1758097687825612549:
+            {}
+          camera_1758097687959037354:
+            {}
+          camera_1758097688092461914:
+            {}
+          camera_1758097688225886719:
+            {}
+          camera_1758097688359309326:
+            {}
+          camera_1758097688492727783:
+            {}
+          camera_1758097688626145752:
+            {}
+          camera_1758097688759563721:
+            {}
+          camera_1758097688892981201:
+            {}
+          camera_1758097689026398682:
+            {}
+          camera_1758097689159815918:
+            {}
+          camera_1758097689293232422:
+            {}
+          camera_1758097689426652344:
+            {}
+          camera_1758097689560072266:
+            {}
+          camera_1758097689693491943:
+            {}
+          camera_1758097689826911621:
+            {}
+          camera_1758097689960331055:
+            {}
+          camera_1758097690093750488:
+            {}
+          camera_1758097690227169922:
+            {}
+          camera_1758097690360588867:
+            {}
+          camera_1758097690494007324:
+            {}
+          camera_1758097690627425293:
+            {}
+          camera_1758097690760843262:
+            {}
+          camera_1758097690894260986:
+            {}
+          camera_1758097691027678711:
+            {}
+          camera_1758097691161095947:
+            {}
+          camera_1758097691294512939:
+            {}
+          camera_1758097691427931152:
+            {}
+          camera_1758097691561349365:
+            {}
+          camera_1758097691694767090:
+            {}
+          camera_1758097691828184814:
+            {}
+          camera_1758097691961602295:
+            {}
+          camera_1758097692095019531:
+            {}
+          camera_1758097692228436523:
+            {}
+          camera_1758097692361859619:
+            {}
+          camera_1758097692495296143:
+            {}
+          camera_1758097692628733643:
+            {}
+          camera_1758097692762171875:
+            {}
+          camera_1758097692895611084:
+            {}
+          camera_1758097693029050781:
+            {}
+          camera_1758097693162491455:
+            {}
+          camera_1758097693295935791:
+            {}
+          camera_1758097693429359863:
+            {}
+          camera_1758097693562784180:
+            {}
+          camera_1758097693696208252:
+            {}
+          camera_1758097693829632324:
+            {}
+          camera_1758097693963056396:
+            {}
+          camera_1758097694096480469:
+            {}
+          camera_1758097694229904541:
+            {}
+          camera_1758097694363327637:
+            {}
+          camera_1758097694496749023:
+            {}
+          camera_1758097694630170410:
+            {}
+          camera_1758097694763591553:
+            {}
+          camera_1758097694897012695:
+            {}
+          camera_1758097695030433838:
+            {}
+          camera_1758097695163854736:
+            {}
+          camera_1758097695297273926:
+            {}
+          camera_1758097695430703613:
+            {}
+          camera_1758097695564133545:
+            {}
+          camera_1758097695697563721:
+            {}
+          camera_1758097695830994385:
+            {}
+          camera_1758097695964425293:
+            {}
+          camera_1758097696097856445:
+            {}
+          camera_1758097696231288086:
+            {}
+          camera_1758097696364716797:
+            {}
+          camera_1758097696498138916:
+            {}
+          camera_1758097696631560547:
+            {}
+          camera_1758097696764982422:
+            {}
+          camera_1758097696898403809:
+            {}
+          camera_1758097697031825439:
+            {}
+          camera_1758097697165246826:
+            {}
+          camera_1758097697298667236:
+            {}
+          camera_1758097697432092773:
+            {}
+          camera_1758097697565518311:
+            {}
+          camera_1758097697698943848:
+            {}
+          camera_1758097697832369385:
+            {}
+          camera_1758097697965795166:
+            {}
+          camera_1758097698099220947:
+            {}
+          camera_1758097698232646729:
+            {}
+          camera_1758097698366072021:
+            {}
+          camera_1758097698499495361:
+            {}
+          camera_1758097698632918945:
+            {}
+          camera_1758097698766342529:
+            {}
+          camera_1758097698899765869:
+            {}
+          camera_1758097699033189209:
+            {}
+          camera_1758097699166612549:
+            {}
+          camera_1758097699300035889:
+            {}
+          camera_1758097699433461670:
+            {}
+          camera_1758097699566887695:
+            {}
+          camera_1758097699833739258:
+            {}
+          camera_1758097699967165283:
+            {}
+          camera_1758097700100591064:
+            {}
+          camera_1758097700234017090:
+            {}
+          camera_1758097700367442871:
+            {}
+          camera_1758097700500870117:
+            {}
+          camera_1758097700634297363:
+            {}
+          camera_1758097700767724854:
+            {}
+          camera_1758097700901152588:
+            {}
+          camera_1758097701034580322:
+            {}
+          camera_1758097701168008057:
+            {}
+          camera_1758097701301436035:
+            {}
+          camera_1758097701434863281:
+            {}
+          camera_1758097701568290283:
+            {}
+          camera_1758097701701717529:
+            {}
+          camera_1758097701835145020:
+            {}
+          camera_1758097701968572510:
+            {}
+          camera_1758097702102000244:
+            {}
+          camera_1758097702235427979:
+            {}
+          camera_1758097702368855225:
+            {}
+          camera_1758097702502284180:
+            {}
+          camera_1758097702635713379:
+            {}
+          camera_1758097702769142578:
+            {}
+          camera_1758097702902572021:
+            {}
+          camera_1758097703036001465:
+            {}
+          camera_1758097703169431152:
+            {}
+          camera_1758097703302860840:
+            {}
+          camera_1758097703436291016:
+            {}
+          camera_1758097703569721680:
+            {}
+          camera_1758097703703152344:
+            {}
+          camera_1758097703836583496:
+            {}
+          camera_1758097703970014648:
+            {}
+          camera_1758097704103446045:
+            {}
+          camera_1758097704236877686:
+            {}
+          camera_1758097704370308594:
+            {}
+          camera_1758097704503737061:
+            {}
+          camera_1758097704637165527:
+            {}
+          camera_1758097704770594238:
+            {}
+          camera_1758097704904022949:
+            {}
+          camera_1758097705037451660:
+            {}
+          camera_1758097705170880615:
+            {}
+          camera_1758097705304309814:
+            {}
+          camera_1758097705437735352:
+            {}
+          camera_1758097705571159668:
+            {}
+          camera_1758097705704583740:
+            {}
+          camera_1758097705838008057:
+            {}
+          camera_1758097705971432373:
+            {}
+          camera_1758097706104856445:
+            {}
+          camera_1758097706238280762:
+            {}
+          camera_1758097706371705811:
+            {}
+          camera_1758097706505133789:
+            {}
+          camera_1758097706638562012:
+            {}
+          camera_1758097706771990234:
+            {}
+          camera_1758097706905418457:
+            {}
+          camera_1758097707038846924:
+            {}
+          camera_1758097707172275146:
+            {}
+          camera_1758097707305703613:
+            {}
+          camera_1758097707439143311:
+            {}
+          camera_1758097707572586914:
+            {}
+          camera_1758097707706030762:
+            {}
+          camera_1758097707839475342:
+            {}
+          camera_1758097707972920166:
+            {}
+          camera_1758097708106365479:
+            {}
+          camera_1758097708239811279:
+            {}
+          camera_1758097708373250977:
+            {}
+          camera_1758097708506671631:
+            {}
+          camera_1758097708640092041:
+            {}
+          camera_1758097708773512451:
+            {}
+          camera_1758097708906932617:
+            {}
+          camera_1758097709040352539:
+            {}
+          camera_1758097709173772217:
+            {}
+          camera_1758097709307191895:
+            {}
+          camera_1758097709440613281:
+            {}
+          camera_1758097709574034180:
+            {}
+          camera_1758097709707455078:
+            {}
+          camera_1758097709840875732:
+            {}
+          camera_1758097709974296387:
+            {}
+          camera_1758097710107717041:
+            {}
+          camera_1758097710241137451:
+            {}
+          camera_1758097710374557617:
+            {}
+          camera_1758097710507976807:
+            {}
+          camera_1758097710641395752:
+            {}
+          camera_1758097710774814453:
+            {}
+          camera_1758097710908233154:
+            {}
+          camera_1758097711041651367:
+            {}
+          camera_1758097711175069580:
+            {}
+          camera_1758097711308487549:
+            {}
+          camera_1758097711441907227:
+            {}
+          camera_1758097711575327148:
+            {}
+          camera_1758097711708747070:
+            {}
+          camera_1758097711842166748:
+            {}
+          camera_1758097711975586182:
+            {}
+          camera_1758097712109005371:
+            {}
+          camera_1758097712242424561:
+            {}
+          camera_1758097712375843750:
+            {}
+          camera_1758097712509263672:
+            {}
+          camera_1758097712642683350:
+            {}
+          camera_1758097712776102783:
+            {}
+          camera_1758097712909522217:
+            {}
+          camera_1758097713042941406:
+            {}
+          camera_1758097713176360352:
+            {}
+          camera_1758097713309779053:
+            {}
+          camera_1758097713443214355:
+            {}
+          camera_1758097713576658447:
+            {}
+          camera_1758097713710102783:
+            {}
+          camera_1758097713843547852:
+            {}
+          camera_1758097713976993164:
+            {}
+          camera_1758097714110439209:
+            {}
+          camera_1758097714243885498:
+            {}
+          camera_1758097714377327637:
+            {}
+          camera_1758097714510745605:
+            {}
+          camera_1758097714644163086:
+            {}
+          camera_1758097714777580566:
+            {}
+          camera_1758097714910997803:
+            {}
+          camera_1758097715044414795:
+            {}
+          camera_1758097715177831299:
+            {}
+          camera_1758097715311247803:
+            {}
+          camera_1758097715444666260:
+            {}
+          camera_1758097715578085693:
+            {}
+          camera_1758097715711504883:
+            {}
+          camera_1758097715844924072:
+            {}
+          camera_1758097715978342773:
+            {}
+          camera_1758097716111761475:
+            {}
+          camera_1758097716245180176:
+            {}
+          camera_1758097716378598389:
+            {}
+          camera_1758097716512016357:
+            {}
+          camera_1758097716645434082:
+            {}
+          camera_1758097716778851318:
+            {}
+          camera_1758097716912268555:
+            {}
+          camera_1758097717045685547:
+            {}
+          camera_1758097717179102295:
+            {}
+          camera_1758097717312518799:
+            {}
+          camera_1758097717445937988:
+            {}
+          camera_1758097717579358643:
+            {}
+          camera_1758097717712779053:
+            {}
+          camera_1758097717846199463:
+            {}
+          camera_1758097717979619629:
+            {}
+          camera_1758097718113039795:
+            {}
+          camera_1758097718246459473:
+            {}
+          camera_1758097718379879639:
+            {}
+          camera_1758097718513301270:
+            {}
+          camera_1758097718646722900:
+            {}
+          camera_1758097718780144531:
+            {}
+          camera_1758097718913565918:
+            {}
+          camera_1758097719046987305:
+            {}
+          camera_1758097719180408691:
+            {}
+          camera_1758097719313830078:
+            {}
+          camera_1758097719447250977:
+            {}
+          camera_1758097719580671875:
+            {}
+          camera_1758097719714092773:
+            {}
+          camera_1758097719847513428:
+            {}
+          camera_1758097719980934082:
+            {}
+          camera_1758097720114354736:
+            {}
+          camera_1758097720247775146:
+            {}
+          camera_1758097720381196045:
+            {}
+          camera_1758097720514621826:
+            {}
+          camera_1758097720648047607:
+            {}
+          camera_1758097720781473389:
+            {}
+          camera_1758097720914899414:
+            {}
+          camera_1758097721048325195:
+            {}
+          camera_1758097721181751221:
+            {}
+          camera_1758097721315177246:
+            {}
+          camera_1758097721448599854:
+            {}
+          camera_1758097721582020264:
+            {}
+          camera_1758097721715440430:
+            {}
+          camera_1758097721848860596:
+            {}
+          camera_1758097721982280518:
+            {}
+          camera_1758097722115700195:
+            {}
+          camera_1758097722249119873:
+            {}
+          camera_1758097722382539795:
+            {}
+          camera_1758097722515962402:
+            {}
+          camera_1758097722649385010:
+            {}
+          camera_1758097722782807861:
+            {}
+          camera_1758097722916230469:
+            {}
+          camera_1758097723049652832:
+            {}
+          camera_1758097723183075439:
+            {}
+          camera_1758097723316498047:
+            {}
+          camera_1758097723449926758:
+            {}
+          camera_1758097723583360352:
+            {}
+          camera_1758097723716794434:
+            {}
+          camera_1758097723850229248:
+            {}
+          camera_1758097723983664307:
+            {}
+          camera_1758097724117099854:
+            {}
+          camera_1758097724250535889:
+            {}
+          camera_1758097724383971924:
+            {}
+          camera_1758097724517398682:
+            {}
+          camera_1758097724650825439:
+            {}
+          camera_1758097724784252197:
+            {}
+          camera_1758097724917678955:
+            {}
+          camera_1758097725051105957:
+            {}
+          camera_1758097725184532715:
+            {}
+          camera_1758097725317959717:
+            {}
+          camera_1758097725451383789:
+            {}
+          camera_1758097725584805664:
+            {}
+          camera_1758097725718227539:
+            {}
+          camera_1758097725851649170:
+            {}
+          camera_1758097725985070801:
+            {}
+          camera_1758097726118492188:
+            {}
+          camera_1758097726251913574:
+            {}
+          camera_1758097726385334717:
+            {}
+          camera_1758097726518756348:
+            {}
+          camera_1758097726652177979:
+            {}
+          camera_1758097726785599121:
+            {}
+          camera_1758097726919020508:
+            {}
+          camera_1758097727052441650:
+            {}
+          camera_1758097727185862549:
+            {}
+          camera_1758097727319283447:
+            {}
+          camera_1758097727452705566:
+            {}
+          camera_1758097727586128418:
+            {}
+          camera_1758097727719551025:
+            {}
+          camera_1758097727852973877:
+            {}
+          camera_1758097727986396484:
+            {}
+          camera_1758097728119819092:
+            {}
+          camera_1758097728253241455:
+            {}
+          camera_1758097728386663818:
+            {}
+          camera_1758097728520085205:
+            {}
+          camera_1758097728653506348:
+            {}
+          camera_1758097728786927246:
+            {}
+          camera_1758097728920348145:
+            {}
+          camera_1758097729053769043:
+            {}
+          camera_1758097729187189697:
+            {}
+          camera_1758097729320610107:
+            {}
+          camera_1758097729454038086:
+            {}
+          camera_1758097729587473389:
+            {}
+          camera_1758097729720909180:
+            {}
+          camera_1758097729854345703:
+            {}
+          camera_1758097729987782715:
+            {}
+          camera_1758097730121220215:
+            {}
+          camera_1758097730254658203:
+            {}
+          camera_1758097730388096436:
+            {}
+          camera_1758097730521520996:
+            {}
+          camera_1758097730654945557:
+            {}
+          camera_1758097730788370117:
+            {}
+          camera_1758097730921794678:
+            {}
+          camera_1758097731055219238:
+            {}
+          camera_1758097731188643799:
+            {}
+          camera_1758097731322068115:
+            {}
+          camera_1758097731455492432:
+            {}
+          camera_1758097731588916016:
+            {}
+          camera_1758097731722339844:
+            {}
+          camera_1758097731855763428:
+            {}
+          camera_1758097731989187012:
+            {}
+          camera_1758097732122610596:
+            {}
+          camera_1758097732256034180:
+            {}
+          camera_1758097732389457764:
+            {}
+          camera_1758097732522882324:
+            {}
+          camera_1758097732656307129:
+            {}
+          camera_1758097732789731689:
+            {}
+          camera_1758097732923156250:
+            {}
+          camera_1758097733056580811:
+            {}
+          camera_1758097733190005371:
+            {}
+          camera_1758097733323429688:
+            {}
+          camera_1758097733456857178:
+            {}
+          camera_1758097733590287842:
+            {}
+          camera_1758097733723718506:
+            {}
+          camera_1758097733857149414:
+            {}
+          camera_1758097733990580322:
+            {}
+          camera_1758097734124011475:
+            {}
+          camera_1758097734257442871:
+            {}
+          camera_1758097734390874268:
+            {}
+          camera_1758097734524300293:
+            {}
+          camera_1758097734657726318:
+            {}
+          camera_1758097734791152588:
+            {}
+          camera_1758097734924578613:
+            {}
+          camera_1758097735058004639:
+            {}
+          camera_1758097735191430908:
+            {}
+          camera_1758097735324857178:
+            {}
+          camera_1758097735458286377:
+            {}
+          camera_1758097735591718994:
+            {}
+          camera_1758097735725151855:
+            {}
+          camera_1758097735858584961:
+            {}
+          camera_1758097735992018066:
+            {}
+          camera_1758097736125451416:
+            {}
+          camera_1758097736258884766:
+            {}
+          camera_1758097736392318359:
+            {}
+          camera_1758097736525747803:
+            {}
+          camera_1758097736659177246:
+            {}
+          camera_1758097736792606689:
+            {}
+          camera_1758097736926036621:
+            {}
+          camera_1758097737059466553:
+            {}
+          camera_1758097737192896484:
+            {}
+          camera_1758097737326326660:
+            {}
+          camera_1758097737459756104:
+            {}
+          camera_1758097737593184570:
+            {}
+          camera_1758097737726613037:
+            {}
+          camera_1758097737860041748:
+            {}
+          camera_1758097737993470459:
+            {}
+          camera_1758097738126899170:
+            {}
+          camera_1758097738260328125:
+            {}
+          camera_1758097738393756836:
+            {}
+          camera_1758097738527228271:
+            {}
+          camera_1758097738660700439:
+            {}
+          camera_1758097738794174072:
+            {}
+          camera_1758097738927648682:
+            {}
+          camera_1758097739061124512:
+            {}
+          camera_1758097739194601563:
+            {}
+          camera_1758097739328079590:
+            {}
+          camera_1758097739461527588:
+            {}
+          camera_1758097739594944824:
+            {}
+          camera_1758097739728362061:
+            {}
+          camera_1758097739861779053:
+            {}
+          camera_1758097739995195557:
+            {}
+          camera_1758097740128612061:
+            {}
+          camera_1758097740262028076:
+            {}
+          camera_1758097740395444824:
+            {}
+          camera_1758097740528864746:
+            {}
+          camera_1758097740662284424:
+            {}
+          camera_1758097740795703857:
+            {}
+          camera_1758097740929123291:
+            {}
+          camera_1758097741062542480:
+            {}
+          camera_1758097741195961426:
+            {}
+          camera_1758097741329380371:
+            {}
+          camera_1758097741462800293:
+            {}
+          camera_1758097741596221680:
+            {}
+          camera_1758097741729642822:
+            {}
+          camera_1758097741863063721:
+            {}
+          camera_1758097741996484619:
+            {}
+          camera_1758097742129905273:
+            {}
+          camera_1758097742263325684:
+            {}
+          camera_1758097742396746582:
+            {}
+          camera_1758097742530163818:
+            {}
+          camera_1758097742663580811:
+            {}
+          camera_1758097742796997559:
+            {}
+          camera_1758097742930413818:
+            {}
+          camera_1758097743063830078:
+            {}
+          camera_1758097743197245850:
+            {}
+          camera_1758097743330661377:
+            {}
+          camera_1758097743464078613:
+            {}
+          camera_1758097743597497559:
+            {}
+          camera_1758097743730916016:
+            {}
+          camera_1758097743864334473:
+            {}
+          camera_1758097743997752686:
+            {}
+          camera_1758097744131170654:
+            {}
+          camera_1758097744264588379:
+            {}
+          camera_1758097744398006104:
+            {}
+          camera_1758097744531423096:
+            {}
+          camera_1758097744664840088:
+            {}
+          camera_1758097744798256592:
+            {}
+          camera_1758097744931672852:
+            {}
+          camera_1758097745065088867:
+            {}
+          camera_1758097745198504639:
+            {}
+          camera_1758097745331919922:
+            {}
+          camera_1758097745465336670:
+            {}
+          camera_1758097745598754639:
+            {}
+          camera_1758097745732172607:
+            {}
+          camera_1758097745865590332:
+            {}
+          camera_1758097745999007568:
+            {}
+          camera_1758097746132424561:
+            {}
+          camera_1758097746265841553:
+            {}
+          camera_1758097746399258057:
+            {}
+          camera_1758097746532674316:
+            {}
+          camera_1758097746666089844:
+            {}
+          camera_1758097746799505371:
+            {}
+          camera_1758097746932920654:
+            {}
+          camera_1758097747066335449:
+            {}
+          camera_1758097747199750000:
+            {}
+          camera_1758097747333164063:
+            {}
+          camera_1758097747466579834:
+            {}
+          camera_1758097747599997070:
+            {}
+          camera_1758097747733414063:
+            {}
+          camera_1758097747866830811:
+            {}
+          camera_1758097748000247070:
+            {}
+          camera_1758097748133663330:
+            {}
+          camera_1758097748267079102:
+            {}
+          camera_1758097748400494629:
+            {}
+          camera_1758097748533912842:
+            {}
+          camera_1758097748667330811:
+            {}
+          camera_1758097748800748535:
+            {}
+          camera_1758097748934166016:
+            {}
+          camera_1758097749067583252:
+            {}
+          camera_1758097749201000244:
+            {}
+          camera_1758097749334416992:
+            {}
+          camera_1758097749467834717:
+            {}
+          camera_1758097749601254883:
+            {}
+          camera_1758097749734675049:
+            {}
+          camera_1758097749868094727:
+            {}
+          camera_1758097750001514648:
+            {}
+          camera_1758097750134934082:
+            {}
+          camera_1758097750268353760:
+            {}
+          camera_1758097750401774170:
+            {}
+          camera_1758097750535187012:
+            {}
+          camera_1758097750668599365:
+            {}
+          camera_1758097750802011475:
+            {}
+          camera_1758097750935423340:
+            {}
+          camera_1758097751068834717:
+            {}
+          camera_1758097751202245850:
+            {}
+          camera_1758097751335656494:
+            {}
+          camera_1758097751469072021:
+            {}
+          camera_1758097751602497314:
+            {}
+          camera_1758097751735922363:
+            {}
+          camera_1758097751869347656:
+            {}
+          camera_1758097752002773193:
+            {}
+          camera_1758097752136198486:
+            {}
+          camera_1758097752269624023:
+            {}
+          camera_1758097752403050293:
+            {}
+          camera_1758097752536471924:
+            {}
+          camera_1758097752669893555:
+            {}
+          camera_1758097752803315186:
+            {}
+          camera_1758097752936736816:
+            {}
+          camera_1758097753070158203:
+            {}
+          camera_1758097753203579590:
+            {}
+          camera_1758097753337000732:
+            {}
+          camera_1758097753470422607:
+            {}
+          camera_1758097753603845703:
+            {}
+          camera_1758097753737268799:
+            {}
+          camera_1758097753870691895:
+            {}
+          camera_1758097754004114746:
+            {}
+          camera_1758097754137537842:
+            {}
+          camera_1758097754270960693:
+            {}
+          camera_1758097754404379395:
+            {}
+          camera_1758097754537827393:
+            {}
+          camera_1758097754671276611:
+            {}
+          camera_1758097754804727051:
+            {}
+          camera_1758097754938178955:
+            {}
+          camera_1758097755071631836:
+            {}
+          camera_1758097755205086182:
+            {}
+          camera_1758097755338541748:
+            {}
+          camera_1758097755471989258:
+            {}
+          camera_1758097755605418701:
+            {}
+          camera_1758097755738848145:
+            {}
+          camera_1758097755872277832:
+            {}
+          camera_1758097756005707520:
+            {}
+          camera_1758097756139137207:
+            {}
+          camera_1758097756272567139:
+            {}
+          camera_1758097756405997559:
+            {}
+          camera_1758097756539423828:
+            {}
+          camera_1758097756672850342:
+            {}
+          camera_1758097756806276611:
+            {}
+          camera_1758097756939703125:
+            {}
+          camera_1758097757073129395:
+            {}
+          camera_1758097757206555908:
+            {}
+          camera_1758097757339982422:
+            {}
+          camera_1758097757473408936:
+            {}
+          camera_1758097757606835449:
+            {}
+          camera_1758097757740261963:
+            {}
+          camera_1758097757873688721:
+            {}
+          camera_1758097758007115479:
+            {}
+          camera_1758097758140542480:
+            {}
+          camera_1758097758273969482:
+            {}
+          camera_1758097758407396729:
+            {}
+          camera_1758097758540822021:
+            {}
+          camera_1758097758674247314:
+            {}
+          camera_1758097758807672607:
+            {}
+          camera_1758097758941097900:
+            {}
+          camera_1758097759074523193:
+            {}
+          camera_1758097759207948486:
+            {}
+          camera_1758097759341373779:
+            {}
+          camera_1758097759474799316:
+            {}
+          camera_1758097759608226318:
+            {}
+          camera_1758097759741653076:
+            {}
+          camera_1758097759875079834:
+            {}
+          camera_1758097760008506836:
+            {}
+          camera_1758097760141933838:
+            {}
+          camera_1758097760275360840:
+            {}
+          camera_1758097760408788330:
+            {}
+          camera_1758097760542214111:
+            {}
+          camera_1758097760675639893:
+            {}
+          camera_1758097760809065674:
+            {}
+          camera_1758097760942491699:
+            {}
+          camera_1758097761075917480:
+            {}
+          camera_1758097761209343506:
+            {}
+          camera_1758097761342769287:
+            {}
+          camera_1758097761476194336:
+            {}
+          camera_1758097761609617188:
+            {}
+          camera_1758097761743039795:
+            {}
+          camera_1758097761876462646:
+            {}
+          camera_1758097762009885254:
+            {}
+          camera_1758097762143307861:
+            {}
+          camera_1758097762276730225:
+            {}
+          camera_1758097762410152832:
+            {}
+          camera_1758097762543579834:
+            {}
+          camera_1758097762677007080:
+            {}
+          camera_1758097762810434082:
+            {}
+          camera_1758097762943861328:
+            {}
+          camera_1758097763077288574:
+            {}
+          camera_1758097763210715820:
+            {}
+          camera_1758097763344143066:
+            {}
+          camera_1758097763477569824:
+            {}
+          camera_1758097763610996094:
+            {}
+          camera_1758097763877848877:
+            {}
+          camera_1758097764011275146:
+            {}
+          camera_1758097764278127930:
+            {}
+          camera_1758097764411554443:
+            {}
+          camera_1758097764544980957:
+            {}
+          camera_1758097764678407715:
+            {}
+          camera_1758097764811834473:
+            {}
+          camera_1758097764945261230:
+            {}
+          camera_1758097765078688232:
+            {}
+          camera_1758097765212115234:
+            {}
+          camera_1758097765345541992:
+            {}
+          camera_1758097765478976074:
+            {}
+          camera_1758097765612430420:
+            {}
+          camera_1758097765745885742:
+            {}
+          camera_1758097765879341797:
+            {}
+          camera_1758097766012798584:
+            {}
+          camera_1758097766146256104:
+            {}
+          camera_1758097766279714355:
+            {}
+          camera_1758097766413173340:
+            {}
+          camera_1758097766546607178:
+            {}
+          camera_1758097766680032715:
+            {}
+          camera_1758097766813458008:
+            {}
+          camera_1758097766946883301:
+            {}
+          camera_1758097767080308350:
+            {}
+          camera_1758097767213733398:
+            {}
+          camera_1758097767347158203:
+            {}
+          camera_1758097767480582275:
+            {}
+          camera_1758097767614003906:
+            {}
+          camera_1758097767747425537:
+            {}
+          camera_1758097767880846924:
+            {}
+          camera_1758097768014268311:
+            {}
+          camera_1758097768147689453:
+            {}
+          camera_1758097768281110596:
+            {}
+          camera_1758097768414531494:
+            {}
+          camera_1758097768547952393:
+            {}
+          camera_1758097768681373291:
+            {}
+          camera_1758097768814793701:
+            {}
+          camera_1758097768948214355:
+            {}
+          camera_1758097769081634521:
+            {}
+          camera_1758097769215054688:
+            {}
+          camera_1758097769348474609:
+            {}
+          camera_1758097769481896729:
+            {}
+          camera_1758097769615326660:
+            {}
+          camera_1758097769748756348:
+            {}
+          camera_1758097769882186523:
+            {}
+          camera_1758097770015616455:
+            {}
+          camera_1758097770149046631:
+            {}
+          camera_1758097770282476807:
+            {}
+          camera_1758097770415906982:
+            {}
+          camera_1758097770549341553:
+            {}
+          camera_1758097770682777832:
+            {}
+          camera_1758097770816214355:
+            {}
+          camera_1758097770949651123:
+            {}
+          camera_1758097771083087891:
+            {}
+          camera_1758097771216525146:
+            {}
+          camera_1758097771349962402:
+            {}
+          camera_1758097771483397217:
+            {}
+          camera_1758097771616823486:
+            {}
+          camera_1758097771750249756:
+            {}
+          camera_1758097771883676270:
+            {}
+          camera_1758097772017102539:
+            {}
+          camera_1758097772150529053:
+            {}
+          camera_1758097772283955322:
+            {}
+          camera_1758097772417381836:
+            {}
+          camera_1758097772550803711:
             {}
       Update Interval: 0
       Value: true
-    - Class: rviz_default_plugins/Image
-      Enabled: false
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Image
-      Normalize Range: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /camera/camera/infra1/image_rect_raw
-      Value: false
     - Class: rviz_common/Group
       Displays:
         - Class: rviz_default_plugins/Image
@@ -379,7 +3451,7 @@ Visualization Manager:
               Value: true
             Value: true
           Enabled: true
-          Keep: 0
+          Keep: 100
           Name: Odometry
           Position Tolerance: 0.10000000149011612
           Shape:
@@ -401,7 +3473,7 @@ Visualization Manager:
             Value: /slam/odometry
           Value: true
       Enabled: true
-      Name: Perception Group
+      Name: Perception
     - Class: rviz_common/Group
       Displays:
         - Alpha: 0.699999988079071
@@ -589,7 +3661,7 @@ Visualization Manager:
           Use rainbow: true
           Value: true
       Enabled: false
-      Name: Planning Group
+      Name: Planning
     - Class: rviz_common/Group
       Displays:
         - Class: rviz_default_plugins/MarkerArray
@@ -696,6 +3768,38 @@ Visualization Manager:
           Value: true
       Enabled: true
       Name: Mapping Group
+    - Class: rviz_common/Group
+      Displays:
+        - Class: rviz_default_plugins/Image
+          Enabled: true
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: gray image
+          Normalize Range: true
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /camera/camera/infra1/image_rect_raw
+          Value: true
+        - Class: rviz_default_plugins/Image
+          Enabled: true
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: color image
+          Normalize Range: true
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /camera/camera/color/image_raw
+          Value: true
+      Enabled: true
+      Name: Sensors
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -742,7 +3846,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/ThirdPersonFollower
-      Distance: 28.660680770874023
+      Distance: 40.62345504760742
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -757,10 +3861,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.3397963047027588
+      Pitch: 1.1847964525222778
       Target Frame: camera
       Value: ThirdPersonFollower (rviz_default_plugins)
-      Yaw: 1.150397539138794
+      Yaw: 0.04539692401885986
     Saved: ~
 Window Geometry:
   Displays:
@@ -772,7 +3876,7 @@ Window Geometry:
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000004000000000000021a00000871fc020000000efb0000001200530065006c0065006300740069006f006e00000001e10000009b000000ab00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c0061007900730100000069000008710000017800fffffffb0000000a0049006d006100670065000000004dfffffff20000004500fffffffb0000000a0049006d0061006700650000000031fffffff20000004500fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000014005400720061006a00530063006f0072006500730000000225000000280000004500fffffffb0000000a0049006d006100670065010000065a000000eb0000000000000000fb0000000a0049006d0061006700650100000326000000ca0000000000000000fb00000012004800650069006700680074004d006100700000000241000001450000004500ffffff000000010000028200000871fc0200000004fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a005600690065007700730100000069000008710000012300fffffffb0000000a0049006d0061006700650100000198000002580000000000000000fb0000001200530065006c0065006300740069006f006e010000025a000000b20000000000000000000000020000073a000000a9fc0100000002fb0000000a0049006d0061006700650300000571000000e2000001da0000014afb0000000a00560069006500770073030000004e00000080000002e1000001970000000300000f0000000051fc0100000002fb0000000800540069006d0065010000000000000f000000046000fffffffb0000000800540069006d0065010000000000000450000000000000000000000a4c0000087100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000004000000000000031500000871fc0200000011fb0000001200530065006c0065006300740069006f006e00000001e10000009b000000ab00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c00610079007301000000690000068a0000017800fffffffb0000000a0049006d00610067006501000006bafffffffd0000000000000000fb0000000a0049006d00610067006500000008e8fffffff20000004500fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb00000014005400720061006a00530063006f0072006500730000000225000000280000004500fffffffb0000000a0049006d006100670065010000065a000000eb0000000000000000fb0000000a0049006d0061006700650100000326000000ca0000000000000000fb00000012004800650069006700680074004d006100700000000241000001450000004500fffffffb0000000c00430061006d00650072006101000007e2000000f80000000000000000fb000000160063006f006c006f007200200069006d00610067006501000006ff000000d60000004500fffffffb00000014006700720061007900200069006d00610067006501000007e1000000f90000004500ffffff000000010000028200000871fc0200000004fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a005600690065007700730100000069000008710000012300fffffffb0000000a0049006d0061006700650100000198000002580000000000000000fb0000001200530065006c0065006300740069006f006e010000025a000000b20000000000000000000000020000073a000000a9fc0100000002fb0000000a0049006d0061006700650300000571000000e2000001da0000014afb0000000a00560069006500770073030000004e00000080000002e1000001970000000300000f0000000051fc0100000002fb0000000800540069006d0065010000000000000f000000046000fffffffb0000000800540069006d00650100000000000004500000000000000000000009510000087100000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:
@@ -786,3 +3890,7 @@ Window Geometry:
   Width: 3840
   X: 0
   Y: 0
+  color image:
+    collapsed: false
+  gray image:
+    collapsed: false
