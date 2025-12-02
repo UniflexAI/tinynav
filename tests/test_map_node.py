@@ -38,12 +38,14 @@ def test_pose_graph_solve():
         relative_pose_constraints.append(
             ((i + 1) % camera_number, i, target_relative_pose, np.array([1, 1, 1]), np.array([1, 1, 1]))
         )
+
     constant_camera_poses = {0: True}
 
     optimized_camera_pose = pose_graph_solve(
         camera_poses,
         relative_pose_constraints,
         constant_camera_poses,
+        max_iteration_num = 100
     )
 
     # sort the optimized camera poses by their keys increased
@@ -54,8 +56,8 @@ def test_pose_graph_solve():
         rotation_error = rad_to_deg(angle_diff_from_two_rotation_matrix(
             pose[:3, :3], target_pose[camera_timestamp][:3, :3]
         ))
-        assert translation_error < 1e-6, f"Translation error for camera {camera_timestamp} is too high."
-        assert rotation_error < 0.1, f"Rotation error for camera {camera_timestamp} is too high."
+        assert translation_error < 1e-6, f"Translation error {translation_error} for camera {camera_timestamp} is too high."
+        assert rotation_error < 1e-6, f"Rotation error {rotation_error} for camera {camera_timestamp} is too high."
 
 if __name__ == "__main__":
     test_pose_graph_solve()

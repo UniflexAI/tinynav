@@ -7,31 +7,8 @@
 
 namespace py = pybind11;
 
-inline Eigen::Matrix3d skew(Eigen::Vector3d v) {
-    Eigen::Matrix3d skew_matrix;
-    skew_matrix << 0, -v[2], v[1],
-                   v[2], 0, -v[0],
-                   -v[1], v[0], 0;
-    return skew_matrix;
-}
-
-Eigen::Matrix3d right_jacobian_rotation(Eigen::Matrix<double, 3, 1> v) {
-    double theta = v.norm();
-    Eigen::Matrix3d I = Eigen::Matrix3d::Identity();
-    Eigen::Matrix3d skew_matrix = skew(v);
-
-    if (theta < 1e-5) {
-        return I - 0.5 * skew_matrix + (1.0 / 6.0) * skew_matrix * skew_matrix;
-    } else {
-        double theta2 = theta * theta;
-        double theta3 = theta * theta2;
-        double A = (1 - std::cos(theta)) / theta2;
-        double B = (theta - std::sin(theta)) / theta3;
-        return I - A * skew_matrix + B * skew_matrix * skew_matrix;
-    }
-}
-
-class RelativePoseError : public ceres::SizedCostFunction<6, 6, 6> {
+// T_j_i @ (T_w_i)^-1 @ T_w_j = I
+class RelativePoseError {
 public:
     RelativePoseError(const Eigen::Matrix4d& relative_pose, Eigen::Vector3d translation_weight, Eigen::Vector3d rotation_weight)
         : relative_j_i_translation_(Eigen::Vector3d::Zero()), relative_j_i_rotation_lie_algebra_(Eigen::Vector3d::Zero()), translation_weight_(translation_weight), rotation_weight_(rotation_weight) {
@@ -39,61 +16,28 @@ public:
             Eigen::Matrix<double, 3, 3> relative_j_i_rotation = relative_pose.block<3, 3>(0, 0);
             ceres::RotationMatrixToAngleAxis(relative_j_i_rotation.data(), relative_j_i_rotation_lie_algebra_.data());
         }
-
-    bool Evaluate(double const* const* parameters, double* residuals, double** jacobians) const override {
-        Eigen::Map<const Eigen::Matrix<double, 6, 1>> camera_i(parameters[0]);
-        Eigen::Map<const Eigen::Matrix<double, 6, 1>> camera_j(parameters[1]);
-
-        Eigen::Matrix<double, 3, 1> translation_i = Eigen::Map<const Eigen::Matrix<double, 3, 1>>(camera_i.data());
-        Eigen::Matrix<double, 3, 1> rotation_i = Eigen::Map<const Eigen::Matrix<double, 3, 1>>(camera_i.data() + 3);
-
-        Eigen::Matrix<double, 3, 1> translation_j = Eigen::Map<const Eigen::Matrix<double, 3, 1>>(camera_j.data());
-        Eigen::Matrix<double, 3, 1> rotation_j = Eigen::Map<const Eigen::Matrix<double, 3, 1>>(camera_j.data() + 3);
-
-        Eigen::Matrix<double, 3, 3> R_i;
+    template<typename T>
+    bool operator()(const T* camera_i, const T* camera_j, T* residuals) const {
+        using TMatrix3 = Eigen::Matrix<T, 3, 3>;
+        using TVector3 = Eigen::Matrix<T, 3, 1>;
+        TVector3 translation_i = Eigen::Map<const TVector3>(camera_i);
+        TVector3 rotation_i = Eigen::Map<const TVector3>(camera_i + 3);
+        TVector3 translation_j = Eigen::Map<const TVector3>(camera_j);
+        TVector3 rotation_j = Eigen::Map<const TVector3>(camera_j + 3);
+        TMatrix3 R_i;
         ceres::AngleAxisToRotationMatrix(rotation_i.data(), R_i.data());
-        Eigen::Matrix<double, 3, 3> R_j;
+        TMatrix3 R_j;
         ceres::AngleAxisToRotationMatrix(rotation_j.data(), R_j.data());
-
-        Eigen::Matrix<double, 3, 3> relative_j_i_rotation;
-        ceres::AngleAxisToRotationMatrix(relative_j_i_rotation_lie_algebra_.data(), relative_j_i_rotation.data());
-        Eigen::Matrix<double, 3, 3> rotation_loss = relative_j_i_rotation * R_i.transpose() * R_j;
+        TMatrix3 relative_j_i_rotation;
+        TVector3 relative_j_i_rotation_lie_algebra_T = relative_j_i_rotation_lie_algebra_.cast<T>();
+        ceres::AngleAxisToRotationMatrix(relative_j_i_rotation_lie_algebra_T.data(), relative_j_i_rotation.data());
+        TMatrix3 rotation_loss = relative_j_i_rotation * R_i.transpose() * R_j;
         ceres::RotationMatrixToAngleAxis(rotation_loss.data(), residuals + 3);
-        Eigen::Map<Eigen::Vector3d> rotation_residuals_map(residuals + 3);
-        rotation_residuals_map = rotation_weight_.asDiagonal() * rotation_residuals_map;
-        Eigen::Vector3d translation_loss = relative_j_i_rotation * R_i.transpose() * (translation_j - translation_i) + relative_j_i_translation_;
-        Eigen::Map<Eigen::Vector3d> residuals_map(residuals);
-        residuals_map = translation_weight_.asDiagonal() * translation_loss;
-
-        if (jacobians != nullptr) {
-            Eigen::Matrix<double, 6, 6> J_camera_i;
-            J_camera_i.setZero();
-
-            J_camera_i.block<3, 3>(0, 0) =
-                translation_weight_.asDiagonal() * -relative_j_i_rotation * R_i.transpose();
-            J_camera_i.block<3, 3>(3, 3) = 
-                translation_weight_.asDiagonal() *
-                relative_j_i_rotation *
-                R_i.transpose() *
-                skew(translation_j - translation_i) *
-                right_jacobian_rotation(-rotation_i);
-            J_camera_i.block<3, 3>(3, 0) = Eigen::Matrix3d::Zero();
-            J_camera_i.block<3, 3>(3, 3) =
-                rotation_weight_.asDiagonal() * -R_j.transpose() * right_jacobian_rotation(-rotation_i);
-
-            Eigen::Matrix<double, 6, 6> J_camera_j;
-            J_camera_j.setZero();
-            J_camera_j.block<3, 3>(0, 0) = translation_weight_.asDiagonal() * relative_j_i_rotation * R_i.transpose();
-            J_camera_j.block<3, 3>(0, 3) = Eigen::Matrix3d::Zero();
-            J_camera_j.block<3, 3>(3, 0) = Eigen::Matrix3d::Zero();
-            J_camera_j.block<3, 3>(3, 3) = rotation_weight_.asDiagonal() * right_jacobian_rotation(rotation_j);
-            if (jacobians[0] != nullptr) {
-                Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(jacobians[0]).noalias() = J_camera_i;
-            }
-            if (jacobians[1] != nullptr) {
-                Eigen::Map<Eigen::Matrix<double, 6, 6, Eigen::RowMajor>>(jacobians[1]).noalias() = J_camera_j;
-            }
-        }
+        Eigen::Map<TVector3> rotation_residuals_map(residuals + 3);
+        rotation_residuals_map = rotation_weight_.cast<T>().asDiagonal() * rotation_residuals_map;
+        TVector3 translation_residuals = relative_j_i_rotation * R_i.transpose() * (translation_j - translation_i) + relative_j_i_translation_;
+        Eigen::Map<TVector3> translation_residuals_map(residuals);
+        translation_residuals_map = translation_weight_.cast<T>().asDiagonal() * translation_residuals;
         return true;
     }
     Eigen::Vector3d relative_j_i_translation_;
@@ -106,8 +50,7 @@ std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
     std::unordered_map<int64_t, py::array_t<double>> camera_poses,
     std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>>> relative_pose_constraints,
     std::unordered_map<int64_t, bool> constant_pose_index,
-    int64_t max_iteration_num
-) {
+    int64_t max_iteration_num) {
     ceres::Problem problem;
     ceres::Solver::Options options;
     ceres::Solver::Summary summary;
@@ -146,7 +89,7 @@ std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
         Eigen::Vector3d rotation_weight_eigen;
         for (ssize_t i = 0; i < 3; ++i)
             rotation_weight_eigen[i] = rotation_weight_buf(i);
-        ceres::CostFunction* relative_pose_error = new RelativePoseError(relative_pose_j_i_eigen, translation_weight_eigen, rotation_weight_eigen);
+        ceres::CostFunction* relative_pose_error = new ceres::AutoDiffCostFunction<RelativePoseError, 6, 6, 6>(new RelativePoseError(relative_pose_j_i_eigen, translation_weight_eigen, rotation_weight_eigen));
         problem.AddResidualBlock(relative_pose_error, nullptr, camera_parameters.at(cam_idx_i).data(), camera_parameters.at(cam_idx_j).data());
     }
 
