@@ -27,7 +27,6 @@ dependencies = [
     "reportlab>=4.4.3",
     "tabulate",
     "viser",
-    "gtsam==4.3.0a0",
 ]
 
 [tool.scikit-build]
