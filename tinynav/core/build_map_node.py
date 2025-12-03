@@ -7,7 +7,6 @@ import numpy as np
 import sys
 
 from sensor_msgs.msg import PointCloud2
-import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
@@ -29,7 +28,6 @@ import asyncio
 import shelve
 from tqdm import tqdm
 import einops
-from visualization_msgs.msg import MarkerArray
 from tf2_msgs.msg import TFMessage
 from typing import Tuple, Dict
 import json
