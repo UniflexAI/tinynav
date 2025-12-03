@@ -17,10 +17,11 @@ from math_utils import uf_init, uf_find, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
 import asyncio
 import gtsam
+import gtsam_unstable
 from collections import deque
 from dataclasses import dataclass, astuple
 
-from gtsam.symbol_shorthand import X, B, V, L
+from gtsam.symbol_shorthand import X, B, V
 
 _N = 5
 _M = 1000
@@ -404,48 +405,39 @@ class PerceptionNode(Node):
 
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 for landmark in tracks[::1]:
-                    landmark_id = landmark[0]
-                    is_all_disparity_nonzero = True
-                    for i, projection in enumerate(landmark):
+                    # Build a smart factor per track (no explicit landmark variable)
+                    disparity_valid = True
+                    observations = []
+                    for projection in landmark:
                         pose_idx = projection // _M
                         feature_idx = projection % _M
                         disparity = self.keyframe_queue[pose_idx].disparity
                         kpt = extract_info[pose_idx]['kpts'][0][feature_idx]
                         if disparity[int(kpt[1]), int(kpt[0])] < 0.1:
-                            is_all_disparity_nonzero = False
+                            disparity_valid = False
                             break
-                    for i, projection in enumerate(landmark):
-                        pose_idx = projection // _M
-                        feature_idx = projection % _M
-                        robust_model = gtsam.noiseModel.Robust.Create(
-                            gtsam.noiseModel.mEstimator.Huber(1.41),       # delta parameter, e.g., 1 pixel
-                            gtsam.noiseModel.Diagonal.Sigmas(np.array([1.0, 1.0, 1.0]))      # base noise (σ in pixels)
-                        )
-                        disparity = self.keyframe_queue[pose_idx].disparity
-                        kpt = extract_info[pose_idx]['kpts'][0][feature_idx]
-                        if i == 0: # use the first observation as the landmark id
-                            point_depth = self.K[0, 0] * self.baseline / (disparity[int(kpt[1]), int(kpt[0])] + 1e-3)
-                            point = depth_to_point(kpt, point_depth, self.K)
-                            pose = self.keyframe_queue[pose_idx].pose
+                        observations.append((pose_idx, kpt, disparity))
 
-                            
-                            point_world = pose[:3, :3] @ point + pose[:3, 3]
-                            initial_estimate.insert(L(landmark_id), gtsam.Point3(point_world))
+                    if not disparity_valid or len(observations) < 2:
+                        continue
 
-                        projection_factor = gtsam.GenericStereoFactor3D(
-                            gtsam.StereoPoint2(
-                                kpt[0],
-                                kpt[0] - disparity[int(kpt[1]), int(kpt[0])],
-                                kpt[1]
-                            ),
-                            robust_model,
-                            X(pose_idx),
-                            L(landmark_id),
-                            gtsam.Cal3_S2Stereo(self.K[0,0], self.K[1,1], 0, self.K[0,2], self.K[1,2], self.baseline),
-                            Matrix4x4ToGtsamPose3(np.eye(4))
+                    # Smart factors require isotropic pixel noise
+                    noise = gtsam.noiseModel.Isotropic.Sigma(3, 1.0)
+                    params = gtsam.SmartProjectionParams()
+                    smart_factor = gtsam_unstable.SmartStereoProjectionPoseFactor(noise, params)
+
+                    calib = gtsam.Cal3_S2Stereo(
+                        self.K[0, 0], self.K[1, 1], 0, self.K[0, 2], self.K[1, 2], self.baseline
+                    )
+                    for pose_idx, kpt, disparity in observations:
+                        stereo_meas = gtsam.StereoPoint2(
+                            kpt[0],
+                            kpt[0] - disparity[int(kpt[1]), int(kpt[0])],
+                            kpt[1],
                         )
-                        graph.add(projection_factor)
-                        #print(f"pose_idx: {pose_idx}, feature_idx: {feature_idx}, error: ", projection_factor.error(initial_estimate))
+                        smart_factor.add(stereo_meas, X(pose_idx), calib)
+
+                    graph.add(smart_factor)
 
         with Timer(name="[Solver]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             params = gtsam.LevenbergMarquardtParams()
