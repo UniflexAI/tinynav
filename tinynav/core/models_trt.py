@@ -5,7 +5,6 @@ import cv2
 from codetiming import Timer
 import platform
 import asyncio
-from async_lru import alru_cache
 from func import alru_cache_numpy
 
 from cuda import cudart

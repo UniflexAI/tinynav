@@ -13,7 +13,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, estimate_pose2
-from math_utils import uf_init, uf_find, uf_union, uf_all_sets_list
+from math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
 import asyncio
 import gtsam
@@ -221,8 +221,6 @@ class PerceptionNode(Node):
             prev_left_extract_result = await self.superpoint.infer(kf_prev)
             current_left_extract_result = await self.superpoint.infer(left_img)
 
-            img_shape0 = kf_prev.shape
-            img_shape1 = left_img.shape
             match_result = await self.light_glue.infer(
                 prev_left_extract_result["kpts"],
                 current_left_extract_result["kpts"],
@@ -332,8 +330,7 @@ class PerceptionNode(Node):
             #        print("error: ", imu_factor.error(initial_estimate))
             #        print("frame_diff_t: ", self.frame_diff_t[i])
             #        print("kf_factor: ", kf_factor)
-
-            current_i = len(self.keyframe_queue[-_N:])
+            #current_i = len(self.keyframe_queue[-_N:])
 
             with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
