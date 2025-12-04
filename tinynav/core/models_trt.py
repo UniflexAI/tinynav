@@ -276,7 +276,6 @@ class SuperPointTRT(TRTBase):
         super().__init__(engine_path)
         # model input [1,1,H,W]
         self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
-        self.real_infer_cnt = 0
 
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
@@ -300,7 +299,6 @@ class SuperPointTRT(TRTBase):
 class LightGlueTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/lightglue_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
-        self.real_infer_cnt = 0
 
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/lightglue.py#L333
