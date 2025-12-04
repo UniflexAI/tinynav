@@ -24,6 +24,44 @@
 | [Navigation with 3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting) |
 | ----------------------|
 | <video src="https://github.com/user-attachments/assets/5e0d5846-ab3f-4a57-8bdd-067473e758a9"> |
+
+| Vision Only Mapping |
+| ----------------------|
+| <video src="https://github.com/user-attachments/assets/578baeb2-63f7-444c-a9cd-e6a8036151d3"> |
+
+
+
+# [v0.3] What's Changed
+## 🚀 Features
+- **IMU–Visual Fusion in Perception Node**
+  
+    Integrates IMU–visual fusion to significantly improve pitch-angle accuracy.
+  
+    This enhancement boosts overall robustness and enables reliable navigation across more robot platforms, especially those sensitive to pitch drift.
+
+- **Resilient Mapping Pipeline**
+
+    Upgraded map-building logic to gracefully handle message loss, improving stability in real-world communication conditions.
+  
+    Paired with a redesigned visualization module, developers can now observe the map-building process incrementally, making debugging and tuning far more intuitive.
+
+- **Unified Model Training for Perception + Planning**
+  
+    We have begun training a single neural model that jointly supports both perception and planning tasks, paving the way for tighter integration and future performance gains. [(TinyBEV)](https://github.com/uniflexai/tinybev)
+
+## 🔧 Improvements
+- **Enhanced C++ CI & Code Quality**
+  
+    The CI pipeline now includes:
+    * clang-tidy static analysis
+    * ASAN (Address Sanitizer) detection
+      
+    These additions ensure higher reliability, cleaner code, and safer memory usage across the C++ stack.
+
+## 🐞 Bug Fixes
+
+Dozens of internal fixes and refinements were merged this cycle, improving system stability, consistency, and developer experience.
+
 # [v0.2] What's Changed
 ## 🚀 Features
 - **3D Gaussian Splatting (3DGS) Map Representation**  
