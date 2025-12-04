@@ -304,6 +304,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/junlinp"><img src="https://avatars.githubusercontent.com/u/16746493?v=4?s=100" width="100px;" alt="junlinp"/><br /><sub><b>junlinp</b></sub></a><br /><a href="https://github.com/UniflexAI/tinynav/commits?author=junlinp" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/heyixuan-DM"><img src="https://avatars.githubusercontent.com/u/105199938?v=4?s=100" width="100px;" alt="heyixuan-DM"/><br /><sub><b>heyixuan-DM</b></sub></a><br /><a href="https://github.com/UniflexAI/tinynav/commits?author=heyixuan-DM" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/xinghanDM"><img src="https://avatars.githubusercontent.com/u/193573671?v=4?s=100" width="100px;" alt="xinghan li"/><br /><sub><b>xinghan li</b></sub></a><br /><a href="https://github.com/UniflexAI/tinynav/commits?author=xinghanDM" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/xiaolefang-dm"><img src="https://avatars.githubusercontent.com/u/62272320?v=4?s=100" width="100px;" alt="Xiaole Fang"/><br /><sub><b>Xiaole Fang</b></sub></a><br /><a href="https://github.com/UniflexAI/tinynav/commits?author=xiaolefang-dm" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
