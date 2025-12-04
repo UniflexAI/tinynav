@@ -470,7 +470,8 @@ class PerceptionNode(Node):
             self.camera_info_msg.header.frame_id = "camera"  # Match TF frame
             self.slam_camera_info_pub.publish(self.camera_info_msg)
             self.depth_pub.publish(depth_msg)
-        self.logger.debug(f"real superpoint: {self.superpoint.real_infer_cnt}/{self.process_cnt}, lightglue: {self.light_glue.real_infer_cnt}/{self.process_cnt}")
+        self.logger.debug(f"superpoint cache info: {self.superpoint.infer.cache_info()}")
+        self.logger.debug(f"lightglue cache info: {self.light_glue.infer.cache_info()}")
 
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
