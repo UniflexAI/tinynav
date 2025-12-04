@@ -19,7 +19,7 @@ import asyncio
 import gtsam
 import gtsam_unstable
 from collections import deque
-from dataclasses import dataclass, astuple
+from dataclasses import dataclass
 
 from gtsam.symbol_shorthand import X, B, V
 
@@ -55,6 +55,7 @@ class Keyframe:
     timestamp: float
     image: np.ndarray
     disparity: np.ndarray
+    depth: np.ndarray
     pose: np.ndarray
     velocity: np.ndarray
     bias: gtsam.imuBias.ConstantBias
@@ -204,6 +205,7 @@ class PerceptionNode(Node):
                     timestamp=current_timestamp,
                     image=left_img,
                     disparity=disparity,
+                    depth=depth,
                     pose=self.T_body_last,
                     velocity=np.zeros(3),
                     bias=gtsam.imuBias.ConstantBias(),
@@ -217,8 +219,8 @@ class PerceptionNode(Node):
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
 
-            kf_prev = self.keyframe_queue[-1].image
-            prev_left_extract_result = await self.superpoint.infer(kf_prev)
+            kf_prev = self.keyframe_queue[-1]
+            prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
             current_left_extract_result = await self.superpoint.infer(left_img)
 
             match_result = await self.light_glue.infer(
@@ -228,7 +230,7 @@ class PerceptionNode(Node):
                 current_left_extract_result["descps"],
                 prev_left_extract_result["mask"],
                 current_left_extract_result["mask"],
-                kf_prev.shape,
+                kf_prev.image.shape,
                 left_img.shape)
 
         # propagate IMU measurements
@@ -256,13 +258,16 @@ class PerceptionNode(Node):
             prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
             current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
             match_indices = match_result["match_indices"][0]
+            idx_to_origial = range(len(prev_keypoints))
             valid_mask = match_indices != -1
             kpt_pre = prev_keypoints[valid_mask]
             kpt_cur = current_keypoints[match_indices[valid_mask]]
+            idx_valid = np.array(idx_to_origial)[valid_mask]
             logging.debug(f"match cnt: {len(kpt_pre)}")
-            state, T_kf_curr, _, _, _ = estimate_pose(
+            state, T_kf_curr, _, _, _ = await estimate_pose2(
                 kpt_pre,
                 kpt_cur,
+                idx_valid,
                 depth,
                 self.K
             )
@@ -274,6 +279,7 @@ class PerceptionNode(Node):
                 timestamp=current_timestamp,
                 image=left_img,
                 disparity=disparity,
+                depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
                 velocity=self.keyframe_queue[-1].velocity,
                 bias=gtsam.imuBias.ConstantBias(),
@@ -291,35 +297,32 @@ class PerceptionNode(Node):
                 initial_estimate = gtsam.Values()
                 # process previous keyframes' factors
                 for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
-                    #kf_image, kf_disparity, kf_factor, kf_P, kf_V, kf_B = astuple(keyframe)
-                    kf_timestamp, kf_image, kf_disparity, kf_P, kf_V, kf_B, kf_factor, latest_imu_timestamp = astuple(keyframe)
-
                     # per pose -- bias
                     initial_estimate.insert(B(i), gtsam.imuBias.ConstantBias())
                     graph.add(gtsam.PriorFactorConstantBias(B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
 
-                    initial_estimate.insert(V(i), kf_V)
-                    initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(kf_P))
+                    initial_estimate.insert(V(i), keyframe.velocity)
+                    initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(keyframe.pose))
                     if i == 0:
                         ## per pose -- velocity
                         #graph.add(gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2]))))
 
                         # per pose -- pose, could only be applied to the first keyframe
-                        graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(kf_P), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1]))))
+                        graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1]))))
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
-                        imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), kf_factor) 
+                        imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
                         graph.add(imu_factor)
-                    print(f"for frame {i} at {kf_timestamp}, added imufactor up to {latest_imu_timestamp}")
+                    print(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
 
-            with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                self.frame_diff_t = []
-                for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
-                    j = i + 1
-                    kf_prev_timestamp, kf_prev_image, kf_prev_disparity, kf_prev_P, kf_prev_V, kf_prev_B, kf_prev_factor, _  = astuple(self.keyframe_queue[i])
-                    kf_curr_timestamp, kf_curr_image, kf_curr_disparity, kf_curr_P, kf_curr_V, kf_curr_B, kf_curr_factor, _  = astuple(self.keyframe_queue[i + 1])
-                    self.frame_diff_t.append(kf_curr_timestamp - kf_prev_timestamp)
+            #with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            #    self.frame_diff_t = []
+            #    for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
+            #        j = i + 1
+            #        kf_prev_timestamp, kf_prev_image, kf_prev_disparity, kf_prev_P, kf_prev_V, kf_prev_B, kf_prev_factor, _  = astuple(self.keyframe_queue[i])
+            #        kf_curr_timestamp, kf_curr_image, kf_curr_disparity, kf_curr_P, kf_curr_V, kf_curr_B, kf_curr_factor, _  = astuple(self.keyframe_queue[i + 1])
+            #        self.frame_diff_t.append(kf_curr_timestamp - kf_prev_timestamp)
 
             #for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
             #    kf_timestamp, kf_image, kf_disparity, kf_P, kf_V, kf_B, kf_factor, latest_imu_timestamp = astuple(keyframe)
@@ -342,13 +345,15 @@ class PerceptionNode(Node):
                 for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
                     with Timer(name="[cached result[1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         j = i + 1
-                        kf_prev_timestamp, kf_prev_image, kf_prev_disparity, kf_prev_P, kf_prev_V, kf_prev_B, kf_prev_factor, _  = astuple(self.keyframe_queue[i])
-                        kf_curr_timestamp, kf_curr_image, kf_curr_disparity, kf_curr_P, kf_curr_V, kf_curr_B, kf_curr_factor, _  = astuple(self.keyframe_queue[j])
+                        kf_prev = self.keyframe_queue[i]
+                        kf_curr = self.keyframe_queue[j]
 
+                    print("timestamp prev: ", kf_prev.timestamp)
+                    print("timestamp curr: ", kf_curr.timestamp)
                     with Timer(name="[cached result[1.1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        prev_left_extract_result = await self.superpoint.infer(kf_prev_image)
+                        prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
                     with Timer(name="[cached result[1.2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        current_left_extract_result = await self.superpoint.infer(kf_curr_image)
+                        current_left_extract_result = await self.superpoint.infer(kf_curr.image)
 
                     with Timer(name="[cached result[1.3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         match_result = await self.light_glue.infer(
@@ -358,13 +363,12 @@ class PerceptionNode(Node):
                             current_left_extract_result["descps"],
                             prev_left_extract_result["mask"],
                             current_left_extract_result["mask"],
-                            kf_prev_image.shape,
-                            kf_curr_image.shape)
+                            kf_prev.image.shape,
+                            kf_curr.image.shape)
                     with Timer(name="[cached result[2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-
                         prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
                         current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
-                        match_indices = match_result["match_indices"][0]
+                        match_indices = match_result["match_indices"][0].copy()
                         idx_to_origial = range(len(prev_keypoints))
 
                         valid_mask = match_indices != -1
@@ -372,11 +376,10 @@ class PerceptionNode(Node):
                         kpt_cur = current_keypoints[match_indices[valid_mask]]
                         idx_valid = np.array(idx_to_origial)[valid_mask]
 
-                        depth = self.baseline * self.K[0,0] / (kf_curr_disparity + 1e-3)
-                        depth[kf_curr_disparity < 0.1] = 0.0
+                        depth = kf_curr.depth
 
                         logging.debug(f"match cnt: {len(kpt_pre)}")
-                        state, _, _, _, inliers = estimate_pose2(
+                        state, _, _, _, inliers = await estimate_pose2(
                             kpt_pre,
                             kpt_cur,
                             idx_valid,
@@ -472,6 +475,7 @@ class PerceptionNode(Node):
             self.depth_pub.publish(depth_msg)
         self.logger.debug(f"superpoint cache info: {self.superpoint.infer.cache_info()}")
         self.logger.debug(f"lightglue cache info: {self.light_glue.infer.cache_info()}")
+        self.logger.debug(f"estimate_pose cache info: {estimate_pose2.cache_info()}")
 
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()

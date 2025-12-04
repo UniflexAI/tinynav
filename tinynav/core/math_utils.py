@@ -4,6 +4,7 @@ from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
+from func import alru_cache_numpy
 
 @njit(cache=True)
 def rotvec_to_matrix(rv):
@@ -237,7 +238,8 @@ def process_keypoints2(kpts_prev, kpts_curr, idx_valid, depth, K):
     
     return points_3d[:valid_count], points_2d[:valid_count], valid_idx[:valid_count]
 
-def estimate_pose2(kpts_prev, kpts_curr, idx_valid, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+@alru_cache_numpy(maxsize=128)
+async def estimate_pose2(kpts_prev, kpts_curr, idx_valid, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     points_3d, points_2d, idx_valid = process_keypoints2(
         kpts_prev.astype(np.float32), 
         kpts_curr.astype(np.float32),
