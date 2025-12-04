@@ -21,7 +21,7 @@ import gtsam_unstable
 from collections import deque
 from dataclasses import dataclass
 
-from gtsam.symbol_shorthand import X, B, V
+from gtsam.symbol_shorthand import X, B, V, L
 
 _N = 5
 _M = 1000
@@ -320,12 +320,12 @@ class PerceptionNode(Node):
             #    self.frame_diff_t = []
             #    for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
             #        j = i + 1
-            #        kf_prev_timestamp, kf_prev_image, kf_prev_disparity, kf_prev_P, kf_prev_V, kf_prev_B, kf_prev_factor, _  = astuple(self.keyframe_queue[i])
-            #        kf_curr_timestamp, kf_curr_image, kf_curr_disparity, kf_curr_P, kf_curr_V, kf_curr_B, kf_curr_factor, _  = astuple(self.keyframe_queue[i + 1])
+            #        kf_prev_timestamp, kf_prev_image, kf_prev_disparity, kf_prev_depth, kf_prev_P, kf_prev_V, kf_prev_B, kf_prev_factor, _  = astuple(self.keyframe_queue[i])
+            #        kf_curr_timestamp, kf_curr_image, kf_curr_disparity, kf_curr_depth, kf_curr_P, kf_curr_V, kf_curr_B, kf_curr_factor, _  = astuple(self.keyframe_queue[i + 1])
             #        self.frame_diff_t.append(kf_curr_timestamp - kf_prev_timestamp)
 
             #for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
-            #    kf_timestamp, kf_image, kf_disparity, kf_P, kf_V, kf_B, kf_factor, latest_imu_timestamp = astuple(keyframe)
+            #    kf_timestamp, kf_image, kf_disparity, kf_depth, kf_P, kf_V, kf_B, kf_factor, latest_imu_timestamp = astuple(keyframe)
             #    if i != len(self.keyframe_queue[-_N:]) - 1:
             #        imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), kf_factor) 
 
@@ -403,42 +403,84 @@ class PerceptionNode(Node):
                 tracks = [track for track in uf_all_sets_list(parent) if len(track) >= 2]
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
+            #with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            #    for landmark in tracks[::1]:
+            #        # Build a smart factor per track (no explicit landmark variable)
+            #        disparity_valid = True
+            #        observations = []
+            #        for projection in landmark:
+            #            pose_idx = projection // _M
+            #            feature_idx = projection % _M
+            #            disparity = self.keyframe_queue[pose_idx].disparity
+            #            kpt = extract_info[pose_idx]['kpts'][0][feature_idx]
+            #            if disparity[int(kpt[1]), int(kpt[0])] < 0.1:
+            #                disparity_valid = False
+            #                break
+            #            observations.append((pose_idx, kpt, disparity))
+            #            projected_info[pose_idx].append(feature_idx)
+
+            #        if not disparity_valid or len(observations) < 2:
+            #            continue
+
+            #        # Smart factors require isotropic pixel noise
+            #        noise = gtsam.noiseModel.Isotropic.Sigma(3, 1.0)
+            #        params = gtsam.SmartProjectionParams()
+            #        smart_factor = gtsam_unstable.SmartStereoProjectionPoseFactor(noise, params)
+
+            #        calib = gtsam.Cal3_S2Stereo(
+            #            self.K[0, 0], self.K[1, 1], 0, self.K[0, 2], self.K[1, 2], self.baseline
+            #        )
+            #        for pose_idx, kpt, disparity in observations:
+            #            stereo_meas = gtsam.StereoPoint2(
+            #                kpt[0],
+            #                kpt[0] - disparity[int(kpt[1]), int(kpt[0])],
+            #                kpt[1],
+            #            )
+            #            smart_factor.add(stereo_meas, X(pose_idx), calib)
+            #        graph.add(smart_factor)
+
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 for landmark in tracks[::1]:
-                    # Build a smart factor per track (no explicit landmark variable)
-                    disparity_valid = True
-                    observations = []
-                    for projection in landmark:
+                    landmark_id = landmark[0]
+                    is_all_disparity_nonzero = True
+                    for i, projection in enumerate(landmark):
                         pose_idx = projection // _M
                         feature_idx = projection % _M
                         disparity = self.keyframe_queue[pose_idx].disparity
                         kpt = extract_info[pose_idx]['kpts'][0][feature_idx]
                         if disparity[int(kpt[1]), int(kpt[0])] < 0.1:
-                            disparity_valid = False
+                            is_all_disparity_nonzero = False
                             break
-                        observations.append((pose_idx, kpt, disparity))
-
-                    if not disparity_valid or len(observations) < 2:
-                        continue
-
-                    # Smart factors require isotropic pixel noise
-                    noise = gtsam.noiseModel.Isotropic.Sigma(3, 1.0)
-                    params = gtsam.SmartProjectionParams()
-                    smart_factor = gtsam_unstable.SmartStereoProjectionPoseFactor(noise, params)
-
-                    calib = gtsam.Cal3_S2Stereo(
-                        self.K[0, 0], self.K[1, 1], 0, self.K[0, 2], self.K[1, 2], self.baseline
-                    )
-                    for pose_idx, kpt, disparity in observations:
-                        stereo_meas = gtsam.StereoPoint2(
-                            kpt[0],
-                            kpt[0] - disparity[int(kpt[1]), int(kpt[0])],
-                            kpt[1],
+                    for i, projection in enumerate(landmark):
+                        pose_idx = projection // _M
+                        feature_idx = projection % _M
+                        robust_model = gtsam.noiseModel.Robust.Create(
+                            gtsam.noiseModel.mEstimator.Huber(1.41),       # delta parameter, e.g., 1 pixel
+                            gtsam.noiseModel.Diagonal.Sigmas(np.array([1.0, 1.0, 1.0]))      # base noise (σ in pixels)
                         )
-                        smart_factor.add(stereo_meas, X(pose_idx), calib)
+                        disparity = self.keyframe_queue[pose_idx].disparity
+                        kpt = extract_info[pose_idx]['kpts'][0][feature_idx]
+                        if i == 0: # use the first observation as the landmark id
+                            point_depth = self.K[0, 0] * self.baseline / (disparity[int(kpt[1]), int(kpt[0])] + 1e-3)
+                            point = depth_to_point(kpt, point_depth, self.K)
+                            pose = self.keyframe_queue[pose_idx].pose
+                            point_world = pose[:3, :3] @ point + pose[:3, 3]
+                            initial_estimate.insert(L(landmark_id), gtsam.Point3(point_world))
 
-                    graph.add(smart_factor)
-
+                        projection_factor = gtsam.GenericStereoFactor3D(
+                            gtsam.StereoPoint2(
+                                kpt[0],
+                                kpt[0] - disparity[int(kpt[1]), int(kpt[0])],
+                                kpt[1]
+                            ),
+                            robust_model,
+                            X(pose_idx),
+                            L(landmark_id),
+                            gtsam.Cal3_S2Stereo(self.K[0,0], self.K[1,1], 0, self.K[0,2], self.K[1,2], self.baseline),
+                            Matrix4x4ToGtsamPose3(np.eye(4))
+                        )
+                        graph.add(projection_factor)
+            
         with Timer(name="[Solver]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             params = gtsam.LevenbergMarquardtParams()
             # set iteration limit
