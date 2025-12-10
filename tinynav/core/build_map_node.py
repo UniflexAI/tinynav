@@ -10,7 +10,6 @@ from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
-
 from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
@@ -95,39 +94,16 @@ def convert_nerf_format(output_dir: str, infra1_poses: dict, rgb_intrinscis:np.n
     with open(f"{output_dir}/transforms.json", "w") as f:
         json.dump(data, f, indent=4)
 
-def merge_grids(grid1:np.ndarray, grid1_origin:np.ndarray, grid2:np.ndarray, grid2_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Merge two grids into one.
-        """
-        min_x = min(grid1_origin[0], grid2_origin[0])
-        min_y = min(grid1_origin[1], grid2_origin[1])
-        min_z = min(grid1_origin[2], grid2_origin[2])
-
-        max_x = max(grid1_origin[0] + grid1.shape[0] * resolution, grid2_origin[0] + grid2.shape[0] * resolution)
-        max_y = max(grid1_origin[1] + grid1.shape[1] * resolution, grid2_origin[1] + grid2.shape[1] * resolution)
-        max_z = max(grid1_origin[2] + grid1.shape[2] * resolution, grid2_origin[2] + grid2.shape[2] * resolution)
-
-        new_shape_x = int((max_x - min_x) / resolution) + 1
-        new_shape_y = int((max_y - min_y) / resolution) + 1
-        new_shape_z = int((max_z - min_z) / resolution) + 1
-
-        new_grid = np.zeros((new_shape_x, new_shape_y, new_shape_z), dtype=np.float32)
-        new_origin = np.array([min_x, min_y, min_z], dtype=np.float32)
-        grid1_x_start = int((grid1_origin[0] - min_x) / resolution)
-        grid1_y_start = int((grid1_origin[1] - min_y) / resolution)
-        grid1_z_start = int((grid1_origin[2] - min_z) / resolution)
-        grid2_x_start = int((grid2_origin[0] - min_x) / resolution)
-        grid2_y_start = int((grid2_origin[1] - min_y) / resolution)
-        grid2_z_start = int((grid2_origin[2] - min_z) / resolution)
-        # Merge the grids
-        new_grid[grid1_x_start:grid1_x_start + grid1.shape[0],
-                  grid1_y_start:grid1_y_start + grid1.shape[1],
-                  grid1_z_start:grid1_z_start + grid1.shape[2]] += grid1
-
-        new_grid[grid2_x_start:grid2_x_start + grid2.shape[0],
-                  grid2_y_start:grid2_y_start + grid2.shape[1],
-                  grid2_z_start:grid2_z_start + grid2.shape[2]] += grid2
-        return new_grid, new_origin
+def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, local_grid:np.ndarray, local_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Merge a local grid into a global grid.
+    """
+    resolution_half = np.array([resolution / 2.0, resolution / 2.0, resolution / 2.0], dtype=np.float32)
+    local_origin_offset = ((local_origin - global_origin + resolution_half) / resolution).astype(np.int32)
+    global_grid[local_origin_offset[0]:local_origin_offset[0] + local_grid.shape[0],
+                local_origin_offset[1]:local_origin_offset[1] + local_grid.shape[1],
+                local_origin_offset[2]:local_origin_offset[2] + local_grid.shape[2]] += local_grid
+    return global_grid, global_origin
 
 def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, max_iteration_num:int = 1024) -> dict:
     """
@@ -165,18 +141,24 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10)
     """
     raycast_shape = (100, 100, 20)
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    global_grid = None
-    global_origin = None
+    odom_pose_min_position = np.array([np.inf, np.inf, np.inf])
+    odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf])
+    for timestamp, odom_pose in poses.items():
+        odom_translation = odom_pose[:3, 3]
+        odom_pose_min_position = np.minimum(odom_pose_min_position, odom_translation)
+        odom_pose_max_position = np.maximum(odom_pose_max_position, odom_translation)
+    odom_pose_min_position = np.floor(odom_pose_min_position / resolution) * resolution
+    odom_pose_max_position = np.ceil(odom_pose_max_position / resolution) * resolution
+    global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
+    global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
+    global_grid = np.zeros(global_grid_shape, dtype=np.float32)
     for timestamp, odom_pose in tqdm(poses.items()):
         depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
         odom_translation = odom_pose[:3, 3]
-        local_origin = odom_translation - 0.5 * np.array(raycast_shape) * resolution
+        local_origin = np.floor(odom_translation / resolution) * resolution - 0.5 * np.array(raycast_shape) * resolution
         local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
-        if global_grid is None:
-            global_grid = local_grid
-            global_origin = local_origin
-        else:
-            global_grid, global_origin = merge_grids(global_grid, global_origin, local_grid, local_origin, resolution)
+        global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
+
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
     grid_type[global_grid > 0] = 2  # Occupied
     grid_type[global_grid < 0] = 1  # Free
@@ -754,15 +736,11 @@ def main(args=None):
     exec_ = SingleThreadedExecutor()
     player_node = BagPlayer(parsed_args.bag_file)
     map_node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
-
     exec_.add_node(player_node)
     exec_.add_node(map_node)
-
     while rclpy.ok() and player_node.play_next():
         exec_.spin_once(timeout_sec=0.001)
-
     map_node.save_mapping()
-    
 
 if __name__ == '__main__':
     main()
