@@ -482,6 +482,7 @@ class BuildMapNode(Node):
 
         with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             embedding = self.get_embeddings(infra1_image)
+            embedding = embedding / np.linalg.norm(embedding)
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
         with Timer(name = "super point extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
