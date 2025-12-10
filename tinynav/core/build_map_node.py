@@ -761,5 +761,8 @@ def main(args=None):
     while rclpy.ok() and player_node.play_next():
         exec_.spin_once(timeout_sec=0.001)
 
+    map_node.save_mapping()
+    
+
 if __name__ == '__main__':
     main()

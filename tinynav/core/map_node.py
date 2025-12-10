@@ -118,7 +118,7 @@ def compute_cost_map(occupancy_map: np.ndarray, Unknown_cost: float = 15.0, Free
     return gaussian_filter(cost_map, sigma=sigma)
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
+    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, tinynav_temp_path: str = TINYNAV_TEMP, verbose_timer: bool = True):
         """Initialization
 
         Args:
@@ -167,8 +167,8 @@ class MapNode(Node):
         self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 1
 
-        os.makedirs(f"{TINYNAV_TEMP}/nav_temp", exist_ok=True)
-        self.nav_temp_db = TinyNavDB(f"{TINYNAV_TEMP}/nav_temp", is_scratch=True)
+        os.makedirs(f"{tinynav_temp_path}/nav_temp", exist_ok=True)
+        self.nav_temp_db = TinyNavDB(f"{tinynav_temp_path}/nav_temp", is_scratch=True)
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
@@ -672,9 +672,11 @@ def main(args=None):
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument("--tinynav_temp_path", type=str, default=TINYNAV_TEMP, help="Path to the temporary directory")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
+                   tinynav_temp_path=parsed_args.tinynav_temp_path,
                    verbose_timer=parsed_args.verbose_timer)
 
     try:

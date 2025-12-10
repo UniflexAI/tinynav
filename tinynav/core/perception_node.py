@@ -31,7 +31,7 @@ _KEYFRAME_MIN_DISTANCE = 0.1    # unit: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 0.1 # unit: degree
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 
 def Matrix4x4ToGtsamPose3(T: np.ndarray) -> gtsam.Pose3:
@@ -240,7 +240,7 @@ class PerceptionNode(Node):
 
             if timestamp < self.keyframe_queue[-1].latest_imu_timestamp:
                 self.imu_measurements.popleft()
-                print("should only happen at beginning")
+                self.logger.warning("should only happen at beginning")
                 continue
 
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt) #todo
@@ -271,7 +271,7 @@ class PerceptionNode(Node):
                 depth,
                 self.K
             )
-            print("Estimated T_kf_curr:\n", T_kf_curr)
+            self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
 
         # for new frame, we first add it as keyframe, if not, we pop it later
         self.keyframe_queue.append(
@@ -314,7 +314,7 @@ class PerceptionNode(Node):
                     if i != len(self.keyframe_queue[-_N:]) - 1:
                         imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
                         graph.add(imu_factor)
-                    print(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
+                    self.logger.debug(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
 
             #with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             #    self.frame_diff_t = []
@@ -348,8 +348,8 @@ class PerceptionNode(Node):
                         kf_prev = self.keyframe_queue[i]
                         kf_curr = self.keyframe_queue[j]
 
-                    print("timestamp prev: ", kf_prev.timestamp)
-                    print("timestamp curr: ", kf_curr.timestamp)
+                    self.logger.debug("timestamp prev: ", kf_prev.timestamp)
+                    self.logger.debug("timestamp curr: ", kf_curr.timestamp)
                     with Timer(name="[cached result[1.1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
                     with Timer(name="[cached result[1.2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
@@ -452,8 +452,8 @@ class PerceptionNode(Node):
             for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                 T_i = result.atPose3(X(i)).matrix()
                 keyframe.pose = T_i
-                print(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
-                print(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
+                self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
+                self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
         with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -501,20 +501,22 @@ class PerceptionNode(Node):
 
 
 def main(args=None):
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("odom.log")],
-    )
 
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
     parser.set_defaults(verbose_timer=True)
     parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument("--log_file", type=str, default="odom.log", help="Path to the log file")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     print(f"Verbose timer: {parsed_args.verbose_timer}")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
+    )
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
 

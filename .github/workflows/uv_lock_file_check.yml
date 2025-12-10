@@ -21,3 +21,5 @@ jobs:
       - name: Lock file check
         run: |
           uv lock --check
+          chmod -R 777 $(pwd)/*
+          chmod -R 777 $(pwd)/.git
