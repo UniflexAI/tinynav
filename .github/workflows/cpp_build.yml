@@ -22,4 +22,8 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
-          colcon build
+          colcon --log-base /tmp/cpp_log build \
+            --build-base /tmp/cpp_build \
+            --install-base /tmp/cpp_install
+          chmod -R 777 $(pwd)/*
+          chmod -R 777 $(pwd)/.git

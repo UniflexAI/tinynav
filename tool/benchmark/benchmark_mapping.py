@@ -278,7 +278,12 @@ def generate_launch_description_localization(
     task_name: str,
     verbose_timer: bool,
 ):
-    perception_cmd = ["python3", "/tinynav/tinynav/core/perception_node.py"]
+    perception_cmd = [
+        "python3",
+        "/tinynav/tinynav/core/perception_node.py",
+        "--log_file",
+        f"{tinynav_db_path}/perception.log",
+    ]
     if not verbose_timer:
         perception_cmd.append("--no_verbose_timer")
 
@@ -349,7 +354,12 @@ def generate_launch_description_mapping(
     task_name: str,
     verbose_timer: bool,
 ):
-    perception_cmd = ["python3", "/tinynav/tinynav/core/perception_node.py"]
+    perception_cmd = [
+        "python3",
+        "/tinynav/tinynav/core/perception_node.py",
+        "--log_file",
+        f"{map_save_path}/perception.log",
+    ]
     if not verbose_timer:
         perception_cmd.append("--no_verbose_timer")
 
@@ -364,6 +374,10 @@ def generate_launch_description_mapping(
         "/tinynav/tinynav/core/build_map_node.py",
         "--map_save_path",
         str(map_save_path),
+        "--bag_file",
+        str(bag_path),
+        "--tinynav_temp_path",
+        f"{map_save_path}/tinynav_temp",
     ]
     if not verbose_timer:
         mapping_cmd.append("--no_verbose_timer")
@@ -373,41 +387,14 @@ def generate_launch_description_mapping(
         name=f"{task_name}_mapping",
         output="screen",
     )
-    bag_play = ExecuteProcess(
-        cmd=[
-            "ros2",
-            "bag",
-            "play",
-            bag_path,
-            "--rate",
-            str(rate),
-            "--clock",
-        ],  # no --loop so it will exit at EOF
-        output="screen",
-    )
 
-    # Coordinator node that will handle the stop signal and wait for completion
-    coordinator_script_path = os.path.join(
-        os.path.dirname(__file__), "data_saving_coordinator.py"
-    )
-    coordinator = ExecuteProcess(
-        cmd=["python3", coordinator_script_path, str(data_saving_timeout)],
-        name=f"{task_name}_coordinator",
-        output="screen",
-    )
-
-    # When rosbag play exits, trigger the coordinator and then shutdown
-    on_bag_exit = RegisterEventHandler(
-        OnProcessExit(target_action=bag_play, on_exit=[coordinator])
-    )
-
-    # Shutdown everything when coordinator finishes
-    on_coordinator_exit = RegisterEventHandler(
-        OnProcessExit(target_action=coordinator, on_exit=[EmitEvent(event=Shutdown())])
+    # Shutdown everything when mapping finishes
+    on_mapping_exit = RegisterEventHandler(
+        OnProcessExit(target_action=mapping, on_exit=[EmitEvent(event=Shutdown())])
     )
 
     return LaunchDescription(
-        [perception, mapping, bag_play, on_bag_exit, on_coordinator_exit]
+        [perception, mapping, on_mapping_exit]
     )
 
 
