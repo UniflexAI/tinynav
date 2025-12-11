@@ -184,8 +184,8 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
 
-        if os.path.exists(f"{tinynav_db_path}/pois.json"):
-            self.pois = json.load(open(f"{tinynav_db_path}/pois.json"))
+        if os.path.exists(f"{tinynav_map_path}/pois.json"):
+            self.pois = json.load(open(f"{tinynav_map_path}/pois.json"))
         else:
             self.pois = {}
         self.poi_index = len(self.pois) - 1
@@ -461,6 +461,8 @@ class MapNode(Node):
     def destroy_node(self):
         try:
             self.save_relocalization_poses()
+            self.nav_temp_db.close()
+            self.db.close()
             super().destroy_node()
         except Exception:
             # Ignore errors during destruction as resources may already be freed
