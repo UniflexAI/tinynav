@@ -16,7 +16,8 @@ from viser import transforms as tf
 import json
 from rclpy.node import Node
 import rclpy
-
+import cv2
+import os
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -193,6 +194,15 @@ def main(
     # POI management
     poi_points = {}
     poi_id_counter = 0
+
+    if os.path.exists(f"{tinynav_db_path}/pois.json"):
+        with open(f"{tinynav_db_path}/pois.json", "r") as f:
+            poi_points = json.load(f)
+            poi_points = {int(k): v for k, v in poi_points.items()}
+            for k, v in poi_points.items():
+                v['position'] = np.array(v['position'])
+            poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
+       
     
     # Add POI management UI
     with server.gui.add_folder("Points of Interest (POI)") as _:
@@ -206,6 +216,14 @@ def main(
 
 
         poi_list_container = server.gui.add_folder("POI List")
+        for poi_id, poi_point in poi_points.items():
+            sphere_handle = server.scene.add_icosphere(
+                f"/{poi_point['name']}",
+                radius=0.1,
+                color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
+                position=poi_point['position']
+            )
+            create_poi_ui(server, poi_list_container,int(poi_id), poi_points, sphere_handle)
 
         @add_poi_button.on_click
         def _(_) -> None:
@@ -215,7 +233,6 @@ def main(
             poi_id = poi_id_counter
             poi_id_counter += 1
             poi_name = f"POI_{poi_id}"
-        
             # Add POI to list
             poi_points[poi_id] = {
                 'id': poi_id,
@@ -244,15 +261,34 @@ def main(
             _ = rgb_image.shape[:2]
             R = vtf.SO3.from_matrix(rgb_pose[:3, :3])
             t = rgb_pose[:3, 3]
-            _ = server.scene.add_camera_frustum(
+            camera_frustum = server.scene.add_camera_frustum(
                 name=f"/cameras/camera_{timestamp}",
                 fov=float(2 * np.arctan((cx / fx))),
                 scale=0.01,
                 aspect=float(cx / cy),
-                image=rgb_image,
+                image=None,
                 wxyz=R.wxyz,
                 position=t,
+                format="jpeg",
+                jpeg_quality=50
             )
+
+            def make_on_click(camera_frustum_handle,ts):
+                def handler(event):
+                    img = rgb_images[str(ts)]
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    camera_frustum_handle.image = img
+                    clients = server.get_clients()
+
+                    for id, client in clients.items():
+                        client.camera.wxyz = camera_frustum_handle.wxyz
+                        client.camera.position = camera_frustum_handle.position
+                        client.camera.fov = camera_frustum_handle.fov
+                return handler
+            camera_frustum.on_click(make_on_click(camera_frustum, timestamp))
+
+
+
 
     
     # Load splat files
