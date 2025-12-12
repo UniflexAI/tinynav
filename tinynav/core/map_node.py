@@ -30,7 +30,6 @@ from build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
 
 
-TINYNAV_TEMP = "tinynav_temp"
 
 def draw_image_match_origin(prev_image: np.ndarray, curr_image: np.ndarray, prev_keypoints: np.ndarray, curr_keypoints: np.ndarray, matches: np.ndarray):
     cv_matches = [cv2.DMatch(_queryIdx=matches[index, 0].item(), _trainIdx=matches[index, 1].item(), _imgIdx=0, _distance=0) for index in range(matches.shape[0])]
@@ -118,7 +117,7 @@ def compute_cost_map(occupancy_map: np.ndarray, Unknown_cost: float = 15.0, Free
     return gaussian_filter(cost_map, sigma=sigma)
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, tinynav_temp_path: str = TINYNAV_TEMP, verbose_timer: bool = True):
+    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
         """Initialization
 
         Args:
@@ -167,8 +166,8 @@ class MapNode(Node):
         self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 1
 
-        os.makedirs(f"{tinynav_temp_path}/nav_temp", exist_ok=True)
-        self.nav_temp_db = TinyNavDB(f"{tinynav_temp_path}/nav_temp", is_scratch=True)
+        os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
+        self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
@@ -580,7 +579,7 @@ class MapNode(Node):
         else:
             logging.info("No path found in map")
 
-    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
+    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray|None:
         dummy_poi_pose = np.eye(4)
         dummy_poi_pose[:3, 3] = target_poi
         self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -670,15 +669,13 @@ def main(args=None):
     )
     rclpy.init(args=args)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tinynav_db_path", type=str, default="tinynav_db", required=True)
+    parser.add_argument("--tinynav_db_path", type=str, default="tinynav_temp")
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
-    parser.add_argument("--tinynav_temp_path", type=str, default=TINYNAV_TEMP, help="Path to the temporary directory")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
-                   tinynav_temp_path=parsed_args.tinynav_temp_path,
                    verbose_timer=parsed_args.verbose_timer)
 
     try:
