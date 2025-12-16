@@ -280,7 +280,7 @@ class SuperPointTRT(TRTBase):
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
     #
-    @alru_cache_numpy(maxsize=128)
+    @alru_cache_numpy(maxsize=32)
     async def infer(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):
         # resize to input_size
         scale = self.input_shape[0] / input_image.shape[0]
@@ -303,7 +303,7 @@ class LightGlueTRT(TRTBase):
     # default threshold as
     # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/lightglue.py#L333
     #
-    @alru_cache_numpy(maxsize=128)
+    @alru_cache_numpy(maxsize=32)
     async def infer(self, kpts0, kpts1, desc0, desc1, mask0, mask1, img_shape0, img_shape1, match_threshold = np.array([[0.1]], dtype=np.float32)):
         np.copyto(self.inputs[0]["host"], kpts0)
         np.copyto(self.inputs[1]["host"], kpts1)

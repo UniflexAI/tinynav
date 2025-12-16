@@ -68,6 +68,12 @@ def alru_cache_numpy(maxsize=128, **alru_kwargs):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             hash_key = _make_hash_key(args, kwargs)
+            remove_keys = [
+                k
+                for k in cache_store.keys() if k not in _cached._LRUCacheWrapper__cache.keys()
+            ]
+            for k in remove_keys:
+                del cache_store[k]
 
             if hash_key not in cache_store:
                 cache_store[hash_key] = (args, kwargs)
