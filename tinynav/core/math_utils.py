@@ -307,3 +307,12 @@ def uf_all_sets_list(parent):
         r = parent[i]
         root_to_members.setdefault(r, []).append(i)
     return list(root_to_members.values())
+
+def se3_inv(matrix_4x4:np.ndarray):
+    rotation = matrix_4x4[:3, :3]
+    translation = matrix_4x4[:3, 3]
+    T = np.eye(4)
+    T[:3, :3] = rotation.T
+    T[:3, 3] = -rotation.T @ translation
+    return T
+
