@@ -7,7 +7,7 @@ import numpy as np
 import sys
 import json
 
-from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf
+from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, theta_star
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -72,41 +72,6 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
     # Apply transformation
     transformed_points = homogeneous_points @ T.T
     return transformed_points[:, :3]
-
-def merge_grids(grid1:np.ndarray, grid1_origin:np.ndarray, grid2:np.ndarray, grid2_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Merge two grids into one.
-        """
-        min_x = min(grid1_origin[0], grid2_origin[0])
-        min_y = min(grid1_origin[1], grid2_origin[1])
-        min_z = min(grid1_origin[2], grid2_origin[2])
-
-        max_x = max(grid1_origin[0] + grid1.shape[0] * resolution, grid2_origin[0] + grid2.shape[0] * resolution)
-        max_y = max(grid1_origin[1] + grid1.shape[1] * resolution, grid2_origin[1] + grid2.shape[1] * resolution)
-        max_z = max(grid1_origin[2] + grid1.shape[2] * resolution, grid2_origin[2] + grid2.shape[2] * resolution)
-
-        new_shape_x = int((max_x - min_x) / resolution) + 1
-        new_shape_y = int((max_y - min_y) / resolution) + 1
-        new_shape_z = int((max_z - min_z) / resolution) + 1
-
-        new_grid = np.zeros((new_shape_x, new_shape_y, new_shape_z), dtype=np.float32)
-        new_origin = np.array([min_x, min_y, min_z], dtype=np.float32)
-        grid1_x_start = int((grid1_origin[0] - min_x) / resolution)
-        grid1_y_start = int((grid1_origin[1] - min_y) / resolution)
-        grid1_z_start = int((grid1_origin[2] - min_z) / resolution)
-        grid2_x_start = int((grid2_origin[0] - min_x) / resolution)
-        grid2_y_start = int((grid2_origin[1] - min_y) / resolution)
-        grid2_z_start = int((grid2_origin[2] - min_z) / resolution)
-        # Merge the grids
-        new_grid[grid1_x_start:grid1_x_start + grid1.shape[0],
-                  grid1_y_start:grid1_y_start + grid1.shape[1],
-                  grid1_z_start:grid1_z_start + grid1.shape[2]] += grid1
-
-        new_grid[grid2_x_start:grid2_x_start + grid2.shape[0],
-                  grid2_y_start:grid2_y_start + grid2.shape[1],
-                  grid2_z_start:grid2_z_start + grid2.shape[2]] += grid2
-        return new_grid, new_origin
-
 
 def compute_cost_map(occupancy_map: np.ndarray, Unknown_cost: float = 15.0, Free_cost: float = 0.0, Occupied_cost: float = 10.0, sigma: float = 5.0) -> np.ndarray:
     x_y_plane = np.max(occupancy_map, axis = 2)
@@ -589,77 +554,11 @@ class MapNode(Node):
         goal_idx = np.array([int((target_poi[0] - cost_map_origin[0]) / resolution), int((target_poi[1] - cost_map_origin[1]) / resolution)], dtype=np.int32)
         if start_idx[0] < 0 or start_idx[0] >= self.cost_map.shape[0] or start_idx[1] < 0 or start_idx[1] >= self.cost_map.shape[1] or goal_idx[0] < 0 or goal_idx[0] >= self.cost_map.shape[0] or goal_idx[1] < 0 or goal_idx[1] >= self.cost_map.shape[1]:
             return None
-        path = A_star(self.cost_map, start_idx, goal_idx, obstacles_cost = 10.0)
+        path = theta_star(self.cost_map, start_idx, goal_idx, obstacles_cost = 10.0)
         if len(path) > 0:
             converted_path = path * resolution + cost_map_origin
             return converted_path
         return None
-
-
-
-
-def reconstruct_path(came_from: dict, current:np.ndarray) -> np.ndarray:
-    """
-    Reconstructs the path from the start to the goal.
-    :param came_from: dict, mapping of nodes to their predecessors
-    :param current: tuple, the current node
-    :return: list of tuples representing the path
-    """
-    path = []
-    while current in came_from:
-        path.append(current)
-        current = came_from[current]
-    return np.array(path[::-1])
-
-
-def A_star(cost_map:np.ndarray, start:np.ndarray, goal:np.ndarray, obstacles_cost: float) -> np.ndarray:
-    """
-    A* algorithm to find the path from start to goal in the cost map.
-    parameters:
-        cost_map: np.ndarray (H, W)
-        start: tuple[int, int], x_idx, y_idx
-        goal: tuple[int, int], x_idx, y_idx
-    returns: list of tuples representing the path from start to goal
-    If no path is found, returns an empty list.
-    0 - unknown, 0.5 - free, 1.0 - occupied
-    """
-
-    from queue import PriorityQueue
-    import numpy as np
-    start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
-    goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-
-    def heuristic(start, goal):
-        return np.linalg.norm(np.array(start) - np.array(goal))
-
-    open_set = PriorityQueue()
-    open_set.put((cost_map[start] + heuristic(start, goal), start))
-
-    came_from = {}
-    g_score = {start: cost_map[start]}
-    f_score = {start: heuristic(start, goal) + cost_map[start]}
-    visited = set()
-    while not open_set.empty():
-        current = open_set.get()[1]
-        if current in visited:
-            continue
-        visited.add(current)
-        if current == goal:
-            return reconstruct_path(came_from, current)
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                neighbor = (current[0] + dx, current[1] + dy)
-                if (0 <= neighbor[0] < cost_map.shape[0] and
-                        0 <= neighbor[1] < cost_map.shape[1] and cost_map[neighbor] < obstacles_cost):
-                    tentative_g_score = g_score[current] + cost_map[neighbor]
-                    if tentative_g_score < g_score.get(neighbor, float('inf')):
-                        came_from[neighbor] = current
-                        g_score[neighbor] = tentative_g_score
-                        f_score[neighbor] = tentative_g_score + heuristic(neighbor, goal)
-                        open_set.put((f_score[neighbor], neighbor))
-    return []
 
 def main(args=None):
     logging.basicConfig(
