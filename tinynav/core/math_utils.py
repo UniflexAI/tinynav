@@ -308,6 +308,113 @@ def uf_all_sets_list(parent):
         root_to_members.setdefault(r, []).append(i)
     return list(root_to_members.values())
 
+def reconstruct_path(parent: dict, current:np.ndarray) -> np.ndarray:
+    """
+    Reconstructs the path from the start to the goal.
+    :param came_from: dict, mapping of nodes to their predecessors
+    :param current: tuple, the current node
+    :return: list of tuples representing the path
+    """
+    path = []
+    while current in parent:
+        path.append(current)
+        if current == parent[current]:
+            break
+        current = parent[current]
+    return np.array(path[::-1])
+
+
+def heuristic(start, goal):
+    return np.linalg.norm(np.array(start) - np.array(goal))
+
+
+def theta_star(cost_map:np.ndarray, start:np.ndarray, goal:np.ndarray, obstacles_cost: float) -> np.ndarray:
+    """
+    theta* algorithm to find the path from start to goal in the cost map.
+    parameters:
+        cost_map: np.ndarray (H, W)
+        start: tuple[int, int], x_idx, y_idx
+        goal: tuple[int, int], x_idx, y_idx
+    returns: list of tuples representing the path from start to goal
+    If no path is found, returns an empty list.
+    0 - unknown, 0.5 - free, 1.0 - occupied
+    """
+    start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
+    goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
+    open_set = set()
+
+    open_set.add(start)
+
+    g_score = {start: cost_map[start]}
+    f_score = {start: heuristic(start, goal) + cost_map[start]}
+    parent = {start: start}
+    visited = set()
+    while len(open_set) > 0:
+        # there can be a better way to maintain a min heap to reduce the complexity
+        current = sorted(open_set, key=lambda x: f_score[x])[0]
+        open_set.remove(current)
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == goal:
+            return reconstruct_path(parent, current)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                neighbor = (current[0] + dx, current[1] + dy)
+                if neighbor in visited:
+                    continue
+                if (0 <= neighbor[0] < cost_map.shape[0] and
+                        0 <= neighbor[1] < cost_map.shape[1] and cost_map[neighbor] < obstacles_cost):
+                    if neighbor not in open_set:
+                        g_score[neighbor] = float('inf')
+                        f_score[neighbor] = float('inf')
+                        parent[neighbor] = None
+                    update_node(cost_map, g_score, f_score, open_set, parent, current, neighbor, goal, obstacles_cost)
+    return []
+
+
+def line_of_sight(cost_map:np.ndarray, start:tuple, end:tuple, obstacles_cost: float):
+    x0, y0 = start
+    x1, y1 = end
+    dx = x1 - x0
+    dy = y1 - y0
+    if dx == 0 and dy == 0:
+        return True, cost_map[start]
+    sX = -1
+    sY = -1
+    if (dx > 0):
+        sX = 1
+    if (dy > 0):
+        sY = 1
+    max_step = max(abs(dx), abs(dy))
+
+    dx = abs(dx) / max_step
+    dy = abs(dy) / max_step
+    accumulated_cost = 0.0
+    for i in range(max_step):
+        node = (int(x0 + (i + 1) * sX * dx), int(y0 + (i + 1) * sY * dy))
+        if cost_map[node] >= obstacles_cost:
+            return False,  accumulated_cost
+        accumulated_cost += cost_map[node]
+    return True, accumulated_cost
+
+def update_node(cost_map:np.ndarray, g_score:dict, f_score:dict, open_set:set, parent:dict, current:tuple, neighbor:tuple, goal:tuple, obstacles_cost: float):
+    status, cost = line_of_sight(cost_map, parent[current], neighbor, obstacles_cost)
+    if status and g_score[parent[current]] + cost < g_score[neighbor]:
+        g_score[neighbor] = g_score[parent[current]] + cost
+        parent[neighbor] = parent[current]
+        f_score[neighbor] = g_score[neighbor] + heuristic(neighbor, goal)
+        if neighbor not in open_set:
+            open_set.add(neighbor)
+    else:
+       if g_score[current] + cost_map[neighbor] < g_score[neighbor]:
+            g_score[neighbor] = g_score[current] + cost_map[neighbor]
+            parent[neighbor] = current
+            f_score[neighbor] = g_score[neighbor] + heuristic(neighbor, goal)
+            if neighbor not in open_set:
+                open_set.add(neighbor)
 def se3_inv(matrix_4x4:np.ndarray):
     rotation = matrix_4x4[:3, :3]
     translation = matrix_4x4[:3, 3]
@@ -315,4 +422,3 @@ def se3_inv(matrix_4x4:np.ndarray):
     T[:3, :3] = rotation.T
     T[:3, 3] = -rotation.T @ translation
     return T
-
