@@ -295,10 +295,19 @@ class PlanningNode(Node):
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
-        self.smoothed_T = None
+        self.smoothed_velocity = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
-        self.target_pose = np.array([0.0, 0.0, 0.0])
+        self.target_pose = None
+
+        self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
+        self.poi_changed = False
+        self.poi_change_timestamp_sec = 0.0
+
+    def poi_change_callback(self, msg):
+        self.poi_changed = True
+        self.poi_change_timestamp_sec = msg.header.stamp.sec
+        self.target_pose = None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -416,10 +425,13 @@ class PlanningNode(Node):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T = msg2np(odom_msg)
-            if self.smoothed_T is None:
-                self.smoothed_T = T.copy()
-            self.smoothed_T[:3,3] = 0.9*self.smoothed_T[:3,3] + 0.1*T[:3,3]
-            self.smoothed_T[:3,:3] = T[:3,:3]
+            if self.last_T is None:
+                self.last_T = T.copy()
+                self.smoothed_velocity = 0.0
+                self.last_stamp = 0
+                self.smoothed_velocity = 0.0
+            velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
+            self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
@@ -449,16 +461,15 @@ class PlanningNode(Node):
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            if self.last_T is None:
-                self.last_T = self.smoothed_T
-                self.last_stamp = 0
-            init_v = (T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
+            v_dir = T[:3, :3] @ np.array([0, 0, 1])
+            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
+            init_v = v_dir * float(magnitude)
             trajectories, params = generate_trajectory_library_3d(
                 init_p = T[:3, 3],
-                init_v = init_v if np.linalg.norm(init_v) > 0.05 else np.array([0, 0.1, 0]),
+                init_v = init_v,
                 init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             )
-            self.last_T = self.smoothed_T
+            self.last_T = T
             self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -472,13 +483,16 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             def cost_function(traj, param, score, target_pose):
                 traj_end = np.array(traj[-1,:3])
-                target_end = target_pose
+                target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
+
+            if self.poi_changed and (depth_msg.header.stamp.sec - self.poi_change_timestamp_sec) > 3.0:
+                self.poi_changed = False
 
             # path
             path = Path()
@@ -487,6 +501,8 @@ class PlanningNode(Node):
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
+                    if self.poi_changed or self.target_pose is None:
+                        x,y,z,qx,qy,qz,qw = trajectories[i][0]
                     pose = PoseStamped()
                     pose.header = depth_msg.header
                     pose.pose.position.x = x
@@ -512,3 +528,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
