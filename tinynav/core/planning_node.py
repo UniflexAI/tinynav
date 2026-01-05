@@ -21,6 +21,11 @@ from codetiming import Timer
 import cv2
 from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
+
+# half width of go2 is around 0.25 meters.
+# set to 3x of resolution.
+SAFETY_RADIUS=0.3
+
 # === Helper functions ===
 @njit(cache=True)
 def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
@@ -147,7 +152,7 @@ def height_map_to_ESDF(height_map, height_threshold, resolution, method='max'):
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
-    num_samples=11, duration=5.0, dt=0.1,
+    num_samples=11, duration=2.0, dt=0.1,
     acc_std=0.00001, omega_y_std_deg=20.0,
     init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
@@ -188,6 +193,7 @@ def generate_trajectory_library_3d(
 
                 acc_world = q @ acc_body
                 v_world += acc_world * dt
+                v_world = np.clip(v_world, -0.5, 0.5)
                 p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
@@ -218,15 +224,18 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution):
                 dist = ESDF_map[x_img, y_img]
                 if dist < min_dist_for_traj:
                     min_dist_for_traj = dist
-                    closest_step_for_traj = i  
+                    closest_step_for_traj = i
         # Scoring based on the found minimum distance and the step it occurred
         if min_dist_for_traj < 1e-3: # Consider it a collision
             scores.append(float('inf'))
         elif min_dist_for_traj != float('inf'):
-            max_steps = len(traj)
-            decay_factor = (max_steps - closest_step_for_traj) / max_steps
-            base_score = 1.0 / (min_dist_for_traj+1e-3)
-            scores.append(decay_factor * base_score)
+            if min_dist_for_traj > SAFETY_RADIUS:
+                scores.append(0.0)
+            else:
+                max_steps = len(traj)
+                decay_factor = (max_steps - closest_step_for_traj) / max_steps
+                base_score = 1.0 / (min_dist_for_traj+1e-3)
+                scores.append(decay_factor * base_score)
         else:
             # If no obstacle is near, score is 0, closest_step_for_traj is the last step
             scores.append(0.0)
@@ -465,7 +474,7 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose
                 dist = np.linalg.norm(traj_end - target_end)
-                return score * 100000 + 10 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
