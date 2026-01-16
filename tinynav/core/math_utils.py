@@ -153,7 +153,7 @@ def msg2np(msg):
     T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
     return T
 
-@njit(cache=True)
+#@njit(cache=True)
 def depth_to_cloud(depth, K, step=10, max_dist=1e9):
     h, w = depth.shape
 
@@ -185,7 +185,7 @@ def process_keypoints(kpts_prev, kpts_curr, depth, K):
         u, v = int(kpts_curr[i,0]), int(kpts_curr[i,1])
         if 0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]:
             Z = depth[v, u]
-            if Z > 0.1 and Z < 10.0:
+            if Z > 0.1 and Z < 50.0:
                 X = (kpts_curr[i,0] - K[0,2]) * Z / K[0,0]
                 Y = (kpts_curr[i,1] - K[1,2]) * Z / K[1,1]
                 points_3d[valid_count] = (X, Y, Z)

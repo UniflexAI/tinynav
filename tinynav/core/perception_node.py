@@ -27,7 +27,7 @@ _N = 5
 _M = 1000
 
 _MIN_FEATURES = 20
-_KEYFRAME_MIN_DISTANCE = 0.1    # unit: meter
+_KEYFRAME_MIN_DISTANCE = 0.05    # unit: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 0.1 # unit: degree
 
 logger = logging.getLogger(__name__)
@@ -120,7 +120,8 @@ class PerceptionNode(Node):
 
         # Noise model (continuous-time)
         # for Realsense D435i
-        accel_noise_density = 0.25     # [m/s^2/√Hz]
+        #accel_noise_density = 0.25     # [m/s^2/√Hz]
+        accel_noise_density = 0.1     # [m/s^2/√Hz]
         gyro_noise_density = 0.00005 # [rad/s/√Hz]
         bias_acc_rw_sigma = 0.001
         bias_gyro_rw_sigma = 0.0001
@@ -302,18 +303,23 @@ class PerceptionNode(Node):
                     graph.add(gtsam.PriorFactorConstantBias(B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
 
                     initial_estimate.insert(V(i), keyframe.velocity)
+                    #initial_estimate.insert(V(i), np.zeros(3))
                     initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(keyframe.pose))
+
+                    graph.add(gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.5, 0.5, 0.5]))))
+
                     if i == 0:
                         ## per pose -- velocity
                         #graph.add(gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2]))))
 
                         # per pose -- pose, could only be applied to the first keyframe
-                        graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1]))))
+                        graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3]))))
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
                         imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
                         graph.add(imu_factor)
+                        #self.logger.info(f"graph {i} to {i + 1} imu delta : {keyframe.preintegrated_imu.deltaPij()}")
                     self.logger.debug(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
 
             #with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -386,18 +392,25 @@ class PerceptionNode(Node):
                             depth,
                             self.K
                         )
-
-                        inlier_set = set(inliers)
-                        for idx in range(len(match_indices)):
-                            if idx not in inlier_set:
+                        if state and len(inliers) > 20:
+                            inlier_set = set(inliers)
+                            for idx in range(len(match_indices)):
+                                if idx not in inlier_set:
+                                    match_indices[idx] = -1
+                        else:
+                            for idx in range(len(match_indices)):
                                 match_indices[idx] = -1
 
+
                     with Timer(name="[cached result[3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        count = 0
                         for k, match_idx in enumerate(match_indices):
                             if match_idx != -1:
                                 idx_prev = i * _M + k
                                 idx_curr = j * _M + match_idx
                                 uf_union(idx_prev, idx_curr, parent, rank)
+                                count += 1
+                        self.logger.info(f"{i} match {j} : {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 tracks = [track for track in uf_all_sets_list(parent) if len(track) >= 2]
@@ -451,10 +464,16 @@ class PerceptionNode(Node):
 
             for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                 T_i = result.atPose3(X(i)).matrix()
+                self.logger.debug(f"Keyframe {i} pose prev:\n{keyframe.pose}, updated: {T_i}, at timestamp {keyframe.timestamp}")
                 keyframe.pose = T_i
-                self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
-                self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
-                #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
+                V_i = result.atVector(V(i))
+                self.logger.debug(f"Velocity {i} prev: {keyframe.velocity}, updated:\n{V_i}")
+                keyframe.velocity = V_i
+                self.logger.debug(f"Keyframe {i} imu_Pij updated:\n{keyframe.preintegrated_imu.deltaPij()}, at timestamp {keyframe.timestamp}")
+                B_i = result.atConstantBias(B(i))
+                self.logger.debug(f"Bias {i} prev: {keyframe.bias}, updated:\n{result.atConstantBias(B(i))}")
+                keyframe.bias = B_i
+                #self.logger.info(f"frame {i} imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
         with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disp_vis = disparity.copy().astype(np.uint8)

@@ -152,6 +152,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10)
     global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
+    print(f"boundary : {global_grid_shape}, resolution : {resolution}")
     for timestamp, odom_pose in tqdm(poses.items()):
         depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
         odom_translation = odom_pose[:3, 3]
@@ -527,7 +528,8 @@ class BuildMapNode(Node):
 
         with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             cloud = depth_to_cloud(depth, self.K, 30, 3)
-            self.publish_local_map(cloud, 'camera_'+str(keyframe_image_timestamp))
+            if len(cloud):
+                self.publish_local_map(cloud, 'camera_'+str(keyframe_image_timestamp))
 
         with Timer(name = "tf publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.publish_all_transforms()
@@ -600,7 +602,9 @@ class BuildMapNode(Node):
         # Generate occupancy map
         occupancy_resolution = 0.05
         occupancy_step = 10
+        print("generate_occupancy_map")
         occupancy_grid, occupancy_origin, occupancy_2d_image = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
+        print("generate_occupancy_map finish")
         occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
         np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
