@@ -6,7 +6,6 @@ from std_msgs.msg import Bool
 import numpy as np
 import sys
 import json
-import math
 
 from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, theta_star,se3_inv
 from sensor_msgs.msg import Image, CameraInfo
@@ -20,14 +19,12 @@ import argparse
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
-from scipy.ndimage import gaussian_filter
 import asyncio
 from tf2_ros import TransformBroadcaster
 from build_map_node import TinyNavDB
 from build_map_node import find_loop, solve_pose_graph
 import einops
 from build_map_node import OdomPoseRecorder
-from queue import PriorityQueue
 from scipy.ndimage import distance_transform_cdt
 
 logger = logging.getLogger(__name__)
