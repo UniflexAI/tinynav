@@ -6,8 +6,9 @@ from std_msgs.msg import Bool
 import numpy as np
 import sys
 import json
+import math
 
-from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, theta_star
+from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, theta_star,se3_inv
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -26,6 +27,8 @@ from build_map_node import TinyNavDB
 from build_map_node import find_loop, solve_pose_graph
 import einops
 from build_map_node import OdomPoseRecorder
+from queue import PriorityQueue
+from scipy.ndimage import distance_transform_cdt
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +76,19 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
     transformed_points = homogeneous_points @ T.T
     return transformed_points[:, :3]
 
-def compute_cost_map(occupancy_map: np.ndarray, Unknown_cost: float = 15.0, Free_cost: float = 0.0, Occupied_cost: float = 10.0, sigma: float = 5.0) -> np.ndarray:
+def compute_cost_map(occupancy_map: np.ndarray, resolution: float = 0.05) -> np.ndarray:
     x_y_plane = np.max(occupancy_map, axis = 2)
-    cost_map = x_y_plane.copy().astype(np.float32)
-    cost_map[x_y_plane == 2] = Occupied_cost
-    cost_map[x_y_plane == 1] = Free_cost
-    cost_map[x_y_plane == 0] = Unknown_cost
-    return gaussian_filter(cost_map, sigma=sigma)
+    binary_map = np.ones_like(x_y_plane, dtype=np.uint8)
+    binary_map[x_y_plane == 2] = 0
+    binary_map[x_y_plane == 0] = 0
+    dist_to_obstacle = distance_transform_cdt(binary_map, metric='taxicab') * resolution
+    # visualize the dist_to_obstacle
+    # dist_to_clip = dist_to_obstacle.clip(0, 2)
+    # dist_to_vis = (dist_to_clip / 2.0 * 255).astype(np.uint8)
+    # dist_to_vis_image = cv2.applyColorMap(dist_to_vis, cv2.COLORMAP_JET)
+    # cv2.imwrite("dist_to_vis_image.png", dist_to_vis_image)
+    cost_map = 1.0 / (dist_to_obstacle + 1e-3)
+    return cost_map
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
@@ -140,7 +149,8 @@ class MapNode(Node):
         self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
-        self.cost_map = compute_cost_map(self.occupancy_map, Unknown_cost=15.0, Free_cost=0.0, Occupied_cost=10.0, sigma=5.0)
+
+        self.cost_map = compute_cost_map(self.occupancy_map, resolution=self.occupancy_map_meta[3])
 
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
@@ -152,10 +162,11 @@ class MapNode(Node):
             self.pois = json.load(open(f"{tinynav_map_path}/pois.json"))
         else:
             self.pois = {}
-        self.poi_index = len(self.pois) - 1
+        self.poi_index = min(0, len(self.pois) - 1)
         pois_dict = {}
-        for key, value in self.pois.items():
-            pois_dict[int(key)] = np.array(value["position"])
+        keys = sorted([int (key) for key in self.pois.keys()])
+        for index, key in enumerate(keys):
+            pois_dict[index] = np.array(self.pois[str(key)]["position"])
         self.pois = pois_dict
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
@@ -245,7 +256,7 @@ class MapNode(Node):
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
-            T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
+            T_prev_curr = se3_inv(last_keyframe_odom_pose) @ odom
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
@@ -267,7 +278,7 @@ class MapNode(Node):
                             success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                                print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                                #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
             find_loop_and_pose_graph(keyframe_image_timestamp)
@@ -390,7 +401,7 @@ class MapNode(Node):
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug
-            pose_in_world = np.linalg.inv(pose_in_camera)
+            pose_in_world = se3_inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
@@ -447,14 +458,13 @@ class MapNode(Node):
             if timestamp in self.pose_graph_used_pose:
                 camera_in_map_world = pose
                 camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-                observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
+                observation_T_from_map_to_odom =  camera_in_odom_world @ se3_inv(camera_in_map_world)
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
         relative_pose_constraint = relative_pose_constraint[-3:]
-        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 10)
+        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 100)
         self.T_from_map_to_odom = optimized_parameters[0]
-
 
     def try_publish_nav_path(self, timestamp: int):
         self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
@@ -476,7 +486,7 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         # get the pose from the map to the odom
-        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
@@ -519,11 +529,13 @@ class MapNode(Node):
 
             target_position_in_map = np.array([target_position[0], target_position[1], 0.0])
             pose_in_origin_odom = self.odom[timestamp]
-            T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
+            T = pose_in_origin_odom @ se3_inv(pose_in_map)
             target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
             dummy_pose = np.eye(4)
             dummy_pose[:3, 3] = target_position_in_odom
-            logging.info(f"target_position_in_odom: {target_position_in_odom}")
+            #logging.info(f"target_position_in_odom: {target_position_in_odom}")
+            print(f"target_position_in_odom: {target_position_in_odom}")
+
             self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
             path_msg = Path()
             path_msg.header.stamp = self.get_clock().now().to_msg()
@@ -554,7 +566,7 @@ class MapNode(Node):
         goal_idx = np.array([int((target_poi[0] - cost_map_origin[0]) / resolution), int((target_poi[1] - cost_map_origin[1]) / resolution)], dtype=np.int32)
         if start_idx[0] < 0 or start_idx[0] >= self.cost_map.shape[0] or start_idx[1] < 0 or start_idx[1] >= self.cost_map.shape[1] or goal_idx[0] < 0 or goal_idx[0] >= self.cost_map.shape[0] or goal_idx[1] < 0 or goal_idx[1] >= self.cost_map.shape[1]:
             return None
-        path = theta_star(self.cost_map, start_idx, goal_idx, obstacles_cost = 10.0)
+        path = theta_star(self.cost_map, start_idx, goal_idx, obstacles_cost = 4.0)
         if len(path) > 0:
             converted_path = path * resolution + cost_map_origin
             return converted_path
@@ -582,14 +594,14 @@ def main(args=None):
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, map node is shut down")
     except Exception as e:
-        logging.exception(f"Error occurred: {e}")
+        logging.error(f"Error occurred: {e}")
     finally:
         try:
             node.destroy_node()
             rclpy.shutdown()
         except Exception as e:
-            logging.exception(f"Error occurred during cleanup: {e}")
-
+            logging.error(f"Error occurred: {e}")
 
 if __name__ == '__main__':
     main()
+
