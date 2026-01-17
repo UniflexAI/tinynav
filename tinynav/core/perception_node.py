@@ -12,7 +12,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose2, se3_inv
+from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
 import asyncio
@@ -237,7 +237,7 @@ class PerceptionNode(Node):
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
         current_timestamp = stamp2second(left_msg.header.stamp)
         if len(self.keyframe_queue) == 0: # first frame
-            disparity, depth = await asyncio.create_task(self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]])))
+            disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
             self.keyframe_queue.append(
                 Keyframe(
                     timestamp=current_timestamp,
@@ -300,12 +300,12 @@ class PerceptionNode(Node):
             kpt_cur = current_keypoints[match_indices[valid_mask]]
             idx_valid = np.array(idx_to_origial)[valid_mask]
             logging.debug(f"match cnt: {len(kpt_pre)}")
-            state, T_kf_curr, _, _, _ = await estimate_pose2(
+            state, T_kf_curr, _, _, _ = estimate_pose(
                 kpt_pre,
                 kpt_cur,
-                idx_valid,
                 depth,
-                self.K
+                self.K,
+                idx_valid
             )
             self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
         # for new frame, we first add it as keyframe, if not, we pop it later
@@ -375,6 +375,9 @@ class PerceptionNode(Node):
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
             
+            # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
+            # match by LightGlue, filter by geometric consistency (pose estimation), 
+            # and build tracks via Union-Find
             with Timer(name="[cached result]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
                     with Timer(name="[cached result[1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
@@ -413,12 +416,12 @@ class PerceptionNode(Node):
                         depth = kf_curr.depth
 
                         logging.debug(f"match cnt: {len(kpt_pre)}")
-                        state, _, _, _, inliers = await estimate_pose2(
+                        state, _, _, _, inliers = estimate_pose(
                             kpt_pre,
                             kpt_cur,
-                            idx_valid,
                             depth,
-                            self.K
+                            self.K,
+                            idx_valid
                         )
                         inlier_set = set(inliers)
                         for idx in range(len(match_indices)):
@@ -507,7 +510,7 @@ class PerceptionNode(Node):
             self.depth_pub.publish(depth_msg)
         self.logger.debug(f"superpoint cache info: {self.superpoint.infer.cache_info()}")
         self.logger.debug(f"lightglue cache info: {self.light_glue.infer.cache_info()}")
-        self.logger.debug(f"estimate_pose cache info: {estimate_pose2.cache_info()}")
+        self.logger.debug(f"estimate_pose cache info: {estimate_pose.cache_info()}")
 
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
