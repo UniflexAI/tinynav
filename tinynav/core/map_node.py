@@ -582,13 +582,13 @@ def main(args=None):
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, map node is shut down")
     except Exception as e:
-        logging.error(f"Error occurred: {e}")
+        logging.exception(f"Error occurred: {e}")
     finally:
         try:
             node.destroy_node()
             rclpy.shutdown()
         except Exception as e:
-            logging.error(f"Error occurred: {e}")
+            logging.exception(f"Error occurred during cleanup: {e}")
 
 
 if __name__ == '__main__':

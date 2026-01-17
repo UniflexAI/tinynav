@@ -4,7 +4,7 @@ from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
-from func import alru_cache_numpy
+from func import lru_cache_numpy
 
 @njit(cache=True)
 def rotvec_to_matrix(rv):
@@ -176,49 +176,7 @@ def depth_to_cloud(depth, K, step=10, max_dist=1e9):
     return np.array(pts)
 
 @njit(cache=True)
-def process_keypoints(kpts_prev, kpts_curr, depth, K):
-    points_3d = np.empty((len(kpts_prev), 3), dtype=np.float32)
-    points_2d = np.empty((len(kpts_prev), 2), dtype=np.float32)
-    valid_count = 0
-    
-    for i in range(len(kpts_prev)):
-        u, v = int(kpts_curr[i,0]), int(kpts_curr[i,1])
-        if 0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]:
-            Z = depth[v, u]
-            if Z > 0.1 and Z < 10.0:
-                X = (kpts_curr[i,0] - K[0,2]) * Z / K[0,0]
-                Y = (kpts_curr[i,1] - K[1,2]) * Z / K[1,1]
-                points_3d[valid_count] = (X, Y, Z)
-                points_2d[valid_count] = kpts_prev[i]
-                valid_count += 1
-    
-    return points_3d[:valid_count], points_2d[:valid_count]
-
-def estimate_pose(kpts_prev, kpts_curr, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    points_3d, points_2d = process_keypoints(
-        kpts_prev.astype(np.float32), 
-        kpts_curr.astype(np.float32),
-        depth, 
-        K.astype(np.float32)
-    )
-    if len(points_3d) < 6:
-        return False, np.eye(4), None, None, None
-    points_3d = np.array(points_3d, dtype=np.float32)
-    points_2d = np.array(points_2d, dtype=np.float32)
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None, reprojectionError=2.0, confidence=0.999, flags=cv2.SOLVEPNP_EPNP)
-    if not success:
-        return False, np.eye(4), None, None, None
-    R_mat, _ = cv2.Rodrigues(rvec)
-    T = np.eye(4)
-    T[:3, :3] = R_mat
-    T[:3, 3] = tvec.ravel()
-    inliers = inliers.flatten()
-    inliers_2d = points_2d[inliers]
-    inliers_3d = points_3d[inliers]
-    return True, T, inliers_2d, inliers_3d, inliers
-
-@njit(cache=True)
-def process_keypoints2(kpts_prev, kpts_curr, idx_valid, depth, K):
+def process_keypoints(kpts_prev, kpts_curr, idx_valid, depth, K):
     points_3d = np.empty((len(kpts_prev), 3), dtype=np.float32)
     points_2d = np.empty((len(kpts_prev), 2), dtype=np.float32)
     valid_idx = np.empty(len(kpts_prev), dtype=np.int32)
@@ -238,9 +196,16 @@ def process_keypoints2(kpts_prev, kpts_curr, idx_valid, depth, K):
     
     return points_3d[:valid_count], points_2d[:valid_count], valid_idx[:valid_count]
 
-@alru_cache_numpy(maxsize=32)
-async def estimate_pose2(kpts_prev, kpts_curr, idx_valid, depth, K) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    points_3d, points_2d, idx_valid = process_keypoints2(
+@lru_cache_numpy(maxsize=128)
+def estimate_pose(kpts_prev, kpts_curr, depth, K, idx_valid=None):
+    """
+    Unified pose estimation function with cache support.
+    """
+    if idx_valid is None:
+        idx_valid = np.arange(len(kpts_prev), dtype=np.int32)
+    
+    # Core pose estimation logic
+    points_3d, points_2d, idx_valid = process_keypoints(
         kpts_prev.astype(np.float32), 
         kpts_curr.astype(np.float32),
         idx_valid,
@@ -248,12 +213,12 @@ async def estimate_pose2(kpts_prev, kpts_curr, idx_valid, depth, K) -> tuple[boo
         K.astype(np.float32)
     )
     if len(points_3d) < 6:
-        return False, np.eye(4), None, None, None
+        return False, np.eye(4), [], [], []
     points_3d = np.array(points_3d, dtype=np.float32)
     points_2d = np.array(points_2d, dtype=np.float32)
     success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None, reprojectionError=2.0, confidence=0.999, flags=cv2.SOLVEPNP_EPNP)
     if not success:
-        return False, np.eye(4), None, None, None
+        return False, np.eye(4), [], [], []
     R_mat, _ = cv2.Rodrigues(rvec)
     T = np.eye(4)
     T[:3, :3] = R_mat
