@@ -1,5 +1,6 @@
 from async_lru import alru_cache
-from functools import wraps
+from functools import wraps, lru_cache
+from collections import OrderedDict
 import numpy as np
 import hashlib
 
@@ -58,11 +59,13 @@ def alru_cache_numpy(maxsize=128, **alru_kwargs):
     """
     def decorator(func):
         # Stores hash_key → (real args, real kwargs)
-        cache_store = {}
+        # OrderedDict maintains insertion order for cleanup to avoid memory leak
+        cache_store = OrderedDict()
 
         @alru_cache(maxsize=maxsize, **alru_kwargs)
         async def _cached(hash_key):
             real_args, real_kwargs = cache_store[hash_key]
+            cache_store.move_to_end(hash_key)
             return await func(*real_args, **real_kwargs)
 
         @wraps(func)
@@ -78,10 +81,57 @@ def alru_cache_numpy(maxsize=128, **alru_kwargs):
             if hash_key not in cache_store:
                 cache_store[hash_key] = (args, kwargs)
 
+                if len(cache_store) > maxsize * 2:
+                    to_remove = len(cache_store) - maxsize
+                    for _ in range(to_remove):
+                        cache_store.popitem(last=False)
+
             return await _cached(hash_key)
 
+        def cache_clear():
+            cache_store.clear()
+            return _cached.cache_clear()
+
         wrapper.cache_info = _cached.cache_info
-        wrapper.cache_clear = _cached.cache_clear
+        wrapper.cache_clear = cache_clear
+        return wrapper
+
+    return decorator
+
+def lru_cache_numpy(maxsize=128, **lru_kwargs):
+    """
+    LRU cache for functions with numpy array arguments.
+    """
+    def decorator(func):
+        # Stores hash_key → (real args, real kwargs)
+        cache_store = OrderedDict()
+
+        @lru_cache(maxsize=maxsize, **lru_kwargs)
+        def _cached(hash_key):
+            real_args, real_kwargs = cache_store[hash_key]
+            cache_store.move_to_end(hash_key)
+            return func(*real_args, **real_kwargs)
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            hash_key = _make_hash_key(args, kwargs)
+
+            if hash_key not in cache_store:
+                cache_store[hash_key] = (args, kwargs)
+
+                if len(cache_store) > maxsize * 2:
+                    to_remove = len(cache_store) - maxsize
+                    for _ in range(to_remove):
+                        cache_store.popitem(last=False)
+
+            return _cached(hash_key)
+
+        def cache_clear():
+            cache_store.clear()
+            return _cached.cache_clear()
+
+        wrapper.cache_info = _cached.cache_info
+        wrapper.cache_clear = cache_clear
         return wrapper
 
     return decorator
