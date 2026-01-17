@@ -68,15 +68,18 @@ class PerceptionNode(Node):
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        # model
-        self.superpoint = SuperPointTRT()
+        # model initialized after receive image info to determine the sensor is realsense or looper.
+        # self.superpoint = SuperPointTRT()
+        # self.light_glue = LightGlueTRT()
+        # self.stereo_engine = StereoEngineTRT("/tinynav/tinynav/models/retinify_fp16_newest_dy_x86_64.plan")
+
+        self.superpoint = SuperPointTRT("/tinynav/tinynav/models/superpoint_static_sim_dy_x86_64.plan")
         self.light_glue = LightGlueTRT()
-        self.trt_fusion_model = TRTFusionModel()
+        self.stereo_engine = StereoEngineTRT("/tinynav/tinynav/models/retinify_fp16_newest_dy_x86_64.plan")
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
 
-        self.stereo_engine = StereoEngineTRT()
         # intrinsic
         self.baseline = None
         self.K = None
@@ -97,6 +100,7 @@ class PerceptionNode(Node):
         self.imu_ts = ApproximateTimeSynchronizer([self.imu_accel_sub, self.imu_gyro_sub], queue_size=1000, slop=0.005)
         self.imu_ts.registerCallback(self.imu_callback)
         self.imu_last_received_timestamp = None
+        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.imu_callback_2, qos_profile)
         
         self.accel_sub = self.create_subscription(Imu, "/camera/camera/accel/sample", self.accel_callback, qos_profile)
         self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
@@ -184,6 +188,32 @@ class PerceptionNode(Node):
         gyro_data = np.array([[gyro_msg.angular_velocity.x], [gyro_msg.angular_velocity.y], [gyro_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
+    def imu_callback_2(self, imu_msg):
+        current_timestamp = stamp2second(imu_msg.header.stamp)
+        if len(self.accel_readings) >= 10 and self.T_body_last is None:
+            accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
+            gravity_cam = np.mean(accel_data, axis=0)
+            gravity_cam /= np.linalg.norm(gravity_cam)
+            gravity_world = np.array([0.0, 0.0, 1.0])
+
+            self.T_body_last = np.eye(4)
+            self.T_body_last[:3, :3] = rot_from_two_vector(gravity_cam, gravity_world)
+            self.get_logger().info("Initial pose set from accelerometer data.")
+            self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
+        elif len(self.accel_readings) < 10:
+            self.accel_readings.append(imu_msg.linear_acceleration)
+        #print(f"accel_readings : {len(self.accel_readings)}")
+
+        # if the timestamp jump is too large, it means the IMU is not working properly
+        if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
+            delta_timestamp = current_timestamp - self.imu_last_received_timestamp
+            self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
+        self.imu_last_received_timestamp = current_timestamp
+
+        accel_data = np.array([[imu_msg.linear_acceleration.x], [imu_msg.linear_acceleration.y], [imu_msg.linear_acceleration.z]])
+        gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
+        self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
+
     def images_callback(self, left_msg, right_msg):
         current_timestamp = stamp2second(left_msg.header.stamp)
         if current_timestamp - self.last_processed_timestamp < 0.1333:
@@ -224,6 +254,8 @@ class PerceptionNode(Node):
             prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
             current_left_extract_result = await self.superpoint.infer(left_img)
 
+            #print(f"prev_left_extract_result : {prev_left_extract_result['kpts']}")
+
             match_result = await self.light_glue.infer(
                 prev_left_extract_result["kpts"],
                 current_left_extract_result["kpts"],
@@ -233,6 +265,7 @@ class PerceptionNode(Node):
                 current_left_extract_result["mask"],
                 kf_prev.image.shape,
                 left_img.shape)
+            #print(f"match_result : {match_result['match_indices']}")
 
         # propagate IMU measurements
         while len(self.imu_measurements) > 0 and self.imu_measurements[0][0] <= current_timestamp:
