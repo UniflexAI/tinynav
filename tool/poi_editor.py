@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -16,8 +15,8 @@ from viser import transforms as tf
 import json
 from rclpy.node import Node
 import rclpy
-import cv2
 import os
+from tinynav.core.math_utils import msg2np, matrix_to_quat
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -100,6 +99,43 @@ def load_ply_file(ply_file_path: Path, center: bool = False) -> SplatFile:
         "opacities": opacities,
         "covariances": covariances,
     }
+
+
+def load_pointcloud_ply(ply_file_path: Path, center: bool = False) -> dict:
+    start_time = time.time()
+    
+    plydata = PlyData.read(ply_file_path)
+    v = plydata["vertex"]
+    
+    positions = np.stack([v["x"], v["y"], v["z"]], axis=-1).astype(np.float32)
+    
+    try:
+        if "red" in v.data.dtype.names:
+            colors = np.stack([v["red"], v["green"], v["blue"]], axis=-1)
+            if colors.dtype == np.uint8:
+                colors = colors.astype(np.float32) / 255.0
+        elif "r" in v.data.dtype.names:
+            colors = np.stack([v["r"], v["g"], v["b"]], axis=-1)
+            if colors.dtype == np.uint8:
+                colors = colors.astype(np.float32) / 255.0
+        else:
+            colors = np.ones((len(v), 3), dtype=np.float32)
+    except Exception:
+        colors = np.ones((len(v), 3), dtype=np.float32)
+    
+    if center:
+        positions -= np.mean(positions, axis=0, keepdims=True)
+    
+    num_points = len(v)
+    print(
+        f"Point cloud PLY file with {num_points=} loaded in {time.time() - start_time} seconds"
+    )
+    
+    return {
+        "positions": positions,
+        "colors": colors,
+    }
+
     
 def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphere_handle:viser.SceneHandle):
     with poi_list_container:
@@ -150,6 +186,9 @@ class RelocalizationPose(Node):
         self.viser_server = viser_server
         self.relocalization_pose_sub = self.create_subscription(Odometry, '/map/relocalization', self.relocalization_pose_callback, 10)
         self.global_plan_sub = self.create_subscription(nav_msgs.msg.Path, '/mapping/global_plan', self.global_plan_callback, 10)
+        self.planning_path_sub = self.create_subscription(nav_msgs.msg.Path, '/planning/trajectory_path', self.planning_path_callback, 10)
+        self.targegt_pose_sub = self.create_subscription(Odometry, "/control/target_pose", self.target_pose_callback, 10)
+        self.odom_sub = self.create_subscription(Odometry, "/slam/odometry", self.odometry_callback, 10)
 
     def relocalization_pose_callback(self, msg: Odometry):
         position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -182,6 +221,41 @@ class RelocalizationPose(Node):
             colors=colors,
             line_width=3
         )
+
+    def planning_path_callback(self, msg: Path):
+        points = []
+        for pose in msg.poses:
+            position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
+            points.append(position)
+        if len(points) < 2:
+            print("Not enough points to draw line segments")
+            return
+        line_segments= []
+        for i in range(1, len(points)):
+            line_segments.append(np.array([points[i-1], points[i]]))
+        line_segments = np.array(line_segments)
+        N = line_segments.shape[0]
+        colors = np.zeros((N, 2, 3))
+        colors[:, 0, :] = (0, 0, 255)
+        colors[:, 1, :] = (0, 0, 255)
+        self.viser_server.scene.add_line_segments(
+            "/planning_path",
+            points=np.array(line_segments),
+            colors=colors,
+            line_width=3
+        )
+
+    def odometry_callback(self, msg:Odometry):
+        odom = msg2np(msg)
+        xyzw = matrix_to_quat(odom[:3, :3])
+        position = odom[:3, 3]
+        gizmo = self.viser_server.scene.add_transform_controls("/odom_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
+
+    def target_pose_callback(self, msg:Odometry):
+        odom = msg2np(msg)
+        xyzw = matrix_to_quat(odom[:3, :3])
+        position = odom[:3, 3]
+        gizmo = self.viser_server.scene.add_transform_controls("/target_pose_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
 
 
 def main(
@@ -252,7 +326,6 @@ def main(
     rgb_images = shelve.open(f"{tinynav_db_path}/rgb_images")
     T_rgb_to_infra1 = np.load(tinynav_db_path / "T_rgb_to_infra1.npy", allow_pickle=True)
 
-    splat_paths = list([Path(f"{tinynav_db_path}/splat.ply")])
     fx, _, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
     with server.gui.add_folder("cameras") as _:
         for timestamp, rgb_pose in poses.items():
@@ -273,26 +346,13 @@ def main(
                 jpeg_quality=50
             )
 
-            def make_on_click(camera_frustum_handle,ts):
-                def handler(event):
-                    img = rgb_images[str(ts)]
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    camera_frustum_handle.image = img
-                    clients = server.get_clients()
+    # Load splat or point cloud files
+    splat_path = Path(f"{tinynav_db_path}/splat.ply")
+    pointcloud_path = Path(f"{tinynav_db_path}/pointcloud.ply")
 
-                    for id, client in clients.items():
-                        client.camera.wxyz = camera_frustum_handle.wxyz
-                        client.camera.position = camera_frustum_handle.position
-                        client.camera.fov = camera_frustum_handle.fov
-                return handler
-            camera_frustum.on_click(make_on_click(camera_frustum, timestamp))
-
-
-
-
-    
-    # Load splat files
-    for i, splat_path in enumerate(splat_paths):
+    if splat_path.exists():
+        # Load as Gaussian splat
+        print(f"Loading Gaussian splat from {splat_path}")
         if splat_path.suffix == ".splat":
             splat_data = load_splat_file(splat_path, center=True)
         elif splat_path.suffix == ".ply":
@@ -300,19 +360,49 @@ def main(
         else:
             raise SystemExit("Please provide a filepath to a .splat or .ply file.")
 
-        #server.scene.add_transform_controls(f"/{i}")
         gs_handle = server.scene.add_gaussian_splats(
-            f"/{i}/gaussian_splats",
+            "/0/gaussian_splats",
             centers=splat_data["centers"],
             rgbs=splat_data["rgbs"],
             opacities=splat_data["opacities"],
             covariances=splat_data["covariances"],
         )
-        remove_button = server.gui.add_button(f"Remove splat object {i}")
+        remove_button = server.gui.add_button("Remove splat object")
         @remove_button.on_click
         def _(_, gs_handle=gs_handle, remove_button=remove_button) -> None:
             gs_handle.remove()
             remove_button.remove()
+            
+    elif pointcloud_path.exists():
+        # Load as point cloud
+        print(f"Loading point cloud from {pointcloud_path}")
+        pc_data = load_pointcloud_ply(pointcloud_path, center=False)
+        
+        pc_handle = server.scene.add_point_cloud(
+            "/0/point_cloud",
+            points=pc_data["positions"],
+            colors=pc_data["colors"],
+            point_size=0.01,
+            point_shape="rounded",
+        )
+        
+        # Add point size control
+        with server.gui.add_folder("Point Cloud Settings") as _:
+            point_size_slider = server.gui.add_slider(
+                "Point Size", min=0.001, max=0.1, step=0.001, initial_value=0.01
+            )
+            
+            @point_size_slider.on_update
+            def _(_) -> None:
+                pc_handle.point_size = point_size_slider.value
+        
+        remove_button = server.gui.add_button("Remove point cloud")
+        @remove_button.on_click
+        def _(_, pc_handle=pc_handle, remove_button=remove_button) -> None:
+            pc_handle.remove()
+            remove_button.remove()
+    else:
+        print(f"Warning: Neither {splat_path} nor {pointcloud_path} exists. No 3D representation loaded.")
 
     rclpy.init()
     relocalization_pose_node = RelocalizationPose(server)
@@ -326,3 +416,4 @@ def main(
 
 if __name__ == "__main__":
     tyro.cli(main)
+
