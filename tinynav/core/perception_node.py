@@ -12,7 +12,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose2
+from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose2, se3_inv
 from math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
 import asyncio
@@ -32,6 +32,14 @@ _KEYFRAME_MIN_ROTATE_DEGREE = 0.1 # unit: degree
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def keyframe_check(T_i, T_j):
+    T_ij = se3_inv(T_i) @ T_j
+    t_diff = np.linalg.norm(T_ij[:3, 3])
+    cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
+    r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
+    return t_diff > _KEYFRAME_MIN_DISTANCE or r_diff > _KEYFRAME_MIN_ROTATE_DEGREE
 
 
 def Matrix4x4ToGtsamPose3(T: np.ndarray) -> gtsam.Pose3:
@@ -86,21 +94,25 @@ class PerceptionNode(Node):
         self.V_last = None
         self.B_last = None
 
-        self.Tcb = np.array([[0, -1, 0, 0], [0, 0, -1, 0], [1, 0, 0, 0], [0, 0, 0, 1]])
-
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
-        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=3000)
-        
+        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
+
+        # previous methods to process imu data.
+        # this should be remove after other user update the recording rosbag scripts.
         self.imu_accel_sub = Subscriber(self, Imu, "/camera/camera/accel/sample", qos_profile=qos_profile)
         self.imu_gyro_sub = Subscriber(self, Imu, "/camera/camera/gyro/sample", qos_profile=qos_profile)
-        self.imu_ts = ApproximateTimeSynchronizer([self.imu_accel_sub, self.imu_gyro_sub], queue_size=1000, slop=0.005)
+        self.imu_ts = ApproximateTimeSynchronizer([self.imu_accel_sub, self.imu_gyro_sub], queue_size=100, slop=0.001)
         self.imu_ts.registerCallback(self.imu_callback)
-        self.imu_last_received_timestamp = None
-        
         self.accel_sub = self.create_subscription(Imu, "/camera/camera/accel/sample", self.accel_callback, qos_profile)
-        self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
 
+
+        # use a single topic to handle the imu data.
+        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.sync_imu_callback, qos_profile)
+        self.imu_last_received_timestamp = None
+
+
+        self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
         self.left_sub = Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw")
         self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=10, slop=0.02)
@@ -183,6 +195,32 @@ class PerceptionNode(Node):
         gyro_data = np.array([[gyro_msg.angular_velocity.x], [gyro_msg.angular_velocity.y], [gyro_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
+    def sync_imu_callback(self, imu_msg):
+        current_timestamp = stamp2second(imu_msg.header.stamp)
+        if len(self.accel_readings) >= 10 and self.T_body_last is None:
+            accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
+            gravity_cam = np.mean(accel_data, axis=0)
+            gravity_cam /= np.linalg.norm(gravity_cam)
+            gravity_world = np.array([0.0, 0.0, 1.0])
+
+            self.T_body_last = np.eye(4)
+            self.T_body_last[:3, :3] = rot_from_two_vector(gravity_cam, gravity_world)
+            self.get_logger().info("Initial pose set from accelerometer data.")
+            self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
+        elif len(self.accel_readings) < 10:
+            self.accel_readings.append(imu_msg.linear_acceleration)
+        #print(f"accel_readings : {len(self.accel_readings)}")
+
+        # if the timestamp jump is too large, it means the IMU is not working properly
+        if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
+            delta_timestamp = current_timestamp - self.imu_last_received_timestamp
+            self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
+        self.imu_last_received_timestamp = current_timestamp
+
+        accel_data = np.array([[imu_msg.linear_acceleration.x], [imu_msg.linear_acceleration.y], [imu_msg.linear_acceleration.z]])
+        gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
+        self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
+
     def images_callback(self, left_msg, right_msg):
         current_timestamp = stamp2second(left_msg.header.stamp)
         if current_timestamp - self.last_processed_timestamp < 0.1333:
@@ -215,10 +253,8 @@ class PerceptionNode(Node):
             )
             return
 
-
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
-
             kf_prev = self.keyframe_queue[-1]
             prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
             current_left_extract_result = await self.superpoint.infer(left_img)
@@ -272,7 +308,6 @@ class PerceptionNode(Node):
                 self.K
             )
             self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
-
         # for new frame, we first add it as keyframe, if not, we pop it later
         self.keyframe_queue.append(
             Keyframe(
@@ -289,7 +324,6 @@ class PerceptionNode(Node):
         )
         if len(self.keyframe_queue) > _N:
             self.keyframe_queue.pop(0)
-
         with Timer(name="[ISAM Processing]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
             with Timer(name="[adding imu]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                 # we have new graph each time
@@ -386,7 +420,6 @@ class PerceptionNode(Node):
                             depth,
                             self.K
                         )
-
                         inlier_set = set(inliers)
                         for idx in range(len(match_indices)):
                             if idx not in inlier_set:
@@ -483,16 +516,10 @@ class PerceptionNode(Node):
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
 
-            def keyframe_check(T_i, T_j):
-                T_ij = np.linalg.inv(T_i) @ T_j
-                t_diff = np.linalg.norm(T_ij[:3, 3])
-                cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
-                r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
-                return t_diff > _KEYFRAME_MIN_DISTANCE or r_diff > _KEYFRAME_MIN_ROTATE_DEGREE
-
-
-            if keyframe_check(self.keyframe_queue[-2].pose, self.keyframe_queue[-1].pose):
-                self.keyframe_pose_pub.publish(np2msg(self.keyframe_queue[-1].pose, left_msg.header.stamp, "world", "camera"))
+            last_keyframe = self.keyframe_queue[-2]
+            current_keyframe = self.keyframe_queue[-1]
+            if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
+                self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera"))
                 self.keyframe_image_pub.publish(left_msg)
                 self.keyframe_depth_pub.publish(depth_msg)
             else:
