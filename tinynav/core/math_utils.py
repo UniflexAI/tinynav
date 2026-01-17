@@ -4,7 +4,7 @@ from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
-from func import lru_cache_numpy
+from tinynav.core.func import lru_cache_numpy
 
 @njit(cache=True)
 def rotvec_to_matrix(rv):
