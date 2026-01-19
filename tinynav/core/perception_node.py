@@ -99,7 +99,7 @@ class PerceptionNode(Node):
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
-        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
+        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=2000)
 
         # previous methods to process imu data.
         # this should be remove after other user update the recording rosbag scripts.
@@ -291,6 +291,10 @@ class PerceptionNode(Node):
             self.keyframe_queue[-1].latest_imu_timestamp = timestamp
 
             self.imu_measurements.popleft()
+
+        if current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.005:
+            self.logger.warning(f"IMU timestamp jump {current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp} s is too large, it means the IMU is not working properly")
+
         # specially process the last imu
         if len(self.imu_measurements) > 0 and current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.001:
             timestamp, accel, gyro = self.imu_measurements[0]

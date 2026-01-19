@@ -6,6 +6,8 @@ from cv_bridge import CvBridge
 import numpy as np
 import cv2
 from codetiming import Timer
+from tf2_ros import TransformBroadcaster
+from geometry_msgs.msg import TransformStamped
 
 class LooperHelpNode(Node):
 
@@ -16,6 +18,13 @@ class LooperHelpNode(Node):
         self.right_image_pub = self.create_publisher(Image, "/camera/camera/infra2/image_rect_raw", 10)
         self.left_camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra1/camera_info", 10)
         self.right_camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
+        
+        # Color image publisher (converted from left grayscale image)
+        self.color_image_pub = self.create_publisher(Image, "/camera/camera/color/image_raw", 10)
+        self.color_camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/color/camera_info", 10)
+        
+        # TF broadcaster for camera frame transforms
+        self.tf_broadcaster = TransformBroadcaster(self)
 
         # Subscribe to IMU data with BEST_EFFORT QoS for high-frequency sensor data
         imu_qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=3000)
@@ -27,6 +36,7 @@ class LooperHelpNode(Node):
         self._setup_camera_parameters()
         self._setup_rectification_maps()
         self._setup_imu_transform()
+        self._setup_tf_transforms()
 
     def _setup_camera_parameters(self):
         """Parse and setup camera intrinsics and distortion parameters."""
@@ -154,6 +164,102 @@ class LooperHelpNode(Node):
         # t_imu_cam0 = -R_cam0_imu^T @ t_cam0_imu
         self.R_imu_cam0 = R_cam0_imu.T
         self.t_imu_cam0 = -self.R_imu_cam0 @ t_cam0_imu
+    
+    def _setup_tf_transforms(self):
+        """Setup TF transform matrices for camera frames."""
+        # Since we're using left camera (infra1) as color source,
+        # color camera is at the same position as infra1
+        
+        # camera_link -> camera_infra1_frame: identity (or can use small offset if needed)
+        self.T_link_infra1 = np.eye(4, dtype=np.float64)
+        
+        # camera_infra1_frame -> camera_infra1_optical_frame
+        # Standard ROS camera convention: rotate 180 degrees around Y-axis
+        # This converts from camera frame (Z forward, X right, Y down) to optical frame (Z forward, X right, Y up)
+        self.T_infra1_infra1_optical = np.array([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ], dtype=np.float64)
+        
+        # camera_link -> camera_color_frame: same as infra1 (identity)
+        self.T_link_color = np.eye(4, dtype=np.float64)
+        
+        # camera_color_frame -> camera_color_optical_frame: same as infra1_optical
+        self.T_color_color_optical = self.T_infra1_infra1_optical.copy()
+        
+        self.get_logger().info("TF transforms setup completed")
+    
+    def _publish_tf_transforms(self, header):
+        """Publish TF transforms for camera frames."""
+        transforms = []
+        
+        # camera_link -> camera_infra1_frame
+        t = TransformStamped()
+        t.header.stamp = header.stamp
+        t.header.frame_id = "camera_link"
+        t.child_frame_id = "camera_infra1_frame"
+        t.transform.translation.x = self.T_link_infra1[0, 3]
+        t.transform.translation.y = self.T_link_infra1[1, 3]
+        t.transform.translation.z = self.T_link_infra1[2, 3]
+        R = self.T_link_infra1[:3, :3]
+        q = self._rotation_matrix_to_quaternion(R)
+        t.transform.rotation.w = q[0]
+        t.transform.rotation.x = q[1]
+        t.transform.rotation.y = q[2]
+        t.transform.rotation.z = q[3]
+        transforms.append(t)
+        
+        # camera_infra1_frame -> camera_infra1_optical_frame
+        t = TransformStamped()
+        t.header.stamp = header.stamp
+        t.header.frame_id = "camera_infra1_frame"
+        t.child_frame_id = "camera_infra1_optical_frame"
+        t.transform.translation.x = self.T_infra1_infra1_optical[0, 3]
+        t.transform.translation.y = self.T_infra1_infra1_optical[1, 3]
+        t.transform.translation.z = self.T_infra1_infra1_optical[2, 3]
+        R = self.T_infra1_infra1_optical[:3, :3]
+        q = self._rotation_matrix_to_quaternion(R)
+        t.transform.rotation.w = q[0]
+        t.transform.rotation.x = q[1]
+        t.transform.rotation.y = q[2]
+        t.transform.rotation.z = q[3]
+        transforms.append(t)
+        
+        # camera_link -> camera_color_frame
+        t = TransformStamped()
+        t.header.stamp = header.stamp
+        t.header.frame_id = "camera_link"
+        t.child_frame_id = "camera_color_frame"
+        t.transform.translation.x = self.T_link_color[0, 3]
+        t.transform.translation.y = self.T_link_color[1, 3]
+        t.transform.translation.z = self.T_link_color[2, 3]
+        R = self.T_link_color[:3, :3]
+        q = self._rotation_matrix_to_quaternion(R)
+        t.transform.rotation.w = q[0]
+        t.transform.rotation.x = q[1]
+        t.transform.rotation.y = q[2]
+        t.transform.rotation.z = q[3]
+        transforms.append(t)
+        
+        # camera_color_frame -> camera_color_optical_frame
+        t = TransformStamped()
+        t.header.stamp = header.stamp
+        t.header.frame_id = "camera_color_frame"
+        t.child_frame_id = "camera_color_optical_frame"
+        t.transform.translation.x = self.T_color_color_optical[0, 3]
+        t.transform.translation.y = self.T_color_color_optical[1, 3]
+        t.transform.translation.z = self.T_color_color_optical[2, 3]
+        R = self.T_color_color_optical[:3, :3]
+        q = self._rotation_matrix_to_quaternion(R)
+        t.transform.rotation.w = q[0]
+        t.transform.rotation.x = q[1]
+        t.transform.rotation.y = q[2]
+        t.transform.rotation.z = q[3]
+        transforms.append(t)
+        
+        self.tf_broadcaster.sendTransform(transforms)
         
     
     def _quaternion_multiply(self, q1, q2):
@@ -338,6 +444,29 @@ class LooperHelpNode(Node):
             )
             #print(f"right_rectified_projection : {self.right_rectified_projection}")
             self.right_camera_info_pub.publish(right_camera_info)
+            
+            # Convert left image from grayscale to RGB (BGR in OpenCV)
+            left_image_rgb = cv2.cvtColor(left_image_rect, cv2.COLOR_GRAY2BGR)
+            
+            # Publish color image
+            color_msg = self.bridge.cv2_to_imgmsg(left_image_rgb, encoding="bgr8")
+            color_msg.header = conbined_image.header
+            color_msg.header.frame_id = "camera_color_optical_frame"
+            self.color_image_pub.publish(color_msg)
+            
+            # Publish color camera info (using left camera intrinsics)
+            color_camera_info = self._create_camera_info(
+                conbined_image.header,
+                self.left_rectified_intrinsics,
+                self.left_rectified_projection,
+                self.rectified_width,
+                self.rectified_height
+            )
+            color_camera_info.header.frame_id = "camera_color_optical_frame"
+            self.color_camera_info_pub.publish(color_camera_info)
+            
+            # Publish TF transforms
+            self._publish_tf_transforms(conbined_image.header)
 
             # Save images for debugging
             #cv2.imwrite("/tinynav/output/left_image_raw.png", left_image_raw)
