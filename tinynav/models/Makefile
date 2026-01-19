@@ -22,7 +22,7 @@ LIGHTGLUE_ENGINE  := $(basename $(LIGHTGLUE_ONNX))_$(ARCH).plan
 
 SUPERPOINT_REALSENSE_ENGINE := $(basename $(SUPERPOINT_ONNX))_240x424_$(ARCH).plan
 RETINIFY_REALSENSE_ENGINE   := $(basename $(RETINIFY_ONNX))_480x848_$(ARCH).plan
-SUPERPOINT_LOOPER_ENGINE := $(basename $(SUPERPOINT_ONNX))_640x544_$(ARCH).plan
+SUPERPOINT_LOOPER_ENGINE := $(basename $(SUPERPOINT_ONNX))_320x272_$(ARCH).plan
 RETINIFY_LOOPER_ENGINE := $(basename $(RETINIFY_ONNX))_640x544_$(ARCH).plan
 
 SUPERPOINT_DY_ONNX := superpoint_static_sim_dy.onnx
@@ -81,9 +81,9 @@ $(RETINIFY_REALSENSE_ENGINE): $(RETINIFY_ONNX)
 
 $(SUPERPOINT_LOOPER_ENGINE): $(SUPERPOINT_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
-		--minShapes=image:1x1x640x544 \
-		--optShapes=image:1x1x640x544 \
-		--maxShapes=image:1x1x640x544 \
+		--minShapes=image:1x1x320x272 \
+		--optShapes=image:1x1x320x272 \
+		--maxShapes=image:1x1x320x272 \
 		--fp16
 
 $(RETINIFY_LOOPER_ENGINE): $(RETINIFY_ONNX)
