@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
-from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT, TRTFusionModel
+from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
@@ -81,9 +81,9 @@ class PerceptionNode(Node):
         # self.light_glue = LightGlueTRT()
         # self.stereo_engine = StereoEngineTRT("/tinynav/tinynav/models/retinify_fp16_newest_dy_x86_64.plan")
 
-        self.superpoint = SuperPointTRT("/tinynav/tinynav/models/superpoint_static_sim_dy_x86_64.plan")
+        self.superpoint = SuperPointTRT("640x544")
         self.light_glue = LightGlueTRT()
-        self.stereo_engine = StereoEngineTRT("/tinynav/tinynav/models/retinify_fp16_newest_dy_x86_64.plan")
+        self.stereo_engine = StereoEngineTRT("640x544")
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
