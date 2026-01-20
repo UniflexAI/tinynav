@@ -353,7 +353,9 @@ class BuildMapNode(Node):
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        self.super_point_extractor = SuperPointTRT()
+        # Lazy initialization after the image shape is known
+        #self.super_point_extractor = SuperPointTRT()
+        self.super_point_extractor = None
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
 
@@ -438,7 +440,10 @@ class BuildMapNode(Node):
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]
+            self.image_height = msg.height
+            self.image_width = msg.width
             self.baseline = -Tx / fx
+            self.super_point_extractor = SuperPointTRT(f"{self.image_height // 2}x{self.image_width // 2}")
             self.destroy_subscription(self.camera_info_sub)
 
     def continuous_odom_callback(self, odom_msg: Odometry):
@@ -543,6 +548,7 @@ class BuildMapNode(Node):
         return asyncio.run(self.dinov2_model.infer(image))
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        image_shape = np.array([self.image_height, self.image_width], dtype = np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1

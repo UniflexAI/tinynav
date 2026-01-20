@@ -99,7 +99,8 @@ class MapNode(Node):
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        self.super_point_extractor = SuperPointTRT()
+        #self.super_point_extractor = SuperPointTRT("320x272")
+        self.super_point_extractor = None
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path
@@ -184,6 +185,9 @@ class MapNode(Node):
             fx = self.K[0, 0]
             Tx = msg.p[3]
             self.baseline = -Tx / fx
+            self.image_height = msg.height
+            self.image_width = msg.width
+            self.super_point_extractor = SuperPointTRT(f"{self.image_height // 2}x{self.image_width // 2}")
             self.destroy_subscription(self.camera_info_sub)
 
     def continuous_odom_callback(self, odom_msg: Odometry):
@@ -247,7 +251,6 @@ class MapNode(Node):
         self.nav_temp_db.set_entry(keyframe_image_timestamp, embedding = embedding)
         features = asyncio.run(self.super_point_extractor.infer(image))
         self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
-
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
@@ -288,7 +291,8 @@ class MapNode(Node):
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([544, 640], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        image_shape = np.array([self.image_height, self.image_width], dtype = np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
@@ -586,18 +590,21 @@ def main(args=None):
                    tinynav_map_path=parsed_args.tinynav_map_path,
                    verbose_timer=parsed_args.verbose_timer)
 
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        logging.info("Keyboard interrupt received, map node is shut down")
-    except Exception as e:
-        logging.error(f"Error occurred: {e}")
-    finally:
-        try:
-            node.destroy_node()
-            rclpy.shutdown()
-        except Exception as e:
-            logging.error(f"Error occurred: {e}")
+    #try:
+    #    rclpy.spin(node)
+    #except KeyboardInterrupt:
+    #    logging.info("Keyboard interrupt received, map node is shut down")
+    #except Exception as e:
+    #    logging.error(f"Error occurred: {e}")
+    #finally:
+    #    try:
+    #        node.destroy_node()
+    #        rclpy.shutdown()
+    #    except Exception as e:
+    #        logging.error(f"Error occurred: {e}")
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

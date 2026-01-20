@@ -81,9 +81,11 @@ class PerceptionNode(Node):
         # self.light_glue = LightGlueTRT()
         # self.stereo_engine = StereoEngineTRT("/tinynav/tinynav/models/retinify_fp16_newest_dy_x86_64.plan")
 
-        self.superpoint = SuperPointTRT("640x544")
         self.light_glue = LightGlueTRT()
-        self.stereo_engine = StereoEngineTRT("640x544")
+        #self.superpoint = SuperPointTRT("640x544")
+        #self.stereo_engine = StereoEngineTRT("640x544")
+        self.superpoint = None
+        self.stereo_engine = None
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
@@ -164,6 +166,11 @@ class PerceptionNode(Node):
 
     def info_callback(self, msg):
         if self.K is None:
+            self.image_height = msg.height
+            self.image_width = msg.width
+            self.superpoint = SuperPointTRT(f"{self.image_height // 2}x{self.image_width // 2}")
+            self.stereo_engine = StereoEngineTRT(f"{self.image_height}x{self.image_width}")
+
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]  # From the right camera's projection matrix

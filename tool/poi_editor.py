@@ -1,4 +1,6 @@
 from __future__ import annotations
+import sys
+sys.path.append("/tinynav/tinynav/core")
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -16,7 +18,7 @@ import json
 from rclpy.node import Node
 import rclpy
 import os
-from tinynav.core.math_utils import msg2np, matrix_to_quat
+from math_utils import msg2np, matrix_to_quat
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
