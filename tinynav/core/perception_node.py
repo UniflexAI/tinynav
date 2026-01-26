@@ -289,7 +289,7 @@ class PerceptionNode(Node):
             timestamp, accel, gyro = self.imu_measurements[0]
             dt = timestamp - self.keyframe_queue[-1].latest_imu_timestamp
 
-            if timestamp < self.keyframe_queue[-1].latest_imu_timestamp:
+            if timestamp <= self.keyframe_queue[-1].latest_imu_timestamp:
                 self.imu_measurements.popleft()
                 self.logger.warning("should only happen at beginning")
                 continue
