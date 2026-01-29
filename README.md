@@ -4,7 +4,7 @@
   <img alt="tinynav logo" src="/docs/tinynav.png" width="50%" height="50%">
 </picture>
 
-**TinyNav** /ˈtaɪni ˈnævi/: *A lightweight, hackable system to guide your robots anywhere.*
+**TinyNav** : *A lightweight, hackable system to guide your robots anywhere.*
  Maintained by [Uniflex AI](https://x.com/UniflexAI).
 
 <h3>
@@ -29,6 +29,20 @@
 | ----------------------|
 | <video src="https://github.com/user-attachments/assets/578baeb2-63f7-444c-a9cd-e6a8036151d3"> |
 
+
+# Bounties
+
+We’ve launched our bounty program! Check the [list](https://docs.google.com/spreadsheets/d/1fyFSkiyfSGVeO8uW97gS7-gIt9qTbGIpYaMcHcjPF4Q/edit?usp=sharing) to see how you can contribute and the reward values for each task.
+
+# Stereo Cameras
+
+we’re excited to add [Looper](https://looper-robotics.com/?utm_source=blogger&utm_medium=social&utm_campaign=booking&promo=uIwjGxmJ) as a first-class supported camera, alongside RealSense.
+
+Looper is special because it provides built-in depth and visual–inertial odometry (VIO), enabling many new possibilities for perception and navigation.
+
+   <p align="center">
+     <img alt="looper" src="/docs/looper.jpg" width="50%" height="50%">
+   </p>
 
 
 # [v0.3] What's Changed
