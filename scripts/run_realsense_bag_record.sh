@@ -9,8 +9,7 @@ ros2 bag record \
     /camera/camera/infra2/metadata \
     /camera/camera/extrinsics/depth_to_infra1 \
     /camera/camera/extrinsics/depth_to_infra2 \
-    /camera/camera/accel/sample \
-    /camera/camera/gyro/sample \
+    /camera/camera/imu \
     /camera/camera/color/image_raw \
     /camera/camera/color/camera_info \
     /tf

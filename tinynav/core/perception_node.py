@@ -98,15 +98,6 @@ class PerceptionNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
         qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
 
-        # previous methods to process imu data.
-        # this should be remove after other user update the recording rosbag scripts.
-        self.imu_accel_sub = Subscriber(self, Imu, "/camera/camera/accel/sample", qos_profile=qos_profile)
-        self.imu_gyro_sub = Subscriber(self, Imu, "/camera/camera/gyro/sample", qos_profile=qos_profile)
-        self.imu_ts = ApproximateTimeSynchronizer([self.imu_accel_sub, self.imu_gyro_sub], queue_size=100, slop=0.001)
-        self.imu_ts.registerCallback(self.imu_callback)
-        self.accel_sub = self.create_subscription(Imu, "/camera/camera/accel/sample", self.accel_callback, qos_profile)
-
-
         # use a single topic to handle the imu data.
         self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.sync_imu_callback, qos_profile)
         self.imu_last_received_timestamp = None
@@ -167,34 +158,6 @@ class PerceptionNode(Node):
             self.camera_info_msg = msg
             self.destroy_subscription(self.camerainfo_sub)
 
-    def accel_callback(self, msg):
-        self.accel_readings.append(msg.linear_acceleration)
-        if len(self.accel_readings) >= 10 and self.T_body_last is None:
-            accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
-            gravity_cam = np.mean(accel_data, axis=0)
-            gravity_cam /= np.linalg.norm(gravity_cam)
-            gravity_world = np.array([0.0, 0.0, 1.0])
-
-            self.T_body_last = np.eye(4)
-            self.T_body_last[:3, :3] = rot_from_two_vector(gravity_cam, gravity_world)
-
-            self.get_logger().info("Initial pose set from accelerometer data.")
-            self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
-            self.destroy_subscription(self.accel_sub)
-
-    def imu_callback(self, accel_msg, gyro_msg):
-        current_timestamp = stamp2second(accel_msg.header.stamp)
-
-        # if the timestamp jump is too large, it means the IMU is not working properly
-        if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
-            delta_timestamp = current_timestamp - self.imu_last_received_timestamp
-            self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
-        self.imu_last_received_timestamp = current_timestamp
-
-        accel_data = np.array([[accel_msg.linear_acceleration.x], [accel_msg.linear_acceleration.y], [accel_msg.linear_acceleration.z]])
-        gyro_data = np.array([[gyro_msg.angular_velocity.x], [gyro_msg.angular_velocity.y], [gyro_msg.angular_velocity.z]])
-        self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
-
     def sync_imu_callback(self, imu_msg):
         current_timestamp = stamp2second(imu_msg.header.stamp)
         if len(self.accel_readings) >= 10 and self.T_body_last is None:
@@ -209,14 +172,12 @@ class PerceptionNode(Node):
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
         elif len(self.accel_readings) < 10:
             self.accel_readings.append(imu_msg.linear_acceleration)
-        #print(f"accel_readings : {len(self.accel_readings)}")
 
         # if the timestamp jump is too large, it means the IMU is not working properly
         if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
             delta_timestamp = current_timestamp - self.imu_last_received_timestamp
             self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
         self.imu_last_received_timestamp = current_timestamp
-
         accel_data = np.array([[imu_msg.linear_acceleration.x], [imu_msg.linear_acceleration.y], [imu_msg.linear_acceleration.z]])
         gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
