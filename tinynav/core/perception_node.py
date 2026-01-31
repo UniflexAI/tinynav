@@ -392,6 +392,9 @@ class PerceptionNode(Node):
                         else:
                             for idx in range(len(match_indices)):
                                 match_indices[idx] = -1
+                            self.logger.warning(f"match cnt: {len(kpt_pre)} is too small, {len(inlier_set)} inliers.enable velocity constraint")
+                            velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
+                            graph.add(velocity_constraint)
 
                     with Timer(name="[cached result[3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         for k, match_idx in enumerate(match_indices):
