@@ -235,7 +235,7 @@ class PerceptionNode(Node):
             timestamp, accel, gyro = self.imu_measurements[0]
             dt = timestamp - self.keyframe_queue[-1].latest_imu_timestamp
 
-            if timestamp < self.keyframe_queue[-1].latest_imu_timestamp:
+            if timestamp <= self.keyframe_queue[-1].latest_imu_timestamp:
                 self.imu_measurements.popleft()
                 self.logger.warning("should only happen at beginning")
                 continue
@@ -385,8 +385,12 @@ class PerceptionNode(Node):
                             idx_valid
                         )
                         inlier_set = set(inliers)
-                        for idx in range(len(match_indices)):
-                            if idx not in inlier_set:
+                        if len(inlier_set) > 20:
+                            for idx in range(len(match_indices)):
+                                if idx not in inlier_set:
+                                    match_indices[idx] = -1
+                        else:
+                            for idx in range(len(match_indices)):
                                 match_indices[idx] = -1
                             self.logger.warning(f"match cnt: {len(kpt_pre)} is too small, {len(inlier_set)} inliers.enable velocity constraint")
                             velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
@@ -455,6 +459,7 @@ class PerceptionNode(Node):
             for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                 T_i = result.atPose3(X(i)).matrix()
                 keyframe.pose = T_i
+                keyframe.velocity = result.atVector(V(i))
                 self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
                 self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
@@ -523,16 +528,7 @@ def main(args=None):
     executor.spin()
     perception_node.destroy_node()
     executor.shutdown()
-    #try:
-    #    executor.spin()
-    #    perception_node.destroy_node()
-    #    executor.shutdown()
-    #except KeyboardInterrupt:
-    #    logging.info("Keyboard interrupt received, perception node is shut down")
-    #except Exception as e:
-    #    logging.error(f"Error occurred: {e}")
-    #finally:
-    #    rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
