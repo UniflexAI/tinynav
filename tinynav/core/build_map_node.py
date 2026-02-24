@@ -103,6 +103,7 @@ def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, lo
     global_grid[local_origin_offset[0]:local_origin_offset[0] + local_grid.shape[0],
                 local_origin_offset[1]:local_origin_offset[1] + local_grid.shape[1],
                 local_origin_offset[2]:local_origin_offset[2] + local_grid.shape[2]] += local_grid
+
     return global_grid, global_origin
 
 def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, max_iteration_num:int = 1024) -> dict:
@@ -131,7 +132,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10):
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100):
     """
         Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -152,16 +153,27 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10)
     global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
+    global_grid_type = np.zeros(global_grid_shape, dtype=np.float32)
+    radius_index = int(0.2 / resolution)
     for timestamp, odom_pose in tqdm(poses.items()):
         depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
         odom_translation = odom_pose[:3, 3]
         local_origin = np.floor(odom_translation / resolution) * resolution - 0.5 * np.array(raycast_shape) * resolution
         local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
         global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
+        odom_position = odom_pose[:3, 3]
+        odom_position_index = np.floor((odom_position - global_origin) / resolution).astype(np.int32)
+        odom_min_index = np.maximum(0, odom_position_index - radius_index)
+        odom_max_index = np.minimum(global_grid_shape, odom_position_index + radius_index)
+        global_grid_type[odom_min_index[0]:odom_max_index[0], odom_min_index[1]:odom_max_index[1], odom_min_index[2]:odom_max_index[2]] = 1
+        
 
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
+
     grid_type[global_grid > 0] = 2  # Occupied
     grid_type[global_grid < 0] = 1  # Free
+    grid_type[global_grid_type >= 1] = 3  # Ground
+
     x_y_plane = np.max(grid_type, axis=2)
     x_y_plane_image = np.zeros_like(x_y_plane, dtype=np.float32)
     x_y_plane_image[x_y_plane == 2] = 1.0
