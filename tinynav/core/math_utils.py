@@ -103,7 +103,7 @@ def rot_from_two_vector(a, b):
     ])
     return R
 
-def np2msg(odom_np, timestamp, frame_id, child_frame_id):
+def np2msg(odom_np, timestamp, frame_id, child_frame_id, velocity=None):
     R_odom = odom_np[:3, :3]
     t_odom = odom_np[:3, 3]
     quat = R.from_matrix(R_odom).as_quat()
@@ -118,6 +118,10 @@ def np2msg(odom_np, timestamp, frame_id, child_frame_id):
     odom_msg.pose.pose.orientation.y = quat[1]
     odom_msg.pose.pose.orientation.z = quat[2]
     odom_msg.pose.pose.orientation.w = quat[3]
+    if velocity is not None:
+        odom_msg.twist.twist.linear.x = velocity[0]
+        odom_msg.twist.twist.linear.y = velocity[1]
+        odom_msg.twist.twist.linear.z = velocity[2]
     return odom_msg
 
 def np2tf(odom_np, timestamp, frame_id, child_frame_id):
@@ -151,7 +155,11 @@ def msg2np(msg):
     quat = [rot.x, rot.y, rot.z, rot.w]
     T[:3, :3] = R.from_quat(quat).as_matrix()
     T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
-    return T
+    if msg.twist.twist is not None:
+        velocity = np.array([msg.twist.twist.linear.x, msg.twist.twist.linear.y, msg.twist.twist.linear.z])
+    else:
+        velocity = np.array([0.0, 0.0, 0.0])
+    return T, velocity
 
 @njit(cache=True)
 def depth_to_cloud(depth, K, step=10, max_dist=1e9):
