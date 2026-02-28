@@ -191,6 +191,9 @@ class RelocalizationPose(Node):
         self.planning_path_sub = self.create_subscription(nav_msgs.msg.Path, '/planning/trajectory_path', self.planning_path_callback, 10)
         self.targegt_pose_sub = self.create_subscription(Odometry, "/control/target_pose", self.target_pose_callback, 10)
         self.odom_sub = self.create_subscription(Odometry, "/slam/odometry", self.odometry_callback, 10)
+        self.current_pose_in_map_sub = self.create_subscription(
+            Odometry, "/mapping/current_pose_in_map", self.current_pose_in_map_callback, 10
+        )
 
     def relocalization_pose_callback(self, msg: Odometry):
         position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -258,6 +261,16 @@ class RelocalizationPose(Node):
         xyzw = matrix_to_quat(odom[:3, :3])
         position = odom[:3, 3]
         gizmo = self.viser_server.scene.add_transform_controls("/target_pose_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
+
+    def current_pose_in_map_callback(self, msg: Odometry):
+        odom, _ = msg2np(msg)
+        xyzw = matrix_to_quat(odom[:3, :3])
+        position = odom[:3, 3]
+        self.viser_server.scene.add_transform_controls(
+            "/current_pose_in_map_gizmo",
+            position=position,
+            wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]),
+        )
 
 
 def main(

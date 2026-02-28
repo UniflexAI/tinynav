@@ -5,7 +5,6 @@ from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
 from tinynav.core.func import lru_cache_numpy
-import heapq
 
 @njit(cache=True)
 def rotvec_to_matrix(rv):
@@ -282,131 +281,7 @@ def uf_all_sets_list(parent):
         root_to_members.setdefault(r, []).append(i)
     return list(root_to_members.values())
 
-def reconstruct_path(parent: dict, current:np.ndarray) -> np.ndarray:
-    """
-    Reconstructs the path from the start to the goal.
-    :param came_from: dict, mapping of nodes to their predecessors
-    :param current: tuple, the current node
-    :return: list of tuples representing the path
-    """
-    path = []
-    while current in parent:
-        path.append(current)
-        if current == parent[current]:
-            break
-        current = parent[current]
-    return np.array(path[::-1])
 
-
-def heuristic(start, goal):
-    vec_start = np.array(start)
-    vec_goal = np.array(goal)
-    return np.linalg.norm(vec_start - vec_goal) + 20 * np.abs(vec_start[2] - vec_goal[2])
-
-
-def theta_star(cost_map:np.ndarray, start:np.ndarray, goal:np.ndarray, obstacles_cost: float) -> np.ndarray:
-    """
-    theta* algorithm to find the path from start to goal in the cost map.
-    parameters:
-        cost_map: np.ndarray (X, Y, Z)
-        start: tuple[int, int, int], x_idx, y_idx, z_idx
-        goal: tuple[int, int, int], x_idx, y_idx, z_idx
-    returns: list of tuples representing the path from start to goal
-    If no path is found, returns an empty list.
-    0 - free, 1.0 - occupied
-    """
-    start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
-    goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-
-
-    g_score = {start: cost_map[start]}
-    f_score = {start: heuristic(start, goal) + cost_map[start]}
-
-    open_heap = []
-    open_heap_set = set()
-    heapq.heappush(open_heap, (f_score[start], start))
-    open_heap_set.add(start)
-
-    parent = {start: start}
-    visited = set()
-    print(f"start: {start}, goal: {goal}")
-    while len(open_heap) > 0:
-        # there can be a better way to maintain a min heap to reduce the complexity
-        current_f, current = heapq.heappop(open_heap)
-        open_heap_set.remove(current)
-        if current in visited:
-            continue
-        visited.add(current)
-        #print(f"current: {current}, goal: {goal}, current_cost: {cost_map[current]}")
-        if current == goal:
-            return reconstruct_path(parent, current)
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    if dx == 0 and dy == 0 and dz == 0:
-                        continue
-                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
-                    if neighbor in visited:
-                        continue
-                    if (0 <= neighbor[0] < cost_map.shape[0] and
-                            0 <= neighbor[1] < cost_map.shape[1] and
-                            0 <= neighbor[2] < cost_map.shape[2] and cost_map[neighbor] < obstacles_cost):
-                        if neighbor not in open_heap_set:
-                            g_score[neighbor] = float('inf')
-                            f_score[neighbor] = float('inf')
-                            parent[neighbor] = None
-                        update_node(cost_map, g_score, f_score, open_heap, open_heap_set, parent, current, neighbor, goal, obstacles_cost)
-    return []
-
-
-def line_of_sight(cost_map:np.ndarray, start:tuple, end:tuple, obstacles_cost: float):
-    return False, cost_map[end]
-    x0, y0, z0 = start
-    x1, y1, z1 = end
-    dx = x1 - x0
-    dy = y1 - y0
-    dz = z1 - z0
-    if dx == 0 and dy == 0 and dz == 0:
-        return True, cost_map[start]
-    sX = -1
-    sY = -1
-    sZ = -1
-    if (dx > 0):
-        sX = 1
-    if (dy > 0):
-        sY = 1
-    if (dz > 0):
-        sZ = 1
-    max_step = max(abs(dx), abs(dy), abs(dz))
-
-    dx = abs(dx) / max_step
-    dy = abs(dy) / max_step
-    dz = abs(dz) / max_step
-    accumulated_cost = 0.0
-    for i in range(max_step):
-        node = (int(x0 + (i + 1) * sX * dx), int(y0 + (i + 1) * sY * dy), int(z0 + (i + 1) * sZ * dz))
-        if cost_map[node] >= obstacles_cost:
-            return False,  accumulated_cost
-        accumulated_cost += cost_map[node]
-    return True, accumulated_cost
-
-def update_node(cost_map:np.ndarray, g_score:dict, f_score:dict, open_heap:list, open_heap_set:set, parent:dict, current:tuple, neighbor:tuple, goal:tuple, obstacles_cost: float):
-    status, cost = line_of_sight(cost_map, parent[current], neighbor, obstacles_cost)
-    if status and g_score[parent[current]] + cost < g_score[neighbor]:
-        g_score[neighbor] = g_score[parent[current]] + cost
-        parent[neighbor] = parent[current]
-        f_score[neighbor] = g_score[neighbor] + heuristic(neighbor, goal)
-        if neighbor not in open_heap_set:
-            open_heap_set.add(neighbor)
-            heapq.heappush(open_heap, (f_score[neighbor], neighbor))
-    else:
-       if g_score[current] + cost_map[neighbor] < g_score[neighbor]:
-            g_score[neighbor] = g_score[current] + cost_map[neighbor]
-            parent[neighbor] = current
-            f_score[neighbor] = g_score[neighbor] + heuristic(neighbor, goal)
-            if neighbor not in open_heap_set:
-                open_heap_set.add(neighbor)
-                heapq.heappush(open_heap, (f_score[neighbor], neighbor))
 
 def se3_inv(matrix_4x4:np.ndarray):
     rotation = matrix_4x4[:3, :3]
