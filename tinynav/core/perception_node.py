@@ -71,21 +71,28 @@ class Keyframe:
     latest_imu_timestamp: float
 
 class PerceptionNode(Node):
-    def __init__(self, verbose_timer: bool = True):
+    def __init__(self, sensor_type: str, verbose_timer: bool = True):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
-        # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        # model initialized after receive image info to determine the sensor is realsense or looper.
-        # self.superpoint = SuperPointTRT()
-        # self.light_glue = LightGlueTRT()
-        # self.stereo_engine = StereoEngineTRT("/tinynav/tinynav/models/retinify_fp16_newest_dy_x86_64.plan")
 
+        if sensor_type == "realsense":
+            imu_topic_name = "/camera/camera/imu"
+            left_image_topic_name = "/camera/camera/infra1/image_rect_raw"
+            right_image_topic_name = "/camera/camera/infra2/image_rect_raw"
+            camera_info_topic_name = "/camera/camera/infra2/camera_info"
+            self.superpoint = SuperPointTRT("240x424")
+            self.stereo_engine = StereoEngineTRT("240x424")
+        elif sensor_type == "looper":
+            imu_topic_name = "/insight/imu"
+            left_image_topic_name = "/insight/camera_left_rectified"
+            right_image_topic_name = "/insight/camera_right_rectified"
+            camera_info_topic_name = "/insight/camera_right_info"
+            self.superpoint = SuperPointTRT("320x272")
+            self.stereo_engine = StereoEngineTRT("320x272")
+        else:
+            raise ValueError(f"Invalid sensor type: {sensor_type}")
         self.light_glue = LightGlueTRT()
-        #self.superpoint = SuperPointTRT("640x544")
-        #self.stereo_engine = StereoEngineTRT("640x544")
-        self.superpoint = None
-        self.stereo_engine = None
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
@@ -101,16 +108,16 @@ class PerceptionNode(Node):
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
-        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=2000)
+        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
 
         # use a single topic to handle the imu data.
-        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.sync_imu_callback, qos_profile)
+        self.imu_sub = self.create_subscription(Imu, imu_topic_name, self.sync_imu_callback, qos_profile)
+
         self.imu_last_received_timestamp = None
+        self.camerainfo_sub = self.create_subscription(CameraInfo, camera_info_topic_name, self.info_callback, 10)
+        self.left_sub = Subscriber(self, Image, left_image_topic_name)
+        self.right_sub = Subscriber(self, Image, right_image_topic_name)
 
-
-        self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
-        self.left_sub = Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw")
-        self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=10, slop=0.02)
         self.ts.registerCallback(self.images_callback)
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
@@ -158,8 +165,6 @@ class PerceptionNode(Node):
         if self.K is None:
             self.image_height = msg.height
             self.image_width = msg.width
-            self.superpoint = SuperPointTRT(f"{self.image_height // 2}x{self.image_width // 2}")
-            self.stereo_engine = StereoEngineTRT(f"{self.image_height}x{self.image_width}")
 
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
@@ -231,8 +236,6 @@ class PerceptionNode(Node):
             prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
             current_left_extract_result = await self.superpoint.infer(left_img)
 
-            #print(f"prev_left_extract_result : {prev_left_extract_result['kpts']}")
-
             match_result = await self.light_glue.infer(
                 prev_left_extract_result["kpts"],
                 current_left_extract_result["kpts"],
@@ -242,7 +245,6 @@ class PerceptionNode(Node):
                 current_left_extract_result["mask"],
                 kf_prev.image.shape,
                 left_img.shape)
-            #print(f"match_result : {match_result['match_indices']}")
 
         # propagate IMU measurements
         while len(self.imu_measurements) > 0 and self.imu_measurements[0][0] <= current_timestamp:
@@ -536,6 +538,7 @@ def main(args=None):
     parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parser.add_argument("--log_file", type=str, default="odom.log", help="Path to the log file")
+    parser.add_argument("--sensor_type", type=str, default="realsense", help="Sensor type: realsense or looper")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     print(f"Verbose timer: {parsed_args.verbose_timer}")
 
@@ -546,7 +549,7 @@ def main(args=None):
         handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
     )
 
-    perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
+    perception_node = PerceptionNode(sensor_type=parsed_args.sensor_type, verbose_timer=parsed_args.verbose_timer)
 
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(perception_node)
