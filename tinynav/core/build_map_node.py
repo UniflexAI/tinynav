@@ -4,6 +4,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Bool
 import numpy as np
+from numba import njit, prange
 import sys
 
 from sensor_msgs.msg import PointCloud2
@@ -132,6 +133,27 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
+@njit(cache=True, parallel=True)
+def sdf_min_dist_parallel(position_grid, positions, sdf_map):
+    """Parallel over grid points: each voxel gets min distance to all positions."""
+    ni, nj, nk = position_grid.shape[0], position_grid.shape[1], position_grid.shape[2]
+    n_pos = positions.shape[0]
+    for i in prange(ni):
+        for j in range(nj):
+            for k in range(nk):
+                gx = position_grid[i, j, k, 0]
+                gy = position_grid[i, j, k, 1]
+                gz = position_grid[i, j, k, 2]
+                min_d = np.inf
+                for p in range(n_pos):
+                    dx = gx - positions[p, 0]
+                    dy = gy - positions[p, 1]
+                    dz = gz - positions[p, 2]
+                    d = np.sqrt(dx * dx + dy * dy + dz * dz)
+                    if d < min_d:
+                        min_d = d
+                sdf_map[i, j, k] = min_d
+
 def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100):
     """
         Generate a occupancy grid map from the depth images.
@@ -153,18 +175,8 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
     global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
-    global_grid_type = np.zeros(global_grid_shape, dtype=np.float32)
-    radius_index = int(0.2 / resolution)
 
-    sdf_map = np.full_like(global_grid, np.inf, dtype=np.float32)
-
-    # compute the sdf w.r.t odom_position: odom_sdf_map[i,j,k] = || (i,j,k)*resolution + origin - odom_position ||
-    ix = np.arange(global_grid_shape[0], dtype=np.float32)
-    iy = np.arange(global_grid_shape[1], dtype=np.float32)
-    iz = np.arange(global_grid_shape[2], dtype=np.float32)
-    xx, yy, zz = np.meshgrid(ix, iy, iz, indexing="ij")
-    grid_positions = global_origin + resolution * np.stack([xx, yy, zz], axis=-1)
-
+    odom_positions = []
     for timestamp, odom_pose in tqdm(poses.items()):
         depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
         odom_translation = odom_pose[:3, 3]
@@ -172,9 +184,17 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
         local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
         global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
         odom_position = odom_pose[:3, 3]
-        odom_position_index = np.floor((odom_position - global_origin) / resolution).astype(np.int32)
-        odom_sdf_map = np.linalg.norm(grid_positions - odom_position, axis=-1).astype(np.float32)
-        sdf_map = np.minimum(sdf_map, odom_sdf_map)
+        odom_positions.append(odom_position)
+
+    sdf_map = np.full_like(global_grid, np.inf, dtype=np.float32)
+    # compute the sdf w.r.t odom_position: odom_sdf_map[i,j,k] = || (i,j,k)*resolution + origin - odom_position ||
+    ix = np.arange(global_grid_shape[0], dtype=np.float32)
+    iy = np.arange(global_grid_shape[1], dtype=np.float32)
+    iz = np.arange(global_grid_shape[2], dtype=np.float32)
+    xx, yy, zz = np.meshgrid(ix, iy, iz, indexing="ij")
+    grid_positions = global_origin + resolution * np.stack([xx, yy, zz], axis=-1)
+    with Timer(name="sdf_min_dist_baseline", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        sdf_min_dist_parallel(grid_positions, np.array(odom_positions), sdf_map)
 
     # 0 is the unknown.
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
