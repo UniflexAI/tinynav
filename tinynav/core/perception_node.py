@@ -82,14 +82,14 @@ class PerceptionNode(Node):
             right_image_topic_name = "/camera/camera/infra2/image_rect_raw"
             camera_info_topic_name = "/camera/camera/infra2/camera_info"
             self.superpoint = SuperPointTRT("240x424")
-            self.stereo_engine = StereoEngineTRT("240x424")
+            self.stereo_engine = StereoEngineTRT("480x848")
         elif sensor_type == "looper":
             imu_topic_name = "/insight/imu"
             left_image_topic_name = "/insight/camera_left_rectified"
             right_image_topic_name = "/insight/camera_right_rectified"
             camera_info_topic_name = "/insight/camera_right_info"
             self.superpoint = SuperPointTRT("320x272")
-            self.stereo_engine = StereoEngineTRT("320x272")
+            self.stereo_engine = StereoEngineTRT("640x544")
         else:
             raise ValueError(f"Invalid sensor type: {sensor_type}")
         self.light_glue = LightGlueTRT()
