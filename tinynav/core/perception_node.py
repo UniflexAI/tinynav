@@ -482,9 +482,9 @@ class PerceptionNode(Node):
 
             for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                 T_i = result.atPose3(X(i)).matrix()
-                self.logger.debug(f"Keyframe {i} pose prev:\n{keyframe.pose}, updated: {T_i}, at timestamp {keyframe.timestamp}")
                 keyframe.pose = T_i
                 keyframe.velocity = result.atVector(V(i))
+                self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
                 self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
