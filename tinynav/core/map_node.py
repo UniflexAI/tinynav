@@ -157,7 +157,6 @@ class MapNode(Node):
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        #self.super_point_extractor = SuperPointTRT("320x272")
         self.super_point_extractor = None
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
@@ -358,7 +357,7 @@ class MapNode(Node):
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([544, 640], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         image_shape = np.array([self.image_height, self.image_width], dtype = np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
