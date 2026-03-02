@@ -36,12 +36,12 @@ retinify: $(RETINIFY_REALSENSE_ENGINE) $(RETINIFY_LOOPER_ENGINE)
 
 help:
     @echo "Targets:"
-    @echo "  make all          # Build all engines"
-    @echo "  make dinov2       # Build DINOv2"
-    @echo "  make superpoint   # Build SuperPoint"
-    @echo "  make lightglue    # Build LightGlue"
-    @echo "  make retinify     # Build Retinify"
-    @echo "  make clean        # Remove *_$(ARCH).plan"
+	@echo "  make all          # Build all engines"
+	@echo "  make dinov2       # Build DINOv2"
+	@echo "  make superpoint   # Build SuperPoint"
+	@echo "  make lightglue    # Build LightGlue"
+	@echo "  make retinify     # Build Retinify"
+	@echo "  make clean        # Remove *_$(ARCH).plan"
 
 $(DINO_ENGINE): $(DINO_ONNX)
     $(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -49,20 +49,20 @@ $(DINO_ENGINE): $(DINO_ONNX)
 
 
 $(LIGHTGLUE_ENGINE): $(LIGHTGLUE_ONNX)
-    $(TRTEXEC) --onnx=$< --saveEngine=$@ \
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
         --precisionConstraints=obey \
         --layerPrecisions="/backbone/self_attn.0/inner_attn/Einsum:fp16","/backbone/self_attn.0/inner_attn_1/Einsum:fp16" \
         --fp16
 
 $(SUPERPOINT_REALSENSE_ENGINE): $(SUPERPOINT_ONNX)
-    $(TRTEXEC) --onnx=$< --saveEngine=$@ \
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
         --minShapes=image:1x1x240x424 \
         --optShapes=image:1x1x240x424 \
         --maxShapes=image:1x1x240x424 \
         --fp16
 
 $(RETINIFY_REALSENSE_ENGINE): $(RETINIFY_ONNX)
-    $(TRTEXEC) --onnx=$< --saveEngine=$@ \
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
         --minShapes=left:1x1x480x848,right:1x1x480x848 \
     --optShapes=left:1x1x480x848,right:1x1x480x848 \
     --maxShapes=left:1x1x480x848,right:1x1x480x848 \
@@ -72,14 +72,14 @@ $(RETINIFY_REALSENSE_ENGINE): $(RETINIFY_ONNX)
 
 
 $(SUPERPOINT_LOOPER_ENGINE): $(SUPERPOINT_ONNX)
-    $(TRTEXEC) --onnx=$< --saveEngine=$@ \
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
         --minShapes=image:1x1x320x272 \
         --optShapes=image:1x1x320x272 \
         --maxShapes=image:1x1x320x272 \
         --fp16
 
 $(RETINIFY_LOOPER_ENGINE): $(RETINIFY_ONNX)
-    TRTEXEC) --onnx=$< --saveEngine=$@ \
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
     --minShapes=left:1x1x640x544,right:1x1x640x544 \
     --optShapes=left:1x1x640x544,right:1x1x640x544 \
     --maxShapes=left:1x1x640x544,right:1x1x640x544 \
@@ -88,5 +88,5 @@ $(RETINIFY_LOOPER_ENGINE): $(RETINIFY_ONNX)
     --fp16
 
 clean:
-    rm -f *_$(ARCH).plan
+	rm -f *_$(ARCH).plan
 
