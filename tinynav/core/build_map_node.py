@@ -401,8 +401,14 @@ class BuildMapNode(Node):
         self.bridge = CvBridge()
 
         self.tf_broadcaster = TransformBroadcaster(self)
+        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        if '/camera/camera/infra2/camera_info' in active_topics:
+            self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+        elif '/insight/camera_right_info' in active_topics:
+            self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+        else:
+            raise ValueError(f"Invalid active topics: {active_topics}")
 
-        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')

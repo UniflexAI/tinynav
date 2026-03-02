@@ -27,7 +27,7 @@ _N = 5
 _M = 1000
 
 _MIN_FEATURES = 20
-_KEYFRAME_MIN_DISTANCE = 0.05    # unit: meter
+_KEYFRAME_MIN_DISTANCE = 0.1    # unit: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 0.1 # unit: degree
 
 logger = logging.getLogger(__name__)
@@ -70,28 +70,36 @@ class Keyframe:
     preintegrated_imu: gtsam.PreintegratedCombinedMeasurements
     latest_imu_timestamp: float
 
+realsense_signature = [
+    "/camera/camera/imu",
+    "/camera/camera/infra1/image_rect_raw",
+    "/camera/camera/infra2/image_rect_raw",
+    "/camera/camera/infra2/camera_info",
+]
+
+looper_signature = [
+    "/insight/imu",
+    "/insight/camera_left_rectified",
+    "/insight/camera_right_rectified",
+    "/insight/camera_right_info"
+]
+
 class PerceptionNode(Node):
-    def __init__(self, sensor_type: str, verbose_timer: bool = True):
+    def __init__(self, verbose_timer: bool = True):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
-
-        if sensor_type == "realsense":
-            imu_topic_name = "/camera/camera/imu"
-            left_image_topic_name = "/camera/camera/infra1/image_rect_raw"
-            right_image_topic_name = "/camera/camera/infra2/image_rect_raw"
-            camera_info_topic_name = "/camera/camera/infra2/camera_info"
+        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        if all(topic in active_topics for topic in realsense_signature):
+            imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = realsense_signature
             self.superpoint = SuperPointTRT("240x424")
             self.stereo_engine = StereoEngineTRT("480x848")
-        elif sensor_type == "looper":
-            imu_topic_name = "/insight/imu"
-            left_image_topic_name = "/insight/camera_left_rectified"
-            right_image_topic_name = "/insight/camera_right_rectified"
-            camera_info_topic_name = "/insight/camera_right_info"
+        elif all(topic in active_topics for topic in looper_signature):
+            imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
             self.superpoint = SuperPointTRT("320x272")
             self.stereo_engine = StereoEngineTRT("640x544")
         else:
-            raise ValueError(f"Invalid sensor type: {sensor_type}")
+            raise ValueError(f"Invalid active topics: {active_topics}")
         self.light_glue = LightGlueTRT()
 
         self.last_keyframe_img = None
@@ -112,7 +120,6 @@ class PerceptionNode(Node):
 
         # use a single topic to handle the imu data.
         self.imu_sub = self.create_subscription(Imu, imu_topic_name, self.sync_imu_callback, qos_profile)
-
         self.imu_last_received_timestamp = None
         self.camerainfo_sub = self.create_subscription(CameraInfo, camera_info_topic_name, self.info_callback, 10)
         self.left_sub = Subscriber(self, Image, left_image_topic_name)
@@ -538,7 +545,6 @@ def main(args=None):
     parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parser.add_argument("--log_file", type=str, default="odom.log", help="Path to the log file")
-    parser.add_argument("--sensor_type", type=str, default="realsense", help="Sensor type: realsense or looper")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     print(f"Verbose timer: {parsed_args.verbose_timer}")
 
@@ -549,7 +555,7 @@ def main(args=None):
         handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
     )
 
-    perception_node = PerceptionNode(sensor_type=parsed_args.sensor_type, verbose_timer=parsed_args.verbose_timer)
+    perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
 
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(perception_node)
