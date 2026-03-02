@@ -267,9 +267,6 @@ class PerceptionNode(Node):
 
             self.imu_measurements.popleft()
 
-        if current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.005:
-            self.logger.warning(f"IMU timestamp jump {current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp} s is too large, it means the IMU is not working properly")
-
         # specially process the last imu
         if len(self.imu_measurements) > 0 and current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.001:
             timestamp, accel, gyro = self.imu_measurements[0]
@@ -323,23 +320,18 @@ class PerceptionNode(Node):
                     graph.add(gtsam.PriorFactorConstantBias(B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
 
                     initial_estimate.insert(V(i), keyframe.velocity)
-                    #initial_estimate.insert(V(i), np.zeros(3))
                     initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(keyframe.pose))
-
-                    graph.add(gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.5, 0.5, 0.5]))))
-
                     if i == 0:
                         ## per pose -- velocity
                         #graph.add(gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2]))))
 
                         # per pose -- pose, could only be applied to the first keyframe
-                        graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-3, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3]))))
+                        graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1]))))
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
                         imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
                         graph.add(imu_factor)
-                        #self.logger.info(f"graph {i} to {i + 1} imu delta : {keyframe.preintegrated_imu.deltaPij()}")
                     self.logger.debug(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
 
             #with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -493,7 +485,6 @@ class PerceptionNode(Node):
                 self.logger.debug(f"Keyframe {i} pose prev:\n{keyframe.pose}, updated: {T_i}, at timestamp {keyframe.timestamp}")
                 keyframe.pose = T_i
                 keyframe.velocity = result.atVector(V(i))
-                self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
                 self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
