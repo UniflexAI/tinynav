@@ -404,9 +404,12 @@ class BuildMapNode(Node):
         while True:
             if '/camera/camera/infra2/camera_info' in active_topics:
                 self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+                self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
                 break
             elif '/insight/camera_right_info' in active_topics:
                 self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+                # use the keyframe image as the rgb image.
+                self.rgb_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
                 break
             else:
                 self.logger.error(f"Invalid active topics: {active_topics}")
@@ -415,7 +418,6 @@ class BuildMapNode(Node):
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
-        self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
 
         self.marker_pub = self.create_publisher(MarkerArray, '/mapping/pointcloud_markers', 10)
