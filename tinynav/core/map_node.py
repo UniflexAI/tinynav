@@ -188,6 +188,7 @@ class MapNode(Node):
                 break
             else:
                 self.logger.error(f"Invalid active topics: {active_topics}")
+                active_topics = [t[0] for t in self.get_topic_names_and_types()]
 
         self.K = None
         self.baseline = None
