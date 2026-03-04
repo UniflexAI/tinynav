@@ -90,16 +90,21 @@ class PerceptionNode(Node):
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         active_topics = [t[0] for t in self.get_topic_names_and_types()]
-        if all(topic in active_topics for topic in realsense_signature):
-            imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = realsense_signature
-            self.superpoint = SuperPointTRT("240x424")
-            self.stereo_engine = StereoEngineTRT("480x848")
-        elif all(topic in active_topics for topic in looper_signature):
-            imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
-            self.superpoint = SuperPointTRT("320x272")
-            self.stereo_engine = StereoEngineTRT("640x544")
-        else:
-            raise ValueError(f"Invalid active topics: {active_topics}")
+        
+        while True:
+            if all(topic in active_topics for topic in realsense_signature):
+                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = realsense_signature
+                self.superpoint = SuperPointTRT("240x424")
+                self.stereo_engine = StereoEngineTRT("480x848")
+                break
+            elif all(topic in active_topics for topic in looper_signature):
+                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
+                self.superpoint = SuperPointTRT("320x272")
+                self.stereo_engine = StereoEngineTRT("640x544")
+                break
+            else:
+                self.logger.error(f"Invalid active topics: {active_topics}")
+
         self.light_glue = LightGlueTRT()
 
         self.last_keyframe_img = None

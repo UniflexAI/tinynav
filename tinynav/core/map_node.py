@@ -179,12 +179,15 @@ class MapNode(Node):
         self.ts.registerCallback(self.keyframe_callback)
 
         active_topics = [t[0] for t in self.get_topic_names_and_types()]
-        if '/camera/camera/infra2/camera_info' in active_topics:
-            self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
-        elif '/insight/camera_right_info' in active_topics:
-            self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
-        else:
-            raise ValueError(f"Invalid active topics: {active_topics}")
+        while True:
+            if '/camera/camera/infra2/camera_info' in active_topics:
+                self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+                break
+            elif '/insight/camera_right_info' in active_topics:
+                self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+                break
+            else:
+                self.logger.error(f"Invalid active topics: {active_topics}")
 
         self.K = None
         self.baseline = None
