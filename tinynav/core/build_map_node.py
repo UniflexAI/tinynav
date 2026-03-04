@@ -405,11 +405,13 @@ class BuildMapNode(Node):
             if '/camera/camera/infra2/camera_info' in active_topics:
                 self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
                 self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
+                self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
                 break
             elif '/insight/camera_right_info' in active_topics:
                 self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
                 # use the keyframe image as the rgb image.
                 self.rgb_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
+                self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/insight/camera_right_info")
                 break
             else:
                 self.logger.error(f"Invalid active topics: {active_topics}")
@@ -455,7 +457,6 @@ class BuildMapNode(Node):
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
         self.T_rgb_to_infra1 = None
-        self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
 
@@ -477,6 +478,7 @@ class BuildMapNode(Node):
             if frame_id == "camera_link" and child_frame_id == "camera_color_frame":
                 T_rgb_to_link = T
         if T_infra1_optical_to_infra1 is None or T_rgb_optical_to_rgb is None or T_infra1_to_link is None or T_rgb_to_link is None:
+            self.T_rgb_to_infra1 = np.eye(4)
             return
         self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
 
