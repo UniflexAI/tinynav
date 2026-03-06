@@ -35,7 +35,7 @@ lightglue: $(LIGHTGLUE_ENGINE)
 retinify: $(RETINIFY_REALSENSE_ENGINE) $(RETINIFY_LOOPER_ENGINE)
 
 help:
-    @echo "Targets:"
+	@echo "Targets:"
 	@echo "  make all          # Build all engines"
 	@echo "  make dinov2       # Build DINOv2"
 	@echo "  make superpoint   # Build SuperPoint"
@@ -44,8 +44,8 @@ help:
 	@echo "  make clean        # Remove *_$(ARCH).plan"
 
 $(DINO_ENGINE): $(DINO_ONNX)
-    $(TRTEXEC) --onnx=$< --saveEngine=$@ \
-        --shapes='pixel_values':1x3x224x224 --fp16
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
+	--shapes='pixel_values':1x3x224x224 --fp16
 
 
 $(LIGHTGLUE_ENGINE): $(LIGHTGLUE_ONNX)
