@@ -15,7 +15,6 @@ from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
-import os
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
@@ -27,7 +26,6 @@ from build_map_node import TinyNavDB
 from build_map_node import find_loop, solve_pose_graph
 import einops
 from build_map_node import OdomPoseRecorder
-from scipy.ndimage import distance_transform_cdt
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +155,7 @@ class MapNode(Node):
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        self.super_point_extractor = SuperPointTRT()
+        self.super_point_extractor = None
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path
@@ -178,7 +176,18 @@ class MapNode(Node):
         self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 10)
         self.ts.registerCallback(self.keyframe_callback)
 
-        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        while True:
+            if '/camera/camera/infra2/camera_info' in active_topics:
+                self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+                break
+            elif '/insight/camera_right_info' in active_topics:
+                self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+                break
+            else:
+                self.logger.error(f"Invalid active topics: {active_topics}")
+                active_topics = [t[0] for t in self.get_topic_names_and_types()]
+
         self.K = None
         self.baseline = None
         self.last_keyframe_image = None
@@ -244,6 +253,9 @@ class MapNode(Node):
             fx = self.K[0, 0]
             Tx = msg.p[3]
             self.baseline = -Tx / fx
+            self.image_height = msg.height
+            self.image_width = msg.width
+            self.super_point_extractor = SuperPointTRT(f"{self.image_height // 2}x{self.image_width // 2}")
             self.destroy_subscription(self.camera_info_sub)
 
     def continuous_odom_callback(self, odom_msg: Odometry):
@@ -307,7 +319,6 @@ class MapNode(Node):
         self.nav_temp_db.set_entry(keyframe_image_timestamp, embedding = embedding)
         features = asyncio.run(self.super_point_extractor.infer(image))
         self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
-
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
@@ -348,7 +359,8 @@ class MapNode(Node):
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        image_shape = np.array([self.image_height, self.image_width], dtype = np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1

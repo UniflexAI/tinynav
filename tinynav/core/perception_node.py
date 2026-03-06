@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
-from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT, TRTFusionModel
+from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
@@ -70,21 +70,47 @@ class Keyframe:
     preintegrated_imu: gtsam.PreintegratedCombinedMeasurements
     latest_imu_timestamp: float
 
+realsense_signature = [
+    "/camera/camera/imu",
+    "/camera/camera/infra1/image_rect_raw",
+    "/camera/camera/infra2/image_rect_raw",
+    "/camera/camera/infra2/camera_info",
+]
+
+looper_signature = [
+    "/insight/imu",
+    "/insight/camera_left_rectified",
+    "/insight/camera_right_rectified",
+    "/insight/camera_right_info"
+]
+
 class PerceptionNode(Node):
     def __init__(self, verbose_timer: bool = True):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
-        # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        # model
-        self.superpoint = SuperPointTRT()
+        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        
+        while True:
+            if all(topic in active_topics for topic in realsense_signature):
+                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = realsense_signature
+                self.superpoint = SuperPointTRT("240x424")
+                self.stereo_engine = StereoEngineTRT("480x848")
+                break
+            elif all(topic in active_topics for topic in looper_signature):
+                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
+                self.superpoint = SuperPointTRT("320x272")
+                self.stereo_engine = StereoEngineTRT("640x544")
+                break
+            else:
+                self.logger.error(f"Invalid active topics: {active_topics}")
+                active_topics = [t[0] for t in self.get_topic_names_and_types()]
+
         self.light_glue = LightGlueTRT()
-        self.trt_fusion_model = TRTFusionModel()
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
 
-        self.stereo_engine = StereoEngineTRT()
         # intrinsic
         self.baseline = None
         self.K = None
@@ -99,13 +125,12 @@ class PerceptionNode(Node):
         qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
 
         # use a single topic to handle the imu data.
-        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.sync_imu_callback, qos_profile)
+        self.imu_sub = self.create_subscription(Imu, imu_topic_name, self.sync_imu_callback, qos_profile)
         self.imu_last_received_timestamp = None
+        self.camerainfo_sub = self.create_subscription(CameraInfo, camera_info_topic_name, self.info_callback, 10)
+        self.left_sub = Subscriber(self, Image, left_image_topic_name)
+        self.right_sub = Subscriber(self, Image, right_image_topic_name)
 
-
-        self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
-        self.left_sub = Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw")
-        self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=10, slop=0.02)
         self.ts.registerCallback(self.images_callback)
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
@@ -150,6 +175,9 @@ class PerceptionNode(Node):
 
     def info_callback(self, msg):
         if self.K is None:
+            self.image_height = msg.height
+            self.image_width = msg.width
+
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]  # From the right camera's projection matrix
@@ -244,6 +272,7 @@ class PerceptionNode(Node):
             self.keyframe_queue[-1].latest_imu_timestamp = timestamp
 
             self.imu_measurements.popleft()
+
         # specially process the last imu
         if len(self.imu_measurements) > 0 and current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.001:
             timestamp, accel, gyro = self.imu_measurements[0]
@@ -395,6 +424,7 @@ class PerceptionNode(Node):
                             self.logger.warning(f"match cnt: {len(kpt_pre)} is too small, {len(inlier_set)} inliers.enable velocity constraint")
                             velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
                             graph.add(velocity_constraint)
+
 
                     with Timer(name="[cached result[3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         count = 0

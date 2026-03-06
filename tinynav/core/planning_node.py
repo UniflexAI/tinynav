@@ -329,7 +329,17 @@ class PlanningNode(Node):
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
-        self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+
+        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        while True:
+            if '/camera/camera/infra2/camera_info' in active_topics:
+                self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+                break
+            elif '/insight/camera_right_info' in active_topics:
+                self.camerainfo_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+                break
+            else:
+                active_topics = [t[0] for t in self.get_topic_names_and_types()]
 
 
         self.grid_shape = (100, 100, 10)

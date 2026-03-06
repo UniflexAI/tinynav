@@ -392,19 +392,34 @@ class BuildMapNode(Node):
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        self.super_point_extractor = SuperPointTRT()
+        # Lazy initialization after the image shape is known
+        self.super_point_extractor = None
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
 
         self.bridge = CvBridge()
 
         self.tf_broadcaster = TransformBroadcaster(self)
+        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        while True:
+            if '/camera/camera/infra2/camera_info' in active_topics:
+                self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+                self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
+                self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
+                break
+            elif '/insight/camera_right_info' in active_topics:
+                self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+                # use the keyframe image as the rgb image.
+                self.rgb_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
+                self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/insight/camera_right_info")
+                break
+            else:
+                self.logger.error(f"Invalid active topics: {active_topics}")
+                active_topics = [t[0] for t in self.get_topic_names_and_types()]
 
-        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
-        self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
 
         self.marker_pub = self.create_publisher(MarkerArray, '/mapping/pointcloud_markers', 10)
@@ -442,7 +457,6 @@ class BuildMapNode(Node):
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
         self.T_rgb_to_infra1 = None
-        self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
 
@@ -464,6 +478,7 @@ class BuildMapNode(Node):
             if frame_id == "camera_link" and child_frame_id == "camera_color_frame":
                 T_rgb_to_link = T
         if T_infra1_optical_to_infra1 is None or T_rgb_optical_to_rgb is None or T_infra1_to_link is None or T_rgb_to_link is None:
+            self.T_rgb_to_infra1 = np.eye(4)
             return
         self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
 
@@ -477,7 +492,10 @@ class BuildMapNode(Node):
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]
+            self.image_height = msg.height
+            self.image_width = msg.width
             self.baseline = -Tx / fx
+            self.super_point_extractor = SuperPointTRT(f"{self.image_height // 2}x{self.image_width // 2}")
             self.destroy_subscription(self.camera_info_sub)
 
     def continuous_odom_callback(self, odom_msg: Odometry):
@@ -580,7 +598,8 @@ class BuildMapNode(Node):
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        image_shape = np.array([self.image_height, self.image_width], dtype = np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
