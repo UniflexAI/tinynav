@@ -1,11 +1,14 @@
 {
   "name": "tinynav-dev",
-  "image": "uniflexai/tinynav:latest",
+  "image": "docker.1ms.run/uniflexai/tinynav:latest",
   "context": "..",
 
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
-    "GDK_SCALE": "2"
+    "GDK_SCALE": "2",
+    "HF_ENDPOINT": "https://hf-mirror.com",
+    "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/",
+    "PIP_TRUSTED_HOST": "mirrors.aliyun.com"
   },
 
   "runArgs": [
