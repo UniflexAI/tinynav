@@ -1,0 +1,31 @@
+{
+  "name": "tinynav-dev",
+  "image": "uniflexai/tinynav:latest",
+  "context": "..",
+
+  "containerEnv": {
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "GDK_SCALE": "2"
+  },
+
+  "runArgs": [
+    "--gpus", "all",
+    "--privileged",
+    "--network", "host",
+    "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
+    "-v", "/dev:/dev",
+    "-v", "/etc/localtime:/etc/localtime",
+    "--device-cgroup-rule=c 81:* rwm",
+    "--device-cgroup-rule=c 234:* rwm",
+    "--shm-size=16gb",
+    "-v", "${localWorkspaceFolder}:/tinynav"
+  ],
+
+  "workspaceFolder": "/tinynav",
+  "remoteUser": "root",
+  "features": {},
+  "mounts": [],
+  "postCreateCommand": "echo 'Devcontainer ready.'",
+  "postStartCommand": "/usr/local/bin/entrypoint.sh"
+}
+
