@@ -41,7 +41,7 @@ help:
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
-		--shapes='pixel_values':1x3x224x224 --fp16
+	--shapes='pixel_values':1x3x224x224 --fp16
 
 $(SUPERPOINT_ENGINE): $(SUPERPOINT_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
