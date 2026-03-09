@@ -4,6 +4,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Bool
 import numpy as np
+from numba import njit, prange
 import sys
 
 from sensor_msgs.msg import PointCloud2
@@ -103,6 +104,7 @@ def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, lo
     global_grid[local_origin_offset[0]:local_origin_offset[0] + local_grid.shape[0],
                 local_origin_offset[1]:local_origin_offset[1] + local_grid.shape[1],
                 local_origin_offset[2]:local_origin_offset[2] + local_grid.shape[2]] += local_grid
+
     return global_grid, global_origin
 
 def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, max_iteration_num:int = 1024) -> dict:
@@ -131,7 +133,28 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10):
+@njit(cache=True, parallel=True)
+def sdf_min_dist_parallel(position_grid, positions, sdf_map):
+    """Parallel over grid points: each voxel gets min distance to all positions."""
+    ni, nj, nk = position_grid.shape[0], position_grid.shape[1], position_grid.shape[2]
+    n_pos = positions.shape[0]
+    for i in prange(ni):
+        for j in range(nj):
+            for k in range(nk):
+                gx = position_grid[i, j, k, 0]
+                gy = position_grid[i, j, k, 1]
+                gz = position_grid[i, j, k, 2]
+                min_d = np.inf
+                for p in range(n_pos):
+                    dx = gx - positions[p, 0]
+                    dy = gy - positions[p, 1]
+                    dz = gz - positions[p, 2]
+                    d = np.sqrt(dx * dx + dy * dy + dz * dz)
+                    if d < min_d:
+                        min_d = d
+                sdf_map[i, j, k] = min_d
+
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100):
     """
         Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -152,22 +175,39 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 10)
     global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
+
+    odom_positions = []
     for timestamp, odom_pose in tqdm(poses.items()):
         depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
         odom_translation = odom_pose[:3, 3]
         local_origin = np.floor(odom_translation / resolution) * resolution - 0.5 * np.array(raycast_shape) * resolution
         local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
         global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
+        odom_position = odom_pose[:3, 3]
+        odom_positions.append(odom_position)
 
+    sdf_map = np.full_like(global_grid, np.inf, dtype=np.float32)
+    # compute the sdf w.r.t odom_position: odom_sdf_map[i,j,k] = || (i,j,k)*resolution + origin - odom_position ||
+    ix = np.arange(global_grid_shape[0], dtype=np.float32)
+    iy = np.arange(global_grid_shape[1], dtype=np.float32)
+    iz = np.arange(global_grid_shape[2], dtype=np.float32)
+    xx, yy, zz = np.meshgrid(ix, iy, iz, indexing="ij")
+    grid_positions = global_origin + resolution * np.stack([xx, yy, zz], axis=-1)
+    with Timer(name="sdf_min_dist_baseline", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        sdf_min_dist_parallel(grid_positions, np.array(odom_positions), sdf_map)
+
+    # 0 is the unknown.
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
+
     grid_type[global_grid > 0] = 2  # Occupied
     grid_type[global_grid < 0] = 1  # Free
+
     x_y_plane = np.max(grid_type, axis=2)
     x_y_plane_image = np.zeros_like(x_y_plane, dtype=np.float32)
     x_y_plane_image[x_y_plane == 2] = 1.0
     x_y_plane_image[x_y_plane == 1] = 0.5
     x_y_plane_image = (x_y_plane_image * 255).astype(np.uint8)
-    return grid_type, global_origin, x_y_plane_image
+    return grid_type, global_origin, x_y_plane_image, sdf_map
 
 class IntKeyShelf:
     def __init__(self, filename):
@@ -600,10 +640,11 @@ class BuildMapNode(Node):
         # Generate occupancy map
         occupancy_resolution = 0.05
         occupancy_step = 10
-        occupancy_grid, occupancy_origin, occupancy_2d_image = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
+        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
         occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
         np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
+        np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
 
         image_size = None
