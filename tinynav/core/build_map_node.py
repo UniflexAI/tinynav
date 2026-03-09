@@ -473,7 +473,7 @@ class BuildMapNode(Node):
         with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
-            odom = msg2np(keyframe_odom_msg)
+            odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
@@ -683,7 +683,6 @@ class BuildMapNode(Node):
             return
             
         transforms = []        
-                
         for time, pose_in_world in self.pose_graph_used_pose.items():
             transform = TransformStamped()
             
