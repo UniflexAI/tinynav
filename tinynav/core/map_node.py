@@ -15,7 +15,6 @@ from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
-import os
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
@@ -27,8 +26,6 @@ from build_map_node import TinyNavDB
 from build_map_node import find_loop, solve_pose_graph
 import einops
 from build_map_node import OdomPoseRecorder
-from scipy.ndimage import distance_transform_cdt
-
 logger = logging.getLogger(__name__)
 
 
