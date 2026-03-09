@@ -235,7 +235,7 @@ class PerceptionNode(Node):
             timestamp, accel, gyro = self.imu_measurements[0]
             dt = timestamp - self.keyframe_queue[-1].latest_imu_timestamp
 
-            if timestamp < self.keyframe_queue[-1].latest_imu_timestamp:
+            if timestamp <= self.keyframe_queue[-1].latest_imu_timestamp:
                 self.imu_measurements.popleft()
                 self.logger.warning("should only happen at beginning")
                 continue
@@ -385,16 +385,26 @@ class PerceptionNode(Node):
                             idx_valid
                         )
                         inlier_set = set(inliers)
-                        for idx in range(len(match_indices)):
-                            if idx not in inlier_set:
+                        if len(inlier_set) > 20:
+                            for idx in range(len(match_indices)):
+                                if idx not in inlier_set:
+                                    match_indices[idx] = -1
+                        else:
+                            for idx in range(len(match_indices)):
                                 match_indices[idx] = -1
+                            self.logger.warning(f"match cnt: {len(kpt_pre)} is too small, {len(inlier_set)} inliers.enable velocity constraint")
+                            velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
+                            graph.add(velocity_constraint)
 
                     with Timer(name="[cached result[3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        count = 0
                         for k, match_idx in enumerate(match_indices):
                             if match_idx != -1:
                                 idx_prev = i * _M + k
                                 idx_curr = j * _M + match_idx
                                 uf_union(idx_prev, idx_curr, parent, rank)
+                                count += 1
+                        self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 tracks = [track for track in uf_all_sets_list(parent) if len(track) >= 2]
@@ -449,6 +459,7 @@ class PerceptionNode(Node):
             for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                 T_i = result.atPose3(X(i)).matrix()
                 keyframe.pose = T_i
+                keyframe.velocity = result.atVector(V(i))
                 self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
                 self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
@@ -475,15 +486,16 @@ class PerceptionNode(Node):
 
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
+            self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
             # publish odometry
-            self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera"))
+            self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
 
             last_keyframe = self.keyframe_queue[-2]
             current_keyframe = self.keyframe_queue[-1]
             if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
-                self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera"))
+                self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera", current_keyframe.velocity))
                 self.keyframe_image_pub.publish(left_msg)
                 self.keyframe_depth_pub.publish(depth_msg)
             else:
@@ -516,16 +528,7 @@ def main(args=None):
     executor.spin()
     perception_node.destroy_node()
     executor.shutdown()
-    #try:
-    #    executor.spin()
-    #    perception_node.destroy_node()
-    #    executor.shutdown()
-    #except KeyboardInterrupt:
-    #    logging.info("Keyboard interrupt received, perception node is shut down")
-    #except Exception as e:
-    #    logging.error(f"Error occurred: {e}")
-    #finally:
-    #    rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
