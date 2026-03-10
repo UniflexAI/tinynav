@@ -356,6 +356,11 @@ def main(
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
+    server.scene.configure_environment_map(
+        hdri=None,
+        background=False,
+        environment_intensity=0.0,
+    )
 
     # POI management
     poi_points = {}
