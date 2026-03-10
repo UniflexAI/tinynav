@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
-from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT, TRTFusionModel
+from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
@@ -76,10 +76,9 @@ class PerceptionNode(Node):
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        # model
+        # models
         self.superpoint = SuperPointTRT()
         self.light_glue = LightGlueTRT()
-        self.trt_fusion_model = TRTFusionModel()
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None

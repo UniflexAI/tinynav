@@ -21,171 +21,6 @@ numpy_to_ctypes = {
     np.dtype(np.bool_):  ctypes.c_bool
 }
 
-class TRTFusionModel():
-    def __init__(self,
-        superpoint_engine_path=f"/tinynav/tinynav/models/superpoint_240x424_fp16_{platform.machine()}.plan",
-        lightglue_engine_path=f"/tinynav/tinynav/models/lightglue_fp16_{platform.machine()}.plan"):
-        TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-        with open(superpoint_engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
-            self.superpoint_engine = runtime.deserialize_cuda_engine(f.read())
-        with open(lightglue_engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
-            self.lightglue_engine = runtime.deserialize_cuda_engine(f.read())
-        _, self.stream = cudart.cudaStreamCreate()
-        self.superpoint_context = self.superpoint_engine.create_execution_context()
-        self.lightglue_context = self.lightglue_engine.create_execution_context()
-        self.memory_addresses = self.allocate_buffers()
-        with Timer(name="[capture_graph]", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.superpoint_graph_exec, self.lightglue_graph_exec = self.capture_graph()
-        logging.info(f"load {superpoint_engine_path} and {lightglue_engine_path} done!")
-
-    def allocate_buffers(self):
-        memory_addresses = {
-            "superpoint": {},
-            "lightglue": {},
-        }
-        for i in range(self.superpoint_engine.num_io_tensors):
-            name = self.superpoint_engine.get_tensor_name(i)
-            shape = self.superpoint_context.get_tensor_shape(name)
-            dtype = np.dtype(trt.nptype(self.superpoint_engine.get_tensor_dtype(name)))
-            ctype_dtype = numpy_to_ctypes[dtype]
-            _ = self.superpoint_engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
-            size = trt.volume(shape)
-            nbytes = trt.volume(shape) * dtype.itemsize
-            if "aarch64" in platform.machine():
-                ptr = cudart.cudaHostAlloc(nbytes, cudart.cudaHostAllocMapped)[1]
-                host_mem = np.ctypeslib.as_array((ctype_dtype * size).from_address(ptr))
-                host_mem = host_mem.view(dtype).reshape(shape)
-                device_ptr = cudart.cudaHostGetDevicePointer(ptr, 0)[1]
-            else:
-                ptr = cudart.cudaMallocHost(nbytes)[1]
-                host_mem = np.ctypeslib.as_array((ctype_dtype * size).from_address(ptr))
-                host_mem = host_mem.view(dtype).reshape(shape)
-                device_ptr = cudart.cudaMalloc(nbytes)[1]
-
-            memory_addresses["superpoint"][name] = {
-                "host": host_mem,
-                "device": device_ptr,
-                "shape": shape,
-                "nbytes": nbytes,
-            }
-        for i in range(self.lightglue_engine.num_io_tensors):
-            name = self.lightglue_engine.get_tensor_name(i)
-            if name in ["kpts1", "desc1", "mask1"]:
-                continue
-            shape = self.lightglue_context.get_tensor_shape(name)
-            dtype = np.dtype(trt.nptype(self.lightglue_engine.get_tensor_dtype(name)))
-            ctype_dtype = numpy_to_ctypes[dtype]
-            _ = self.lightglue_engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
-            size = trt.volume(shape)
-            nbytes = trt.volume(shape) * dtype.itemsize
-
-            # print(f"lightglue: name: {name}, shape: {shape}, dtype: {dtype}, ctype_dtype: {ctype_dtype}, is_input: {is_input}, size: {size}, nbytes: {nbytes}")
-            if "aarch64" in platform.machine():
-                ptr = cudart.cudaHostAlloc(nbytes, cudart.cudaHostAllocMapped)[1]
-                host_mem = np.ctypeslib.as_array((ctype_dtype * size).from_address(ptr))
-                host_mem = host_mem.view(dtype).reshape(shape)
-                device_ptr = cudart.cudaHostGetDevicePointer(ptr, 0)[1]
-            else:
-                ptr = cudart.cudaMallocHost(nbytes)[1]
-                host_mem = np.ctypeslib.as_array((ctype_dtype * size).from_address(ptr))
-                host_mem = host_mem.view(dtype).reshape(shape)
-                device_ptr = cudart.cudaMalloc(nbytes)[1]
-
-            memory_addresses["lightglue"][name] = {
-                "host": host_mem,
-                "device": device_ptr,
-                "shape": shape,
-                "nbytes": nbytes,
-            }
-        memory_addresses["lightglue"]["kpts1"] = memory_addresses["superpoint"]["kpts"]
-        memory_addresses["lightglue"]["desc1"] = memory_addresses["superpoint"]["descps"]
-        memory_addresses["lightglue"]["mask1"] = memory_addresses["superpoint"]["mask"]
-        return memory_addresses
-    def capture_graph(self):
-        cudart.cudaStreamBeginCapture(self.stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
-        for i in range(self.superpoint_engine.num_io_tensors):
-            name = self.superpoint_engine.get_tensor_name(i)
-            self.superpoint_context.set_tensor_address(name, self.memory_addresses["superpoint"][name]["device"])
-        self.superpoint_context.execute_async_v3(stream_handle=self.stream)
-        _, superpoint_graph = cudart.cudaStreamEndCapture(self.stream)
-        _, superpoint_graph_exec = cudart.cudaGraphInstantiate(superpoint_graph, 0)
-        cudart.cudaStreamSynchronize(self.stream)
-        cudart.cudaStreamBeginCapture(self.stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
-        for i in range(self.lightglue_engine.num_io_tensors):
-            name = self.lightglue_engine.get_tensor_name(i)
-            self.lightglue_context.set_tensor_address(name, self.memory_addresses["lightglue"][name]["device"])
-        self.lightglue_context.execute_async_v3(stream_handle=self.stream)
-        _, lightglue_graph = cudart.cudaStreamEndCapture(self.stream)
-        _, lightglue_graph_exec = cudart.cudaGraphInstantiate(lightglue_graph, 1)
-        cudart.cudaStreamSynchronize(self.stream)
-        return superpoint_graph_exec, lightglue_graph_exec
-
-    async def run_graph(self):
-        if "aarch64" not in platform.machine():
-                superpoint_addresses = self.memory_addresses["superpoint"]
-                for name in ["image", "keypoint_threshold"]:
-                    cudart.cudaMemcpyAsync(superpoint_addresses[name]["device"], superpoint_addresses[name]["host"].ctypes.data,
-                                    superpoint_addresses[name]["nbytes"],
-                                    cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
-                                    self.stream)
-                lightglue_addresses = self.memory_addresses["lightglue"]
-                for name in ["kpts0", "desc0", "mask0", "threshold", "img_shape0", "img_shape1"]:
-                    cudart.cudaMemcpyAsync(lightglue_addresses[name]["device"], lightglue_addresses[name]["host"].ctypes.data,
-                                    lightglue_addresses[name]["nbytes"],
-                                    cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
-                                    self.stream)
-        cudart.cudaGraphLaunch(self.superpoint_graph_exec, self.stream)
-        cudart.cudaGraphLaunch(self.lightglue_graph_exec, self.stream)
-        if "aarch64" not in platform.machine():
-            superpoint_addresses = self.memory_addresses["superpoint"]
-            for name in ["kpts", "scores", "descps", "mask"]:
-                cudart.cudaMemcpyAsync(superpoint_addresses[name]["host"].ctypes.data, superpoint_addresses[name]["device"],
-                                    superpoint_addresses[name]["nbytes"],
-                                    cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
-                                    self.stream)
-            lightglue_addresses = self.memory_addresses["lightglue"]
-            for name in ["match_indices", "score"]:
-                cudart.cudaMemcpyAsync(lightglue_addresses[name]["host"].ctypes.data, lightglue_addresses[name]["device"],
-                                    lightglue_addresses[name]["nbytes"],
-                                    cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
-                                    self.stream)
-        _, event = cudart.cudaEventCreate()
-        cudart.cudaEventRecord(event, self.stream)
-        while cudart.cudaEventQuery(event)[0] == cudart.cudaError_t.cudaErrorNotReady:
-            await asyncio.sleep(0)
-
-        results = {}
-        superpoint_addresses = self.memory_addresses["superpoint"]
-        for name in ["kpts", "scores", "descps", "mask"]:
-            results[name] = superpoint_addresses[name]["host"].copy()
-        lightglue_addresses = self.memory_addresses["lightglue"]
-        for name in ["match_indices", "score"]:
-            results[name] = lightglue_addresses[name]["host"].copy()
-        return results
-
-    async def infer(self, kpts0, desc0, mask0, image_1, img_shape0, img_shape1, superpoint_threshold = np.array([[0.0005]], dtype=np.float32), match_threshold = np.array([[0.1]])):
-        input_shape = self.memory_addresses["superpoint"]["image"]["shape"][2:4]
-        scale = input_shape[0] / image_1.shape[0]
-        network_input_shape = self.memory_addresses["superpoint"]["image"]["shape"][2:4]
-        image = cv2.resize(image_1, (network_input_shape[1], network_input_shape[0]))
-        image = image[None, None, :, :]
-        np.copyto(self.memory_addresses["superpoint"]["image"]["host"], image)
-        np.copyto(self.memory_addresses["superpoint"]["keypoint_threshold"]["host"], superpoint_threshold)
-        recovered_kpts0 = (kpts0 + 0.5) * scale - 0.5
-
-        np.copyto(self.memory_addresses["lightglue"]["kpts0"]["host"], recovered_kpts0)
-        np.copyto(self.memory_addresses["lightglue"]["desc0"]["host"], desc0)
-        np.copyto(self.memory_addresses["lightglue"]["mask0"]["host"], mask0)
-        np.copyto(self.memory_addresses["lightglue"]["threshold"]["host"], match_threshold)
-        np.copyto(self.memory_addresses["lightglue"]["img_shape0"]["host"], input_shape)
-        np.copyto(self.memory_addresses["lightglue"]["img_shape1"]["host"], input_shape)
-
-        results = await self.run_graph()
-        results["kpts"][0] = (results["kpts"][0] + 0.5) / scale - 0.5
-        results["mask"] = results["mask"][:, :, None]
-        return results
-
-
 class TRTBase:
     def __init__(self, engine_path):
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
@@ -197,6 +32,20 @@ class TRTBase:
             self.graph_exec = self.capture_graph()
         logging.info(f"load {engine_path} done!")
 
+    def _get_static_shape(self, name):
+        """Return a concrete shape for a tensor, resolving dynamic dims via the profile if needed."""
+        shape = tuple(self.context.get_tensor_shape(name))
+        if -1 not in shape:
+            return shape
+
+        # Resolve from optimization profile (profile 0) when available.
+        try:
+            _, _, max_shape = self.engine.get_tensor_profile_shape(name, 0)
+            return tuple(int(d) for d in max_shape)
+        except Exception:
+            # Fallback: replace dynamic dims with 1 to avoid crashes.
+            return tuple(d if d != -1 else 1 for d in shape)
+
     def allocate_buffers(self):
         inputs = []
         outputs = []
@@ -205,7 +54,7 @@ class TRTBase:
 
         for i in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(i)
-            shape = self.context.get_tensor_shape(name)
+            shape = self._get_static_shape(name)
             dtype = np.dtype(trt.nptype(self.engine.get_tensor_dtype(name)))
             ctype_dtype = numpy_to_ctypes[dtype]
             is_input = self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
@@ -235,6 +84,13 @@ class TRTBase:
 
 
     def capture_graph(self):
+        # Ensure dynamic input shapes are specified before first execution.
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                shape = self._get_static_shape(name)
+                self.context.set_input_shape(name, shape)
+
         cudart.cudaStreamBeginCapture(self.stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
 
         for i in range(self.engine.num_io_tensors):
@@ -272,7 +128,7 @@ class TRTBase:
 
 
 class SuperPointTRT(TRTBase):
-    def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_240x424_fp16_{platform.machine()}.plan"):
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_fp16_dynamic_{platform.machine()}.plan"):
         super().__init__(engine_path)
         # model input [1,1,H,W]
         self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
@@ -282,9 +138,10 @@ class SuperPointTRT(TRTBase):
     #
     @alru_cache_numpy(maxsize=32)
     async def infer(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):
-        # resize to input_size
-        scale = self.input_shape[0] / input_image.shape[0]
-        image = cv2.resize(input_image, (self.input_shape[1], self.input_shape[0]))
+        # Resize to engine input size (may change aspect ratio for non-matching resolutions).
+        h_in, w_in = input_image.shape[0], input_image.shape[1]
+        h_net, w_net = self.input_shape[0], self.input_shape[1]
+        image = cv2.resize(input_image, (w_net, h_net))
         image = image[None, None, :, :]
 
         np.copyto(self.inputs[0]["host"], image)
@@ -292,7 +149,17 @@ class SuperPointTRT(TRTBase):
 
         results = await self.run_graph()
 
-        results["kpts"][0] = (results["kpts"][0] + 0.5) / scale - 0.5
+        # Scale keypoints from network coords (h_net, w_net) back to input image coords (h_in, w_in).
+        # Use per-axis scale so Looper (640x544) and other resolutions match; img_shape is (width, height).
+        scale_x = w_in / w_net
+        scale_y = h_in / h_net
+        k = results["kpts"][0]
+        if k.shape[0] == 2:
+            k[0] = (k[0] + 0.5) * scale_x - 0.5
+            k[1] = (k[1] + 0.5) * scale_y - 0.5
+        else:
+            k[:, 0] = (k[:, 0] + 0.5) * scale_x - 0.5
+            k[:, 1] = (k[:, 1] + 0.5) * scale_y - 0.5
         results["mask"] = results["mask"][:, :, None]
         return results
 
@@ -340,21 +207,113 @@ class Dinov2TRT(TRTBase):
         return results["last_hidden_state"][:, 0, :].squeeze(0)
 
 
+# Retinify two-profile engine: (H, W) -> profile index
+_STEREO_PROFILES = [(480, 848), (640, 544)]  # RealSense, Looper
+
+
+def _alloc_pinned(shape, dtype):
+    """Allocate pinned host buffer with exact shape (for profile-matched I/O)."""
+    nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+    if "aarch64" in platform.machine():
+        ptr = cudart.cudaHostAlloc(nbytes, cudart.cudaHostAllocMapped)[1]
+    else:
+        ptr = cudart.cudaMallocHost(nbytes)[1]
+    ctype = numpy_to_ctypes[np.dtype(dtype)]
+    arr = np.ctypeslib.as_array((ctype * int(np.prod(shape))).from_address(ptr))
+    return arr.view(dtype).reshape(shape)
+
+
 class StereoEngineTRT(TRTBase):
-    def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_480x848_{platform.machine()}.plan"):
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_dynamic_{platform.machine()}.plan"):
         super().__init__(engine_path)
+        # Profile 0 buffers: base class already allocated (1,1,480,848) for left/right and disp/depth
+        h0, w0 = _STEREO_PROFILES[0]
+        h1, w1 = _STEREO_PROFILES[1]
+        sh0 = (1, 1, h0, w0)
+        sh1 = (1, 1, h1, w1)
+        self._inputs_p0 = self.inputs
+        self._outputs_p0 = self.outputs
+        left_1 = _alloc_pinned(sh1, np.uint8)
+        right_1 = _alloc_pinned(sh1, np.uint8)
+        disp_1 = _alloc_pinned(sh1, np.float32)
+        depth_1 = _alloc_pinned(sh1, np.float32)
+        self._inputs_p1 = [
+            {"host": left_1, "device": self.inputs[0]["device"], "shape": sh1, "nbytes": left_1.nbytes},
+            {"host": right_1, "device": self.inputs[1]["device"], "shape": sh1, "nbytes": right_1.nbytes},
+            self.inputs[2],
+            self.inputs[3],
+        ]
+        self._outputs_p1 = [
+            {"host": disp_1, "device": self.outputs[0]["device"], "name": "disp", "nbytes": disp_1.nbytes},
+            {"host": depth_1, "device": self.outputs[1]["device"], "name": "depth", "nbytes": depth_1.nbytes},
+        ]
+        self._current_profile = 0
+        self._current_input_shapes = sh0
+
+    def capture_graph(self):
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            self.context.set_tensor_address(name, self.bindings[i])
+        return None
+
+    async def run_graph(self):
+        profile = self._current_profile
+        input_shapes = self._current_input_shapes
+        inputs = self._inputs_p0 if profile == 0 else self._inputs_p1
+        outputs = self._outputs_p0 if profile == 0 else self._outputs_p1
+        if "aarch64" not in platform.machine():
+            for inp in inputs:
+                cudart.cudaMemcpyAsync(inp["device"], inp["host"].ctypes.data,
+                                       inp["nbytes"],
+                                       cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                                       self.stream)
+        self.context.set_optimization_profile_async(profile, self.stream)
+        self.context.set_input_shape("left", input_shapes)
+        self.context.set_input_shape("right", input_shapes)
+        self.context.execute_async_v3(stream_handle=self.stream)
+        if "aarch64" not in platform.machine():
+            for out in outputs:
+                cudart.cudaMemcpyAsync(out["host"].ctypes.data, out["device"], out["nbytes"],
+                                       cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost, self.stream)
+        _, event = cudart.cudaEventCreate()
+        cudart.cudaEventRecord(event, self.stream)
+        while cudart.cudaEventQuery(event)[0] == cudart.cudaError_t.cudaErrorNotReady:
+            await asyncio.sleep(0)
+        results = {}
+        for out in outputs:
+            results[out["name"]] = out["host"].copy()
+        return results
 
     async def infer(self, left_img, right_img, baseline, focal_length):
-        left_tensor = left_img[None, None, :, :]
-        right_tensor = right_img[None, None, :, :]
+        h_in, w_in = left_img.shape[0], left_img.shape[1]
+        if (h_in, w_in) == (480, 848):
+            profile, (h_net, w_net) = 0, (480, 848)
+        elif (h_in, w_in) == (640, 544):
+            profile, (h_net, w_net) = 1, (640, 544)
+        else:
+            h_net, w_net = _STEREO_PROFILES[0]
+            profile = 0
+            left_img = cv2.resize(left_img, (w_net, h_net))
+            right_img = cv2.resize(right_img, (w_net, h_net))
+            h_in, w_in = h_net, w_net
 
-        np.copyto(self.inputs[0]["host"], left_tensor)
-        np.copyto(self.inputs[1]["host"], right_tensor)
-        np.copyto(self.inputs[2]["host"], baseline)
-        np.copyto(self.inputs[3]["host"], focal_length)
+        self._current_profile = profile
+        self._current_input_shapes = (1, 1, h_net, w_net)
+        inputs = self._inputs_p0 if profile == 0 else self._inputs_p1
+        left_tensor = left_img.astype(np.uint8)[None, None, :, :]
+        right_tensor = right_img.astype(np.uint8)[None, None, :, :]
+        np.copyto(inputs[0]["host"], left_tensor)
+        np.copyto(inputs[1]["host"], right_tensor)
+        np.copyto(inputs[2]["host"], baseline)
+        np.copyto(inputs[3]["host"], focal_length)
 
         results = await self.run_graph()
-        return results['disp'][0, 0, :, :], results['depth'][0, 0, :, :]
+        disp = results["disp"][0, 0, :, :]
+        depth = results["depth"][0, 0, :, :]
+        if (disp.shape[0], disp.shape[1]) != (h_in, w_in):
+            disp = cv2.resize(disp, (w_in, h_in), interpolation=cv2.INTER_LINEAR)
+            depth = cv2.resize(depth, (w_in, h_in), interpolation=cv2.INTER_LINEAR)
+        return disp.astype(np.float32), depth.astype(np.float32)
 
 if __name__ == "__main__":
     dinov2 = Dinov2TRT()
@@ -362,75 +321,48 @@ if __name__ == "__main__":
     light_glue = LightGlueTRT()
     stereo_engine = StereoEngineTRT()
 
-    # Create dummy zero inputs
-    image_shape = np.array([848, 480], dtype=np.int64)
-    width, height = image_shape
+    # Test both RealSense and Looper resolutions (profile 0 and 1).
+    # Each entry: (name, width, height)
+    resolutions = [
+        ("realsense", 848, 480),
+        ("looper", 544, 640),
+    ]
+
     match_threshold = np.array([0.1], dtype=np.float32)
     threshold = np.array([0.015], dtype=np.float32)
 
-    dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
-    dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+    for tag, width, height in resolutions:
+        print(f"\n=== Testing stereo pipeline for {tag} resolution: {height}x{width} ===")
+        image_shape = np.array([width, height], dtype=np.int64)
 
-    with Timer(text="[dinov2] Elapsed time: {milliseconds:.0f} ms"):
-        embedding = asyncio.run(dinov2.infer(dummy_left))
+        dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+        dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
 
-    with Timer(text="[superpoint] Elapsed time: {milliseconds:.0f} ms"):
-        left_extract_result = asyncio.run(superpoint.infer(dummy_left))
-        right_extract_result = asyncio.run(superpoint.infer(dummy_right))
+        with Timer(text=f"[dinov2:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            _ = asyncio.run(dinov2.infer(dummy_left))
 
-    with Timer(text="[lightglue] Elapsed time: {milliseconds:.0f} ms"):
-        match_result = asyncio.run(light_glue.infer(
-            left_extract_result["kpts"],
-            right_extract_result["kpts"],
-            left_extract_result["descps"],
-            right_extract_result["descps"],
-            left_extract_result["mask"],
-            right_extract_result["mask"],
-            image_shape,
-            image_shape,
-            match_threshold))
+        with Timer(text=f"[superpoint:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            left_extract_result = asyncio.run(superpoint.infer(dummy_left))
+            right_extract_result = asyncio.run(superpoint.infer(dummy_right))
 
-    with Timer(text="[stereo] Elapsed time: {milliseconds:.0f} ms"):
-        baseline = np.array([[0.05]])
-        focal_length = np.array([[323.0]])
-        disp, depth = asyncio.run(stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length))
-
-    trt_fusion_model = TRTFusionModel()
-    with Timer(text="[trt_fusion] Elapsed time: {milliseconds:.0f} ms"):
-        results = asyncio.run(trt_fusion_model.infer(
-            left_extract_result["kpts"],
-            left_extract_result["descps"],
-            left_extract_result["mask"],
-            dummy_left,
-            image_shape,
-            image_shape,
-            threshold,
-            match_threshold))
-    def hard_time_cpu():
-        time.sleep(0.1)
-        print("hard time cpu")
-    with Timer(text="[stereo & fution] Elapsed time: {milliseconds:.0f} ms"):
-        async def stereo_and_fusion():
-            baseline = np.array([[0.05]])
-            focal_length = np.array([[323.0]])
-            stereo_task = asyncio.create_task(stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length))
-            fusion_task = asyncio.create_task(trt_fusion_model.infer(
-                left_extract_result["kpts"],
-                left_extract_result["descps"],
-                left_extract_result["mask"],
-                dummy_left,
-                image_shape,
-                image_shape,
-                threshold,
-                match_threshold))
-            # Run hard_time_cpu concurrently with other async tasks
-            cpu_task = asyncio.to_thread(hard_time_cpu)
-            # Wait for all tasks concurrently using gather
-            (disp, depth), results, _ = await asyncio.gather(
-                stereo_task,
-                fusion_task,
-                cpu_task
+        with Timer(text=f"[lightglue:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            _ = asyncio.run(
+                light_glue.infer(
+                    left_extract_result["kpts"],
+                    right_extract_result["kpts"],
+                    left_extract_result["descps"],
+                    right_extract_result["descps"],
+                    left_extract_result["mask"],
+                    right_extract_result["mask"],
+                    image_shape,
+                    image_shape,
+                    match_threshold,
+                )
             )
-            return disp, depth, results
 
-        disp, depth, results = asyncio.run(stereo_and_fusion())
+        with Timer(text=f"[stereo:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            baseline = np.array([[0.05]], dtype=np.float32)
+            focal_length = np.array([[323.0]], dtype=np.float32)
+            _disp, _depth = asyncio.run(
+                stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length)
+            )
