@@ -28,7 +28,7 @@ from geometry_msgs.msg import Twist
 SAFETY_RADIUS=0.3
 
 HALF_SAFETY_LENGTH = 0.5
-HALF_SAFETY_WIDTH = 0.25
+HALF_SAFETY_WIDTH = 0.35
 
 # === Helper functions ===
 @njit(cache=True)
@@ -236,7 +236,7 @@ def score_trajectories_by_height_map(trajectories, height_map, origin, resolutio
                     if 0 <= x_img < height_map_rows and 0 <= y_img < height_map_cols:
                         delta_height = point_in_world[2] - height_map[x_img, y_img]
                         # magic number
-                        if (delta_height > 0.05):
+                        if (delta_height > -0.05):
                             cost += 0.0  # Trajectory is above the height map, no collision
                         else:
                             # Trajectory is at or below the height map, add collision cost
@@ -346,7 +346,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 10
+        self.step = 5
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
