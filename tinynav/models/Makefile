@@ -20,7 +20,7 @@ LIGHTGLUE_ENGINE  := $(basename $(LIGHTGLUE_ONNX))_$(ARCH).plan
 
 # One plan each per model:
 # - SuperPoint: dynamic engine covering RealSense + Looper.
-# - Retinify: fixed RealSense resolution engine (original, correct behaviour).
+# - Retinify: one profile, min/max shapes for RealSense (480x848) and Looper (640x544).
 SUPERPOINT_ENGINE := $(basename $(SUPERPOINT_ONNX))_$(ARCH).plan
 RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
 
@@ -63,19 +63,12 @@ $(SUPERPOINT_ENGINE): $(SUPERPOINT_ONNX)
         --maxShapes=image:1x1x320x424 \
         --fp16
 
-# Retinify: one engine with two optimization profiles (requires explicit --profile index):
-# - profile 0: RealSense resolution (480x848)
-# - profile 1: Looper resolution (640x544)
+# Retinify: one plan, one profile; min/max shapes cover RealSense (480x848) and Looper (640x544).
 $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
-        --profile=0 \
-        --minShapes=left:1x1x480x848,right:1x1x480x848 \
-        --optShapes=left:1x1x480x848,right:1x1x480x848 \
-        --maxShapes=left:1x1x480x848,right:1x1x480x848 \
-        --profile=1 \
-        --minShapes=left:1x1x640x544,right:1x1x640x544 \
+        --minShapes=left:1x1x480x544,right:1x1x480x544 \
         --optShapes=left:1x1x640x544,right:1x1x640x544 \
-        --maxShapes=left:1x1x640x544,right:1x1x640x544 \
+        --maxShapes=left:1x1x640x848,right:1x1x640x848 \
         --precisionConstraints=obey \
         --layerPrecisions='/cost_volume/Unsqueeze:fp16,/cost_volume/post_process/conv_block3/conv_block3.0/BatchNormalization:fp32,/cost_volume/post_process/norm/norm.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.1/Relu:fp32,/disparity_refinement/upsample2_conv/upsample2_conv.0/BatchNormalization:fp32' \
         --fp16
