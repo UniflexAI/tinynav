@@ -354,13 +354,17 @@ def main(
     tinynav_db_path: Path,
 ) -> None:
     server = viser.ViserServer()
-    server.scene.world_axes.visible = True
-    server.scene.set_up_direction("+z")
+
+    # 必须在任何其他场景配置之前调用，避免前端加载默认 HDRI（potsdamer_platz_1k.hdr）
+    # 否则会报 ERR_CONTENT_LENGTH_MISMATCH / Failed to fetch
     server.scene.configure_environment_map(
         hdri=None,
         background=False,
         environment_intensity=0.0,
     )
+
+    server.scene.world_axes.visible = True
+    server.scene.set_up_direction("+z")
 
     # POI management
     poi_points = {}

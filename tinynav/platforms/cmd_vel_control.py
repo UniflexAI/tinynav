@@ -42,8 +42,17 @@ class CmdVelControlNode(Node):
         self.logger.debug(f"diff between path and current time: {path_time_diff}")
         self.last_path_time = current_time
 
-        T1 = msg2np(self.pose.pose)
-        T2 = msg2np(self.path.poses[1])
+        def Pose2np(pose):
+            T = np.eye(4)
+            position = pose.pose.position
+            rot = pose.pose.orientation
+            quat = [rot.x, rot.y, rot.z, rot.w]
+            T[:3, :3] = R.from_quat(quat).as_matrix()
+            T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
+            return T
+        T1, _ = msg2np(self.pose)
+        path_T1 = Pose2np(self.path.poses[0])
+        T2 = Pose2np(self.path.poses[1])
         T_robot_1 = T1 @ self.T_robot_to_camera
         T_robot_2 = T2 @ self.T_robot_to_camera
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
