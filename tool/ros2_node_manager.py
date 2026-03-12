@@ -52,7 +52,8 @@ class Ros2NodeManager(Node):
             'tf_publish_rate:=1.0',
             'publish_tf:=true',
             'rgb_camera.color_profile:=640x360x30',
-            'unite_imu_method:=2'
+            'unite_imu_method:=2',
+            'depth_module.emitter_enabled:=0'
         ]
     
     def _start_realsense_sensor(self):
@@ -75,11 +76,25 @@ class Ros2NodeManager(Node):
             '/camera/camera/extrinsics/depth_to_infra2',
             '/camera/camera/accel/sample',
             '/camera/camera/gyro/sample',
-            '/camera/camera/color/image_raw',
-            '/camera/camera/color/camera_info',
+            # '/camera/camera/color/image_raw',
+            # '/camera/camera/color/camera_info',
             '/camera/camera/imu',
+
+            '/camera_02/camera/infra1/camera_info',
+            '/camera_02/camera/infra1/image_rect_raw',
+            '/camera_02/camera/infra1/metadata',
+            '/camera_02/camera/infra2/camera_info',
+            '/camera_02/camera/infra2/image_rect_raw',
+            '/camera_02/camera/infra2/metadata',
+            '/camera_02/camera/extrinsics/depth_to_infra1',
+            '/camera_02/camera/extrinsics/depth_to_infra2',
+            '/camera_02/camera/accel/sample',
+            '/camera_02/camera/gyro/sample'
+            # '/camera_02/camera/color/image_raw',
+            # '/camera_02/camera/color/camera_info',
+            '/camera_02/camera/imu',
             '/tf',
-            '/cmd_vel',
+            '/cmd_vel_stamped',
             '/mapping/global_plan',
             '/mapping/poi',
             '/mapping/poi_change',
@@ -131,8 +146,8 @@ class Ros2NodeManager(Node):
         cmd_planning = ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py']
         self.processes['planning'] = self._spawn(cmd_planning)
         
-        cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
-        self.processes['control'] = self._spawn(cmd_control)
+        # cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
+        # self.processes['control'] = self._spawn(cmd_control)
         
         cmd_map = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
@@ -144,11 +159,39 @@ class Ros2NodeManager(Node):
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         
         topics = [
-            '/tf', '/cmd_vel', '/mapping/global_plan', '/mapping/poi',
-            '/mapping/poi_change', '/planning/trajectory_path',
+            '/tf', 
+            '/cmd_vel_stamped', 
+            '/mapping/global_plan', 
+            '/mapping/poi',
+            '/mapping/poi_change', 
+            '/planning/trajectory_path',
             '/planning/occupied_voxels',
             '/slam/odometry',
-            '/mapping/pointcloud_markers'
+            '/mapping/pointcloud_markers',
+            '/camera/camera/infra1/image_rect_raw',
+            '/camera/camera/infra1/camera_info',
+            '/camera/camera/infra2/image_rect_raw',
+            '/camera/camera/infra2/camera_info',
+            '/camera/camera/accel/sample',
+            '/camera/camera/gyro/sample',
+            '/camera/camera/imu',
+
+            '/camera_02/camera/infra1/camera_info',
+            '/camera_02/camera/infra1/image_rect_raw',
+            '/camera_02/camera/infra1/metadata',
+            '/camera_02/camera/infra2/camera_info',
+            '/camera_02/camera/infra2/image_rect_raw',
+            '/camera_02/camera/infra2/metadata',
+            '/camera_02/camera/extrinsics/depth_to_infra1',
+            '/camera_02/camera/extrinsics/depth_to_infra2',
+            '/camera_02/camera/accel/sample',
+            '/camera_02/camera/gyro/sample'
+            # '/camera_02/camera/color/image_raw',
+            # '/camera_02/camera/color/camera_info',
+            '/camera_02/camera/imu',
+            '/control/target_pose',
+            '/planning/occupied_voxels_with_esdf',
+            '/mapping/current_pose_in_map'
         ]
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', 'nav_bag'] + topics
         self.processes['bag_record'] = self._spawn(cmd_bag)
