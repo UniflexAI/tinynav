@@ -282,11 +282,11 @@ class MapNode(Node):
                     10,
                 )
                 break
-            elif "/insight/camera_right_info" in active_topics:
-                self.camera_info_sub = self.create_subscription(
-                    CameraInfo, "/insight/camera_right_info", self.info_callback, 10
-                )
-                break
+            # elif "/insight/camera_right_info" in active_topics:
+            #     self.camera_info_sub = self.create_subscription(
+            #         CameraInfo, "/insight/camera_right_info", self.info_callback, 10
+            #     )
+            #     break
             else:
                 self.logger.error(f"Invalid active topics: {active_topics}")
                 active_topics = [t[0] for t in self.get_topic_names_and_types()]

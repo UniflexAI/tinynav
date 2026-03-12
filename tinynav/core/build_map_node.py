@@ -407,12 +407,12 @@ class BuildMapNode(Node):
                 self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
                 self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
                 break
-            elif '/insight/camera_right_info' in active_topics:
-                self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
-                # use the keyframe image as the rgb image.
-                self.rgb_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
-                self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/insight/camera_right_info")
-                break
+            # elif '/insight/camera_right_info' in active_topics:
+            #     self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+            #     # use the keyframe image as the rgb image.
+            #     self.rgb_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
+            #     self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/insight/camera_right_info")
+            #     break
             else:
                 self.logger.error(f"Invalid active topics: {active_topics}")
                 active_topics = [t[0] for t in self.get_topic_names_and_types()]

@@ -335,9 +335,9 @@ class PlanningNode(Node):
             if '/camera/camera/infra2/camera_info' in active_topics:
                 self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
                 break
-            elif '/insight/camera_right_info' in active_topics:
-                self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
-                break
+            # elif '/insight/camera_right_info' in active_topics:
+            #     self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
+            #     break
             else:
                 #self.logger.error(f"Invalid active topics: {active_topics}")
                 active_topics = [t[0] for t in self.get_topic_names_and_types()]
@@ -566,7 +566,7 @@ class PlanningNode(Node):
                     rotation = quat_to_matrix(traj[-1, 3:])
                     target_direction_in_camera = rotation.T @ target_direction
                     cos_angle = np.dot(target_direction_in_camera, np.array([0, 0, 1]))
-                    final_score = 1.0 - cos_angle
+                    final_score = 1.0 - cos_angle + final_score
                 return final_score
 
             top_k = 1

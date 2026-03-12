@@ -97,11 +97,11 @@ class PerceptionNode(Node):
                 self.superpoint = SuperPointTRT("240x424")
                 self.stereo_engine = StereoEngineTRT("480x848")
                 break
-            elif all(topic in active_topics for topic in looper_signature):
-                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
-                self.superpoint = SuperPointTRT("320x272")
-                self.stereo_engine = StereoEngineTRT("640x544")
-                break
+            # elif all(topic in active_topics for topic in looper_signature):
+            #     imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
+            #     self.superpoint = SuperPointTRT("320x272")
+            #     self.stereo_engine = StereoEngineTRT("640x544")
+            #     break
             else:
                 self.logger.error(f"Invalid active topics: {active_topics}")
                 active_topics = [t[0] for t in self.get_topic_names_and_types()]
