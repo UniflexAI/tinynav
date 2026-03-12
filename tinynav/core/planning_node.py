@@ -555,14 +555,22 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                final_score =  score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+                final_score = score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+                # Same safety: prefer higher speed and larger turning radius (smaller |omega|).
+                if score <= 1.0 and param[0] > 0:
+                    final_score -= 20.0 * param[0]
+                final_score += 15.0 * np.abs(param[1])
                 if param[0] < 0:
                     final_score = score * 100000 + 1000
                     return final_score
                 elif np.abs(param[0]) < 1e-3:
                     if target_pose is None:
                         return final_score
-                    target_direction = (target_pose - traj_end) / np.linalg.norm(target_pose - traj_end)
+                    diff = target_pose - traj_end
+                    norm_diff = np.linalg.norm(diff)
+                    if norm_diff < 1e-6:
+                        return final_score
+                    target_direction = diff / norm_diff
                     rotation = quat_to_matrix(traj[-1, 3:])
                     target_direction_in_camera = rotation.T @ target_direction
                     cos_angle = np.dot(target_direction_in_camera, np.array([0, 0, 1]))
@@ -602,9 +610,11 @@ class PlanningNode(Node):
                     pose.pose.orientation.w = qw
                     path.poses.append(pose)
             self.path_pub.publish(path)
+
             cmd = Twist()
-            cmd.linear.x = params[top_indices[0]][0]
-            cmd.angular.z = -params[top_indices[0]][1]
+            if self.target_pose is not None:
+                cmd.linear.x = params[top_indices[0]][0]
+                cmd.angular.z = -params[top_indices[0]][1]
             cmd.linear.y = 0.0
             self.planning_cmd_pub.publish(cmd)
 
