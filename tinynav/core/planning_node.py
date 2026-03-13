@@ -612,9 +612,12 @@ class PlanningNode(Node):
             self.path_pub.publish(path)
 
             cmd = Twist()
-            if self.target_pose is not None:
-                cmd.linear.x = params[top_indices[0]][0]
-                cmd.angular.z = -params[top_indices[0]][1]
+            traj_index = top_indices[0]
+            cmd.linear.x = params[traj_index][0]
+            cmd.angular.z = -params[traj_index][1]
+            if self.target_pose is None or scores[traj_index] > 5.0:
+                cmd.linear.x = 0.0
+                cmd.angular.z = 0.0
             cmd.linear.y = 0.0
             self.planning_cmd_pub.publish(cmd)
 
