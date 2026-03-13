@@ -227,7 +227,7 @@ def score_trajectories_by_height_map(trajectories, height_map, origin, resolutio
             for delta_x_index in range(-delta_x_index_max, delta_x_index_max + 1):
                 for delta_z_index in range(-delta_z_index_max, delta_z_index_max + 1):
                     x_in_camera = delta_x_index * resolution
-                    z_in_camera = delta_z_index * resolution
+                    z_in_camera = delta_z_index * resolution - HALF_SAFETY_LENGTH
                     y_in_camera = 0
                     point_in_camera = np.array([x_in_camera, y_in_camera, z_in_camera])
                     point_in_world = rotation @ point_in_camera + np.array([x_world, y_world, z_world])
@@ -236,7 +236,7 @@ def score_trajectories_by_height_map(trajectories, height_map, origin, resolutio
                     if 0 <= x_img < height_map_rows and 0 <= y_img < height_map_cols:
                         delta_height = point_in_world[2] - height_map[x_img, y_img]
                         # magic number
-                        if (delta_height > -0.05):
+                        if (delta_height > 0.05):
                             cost += 0.0  # Trajectory is above the height map, no collision
                         else:
                             # Trajectory is at or below the height map, add collision cost
@@ -247,7 +247,6 @@ def score_trajectories_by_height_map(trajectories, height_map, origin, resolutio
                     else:
                         height_value.append(-np.inf)
                         grid_in_camera[delta_x_index + delta_x_index_max, delta_z_index + delta_z_index_max] = -np.inf
-            
         height_values.append(height_value)
         scores.append(cost)
 

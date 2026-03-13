@@ -210,7 +210,7 @@ def search_within_sdf_map(
                             neighbor not in open_heap_set
                             and neighbor not in visited
                             and occupancy_map[neighbor] != 2
-                            and sdf_map[neighbor] < 0.2
+                            and sdf_map[neighbor] < 0.4
                         ):
                             open_heap_set.add(neighbor)
                             heapq.heappush(
