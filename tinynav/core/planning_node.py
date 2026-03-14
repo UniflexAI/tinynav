@@ -518,7 +518,7 @@ class PlanningNode(Node):
     def poi_change_callback(self, msg):
         self.poi_changed = True
         self.poi_change_timestamp_sec = msg.header.stamp.sec
-        self.target_pose = None
+        # Do not clear target_pose here: planner should keep chasing latest /control/target_pose.
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
