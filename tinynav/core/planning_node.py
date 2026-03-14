@@ -329,6 +329,17 @@ def grid_to_world_2d(grid_xy, origin, resolution, z):
     ])
 
 
+def sample_height_from_map(point_xy, height_map, origin, resolution, default_z):
+    gx = int((point_xy[0] - origin[0]) / resolution)
+    gy = int((point_xy[1] - origin[1]) / resolution)
+    h, w = height_map.shape
+    if 0 <= gx < h and 0 <= gy < w:
+        z = height_map[gx, gy]
+        if np.isfinite(z):
+            return float(z)
+    return float(default_z)
+
+
 def clip_grid_2d(grid_xy, shape):
     x = min(max(grid_xy[0], 0), shape[0] - 1)
     y = min(max(grid_xy[1], 0), shape[1] - 1)
@@ -408,13 +419,22 @@ def build_astar_cost_map(height_map, esdf_map):
     gx, gy = np.gradient(filled)
     slope = np.sqrt(gx * gx + gy * gy)
 
+    # Stair-friendly handling:
+    # - small slope is almost free
+    # - large slope is penalized but not immediately forbidden
+    slope_penalty = np.clip(slope - 0.12, 0.0, 2.0)
+
     esdf_clamped = np.clip(esdf_map, 0.02, 2.0)
     clearance_cost = 1.0 / esdf_clamped
 
-    # Keep stairs passable: ESDF is a soft cost, not a hard veto (except very close).
-    obstacle = (~finite) | (esdf_map < 0.06)
+    # On stair-like areas, relax hard ESDF threshold a bit.
+    stair_like = slope > 0.28
+    hard_esdf = np.where(stair_like, 0.03, 0.06)
 
-    cost = 1.0 + 0.30 * np.clip(slope, 0.0, 4.0) + 0.12 * np.clip(clearance_cost, 0.0, 20.0)
+    # Keep ESDF as mostly soft cost; only very near obstacles are hard blocked.
+    obstacle = (~finite) | (esdf_map < hard_esdf)
+
+    cost = 1.0 + 0.18 * slope_penalty + 0.10 * np.clip(clearance_cost, 0.0, 20.0)
     cost[obstacle] = np.inf
     return obstacle, cost
 
@@ -688,9 +708,11 @@ class PlanningNode(Node):
 
                 grid_path = astar_2d(astar_cost, obstacle_mask, start_free, goal_free)
                 robot_z = T[2, 3]
-                local_path_world = [
-                    grid_to_world_2d(g, self.origin, self.resolution, robot_z) for g in grid_path
-                ]
+                local_path_world = []
+                for g in grid_path:
+                    p = grid_to_world_2d(g, self.origin, self.resolution, robot_z)
+                    p[2] = sample_height_from_map(p[:2], pooled_map, self.origin, self.resolution, robot_z)
+                    local_path_world.append(p)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             path_msg = Path()
