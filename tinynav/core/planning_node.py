@@ -422,19 +422,22 @@ def build_astar_cost_map(height_map, esdf_map):
     # Stair-friendly handling:
     # - small slope is almost free
     # - large slope is penalized but not immediately forbidden
-    slope_penalty = np.clip(slope - 0.10, 0.0, 2.0)
+    slope_penalty = np.clip(slope - 0.08, 0.0, 2.0)
 
-    esdf_clamped = np.clip(esdf_map, 0.015, 2.0)
+    esdf_clamped = np.clip(esdf_map, 0.012, 2.0)
     clearance_cost = 1.0 / esdf_clamped
 
     # Stair-like regions get a looser hard threshold to avoid over-blocking steps.
-    stair_like = slope > 0.22
-    hard_esdf = np.where(stair_like, 0.02, 0.045)
+    stair_like = slope > 0.18
+    hard_esdf = np.where(stair_like, 0.015, 0.04)
 
     # Keep ESDF as mostly soft cost; only very near obstacles are hard blocked.
     obstacle = (~finite) | (esdf_map < hard_esdf)
 
-    cost = 1.0 + 0.15 * slope_penalty + 0.08 * np.clip(clearance_cost, 0.0, 25.0)
+    # More permissive on stairs, more conservative on flat area.
+    slope_w = np.where(stair_like, 0.08, 0.14)
+    clear_w = np.where(stair_like, 0.05, 0.09)
+    cost = 1.0 + slope_w * slope_penalty + clear_w * np.clip(clearance_cost, 0.0, 25.0)
     cost[obstacle] = np.inf
     return obstacle, cost
 
