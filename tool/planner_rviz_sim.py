@@ -40,6 +40,7 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Twist, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Header
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 
@@ -59,6 +60,8 @@ class PlannerRvizSim(Node):
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.cam_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
         self.target_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+        self.goal_pose_echo_pub = self.create_publisher(PoseStamped, "/goal_pose", 10)
 
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)
         self.create_subscription(PoseStamped, "/goal_pose", self.goal_callback, 10)
@@ -67,6 +70,10 @@ class PlannerRvizSim(Node):
         self.hz = float(hz)
         self.dt = 1.0 / self.hz
         self.depth_m = float(depth_m)
+
+        self.goal_x = 3.0
+        self.goal_y = 0.0
+        self.have_goal = True
 
         self.width = 424
         self.height = 240
@@ -96,14 +103,26 @@ class PlannerRvizSim(Node):
         self.w = float(msg.angular.z)
 
     def goal_callback(self, msg: PoseStamped):
-        odom = Odometry()
-        odom.header.stamp = self.get_clock().now().to_msg()
-        odom.header.frame_id = "world"
-        odom.child_frame_id = "world"
-        odom.pose.pose = msg.pose
-        self.target_pub.publish(odom)
+        self.goal_x = float(msg.pose.position.x)
+        self.goal_y = float(msg.pose.position.y)
+        self.have_goal = True
+
+        # Echo goal for RViz display and diagnostics.
+        echo_msg = PoseStamped()
+        echo_msg.header.stamp = self.get_clock().now().to_msg()
+        echo_msg.header.frame_id = "world"
+        echo_msg.pose = msg.pose
+        self.goal_pose_echo_pub.publish(echo_msg)
+
+        # Trigger planner reset path branch if needed.
+        dummy = Odometry()
+        dummy.header.stamp = self.get_clock().now().to_msg()
+        dummy.header.frame_id = "world"
+        dummy.child_frame_id = "map"
+        self.poi_change_pub.publish(dummy)
+
         self.get_logger().info(
-            f"New goal: x={msg.pose.position.x:.2f}, y={msg.pose.position.y:.2f}"
+            f"New goal: x={self.goal_x:.2f}, y={self.goal_y:.2f}"
         )
 
     def initialpose_callback(self, msg: PoseWithCovarianceStamped):
@@ -205,6 +224,24 @@ class PlannerRvizSim(Node):
 
         self.odom_pub.publish(odom)
 
+    def publish_target(self, stamp_msg):
+        if not self.have_goal:
+            return
+        odom = Odometry()
+        odom.header.stamp = stamp_msg
+        odom.header.frame_id = "world"
+        odom.child_frame_id = "world"
+        odom.pose.pose.position.x = float(self.goal_x)
+        odom.pose.pose.position.y = float(self.goal_y)
+        odom.pose.pose.position.z = float(self.z)
+        odom.pose.pose.orientation.w = 1.0
+        self.target_pub.publish(odom)
+
+        pose_msg = PoseStamped()
+        pose_msg.header = Header(stamp=stamp_msg, frame_id="world")
+        pose_msg.pose = odom.pose.pose
+        self.goal_pose_echo_pub.publish(pose_msg)
+
     def tick(self):
         now_ns = self.get_clock().now().nanoseconds
         dt = max(1e-3, (now_ns - self.last_stamp_ns) * 1e-9)
@@ -219,6 +256,7 @@ class PlannerRvizSim(Node):
         self.y += v * math.sin(self.yaw) * dt
 
         stamp_msg = self.get_clock().now().to_msg()
+        self.publish_target(stamp_msg)
         self.publish_odom(stamp_msg, v)
         self.publish_depth(stamp_msg)
         self.cam_info_pub.publish(self.make_camera_info(stamp_msg))

@@ -10,7 +10,7 @@
 - 发布 `/slam/depth`（合成深度图，默认常量 2.5m）
 - 发布 `/camera/camera/infra2/camera_info`
 - 订阅 `/cmd_vel`（planner 输出速度）
-- 订阅 RViz 的 `/goal_pose`（2D Goal Pose）并转发到 `/control/target_pose`
+- 订阅 RViz 的 `/goal_pose`（2D Goal Pose）并持续发布到 `/control/target_pose`
 - 订阅 RViz 的 `/initialpose`（2D Pose Estimate）用于重置初始位姿
 
 ## 启动
@@ -50,6 +50,7 @@ rviz2
 
 交互：
 - 用 `2D Goal Pose` 点击目标（会发布 `/goal_pose`）
+- 仿真器会持续发布 `/control/target_pose`（避免 planner 只收到一次目标后无更新）
 - 可用 `2D Pose Estimate` 重置机器人位置
 
 ## 说明
