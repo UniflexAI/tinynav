@@ -19,6 +19,7 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
+import heapq
 from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from geometry_msgs.msg import Twist
 
@@ -311,6 +312,132 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     updated_origin = old_origin + shift_voxels * resolution
     return rolled, updated_origin
 
+
+def world_to_grid_2d(point_xy, origin, resolution):
+    gx = int((point_xy[0] - origin[0]) / resolution)
+    gy = int((point_xy[1] - origin[1]) / resolution)
+    return (gx, gy)
+
+
+def grid_to_world_2d(grid_xy, origin, resolution, z):
+    return np.array([
+        origin[0] + (grid_xy[0] + 0.5) * resolution,
+        origin[1] + (grid_xy[1] + 0.5) * resolution,
+        z,
+    ])
+
+
+def clip_grid_2d(grid_xy, shape):
+    x = min(max(grid_xy[0], 0), shape[0] - 1)
+    y = min(max(grid_xy[1], 0), shape[1] - 1)
+    return (x, y)
+
+
+def find_nearest_free(start, obstacle_mask, search_radius=8):
+    sx, sy = start
+    h, w = obstacle_mask.shape
+    if 0 <= sx < h and 0 <= sy < w and (not obstacle_mask[sx, sy]):
+        return (sx, sy)
+    for r in range(1, search_radius + 1):
+        x0, x1 = max(0, sx - r), min(h - 1, sx + r)
+        y0, y1 = max(0, sy - r), min(w - 1, sy + r)
+        for x in range(x0, x1 + 1):
+            for y in range(y0, y1 + 1):
+                if not obstacle_mask[x, y]:
+                    return (x, y)
+    return None
+
+
+def astar_2d(cost_map, obstacle_mask, start, goal):
+    if start is None or goal is None:
+        return []
+    if obstacle_mask[start] or obstacle_mask[goal]:
+        return []
+
+    def heuristic(a, b):
+        return np.hypot(a[0] - b[0], a[1] - b[1])
+
+    neighbors = [
+        (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+        (-1, -1, 1.4142), (-1, 1, 1.4142), (1, -1, 1.4142), (1, 1, 1.4142),
+    ]
+
+    open_heap = []
+    heapq.heappush(open_heap, (heuristic(start, goal), 0.0, start))
+    g_score = {start: 0.0}
+    parent = {start: start}
+    closed = set()
+
+    h, w = obstacle_mask.shape
+    while open_heap:
+        _, g_cur, cur = heapq.heappop(open_heap)
+        if cur in closed:
+            continue
+        closed.add(cur)
+
+        if cur == goal:
+            path = [cur]
+            while path[-1] != parent[path[-1]]:
+                path.append(parent[path[-1]])
+            path.reverse()
+            return path
+
+        cx, cy = cur
+        for dx, dy, step_cost in neighbors:
+            nx, ny = cx + dx, cy + dy
+            if nx < 0 or nx >= h or ny < 0 or ny >= w:
+                continue
+            if obstacle_mask[nx, ny]:
+                continue
+            n = (nx, ny)
+            trans_cost = step_cost * (0.5 * (cost_map[cx, cy] + cost_map[nx, ny]))
+            new_g = g_cur + trans_cost
+            if new_g < g_score.get(n, float('inf')):
+                g_score[n] = new_g
+                parent[n] = cur
+                f = new_g + heuristic(n, goal)
+                heapq.heappush(open_heap, (f, new_g, n))
+    return []
+
+
+def build_astar_cost_map(height_map, esdf_map):
+    finite = np.isfinite(height_map)
+    filled = np.nan_to_num(height_map, nan=0.0, neginf=0.0, posinf=0.0)
+    gx, gy = np.gradient(filled)
+    slope = np.sqrt(gx * gx + gy * gy)
+
+    esdf_clamped = np.clip(esdf_map, 0.02, 2.0)
+    clearance_cost = 1.0 / esdf_clamped
+
+    # Keep stairs passable: ESDF is a soft cost, not a hard veto (except very close).
+    obstacle = (~finite) | (esdf_map < 0.08)
+
+    cost = 1.0 + 0.30 * np.clip(slope, 0.0, 4.0) + 0.20 * np.clip(clearance_cost, 0.0, 20.0)
+    cost[obstacle] = np.inf
+    return obstacle, cost
+
+
+def pick_lookahead_point(path_world, robot_xy, lookahead_dist=0.6):
+    if len(path_world) == 0:
+        return None
+    d_best = float('inf')
+    i_best = 0
+    for i, p in enumerate(path_world):
+        d = np.linalg.norm(p[:2] - robot_xy)
+        if d < d_best:
+            d_best = d
+            i_best = i
+    for i in range(i_best, len(path_world)):
+        if np.linalg.norm(path_world[i][:2] - robot_xy) >= lookahead_dist:
+            return path_world[i]
+    return path_world[-1]
+
+
+def signed_angle_between(v_from, v_to):
+    cross = v_from[0] * v_to[1] - v_from[1] * v_to[0]
+    dot = v_from[0] * v_to[0] + v_from[1] * v_to[1]
+    return np.arctan2(cross, dot)
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -523,102 +650,78 @@ class PlanningNode(Node):
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
 
-        with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            v_dir = T[:3, :3] @ np.array([0, 0, 1])
-            magnitude = np.clip(self.smoothed_velocity, -0.1, 0.5)
-            init_v = v_dir * float(magnitude)
-            trajectories, params = generate_trajectory_library_3d(
-                init_p = T[:3, 3],
-                init_v = init_v,
-                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            )
-            self.last_T = T
-            self.last_stamp = stamp
+        with Timer(name='local astar plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            local_path_world = []
+            if self.target_pose is not None:
+                obstacle_mask, astar_cost = build_astar_cost_map(pooled_map, ESDF_map)
 
-        with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            scores, height_values = score_trajectories_by_height_map(trajectories, pooled_map, self.origin, self.resolution)
+                start_idx = clip_grid_2d(world_to_grid_2d(T[:2, 3], self.origin, self.resolution), obstacle_mask.shape)
+                goal_idx = clip_grid_2d(world_to_grid_2d(self.target_pose[:2], self.origin, self.resolution), obstacle_mask.shape)
 
-        #with Timer(name='vis traj scores', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        #    self.publish_height_map_traj(pooled_map, trajectories, occ_points, top_indices, scores, params, self.origin, self.resolution)
+                start_free = find_nearest_free(start_idx, obstacle_mask)
+                goal_free = find_nearest_free(goal_idx, obstacle_mask)
 
-        # save height_map and current pose with numpy
-        #with Timer(name="save state", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            #np.save(f"/tinynav/output/height_map.npy", pooled_map)
-            #np.save(f"/tinynav/output/current_pose.npy", T)
-            #np.save(f"/tinynav/output/origin.npy", self.origin)
-            #np.save(f"/tinynav/output/smoothed_velocity.npy", self.smoothed_velocity)
-            #np.save(f"/tinynav/output/target_pose.npy", self.target_pose)
+                grid_path = astar_2d(astar_cost, obstacle_mask, start_free, goal_free)
+                robot_z = T[2, 3]
+                local_path_world = [
+                    grid_to_world_2d(g, self.origin, self.resolution, robot_z) for g in grid_path
+                ]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            def cost_function(traj, param, score, target_pose):
-                traj_end = np.array(traj[-1,:3])
-                target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
-                final_score = score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
-                # Same safety: prefer higher speed and larger turning radius (smaller |omega|).
-                if score <= 1.0 and param[0] > 0:
-                    final_score -= 20.0 * param[0]
-                final_score += 15.0 * np.abs(param[1])
-                if param[0] < 0:
-                    final_score = score * 100000 + 1000
-                    return final_score
-                elif np.abs(param[0]) < 1e-3:
-                    if target_pose is None:
-                        return final_score
-                    diff = target_pose - traj_end
-                    norm_diff = np.linalg.norm(diff)
-                    if norm_diff < 1e-6:
-                        return final_score
-                    target_direction = diff / norm_diff
-                    rotation = quat_to_matrix(traj[-1, 3:])
-                    target_direction_in_camera = rotation.T @ target_direction
-                    cos_angle = np.dot(target_direction_in_camera, np.array([0, 0, 1]))
-                    final_score = 1.0 - cos_angle + final_score
-                return final_score
+            path_msg = Path()
+            path_msg.header = depth_msg.header
+            path_msg.header.frame_id = "world"
 
-            top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
-            self.last_param = params[top_indices[0]]
-
-            if self.poi_changed and (depth_msg.header.stamp.sec - self.poi_change_timestamp_sec) > 3.0:
-                self.poi_changed = False
-
-            # path
-            path = Path()
-            path.header = depth_msg.header
-            path.header.frame_id = "world"
-            for i in top_indices:
-                print(f"trajectory {i} d_acc: {params[i][0]}, omega_y: {params[i][1]}, score: {scores[i]:.1f}, velocity: {self.smoothed_velocity:.2f}")
-                # save trajectory as numpy array
-                #np.save(f"/tinynav/output/trajectory.npy", trajectories[i])
-                for j in range(0, len(trajectories[i]), 10):
-                    x,y,z,qx,qy,qz,qw = trajectories[i][j]
-                    #if self.poi_changed or self.target_pose is None:
-                    #    x,y,z,qx,qy,qz,qw = trajectories[i][0]
-                    if scores[i] > 5.0:
-                        x,y,z,qx,qy,qz,qw = trajectories[i][0]
-
-                    pose = PoseStamped()
-                    pose.header = depth_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = qx
-                    pose.pose.orientation.y = qy
-                    pose.pose.orientation.z = qz
-                    pose.pose.orientation.w = qw
-                    path.poses.append(pose)
-            self.path_pub.publish(path)
+            for p in local_path_world[::2]:
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = float(p[0])
+                pose.pose.position.y = float(p[1])
+                pose.pose.position.z = float(p[2])
+                pose.pose.orientation.w = 1.0
+                path_msg.poses.append(pose)
+            self.path_pub.publish(path_msg)
 
             cmd = Twist()
-            traj_index = top_indices[0]
-            cmd.linear.x = params[traj_index][0]
-            cmd.angular.z = -params[traj_index][1]
-            if self.target_pose is None or scores[traj_index] > 5.0:
+            if self.target_pose is None:
                 cmd.linear.x = 0.0
                 cmd.angular.z = 0.0
+            else:
+                robot_xy = T[:2, 3]
+                target_dist = np.linalg.norm(self.target_pose[:2] - robot_xy)
+                if target_dist < 0.25:
+                    cmd.linear.x = 0.0
+                    cmd.angular.z = 0.0
+                elif len(local_path_world) < 2:
+                    # Recovery behavior: turn in place to re-observe when local plan fails.
+                    cmd.linear.x = 0.0
+                    cmd.angular.z = 0.45
+                else:
+                    lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=0.7)
+                    forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                    forward_xy = forward_world[:2]
+                    norm_f = np.linalg.norm(forward_xy)
+                    to_wp = lookahead[:2] - robot_xy
+                    norm_t = np.linalg.norm(to_wp)
+
+                    if norm_f < 1e-6 or norm_t < 1e-6:
+                        cmd.linear.x = 0.0
+                        cmd.angular.z = 0.0
+                    else:
+                        forward_xy = forward_xy / norm_f
+                        to_wp = to_wp / norm_t
+                        heading_err = signed_angle_between(forward_xy, to_wp)
+
+                        cmd.angular.z = float(np.clip(1.4 * heading_err, -0.9, 0.9))
+                        heading_scale = max(0.0, np.cos(heading_err))
+                        dist_scale = np.clip(target_dist / 1.0, 0.2, 1.0)
+                        cmd.linear.x = float(np.clip(0.35 * heading_scale * dist_scale, 0.0, 0.35))
+                        if abs(heading_err) > 1.0:
+                            cmd.linear.x *= 0.2
+
             cmd.linear.y = 0.0
             self.planning_cmd_pub.publish(cmd)
+
 
 def main(args=None):
     rclpy.init(args=args)
