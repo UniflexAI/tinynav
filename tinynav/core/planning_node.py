@@ -410,9 +410,9 @@ def build_astar_cost_map(height_map, esdf_map):
     clearance_cost = 1.0 / esdf_clamped
 
     # Keep stairs passable: ESDF is a soft cost, not a hard veto (except very close).
-    obstacle = (~finite) | (esdf_map < 0.08)
+    obstacle = (~finite) | (esdf_map < 0.06)
 
-    cost = 1.0 + 0.30 * np.clip(slope, 0.0, 4.0) + 0.20 * np.clip(clearance_cost, 0.0, 20.0)
+    cost = 1.0 + 0.30 * np.clip(slope, 0.0, 4.0) + 0.12 * np.clip(clearance_cost, 0.0, 20.0)
     cost[obstacle] = np.inf
     return obstacle, cost
 
@@ -695,9 +695,9 @@ class PlanningNode(Node):
                 elif len(local_path_world) < 2:
                     # Recovery behavior: turn in place to re-observe when local plan fails.
                     cmd.linear.x = 0.0
-                    cmd.angular.z = 0.45
+                    cmd.angular.z = 0.6
                 else:
-                    lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=0.7)
+                    lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=0.6)
                     forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
                     forward_xy = forward_world[:2]
                     norm_f = np.linalg.norm(forward_xy)
@@ -712,12 +712,12 @@ class PlanningNode(Node):
                         to_wp = to_wp / norm_t
                         heading_err = signed_angle_between(forward_xy, to_wp)
 
-                        cmd.angular.z = float(np.clip(1.4 * heading_err, -0.9, 0.9))
+                        cmd.angular.z = float(np.clip(1.8 * heading_err, -1.2, 1.2))
                         heading_scale = max(0.0, np.cos(heading_err))
                         dist_scale = np.clip(target_dist / 1.0, 0.2, 1.0)
-                        cmd.linear.x = float(np.clip(0.35 * heading_scale * dist_scale, 0.0, 0.35))
+                        cmd.linear.x = float(np.clip(0.33 * heading_scale * dist_scale, 0.0, 0.33))
                         if abs(heading_err) > 1.0:
-                            cmd.linear.x *= 0.2
+                            cmd.linear.x *= 0.15
 
             cmd.linear.y = 0.0
             self.planning_cmd_pub.publish(cmd)
