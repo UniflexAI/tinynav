@@ -422,19 +422,19 @@ def build_astar_cost_map(height_map, esdf_map):
     # Stair-friendly handling:
     # - small slope is almost free
     # - large slope is penalized but not immediately forbidden
-    slope_penalty = np.clip(slope - 0.12, 0.0, 2.0)
+    slope_penalty = np.clip(slope - 0.10, 0.0, 2.0)
 
-    esdf_clamped = np.clip(esdf_map, 0.02, 2.0)
+    esdf_clamped = np.clip(esdf_map, 0.015, 2.0)
     clearance_cost = 1.0 / esdf_clamped
 
-    # On stair-like areas, relax hard ESDF threshold a bit.
-    stair_like = slope > 0.28
-    hard_esdf = np.where(stair_like, 0.03, 0.06)
+    # Stair-like regions get a looser hard threshold to avoid over-blocking steps.
+    stair_like = slope > 0.22
+    hard_esdf = np.where(stair_like, 0.02, 0.045)
 
     # Keep ESDF as mostly soft cost; only very near obstacles are hard blocked.
     obstacle = (~finite) | (esdf_map < hard_esdf)
 
-    cost = 1.0 + 0.18 * slope_penalty + 0.10 * np.clip(clearance_cost, 0.0, 20.0)
+    cost = 1.0 + 0.15 * slope_penalty + 0.08 * np.clip(clearance_cost, 0.0, 25.0)
     cost[obstacle] = np.inf
     return obstacle, cost
 
@@ -740,9 +740,21 @@ class PlanningNode(Node):
                     cmd.linear.x = 0.0
                     cmd.angular.z = 0.0
                 elif len(local_path_world) < 2:
-                    # Recovery behavior: turn in place to re-observe when local plan fails.
-                    cmd.linear.x = 0.0
-                    cmd.angular.z = 0.6
+                    # Recovery behavior: cautiously probe toward target instead of pure spinning.
+                    forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                    forward_xy = forward_world[:2]
+                    to_target = self.target_pose[:2] - robot_xy
+                    norm_f = np.linalg.norm(forward_xy)
+                    norm_t = np.linalg.norm(to_target)
+                    if norm_f < 1e-6 or norm_t < 1e-6:
+                        cmd.linear.x = 0.0
+                        cmd.angular.z = 0.5
+                    else:
+                        forward_xy = forward_xy / norm_f
+                        to_target = to_target / norm_t
+                        heading_err = signed_angle_between(forward_xy, to_target)
+                        cmd.angular.z = float(np.clip(1.6 * heading_err, -1.0, 1.0))
+                        cmd.linear.x = 0.08 if abs(heading_err) < 0.6 else 0.03
                 else:
                     lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=0.6)
                     forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
