@@ -40,7 +40,6 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import Twist, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Header
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
 
@@ -51,7 +50,13 @@ def yaw_to_quat(yaw: float):
 
 
 class PlannerRvizSim(Node):
-    def __init__(self, hz: float = 20.0, depth_m: float = 2.5):
+    def __init__(
+        self,
+        hz: float = 20.0,
+        depth_m: float = 2.5,
+        scene: str = "flat",
+        target_mode: str = "once",
+    ):
         super().__init__("planner_rviz_sim")
 
         self.bridge = CvBridge()
@@ -61,7 +66,6 @@ class PlannerRvizSim(Node):
         self.cam_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
         self.target_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
-        self.goal_pose_echo_pub = self.create_publisher(PoseStamped, "/goal_pose", 10)
 
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)
         self.create_subscription(PoseStamped, "/goal_pose", self.goal_callback, 10)
@@ -70,10 +74,13 @@ class PlannerRvizSim(Node):
         self.hz = float(hz)
         self.dt = 1.0 / self.hz
         self.depth_m = float(depth_m)
+        self.scene = scene
+        self.target_mode = target_mode
 
         self.goal_x = 3.0
         self.goal_y = 0.0
-        self.have_goal = True
+        self.have_goal = False
+        self.goal_publish_latch = False
 
         self.width = 424
         self.height = 240
@@ -106,13 +113,7 @@ class PlannerRvizSim(Node):
         self.goal_x = float(msg.pose.position.x)
         self.goal_y = float(msg.pose.position.y)
         self.have_goal = True
-
-        # Echo goal for RViz display and diagnostics.
-        echo_msg = PoseStamped()
-        echo_msg.header.stamp = self.get_clock().now().to_msg()
-        echo_msg.header.frame_id = "world"
-        echo_msg.pose = msg.pose
-        self.goal_pose_echo_pub.publish(echo_msg)
+        self.goal_publish_latch = False
 
         # Trigger planner reset path branch if needed.
         dummy = Odometry()
@@ -159,8 +160,41 @@ class PlannerRvizSim(Node):
         ]
         return msg
 
-    def publish_depth(self, stamp_msg):
+    def build_depth_image(self):
         depth = np.full((self.height, self.width), self.depth_m, dtype=np.float32)
+
+        if self.scene == "flat":
+            return depth
+
+        # Add synthetic obstacles in camera depth image (forward is image center area).
+        if self.scene in ("corridor", "stairs"):
+            # left/right walls with a forward gap
+            depth[:, :35] = np.minimum(depth[:, :35], 0.7)
+            depth[:, -35:] = np.minimum(depth[:, -35:], 0.7)
+
+        if self.scene in ("obstacles", "stairs"):
+            # center obstacle block
+            r0, r1 = int(self.height * 0.45), int(self.height * 0.75)
+            c0, c1 = int(self.width * 0.44), int(self.width * 0.56)
+            depth[r0:r1, c0:c1] = np.minimum(depth[r0:r1, c0:c1], 0.45)
+
+            # second obstacle slightly right
+            r0, r1 = int(self.height * 0.35), int(self.height * 0.62)
+            c0, c1 = int(self.width * 0.66), int(self.width * 0.78)
+            depth[r0:r1, c0:c1] = np.minimum(depth[r0:r1, c0:c1], 0.55)
+
+        if self.scene == "stairs":
+            # stair-like bands: closer depth on lower image rows
+            for k in range(6):
+                rs = int(self.height * (0.55 + 0.06 * k))
+                re = min(self.height, rs + int(self.height * 0.045))
+                z = max(0.35, 1.3 - 0.15 * k)
+                depth[rs:re, :] = np.minimum(depth[rs:re, :], z)
+
+        return depth
+
+    def publish_depth(self, stamp_msg):
+        depth = self.build_depth_image()
         depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
         depth_msg.header.stamp = stamp_msg
         depth_msg.header.frame_id = "camera"
@@ -227,6 +261,9 @@ class PlannerRvizSim(Node):
     def publish_target(self, stamp_msg):
         if not self.have_goal:
             return
+        if self.target_mode == "once" and self.goal_publish_latch:
+            return
+
         odom = Odometry()
         odom.header.stamp = stamp_msg
         odom.header.frame_id = "world"
@@ -236,11 +273,7 @@ class PlannerRvizSim(Node):
         odom.pose.pose.position.z = float(self.z)
         odom.pose.pose.orientation.w = 1.0
         self.target_pub.publish(odom)
-
-        pose_msg = PoseStamped()
-        pose_msg.header = Header(stamp=stamp_msg, frame_id="world")
-        pose_msg.pose = odom.pose.pose
-        self.goal_pose_echo_pub.publish(pose_msg)
+        self.goal_publish_latch = True
 
     def tick(self):
         now_ns = self.get_clock().now().nanoseconds
@@ -266,11 +299,30 @@ class PlannerRvizSim(Node):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hz", type=float, default=20.0, help="Publish/control rate")
-    parser.add_argument("--depth", type=float, default=2.5, help="Synthetic constant depth in meters")
+    parser.add_argument("--depth", type=float, default=2.5, help="Synthetic base depth in meters")
+    parser.add_argument(
+        "--scene",
+        type=str,
+        choices=["flat", "corridor", "obstacles", "stairs"],
+        default="flat",
+        help="Synthetic depth scene profile",
+    )
+    parser.add_argument(
+        "--target_mode",
+        type=str,
+        choices=["once", "continuous"],
+        default="once",
+        help="How /control/target_pose is published after RViz goal",
+    )
     args = parser.parse_args()
 
     rclpy.init()
-    node = PlannerRvizSim(hz=args.hz, depth_m=args.depth)
+    node = PlannerRvizSim(
+        hz=args.hz,
+        depth_m=args.depth,
+        scene=args.scene,
+        target_mode=args.target_mode,
+    )
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
