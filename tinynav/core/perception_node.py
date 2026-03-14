@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import time
 import cv2
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 import numpy as np
@@ -85,26 +86,51 @@ looper_signature = [
 ]
 
 class PerceptionNode(Node):
-    def __init__(self, verbose_timer: bool = True):
+    def __init__(self, verbose_timer: bool = True, sensor_source: str = "auto"):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
-        active_topics = [t[0] for t in self.get_topic_names_and_types()]
-        
+
+        if sensor_source == "realsense":
+            signature = realsense_signature
+            sp_model, stereo_model = "240x424", "480x848"
+        elif sensor_source == "insight":
+            signature = looper_signature
+            sp_model, stereo_model = "320x272", "640x544"
+        else:
+            signature, sp_model, stereo_model = None, None, None
+
+        start_wait = time.time()
+        last_log = 0.0
         while True:
-            if all(topic in active_topics for topic in realsense_signature):
-                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = realsense_signature
-                self.superpoint = SuperPointTRT("240x424")
-                self.stereo_engine = StereoEngineTRT("480x848")
+            active_topics = [t[0] for t in self.get_topic_names_and_types()]
+            if sensor_source == "auto":
+                if all(topic in active_topics for topic in realsense_signature):
+                    signature = realsense_signature
+                    sp_model, stereo_model = "240x424", "480x848"
+                    break
+                if all(topic in active_topics for topic in looper_signature):
+                    signature = looper_signature
+                    sp_model, stereo_model = "320x272", "640x544"
+                    break
+            elif all(topic in active_topics for topic in signature):
                 break
-            # elif all(topic in active_topics for topic in looper_signature):
-            #     imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
-            #     self.superpoint = SuperPointTRT("320x272")
-            #     self.stereo_engine = StereoEngineTRT("640x544")
-            #     break
-            else:
-                self.logger.error(f"Invalid active topics: {active_topics}")
-                active_topics = [t[0] for t in self.get_topic_names_and_types()]
+
+            now = time.time()
+            if now - last_log > 2.0:
+                self.logger.warning(
+                    f"Waiting sensor topics for source={sensor_source}. Active topics count={len(active_topics)}"
+                )
+                last_log = now
+            if now - start_wait > 60.0:
+                raise RuntimeError(
+                    f"Timeout waiting required topics for source={sensor_source}."
+                )
+            time.sleep(0.2)
+
+        imu_topic_name, left_image_topic_name, right_image_topic_name, camera_info_topic_name = signature
+        self.superpoint = SuperPointTRT(sp_model)
+        self.stereo_engine = StereoEngineTRT(stereo_model)
 
         self.light_glue = LightGlueTRT()
 
@@ -541,6 +567,13 @@ def main(args=None):
     parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parser.add_argument("--log_file", type=str, default="odom.log", help="Path to the log file")
+    parser.add_argument(
+        "--sensor_source",
+        type=str,
+        choices=["auto", "realsense", "insight"],
+        default="auto",
+        help="Sensor topic source selection",
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     print(f"Verbose timer: {parsed_args.verbose_timer}")
 
@@ -551,7 +584,10 @@ def main(args=None):
         handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
     )
 
-    perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
+    perception_node = PerceptionNode(
+        verbose_timer=parsed_args.verbose_timer,
+        sensor_source=parsed_args.sensor_source,
+    )
 
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(perception_node)

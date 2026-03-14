@@ -1,5 +1,7 @@
+import argparse
 import matplotlib
 matplotlib.use('Agg')
+import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -440,7 +442,7 @@ def signed_angle_between(v_from, v_to):
 
 # === PlanningNode class ===
 class PlanningNode(Node):
-    def __init__(self):
+    def __init__(self, sensor_source: str = 'auto'):
         super().__init__('planning_node')
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
@@ -456,17 +458,40 @@ class PlanningNode(Node):
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
 
-        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        if sensor_source == 'realsense':
+            camera_info_topic = '/camera/camera/infra2/camera_info'
+        elif sensor_source == 'insight':
+            camera_info_topic = '/insight/camera_right_info'
+        else:
+            camera_info_topic = None
+
+        start_wait = time.time()
+        last_log = 0.0
         while True:
-            if '/camera/camera/infra2/camera_info' in active_topics:
-                self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+            active_topics = [t[0] for t in self.get_topic_names_and_types()]
+            if camera_info_topic is None:
+                if '/camera/camera/infra2/camera_info' in active_topics:
+                    camera_info_topic = '/camera/camera/infra2/camera_info'
+                elif '/insight/camera_right_info' in active_topics:
+                    camera_info_topic = '/insight/camera_right_info'
+
+            if camera_info_topic in active_topics:
+                self.camera_info_sub = self.create_subscription(
+                    CameraInfo, camera_info_topic, self.info_callback, 10
+                )
                 break
-            # elif '/insight/camera_right_info' in active_topics:
-            #     self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
-            #     break
-            else:
-                #self.logger.error(f"Invalid active topics: {active_topics}")
-                active_topics = [t[0] for t in self.get_topic_names_and_types()]
+
+            now = time.time()
+            if now - last_log > 2.0:
+                self.get_logger().warning(
+                    f"Waiting camera info topic for source={sensor_source}. Active topics count={len(active_topics)}"
+                )
+                last_log = now
+            if now - start_wait > 60.0:
+                raise RuntimeError(
+                    f"Timeout waiting camera info topic for source={sensor_source}."
+                )
+            time.sleep(0.2)
 
 
         self.grid_shape = (100, 100, 10)
@@ -724,8 +749,18 @@ class PlanningNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = PlanningNode()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--sensor_source',
+        type=str,
+        choices=['auto', 'realsense', 'insight'],
+        default='auto',
+        help='Sensor topic source selection',
+    )
+    parsed_args, unknown_args = parser.parse_known_args(args)
+
+    rclpy.init(args=unknown_args)
+    node = PlanningNode(sensor_source=parsed_args.sensor_source)
 
     rclpy.spin(node)
     node.destroy_node()

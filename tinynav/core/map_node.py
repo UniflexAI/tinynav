@@ -1,5 +1,6 @@
 import rclpy
 import os
+import time
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -227,7 +228,11 @@ def search_within_sdf_map(
 
 class MapNode(Node):
     def __init__(
-        self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True
+        self,
+        tinynav_db_path: str,
+        tinynav_map_path: str,
+        verbose_timer: bool = True,
+        sensor_source: str = "auto",
     ):
         """Initialization
 
@@ -272,24 +277,43 @@ class MapNode(Node):
         )
         self.ts.registerCallback(self.keyframe_callback)
 
-        active_topics = [t[0] for t in self.get_topic_names_and_types()]
+        if sensor_source == "realsense":
+            camera_info_topic = "/camera/camera/infra2/camera_info"
+        elif sensor_source == "insight":
+            camera_info_topic = "/insight/camera_right_info"
+        else:
+            camera_info_topic = None
+
+        start_wait = time.time()
+        last_log = 0.0
         while True:
-            if "/camera/camera/infra2/camera_info" in active_topics:
+            active_topics = [t[0] for t in self.get_topic_names_and_types()]
+            if camera_info_topic is None:
+                if "/camera/camera/infra2/camera_info" in active_topics:
+                    camera_info_topic = "/camera/camera/infra2/camera_info"
+                elif "/insight/camera_right_info" in active_topics:
+                    camera_info_topic = "/insight/camera_right_info"
+
+            if camera_info_topic in active_topics:
                 self.camera_info_sub = self.create_subscription(
                     CameraInfo,
-                    "/camera/camera/infra2/camera_info",
+                    camera_info_topic,
                     self.info_callback,
                     10,
                 )
                 break
-            # elif "/insight/camera_right_info" in active_topics:
-            #     self.camera_info_sub = self.create_subscription(
-            #         CameraInfo, "/insight/camera_right_info", self.info_callback, 10
-            #     )
-            #     break
-            else:
-                self.logger.error(f"Invalid active topics: {active_topics}")
-                active_topics = [t[0] for t in self.get_topic_names_and_types()]
+
+            now = time.time()
+            if now - last_log > 2.0:
+                self.logger.warning(
+                    f"Waiting camera info topic for source={sensor_source}. Active topics count={len(active_topics)}"
+                )
+                last_log = now
+            if now - start_wait > 60.0:
+                raise RuntimeError(
+                    f"Timeout waiting camera info topic for source={sensor_source}."
+                )
+            time.sleep(0.2)
 
         self.K = None
         self.baseline = None
@@ -943,9 +967,7 @@ class MapNode(Node):
                 print(f"target_position_in_odom: {target_position_in_odom}")
 
                 self.target_pose_pub.publish(
-                    np2msg(
-                        dummy_pose, self.get_clock().now().to_msg(), "world", "camera"
-                    )
+                    np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "world")
                 )
                 path_msg = Path()
                 path_msg.header.stamp = self.get_clock().now().to_msg()
@@ -1051,11 +1073,19 @@ def main(args=None):
         action="store_false",
         help="Disable verbose timer output",
     )
+    parser.add_argument(
+        "--sensor_source",
+        type=str,
+        choices=["auto", "realsense", "insight"],
+        default="auto",
+        help="Sensor topic source selection",
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(
         tinynav_db_path=parsed_args.tinynav_db_path,
         tinynav_map_path=parsed_args.tinynav_map_path,
         verbose_timer=parsed_args.verbose_timer,
+        sensor_source=parsed_args.sensor_source,
     )
 
     rclpy.spin(node)

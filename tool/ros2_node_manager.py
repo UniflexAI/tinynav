@@ -16,14 +16,14 @@ class Ros2NodeManager(Node):
         self.bag_path = os.path.join(tinynav_db_path, 'bag')
         self.map_path = os.path.join(tinynav_db_path, 'map')
         self.nav_out_path = os.path.join(tinynav_db_path, 'nav_out')
-        
+
         self.state_pub = self.create_publisher(String, '/service/state', 10)
         self.create_subscription(String, '/service/command', self._cmd_cb, 10)
-        
+
         self.state_timer = self.create_timer(1.0, self._pub_state)
         self.process_monitor_timer = self.create_timer(2.0, self._check_processes)
         self._pub_state()
-    
+
     def _cmd_cb(self, msg):
         cmd = msg.data.strip()
         if cmd == self.state:
@@ -31,7 +31,7 @@ class Ros2NodeManager(Node):
         elif cmd in ['realsense_sensor', 'realsense_bag_record', 'rosbag_build_map', 'navigation']:
             self._stop_all()
             self._start(cmd)
-    
+
     def _start(self, mode):
         if mode == 'realsense_sensor':
             self._start_realsense_sensor()
@@ -43,7 +43,7 @@ class Ros2NodeManager(Node):
             self._start_navigation()
         self.state = mode
         self._pub_state()
-    
+
     def _get_realsense_cmd(self):
         return [
             'ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
@@ -55,16 +55,16 @@ class Ros2NodeManager(Node):
             'unite_imu_method:=2',
             'depth_module.emitter_enabled:=0'
         ]
-    
+
     def _start_realsense_sensor(self):
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
-    
+
     def _start_realsense_bag_record(self):
         if os.path.exists(self.bag_path):
             shutil.rmtree(self.bag_path)
-        
+
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
-        
+
         topics = [
             '/camera/camera/infra1/camera_info',
             '/camera/camera/infra1/image_rect_raw',
@@ -103,23 +103,23 @@ class Ros2NodeManager(Node):
         ]
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', self.bag_path] + topics
         self.processes['bag_record'] = self._spawn(cmd_bag)
-    
+
     def _start_rosbag_build_map(self):
         bag_file = os.path.join(self.bag_path, 'bag_0.db3')
         if not os.path.exists(bag_file):
             self.get_logger().warn(f'Bag file not found: {bag_file}')
             return
-        
+
         cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
         self.processes['perception'] = self._spawn(cmd_perception)
-        
+
         cmd_build = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
             '--map_save_path', self.map_path,
             '--bag_file', bag_file
         ]
         self.processes['build_map'] = self._spawn(cmd_build)
-        
+
         def wait_and_convert():
             proc_build = self.processes.get('build_map')
             if proc_build:
@@ -133,37 +133,44 @@ class Ros2NodeManager(Node):
             self._stop_all()
             self.state = 'idle'
             self._pub_state()
-        
+
         threading.Thread(target=wait_and_convert, daemon=True).start()
-    
+
     def _start_navigation(self):
         if os.path.exists('nav_bag'):
             shutil.rmtree('nav_bag')
-        
-        cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+
+        cmd_perception = [
+            'uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py',
+            '--sensor_source', 'realsense'
+        ]
         self.processes['perception'] = self._spawn(cmd_perception)
-        
-        cmd_planning = ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py']
+
+        cmd_planning = [
+            'uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py',
+            '--sensor_source', 'realsense'
+        ]
         self.processes['planning'] = self._spawn(cmd_planning)
-        
+
         # cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
         # self.processes['control'] = self._spawn(cmd_control)
-        
+
         cmd_map = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
             '--tinynav_db_path', self.nav_out_path,
-            '--tinynav_map_path', self.map_path
+            '--tinynav_map_path', self.map_path,
+            '--sensor_source', 'realsense'
         ]
         self.processes['map'] = self._spawn(cmd_map)
-        
+
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
-        
+
         topics = [
-            '/tf', 
-            '/cmd_vel_stamped', 
-            '/mapping/global_plan', 
+            '/tf',
+            '/cmd_vel_stamped',
+            '/mapping/global_plan',
             '/mapping/poi',
-            '/mapping/poi_change', 
+            '/mapping/poi_change',
             '/planning/trajectory_path',
             '/planning/occupied_voxels',
             '/slam/odometry',
@@ -195,11 +202,11 @@ class Ros2NodeManager(Node):
         ]
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', 'nav_bag'] + topics
         self.processes['bag_record'] = self._spawn(cmd_bag)
-    
+
     def _spawn(self, cmd):
         env = os.environ.copy()
         return subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)
-    
+
     def _stop_all(self):
         for name, proc in list(self.processes.items()):
             if proc and proc.poll() is None:
@@ -215,14 +222,14 @@ class Ros2NodeManager(Node):
         if self.state != 'idle':
             self.state = 'idle'
             self._pub_state()
-    
+
     def _check_processes(self):
         if self.state == 'idle' or not self.processes:
             return
-        
+
         allow_exit = {'build_map'} if self.state == 'rosbag_build_map' else set()
         failed = []
-        
+
         for name, proc in list(self.processes.items()):
             if not proc:
                 continue
@@ -232,7 +239,7 @@ class Ros2NodeManager(Node):
                     self.processes.pop(name, None)
                 else:
                     failed.append((name, retcode))
-        
+
         if failed:
             for name, retcode in failed:
                 self.get_logger().error(f'Process {name} exited with code {retcode}')
@@ -240,10 +247,10 @@ class Ros2NodeManager(Node):
             failed_names = ','.join(name for name, _ in failed)
             self.state = f'error:{failed_names}'
             self._pub_state()
-    
+
     def _pub_state(self):
         self.state_pub.publish(String(data=self.state))
-    
+
     def destroy_node(self):
         self._stop_all()
         super().destroy_node()
