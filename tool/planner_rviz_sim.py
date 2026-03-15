@@ -166,6 +166,10 @@ class PlannerRvizSim(Node):
         if self.scene == "flat":
             return depth
 
+        if self.scene == "empty":
+            # No returns anywhere: planners will see free space after occupancy decay.
+            return np.zeros((self.height, self.width), dtype=np.float32)
+
         # Add synthetic obstacles in camera depth image (forward is image center area).
         if self.scene in ("corridor", "stairs"):
             # left/right walls with a forward gap
@@ -304,8 +308,8 @@ def main():
     parser.add_argument(
         "--scene",
         type=str,
-        choices=["flat", "corridor", "obstacles", "stairs"],
-        default="flat",
+        choices=["empty", "flat", "corridor", "obstacles", "stairs"],
+        default="empty",
         help="Synthetic depth scene profile",
     )
     parser.add_argument(
