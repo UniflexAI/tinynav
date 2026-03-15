@@ -538,6 +538,20 @@ class PlanningNode(Node):
         self.poi_changed = False
         self.poi_change_timestamp_sec = 0.0
 
+        # Keep planning event-driven (sync depth+odom), but publish cmd at a fixed rate.
+        self.cmd_rate_hz = 20.0
+        self.path_stale_slow_s = 0.3
+        self.path_stale_stop_s = 0.6
+        self.max_linear_acc = 0.8   # m/s^2
+        self.max_angular_acc = 2.5  # rad/s^2
+
+        self.latest_cmd = Twist()
+        self.prev_cmd = Twist()
+        self.last_cmd_pub_time = time.monotonic()
+        self.last_path_update_time = None
+
+        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
+
     def poi_change_callback(self, msg):
         self.poi_changed = True
         self.poi_change_timestamp_sec = msg.header.stamp.sec
@@ -650,6 +664,37 @@ class PlanningNode(Node):
             PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
+
+    def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
+        return float(np.clip(target - current, -max_delta, max_delta) + current)
+
+    def cmd_timer_callback(self):
+        now = time.monotonic()
+        dt = max(1e-3, now - self.last_cmd_pub_time)
+        self.last_cmd_pub_time = now
+
+        # Stale-path protection: slow down, then stop if planner has not refreshed.
+        age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
+        target_cmd = Twist()
+        target_cmd.linear.x = self.latest_cmd.linear.x
+        target_cmd.angular.z = self.latest_cmd.angular.z
+        if age > self.path_stale_stop_s:
+            target_cmd.linear.x = 0.0
+            target_cmd.angular.z = 0.0
+        elif age > self.path_stale_slow_s:
+            target_cmd.linear.x *= 0.3
+            target_cmd.angular.z *= 0.5
+
+        # Acceleration limiting for smoother control.
+        max_dv = self.max_linear_acc * dt
+        max_dw = self.max_angular_acc * dt
+        out = Twist()
+        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
+        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
+        out.linear.y = 0.0
+
+        self.planning_cmd_pub.publish(out)
+        self.prev_cmd = out
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -782,7 +827,8 @@ class PlanningNode(Node):
                             cmd.linear.x *= 0.15
 
             cmd.linear.y = 0.0
-            self.planning_cmd_pub.publish(cmd)
+            self.latest_cmd = cmd
+            self.last_path_update_time = time.monotonic()
 
 
 def main(args=None):
