@@ -281,7 +281,8 @@ class PlannerRvizSim(Node):
         self.last_stamp_ns = now_ns
 
         # Very simple unicycle dynamics in world XY
-        v = float(np.clip(self.v, -0.5, 0.5))
+        # Sim physical speed limit (align with planner max-speed experiments).
+        v = float(np.clip(self.v, -0.8, 0.8))
         w = float(np.clip(self.w, -1.5, 1.5))
 
         self.yaw += w * dt

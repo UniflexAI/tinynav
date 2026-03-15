@@ -542,8 +542,11 @@ class PlanningNode(Node):
         self.cmd_rate_hz = 20.0
         self.path_stale_slow_s = 0.3
         self.path_stale_stop_s = 0.6
-        self.max_linear_acc = 0.8   # m/s^2
-        self.max_angular_acc = 2.5  # rad/s^2
+        self.max_linear_speed = 0.8  # m/s
+        self.max_linear_acc = 0.8    # m/s^2
+        self.max_angular_acc = 2.5   # rad/s^2
+        self.recovery_fast_speed = 0.18
+        self.recovery_slow_speed = 0.08
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -802,7 +805,7 @@ class PlanningNode(Node):
                         to_target = to_target / norm_t
                         heading_err = signed_angle_between(forward_xy, to_target)
                         cmd.angular.z = float(np.clip(1.6 * heading_err, -1.0, 1.0))
-                        cmd.linear.x = 0.08 if abs(heading_err) < 0.6 else 0.03
+                        cmd.linear.x = self.recovery_fast_speed if abs(heading_err) < 0.6 else self.recovery_slow_speed
                 else:
                     lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=0.6)
                     forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
@@ -822,7 +825,7 @@ class PlanningNode(Node):
                         cmd.angular.z = float(np.clip(1.8 * heading_err, -1.2, 1.2))
                         heading_scale = max(0.0, np.cos(heading_err))
                         dist_scale = np.clip(target_dist / 1.0, 0.2, 1.0)
-                        cmd.linear.x = float(np.clip(0.33 * heading_scale * dist_scale, 0.0, 0.33))
+                        cmd.linear.x = float(np.clip(self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed))
                         if abs(heading_err) > 1.0:
                             cmd.linear.x *= 0.15
 
