@@ -431,13 +431,16 @@ def build_astar_cost_map(height_map, esdf_map):
     stair_like = slope > 0.18
     hard_esdf = np.where(stair_like, 0.015, 0.04)
 
-    # Keep ESDF as mostly soft cost; only very near obstacles are hard blocked.
-    obstacle = (~finite) | (esdf_map < hard_esdf)
+    # Unknown region policy:
+    # - unknown (non-finite height) is NOT a hard obstacle
+    # - but it gets extra traversal penalty so planner prefers known space
+    obstacle = (esdf_map < hard_esdf)
+    unknown_penalty = np.where(finite, 0.0, 1.6)
 
     # More permissive on stairs, more conservative on flat area.
     slope_w = np.where(stair_like, 0.08, 0.14)
     clear_w = np.where(stair_like, 0.05, 0.09)
-    cost = 1.0 + slope_w * slope_penalty + clear_w * np.clip(clearance_cost, 0.0, 25.0)
+    cost = 1.0 + slope_w * slope_penalty + clear_w * np.clip(clearance_cost, 0.0, 25.0) + unknown_penalty
     cost[obstacle] = np.inf
     return obstacle, cost
 
