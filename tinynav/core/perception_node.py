@@ -238,7 +238,7 @@ class PerceptionNode(Node):
 
     def images_callback(self, left_msg, right_msg):
         current_timestamp = stamp2second(left_msg.header.stamp)
-        if current_timestamp - self.last_processed_timestamp < 0.1333:
+        if current_timestamp - self.last_processed_timestamp < self.min_process_period:
             return
         self.last_processed_timestamp = current_timestamp
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
@@ -574,6 +574,12 @@ def main(args=None):
         default="auto",
         help="Sensor topic source selection",
     )
+    parser.add_argument(
+        "--min_process_period",
+        type=float,
+        default=0.05,
+        help="Minimum interval (seconds) between processed stereo frames",
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     print(f"Verbose timer: {parsed_args.verbose_timer}")
 
@@ -587,6 +593,7 @@ def main(args=None):
     perception_node = PerceptionNode(
         verbose_timer=parsed_args.verbose_timer,
         sensor_source=parsed_args.sensor_source,
+        min_process_period=parsed_args.min_process_period,
     )
 
     executor = rclpy.executors.SingleThreadedExecutor()
@@ -594,6 +601,11 @@ def main(args=None):
     executor.spin()
     perception_node.destroy_node()
     executor.shutdown()
+
+
+if __name__ == "__main__":
+    main()
+()
 
 
 if __name__ == "__main__":
