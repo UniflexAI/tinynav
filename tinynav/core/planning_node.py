@@ -445,6 +445,33 @@ def build_astar_cost_map(height_map, esdf_map):
     return obstacle, cost
 
 
+def smooth_path_world(path_world, window=5, passes=2):
+    n = len(path_world)
+    if n < 3:
+        return path_world
+
+    arr = np.array(path_world, dtype=np.float32)
+    window = max(3, int(window))
+    if window % 2 == 0:
+        window += 1
+    half = window // 2
+
+    smoothed = arr.copy()
+    for _ in range(max(1, int(passes))):
+        prev = smoothed.copy()
+        for i in range(1, n - 1):
+            l = max(0, i - half)
+            r = min(n, i + half + 1)
+            smoothed[i, :2] = np.mean(prev[l:r, :2], axis=0)
+            smoothed[i, 2] = prev[i, 2]
+
+        # keep endpoints fixed
+        smoothed[0] = arr[0]
+        smoothed[-1] = arr[-1]
+
+    return [smoothed[i] for i in range(n)]
+
+
 def pick_lookahead_point(path_world, robot_xy, lookahead_dist=0.6):
     if len(path_world) == 0:
         return None
@@ -550,6 +577,8 @@ class PlanningNode(Node):
         self.max_angular_acc = 2.5   # rad/s^2
         self.recovery_fast_speed = 0.18
         self.recovery_slow_speed = 0.08
+        self.path_smooth_window = 5
+        self.path_smooth_passes = 2
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -767,6 +796,13 @@ class PlanningNode(Node):
                     p = grid_to_world_2d(g, self.origin, self.resolution, robot_z)
                     p[2] = sample_height_from_map(p[:2], pooled_map, self.origin, self.resolution, robot_z)
                     local_path_world.append(p)
+
+                if len(local_path_world) >= 3:
+                    local_path_world = smooth_path_world(
+                        local_path_world,
+                        window=self.path_smooth_window,
+                        passes=self.path_smooth_passes,
+                    )
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             path_msg = Path()
