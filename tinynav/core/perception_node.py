@@ -86,10 +86,11 @@ looper_signature = [
 ]
 
 class PerceptionNode(Node):
-    def __init__(self, verbose_timer: bool = True, sensor_source: str = "auto"):
+    def __init__(self, verbose_timer: bool = True, sensor_source: str = "auto", min_process_period: float = 0.05):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
+        self.min_process_period = float(min_process_period)
 
         if sensor_source == "realsense":
             signature = realsense_signature
