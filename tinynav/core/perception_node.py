@@ -86,7 +86,7 @@ looper_signature = [
 ]
 
 class PerceptionNode(Node):
-    def __init__(self, verbose_timer: bool = True, sensor_source: str = "auto", min_process_period: float = 0.05):
+    def __init__(self, verbose_timer: bool = True, sensor_source: str = "auto", min_process_period: float = 0.133):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
@@ -578,7 +578,7 @@ def main(args=None):
     parser.add_argument(
         "--min_process_period",
         type=float,
-        default=0.05,
+        default=0.133,
         help="Minimum interval (seconds) between processed stereo frames",
     )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
