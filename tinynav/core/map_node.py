@@ -1,4 +1,5 @@
 import rclpy
+import os
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -7,13 +8,13 @@ import numpy as np
 import sys
 import json
 
-from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, theta_star,se3_inv
+import heapq
+from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, se3_inv
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
-import os
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
@@ -25,8 +26,6 @@ from build_map_node import TinyNavDB
 from build_map_node import find_loop, solve_pose_graph
 import einops
 from build_map_node import OdomPoseRecorder
-from scipy.ndimage import distance_transform_cdt
-
 logger = logging.getLogger(__name__)
 
 
@@ -73,19 +72,75 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
     transformed_points = homogeneous_points @ T.T
     return transformed_points[:, :3]
 
-def compute_cost_map(occupancy_map: np.ndarray, resolution: float = 0.05) -> np.ndarray:
-    x_y_plane = np.max(occupancy_map, axis = 2)
-    binary_map = np.ones_like(x_y_plane, dtype=np.uint8)
-    binary_map[x_y_plane == 2] = 0
-    binary_map[x_y_plane == 0] = 0
-    dist_to_obstacle = distance_transform_cdt(binary_map, metric='taxicab') * resolution
-    # visualize the dist_to_obstacle
-    # dist_to_clip = dist_to_obstacle.clip(0, 2)
-    # dist_to_vis = (dist_to_clip / 2.0 * 255).astype(np.uint8)
-    # dist_to_vis_image = cv2.applyColorMap(dist_to_vis, cv2.COLORMAP_JET)
-    # cv2.imwrite("dist_to_vis_image.png", dist_to_vis_image)
-    cost_map = 1.0 / (dist_to_obstacle + 1e-3)
-    return cost_map
+def heuristic(start, goal, resolution):
+    vec_start = np.array(start)
+    vec_goal = np.array(goal)
+    return np.linalg.norm((vec_start - vec_goal) * resolution) + 20 * np.abs(vec_start[2] - vec_goal[2]) * resolution
+
+def reconstruct_path_sdf(parent:dict, current:tuple):
+    path = []
+    while current in parent:
+        path.append(current)
+        if current == parent[current]:
+            break
+        current = parent[current]
+    return path[::-1]
+
+def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, stop_distance:np.ndarray):
+    start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else start_index
+    open_heap = [(sdf_map[start_index], start_index)]
+    open_heap_set = set()
+    open_heap_set.add(start_index)
+    parent = {start_index: start_index}
+    visited = set()
+    while len(open_heap) > 0:
+        current_sdf, current = heapq.heappop(open_heap)
+        open_heap_set.remove(current)
+        visited.add(current)
+        if current_sdf < stop_distance:
+            return reconstruct_path_sdf(parent, current)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if (0 <= neighbor[0] < sdf_map.shape[0] and
+                            0 <= neighbor[1] < sdf_map.shape[1] and
+                            0 <= neighbor[2] < sdf_map.shape[2]):
+                        if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
+                            open_heap_set.add(neighbor)
+                            heapq.heappush(open_heap, (sdf_map[neighbor], neighbor))
+                            parent[neighbor] = current
+    return []
+
+def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
+    start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
+    goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
+    open_heap = [(sdf_map[start] + heuristic(start, goal, resolution), start)]
+    open_heap_set = set()
+    open_heap_set.add(start)
+    parent = {start: start}
+    visited = set()
+    while len(open_heap) > 0:
+        current_cost, current = heapq.heappop(open_heap)
+        visited.add(current)
+        if current == goal:
+            return reconstruct_path_sdf(parent, current)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if (0 <= neighbor[0] < sdf_map.shape[0] and
+                            0 <= neighbor[1] < sdf_map.shape[1] and
+                            0 <= neighbor[2] < sdf_map.shape[2]):
+                        if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2 and sdf_map[neighbor] < 0.2:
+                            open_heap_set.add(neighbor)
+                            heapq.heappush(open_heap, (heuristic(neighbor, goal, resolution) + sdf_map[neighbor], neighbor))
+                            parent[neighbor] = current
+    return []
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
@@ -117,7 +172,7 @@ class MapNode(Node):
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
         self.localization_data_saved_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 1000)
+        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 10)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
@@ -135,7 +190,7 @@ class MapNode(Node):
         self.loop_top_k = 1
 
         self.relocalization_threshold = 0.85
-        self.relocalization_loop_top_k = 1
+        self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -146,8 +201,10 @@ class MapNode(Node):
         self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
+        self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
 
-        self.cost_map = compute_cost_map(self.occupancy_map, resolution=self.occupancy_map_meta[3])
+        print(f"sdf_map.shape: {self.sdf_map.shape}")
+        print(f"occupancy_map.shape: {self.occupancy_map.shape}")
 
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
@@ -214,7 +271,7 @@ class MapNode(Node):
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
-        success, _ = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
 
@@ -238,7 +295,7 @@ class MapNode(Node):
         assert keyframe_image_timestamp == keyframe_odom_timestamp
         assert keyframe_image_timestamp == depth_timestamp
         depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
-        odom = msg2np(keyframe_odom_msg)
+        odom, _ = msg2np(keyframe_odom_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
         rgb_image_place_holder = einops.repeat(image, "h w -> h w c", c = 3)
 
@@ -342,7 +399,6 @@ class MapNode(Node):
                     point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
                 else:
                     print(f"not enough matched features to relocalize, {len(matches)} < 50")
-                    return False, np.eye(4), -np.inf
 
             if len(point_3d_in_world_list) > 80:
                 point_3d_in_world_list = np.array(point_3d_in_world_list)
@@ -447,7 +503,7 @@ class MapNode(Node):
         """
         relative_pose_constraint = []
         optimized_parameters = {
-            0 : np.eye(4),
+            0 : np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
             1 : np.eye(4),
         }
         constant_pose_index_dict = { 1: True }
@@ -459,8 +515,8 @@ class MapNode(Node):
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
-        relative_pose_constraint = relative_pose_constraint[-3:]
-        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 100)
+        relative_pose_constraint = relative_pose_constraint[-100:]
+        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
     def try_publish_nav_path(self, timestamp: int):
@@ -490,7 +546,7 @@ class MapNode(Node):
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
-            diff_position_norm = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
+            diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
             if diff_position_norm < 1.5:
                 self.poi_index += 1
                 dummy_pose = np.eye(4)
@@ -504,68 +560,95 @@ class MapNode(Node):
             return
 
         target_poi = self.pois[self.poi_index]
-        print(f"current_target_poi_index : {self.poi_index}")
-        paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
+        with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
 
         if paths_in_map is not None:
             # use the max_speed to publish the position the robot should be after 5 seconds
-            max_speed = 1.0
-            if len(paths_in_map) > 1:
-                accumulated_distance = 0.0
-                start_point = pose_in_map_position[:2]
-                target_position = paths_in_map[-1]
-                for i in range(len(paths_in_map) - 1):
-                    accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                    if accumulated_distance > max_speed * 5:
-                        target_position = paths_in_map[i]
-                        break
-                    else:
+            with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                max_speed = 0.5
+                if len(paths_in_map) > 1:
+                    accumulated_distance = 0.0
+                    start_point = pose_in_map_position[:3]
+                    target_position = paths_in_map[-1]
+                    for i in range(len(paths_in_map) - 1):
+                        accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
+                        if accumulated_distance > max_speed * 5:
+                            target_position = paths_in_map[i]
+                            break
                         start_point = paths_in_map[i]
-            else:
-                target_position = paths_in_map[0]
+                else:
+                    target_position = paths_in_map[0]
+                target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
+                pose_in_origin_odom = self.odom[timestamp]
+                T = pose_in_origin_odom @ se3_inv(pose_in_map)
+                target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+                dummy_pose = np.eye(4)
+                dummy_pose[:3, 3] = target_position_in_odom
+                #logging.info(f"target_position_in_odom: {target_position_in_odom}")
+                print(f"target_position_in_odom: {target_position_in_odom}")
 
-            target_position_in_map = np.array([target_position[0], target_position[1], 0.0])
-            pose_in_origin_odom = self.odom[timestamp]
-            T = pose_in_origin_odom @ se3_inv(pose_in_map)
-            target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
-            dummy_pose = np.eye(4)
-            dummy_pose[:3, 3] = target_position_in_odom
-            #logging.info(f"target_position_in_odom: {target_position_in_odom}")
-            print(f"target_position_in_odom: {target_position_in_odom}")
-
-            self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-            path_msg = Path()
-            path_msg.header.stamp = self.get_clock().now().to_msg()
-            path_msg.header.frame_id = "map"
-            for x, y in paths_in_map:
-                pose = PoseStamped()
-                pose.header = path_msg.header
-                pose.pose.position.x = x
-                pose.pose.position.y = y
-                pose.pose.position.z = 0.0
-                pose.pose.orientation.x = 0.0
-                pose.pose.orientation.y = 0.0
-                pose.pose.orientation.z = 0.0
-                pose.pose.orientation.w = 1.0
-                path_msg.poses.append(pose)
+                self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+                path_msg = Path()
+                path_msg.header.stamp = self.get_clock().now().to_msg()
+                path_msg.header.frame_id = "map"
+                for x, y, z in paths_in_map:
+                    pose = PoseStamped()
+                    pose.header = path_msg.header
+                    pose.pose.position.x = x
+                    pose.pose.position.y = y
+                    pose.pose.position.z = z
+                    pose.pose.orientation.x = 0.0
+                    pose.pose.orientation.y = 0.0
+                    pose.pose.orientation.z = 0.0
+                    pose.pose.orientation.w = 1.0
+                    path_msg.poses.append(pose)
                 self.global_plan_pub.publish(path_msg)
-            self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+                self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
             logging.info("No path found in map")
 
-    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray|None:
+    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
         dummy_poi_pose[:3, 3] = target_poi
         self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
-        cost_map_origin = self.occupancy_map_meta[:2]
+        occupancy_map_origin = self.occupancy_map_meta[:3]
         resolution = self.occupancy_map_meta[3]
-        start_idx = np.array([int((pose_in_map[0, 3] - cost_map_origin[0]) / resolution), int((pose_in_map[1, 3] - cost_map_origin[1]) / resolution)], dtype=np.int32)
-        goal_idx = np.array([int((target_poi[0] - cost_map_origin[0]) / resolution), int((target_poi[1] - cost_map_origin[1]) / resolution)], dtype=np.int32)
-        if start_idx[0] < 0 or start_idx[0] >= self.cost_map.shape[0] or start_idx[1] < 0 or start_idx[1] >= self.cost_map.shape[1] or goal_idx[0] < 0 or goal_idx[0] >= self.cost_map.shape[0] or goal_idx[1] < 0 or goal_idx[1] >= self.cost_map.shape[1]:
-            return None
-        path = theta_star(self.cost_map, start_idx, goal_idx, obstacles_cost = 4.0)
+        start_idx = np.array([
+            int((pose_in_map[0, 3] - occupancy_map_origin[0]) / resolution),
+            int((pose_in_map[1, 3] - occupancy_map_origin[1]) / resolution),
+            int((pose_in_map[2, 3] - occupancy_map_origin[2]) / resolution)
+        ], dtype=np.int32)
+        poi_goal_idx = np.array([
+            int((target_poi[0] - occupancy_map_origin[0]) / resolution),
+            int((target_poi[1] - occupancy_map_origin[1]) / resolution),
+            int((target_poi[2] - occupancy_map_origin[2]) / resolution)
+        ], dtype=np.int32)
+
+        if (
+            start_idx[0] < 0
+            or start_idx[0] >= self.occupancy_map.shape[0]
+            or start_idx[1] < 0
+            or start_idx[1] >= self.occupancy_map.shape[1]
+            or start_idx[2] < 0
+            or start_idx[2] >= self.occupancy_map.shape[2]
+            or poi_goal_idx[0] < 0
+            or poi_goal_idx[0] >= self.occupancy_map.shape[0]
+            or poi_goal_idx[1] < 0
+            or poi_goal_idx[1] >= self.occupancy_map.shape[1]
+            or poi_goal_idx[2] < 0
+            or poi_goal_idx[2] >= self.occupancy_map.shape[2]
+        ):
+            return None 
+        sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
+        sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+
+        sdf_start_sdf = sdf_start_path[-1]
+        sdf_goal_sdf = sdf_goal_path[-1]
+        path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
-            converted_path = path * resolution + cost_map_origin
+            converted_path = np.array(path) * resolution + occupancy_map_origin
             return converted_path
         return None
 
@@ -586,18 +669,9 @@ def main(args=None):
                    tinynav_map_path=parsed_args.tinynav_map_path,
                    verbose_timer=parsed_args.verbose_timer)
 
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        logging.info("Keyboard interrupt received, map node is shut down")
-    except Exception as e:
-        logging.error(f"Error occurred: {e}")
-    finally:
-        try:
-            node.destroy_node()
-            rclpy.shutdown()
-        except Exception as e:
-            logging.error(f"Error occurred: {e}")
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
