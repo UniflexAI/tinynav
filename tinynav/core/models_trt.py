@@ -222,7 +222,6 @@ class StereoEngineTRT(TRTBase):
                 _, _, max_in_shape = self.engine.get_tensor_profile_shape("left", 0)
                 # Inputs are (N, C, H, W); outputs are (1, 1, H, W).
                 return (1, 1, int(max_in_shape[2]), int(max_in_shape[3]))
-                #return (1, 1, 640, 544)
             except Exception:
                 # Fallback to base behavior if profile info is unavailable.
                 pass
@@ -310,83 +309,55 @@ class StereoEngineTRT(TRTBase):
             )
         return disp.astype(np.float32), depth.astype(np.float32)
 
+
 if __name__ == "__main__":
-    # If a stereo debug sample exists (captured by perception_node), run StereoEngineTRT on it.
-    debug_npz = "/tinynav/stereo_debug_sample.npz"
-    if os.path.exists(debug_npz):
-        data = np.load(debug_npz)
-        left = data["left"]
-        right = data["right"]
-        K = data["K"]
-        baseline = float(data["baseline"])
-        fx = float(K[0, 0])
+    # Synthetic sanity test for both RealSense and Looper resolutions.
+    dinov2 = Dinov2TRT()
+    superpoint = SuperPointTRT()
+    light_glue = LightGlueTRT()
+    stereo_engine = StereoEngineTRT()
 
-        print(f"Loaded debug sample from {debug_npz}")
-        print(f"left shape: {left.shape}, right shape: {right.shape}")
-        print(f"fx: {fx}, baseline: {baseline}")
+    # Each entry: (name, width, height)
+    resolutions = [
+        ("realsense", 848, 480),
+        ("looper", 544, 640),
+    ]
 
-        stereo_engine = StereoEngineTRT()
-        disp, depth = asyncio.run(
-            stereo_engine.infer(
-                left,
-                right,
-                np.array([[baseline]], dtype=np.float32),
-                np.array([[fx]], dtype=np.float32),
+    match_threshold = np.array([0.1], dtype=np.float32)
+    threshold = np.array([0.015], dtype=np.float32)
+
+    for tag, width, height in resolutions:
+        print(f"\n=== Testing stereo pipeline for {tag} resolution: {height}x{width} ===")
+        image_shape = np.array([width, height], dtype=np.int64)
+
+        dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+        dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+
+        with Timer(text=f"[dinov2:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            _ = asyncio.run(dinov2.infer(dummy_left))
+
+        with Timer(text=f"[superpoint:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            left_extract_result = asyncio.run(superpoint.infer(dummy_left))
+            right_extract_result = asyncio.run(superpoint.infer(dummy_right))
+
+        with Timer(text=f"[lightglue:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            _ = asyncio.run(
+                light_glue.infer(
+                    left_extract_result["kpts"],
+                    right_extract_result["kpts"],
+                    left_extract_result["descps"],
+                    right_extract_result["descps"],
+                    left_extract_result["mask"],
+                    right_extract_result["mask"],
+                    image_shape,
+                    image_shape,
+                    match_threshold,
+                )
             )
-        )
-        print(
-            f"Stereo debug output: disp min/max={disp.min():.3f}/{disp.max():.3f}, "
-            f"depth min/max={depth.min():.3f}/{depth.max():.3f}"
-        )
-    else:
-        # Fallback: synthetic sanity test for both RealSense and Looper resolutions.
-        dinov2 = Dinov2TRT()
-        superpoint = SuperPointTRT()
-        light_glue = LightGlueTRT()
-        stereo_engine = StereoEngineTRT()
 
-        # Test both RealSense and Looper resolutions (single profile).
-        # Each entry: (name, width, height)
-        resolutions = [
-            ("realsense", 848, 480),
-            ("looper", 544, 640),
-        ]
-
-        match_threshold = np.array([0.1], dtype=np.float32)
-        threshold = np.array([0.015], dtype=np.float32)
-
-        for tag, width, height in resolutions:
-            print(f"\n=== Testing stereo pipeline for {tag} resolution: {height}x{width} ===")
-            image_shape = np.array([width, height], dtype=np.int64)
-
-            dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
-            dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
-
-            with Timer(text=f"[dinov2:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
-                _ = asyncio.run(dinov2.infer(dummy_left))
-
-            with Timer(text=f"[superpoint:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
-                left_extract_result = asyncio.run(superpoint.infer(dummy_left))
-                right_extract_result = asyncio.run(superpoint.infer(dummy_right))
-
-            with Timer(text=f"[lightglue:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
-                _ = asyncio.run(
-                    light_glue.infer(
-                        left_extract_result["kpts"],
-                        right_extract_result["kpts"],
-                        left_extract_result["descps"],
-                        right_extract_result["descps"],
-                        left_extract_result["mask"],
-                        right_extract_result["mask"],
-                        image_shape,
-                        image_shape,
-                        match_threshold,
-                    )
-                )
-
-            with Timer(text=f"[stereo:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
-                baseline = np.array([[0.05]], dtype=np.float32)
-                focal_length = np.array([[323.0]], dtype=np.float32)
-                _disp, _depth = asyncio.run(
-                    stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length)
-                )
+        with Timer(text=f"[stereo:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            baseline = np.array([[0.05]], dtype=np.float32)
+            focal_length = np.array([[323.0]], dtype=np.float32)
+            _disp, _depth = asyncio.run(
+                stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length)
+            )
