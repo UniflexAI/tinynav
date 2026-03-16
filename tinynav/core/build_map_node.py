@@ -418,7 +418,7 @@ class BuildMapNode(Node):
         # Add stop signal subscription and save finished publisher
         self.mapping_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.mapping_stop_callback, 10)
         self.mapping_save_finished_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000)
+        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub,], 1000)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
@@ -503,19 +503,19 @@ class BuildMapNode(Node):
                 save_finished_msg.data = False
                 self.mapping_save_finished_pub.publish(save_finished_msg)
 
-    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
+    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.timer_logger):
             if self.K is None:
                 return
-            self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
+            self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg)
 
-    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
+    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
-            rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
+            rgb_image = cv2.cvtColor(infra1_image, cv2.COLOR_GRAY2BGR)
 
         with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
@@ -650,11 +650,11 @@ class BuildMapNode(Node):
         image_size = None
         os.makedirs(f"{self.map_save_path}/images", exist_ok=True)
         for timestamp, infra1_pose in self.pose_graph_used_pose.items():
-            _, _, _, rgb_image, _ = self.db.get_depth_embedding_features_images(timestamp)
+            _, _, _, _, infra1_image = self.db.get_depth_embedding_features_images(timestamp)
             if image_size is None:
-                image_size = rgb_image.shape[:2]
-            cv2.imwrite(f"{self.map_save_path}/images/image_{timestamp}.png", rgb_image)
-        convert_nerf_format(self.map_save_path, self.pose_graph_used_pose, self.rgb_camera_K, image_size, self.T_rgb_to_infra1)
+                image_size = infra1_image.shape
+            cv2.imwrite(f"{self.map_save_path}/images/image_{timestamp}.png", infra1_image)
+        convert_nerf_format(self.map_save_path, self.pose_graph_used_pose, self.K, image_size, np.eye(4))
         self.db.close()
 
         self._save_completed = True
