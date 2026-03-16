@@ -181,6 +181,8 @@ def depth_to_cloud(depth, K, step=10, max_dist=1e9):
                 pts.append((x, y, z))   # tuples are allowed
 
     # convert typed list → ndarray
+    if len(pts) == 0:
+        return np.empty((0, 3), dtype=np.float64)
     return np.array(pts)
 
 @njit(cache=True)
