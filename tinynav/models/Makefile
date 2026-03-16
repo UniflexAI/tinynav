@@ -22,11 +22,13 @@ LIGHTGLUE_ENGINE  := $(basename $(LIGHTGLUE_ONNX))_$(ARCH).plan
 # - SuperPoint: dynamic engine covering RealSense + Looper.
 # - Retinify: one profile, min/max shapes for RealSense (480x848) and Looper (640x544).
 SUPERPOINT_ENGINE := $(basename $(SUPERPOINT_ONNX))_$(ARCH).plan
-RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
+RETINIFY_ENGINE              := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
+# Constant-shape Retinify engine for Looper resolution only (640x544).
+RETINIFY_LOOPER_ENGINE       := retinify_0_1_5_looper_$(ARCH).plan
 
-ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE)
+ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(RETINIFY_LOOPER_ENGINE)
 
-.PHONY: all dinov2 superpoint lightglue retinify clean help
+.PHONY: all dinov2 superpoint lightglue retinify retinify_looper clean help
 
 all: $(ENGINES)
 
@@ -34,6 +36,7 @@ dinov2: $(DINO_ENGINE)
 superpoint: $(SUPERPOINT_ENGINE)
 lightglue: $(LIGHTGLUE_ENGINE)
 retinify: $(RETINIFY_ENGINE)
+retinify_looper: $(RETINIFY_LOOPER_ENGINE)
 
 help:
     @echo "Targets:"
@@ -41,7 +44,8 @@ help:
 	@echo "  make dinov2       # Build DINOv2"
 	@echo "  make superpoint   # Build SuperPoint"
 	@echo "  make lightglue    # Build LightGlue"
-	@echo "  make retinify     # Build Retinify"
+	@echo "  make retinify           # Build Retinify (dynamic, RealSense+Looper)"
+	@echo "  make retinify_looper    # Build Retinify constant-shape engine for Looper"
 	@echo "  make clean        # Remove *_$(ARCH).plan"
 
 $(DINO_ENGINE): $(DINO_ONNX)
@@ -72,6 +76,15 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
         --precisionConstraints=obey \
         --layerPrecisions='/cost_volume/Unsqueeze:fp16,/cost_volume/post_process/conv_block3/conv_block3.0/BatchNormalization:fp32,/cost_volume/post_process/norm/norm.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.1/Relu:fp32,/disparity_refinement/upsample2_conv/upsample2_conv.0/BatchNormalization:fp32' \
         --fp16
+
+# Retinify constant-shape engine for Looper-only resolution (640x544).
+$(RETINIFY_LOOPER_ENGINE): $(RETINIFY_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
+        --shapes=left:1x1x640x544,right:1x1x640x544 \
+        --precisionConstraints=obey \
+        --layerPrecisions='/cost_volume/Unsqueeze:fp16,/cost_volume/post_process/conv_block3/conv_block3.0/BatchNormalization:fp32,/cost_volume/post_process/norm/norm.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.1/Relu:fp32,/disparity_refinement/upsample2_conv/upsample2_conv.0/BatchNormalization:fp32' \
+        --fp16
+
 
 clean:
 	rm -f *_$(ARCH).plan

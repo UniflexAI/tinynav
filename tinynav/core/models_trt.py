@@ -14,6 +14,7 @@ import logging
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
+    np.dtype(np.float16): ctypes.c_uint16,
     np.dtype(np.int8):   ctypes.c_int8,
     np.dtype(np.uint8):  ctypes.c_uint8,
     np.dtype(np.int32):  ctypes.c_int32,
@@ -221,6 +222,7 @@ class StereoEngineTRT(TRTBase):
                 _, _, max_in_shape = self.engine.get_tensor_profile_shape("left", 0)
                 # Inputs are (N, C, H, W); outputs are (1, 1, H, W).
                 return (1, 1, int(max_in_shape[2]), int(max_in_shape[3]))
+                #return (1, 1, 640, 544)
             except Exception:
                 # Fallback to base behavior if profile info is unavailable.
                 pass
@@ -228,10 +230,10 @@ class StereoEngineTRT(TRTBase):
 
     def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_dynamic_{platform.machine()}.plan"):
         super().__init__(engine_path)
-        # Current shapes/byte sizes are set per infer() call.
+        # Current shapes/byte sizes are set per infer() call, based on the
+        # actually received image size (H, W), not the engine's max profile.
         self._current_input_shapes = (1, 1, 1, 1)
-        self._current_input_nbytes = 1 * np.uint8().itemsize
-        self._current_output_nbytes = 1 * np.float32().itemsize
+        self._current_input_nbytes = 0
 
     def capture_graph(self):
         for i in range(self.engine.num_io_tensors):
@@ -255,18 +257,34 @@ class StereoEngineTRT(TRTBase):
         self.context.execute_async_v3(stream_handle=self.stream)
         h_net, w_net = input_shapes[2], input_shapes[3]
         if "aarch64" not in platform.machine():
+            # Copy back only the active region for disp/depth, based on the
+            # current logical image size (h_net, w_net). Other outputs keep
+            # their full allocated size.
             for out in self.outputs:
-                nbytes = self._current_output_nbytes if out["name"] in ("disp", "depth") else out["nbytes"]
-                cudart.cudaMemcpyAsync(out["host"].ctypes.data, out["device"], nbytes,
-                                       cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost, self.stream)
+                if out["name"] in ("disp", "depth"):
+                    nbytes = input_shapes[2] * input_shapes[3] * np.float32().itemsize
+                else:
+                    nbytes = out["nbytes"]
+                cudart.cudaMemcpyAsync(
+                    out["host"].ctypes.data,
+                    out["device"],
+                    nbytes,
+                    cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                    self.stream,
+                )
         cudart.cudaStreamSynchronize(self.stream)
         results = {}
         for out in self.outputs:
             arr = out["host"]
-            if out["name"] in ("disp", "depth") and arr.ndim == 4:
-                results[out["name"]] = arr[0, 0, :h_net, :w_net].copy()
+            name = out["name"]
+            if name in ("disp", "depth"):
+                # Interpret disp/depth as a flat buffer whose leading
+                # h_net * w_net elements form the current image.
+                flat = np.asarray(arr).reshape(-1)
+                needed = h_net * w_net
+                results[name] = flat[:needed].reshape(h_net, w_net).copy()
             else:
-                results[out["name"]] = np.array(arr).copy() if arr.ndim == 0 else arr.copy()
+                results[name] = np.array(arr).copy() if arr.ndim == 0 else arr.copy()
         return results
 
     async def infer(self, left_img, right_img, baseline, focal_length):
@@ -274,7 +292,6 @@ class StereoEngineTRT(TRTBase):
 
         self._current_input_shapes = (1, 1, h_in, w_in)
         self._current_input_nbytes = h_in * w_in * np.uint8().itemsize
-        self._current_output_nbytes = h_in * w_in * np.float32().itemsize
 
         left_tensor = left_img.astype(np.uint8).ravel()
         right_tensor = right_img.astype(np.uint8).ravel()
