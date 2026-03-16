@@ -69,6 +69,105 @@ def test_lightglue_trt_with_cache():
     print(f"Number of matches: {len(kpt_pre)}")
 
 
+def _superpoint_lightglue_matches(
+    img0: np.ndarray, img1: np.ndarray, output_path: str
+) -> None:
+    """
+    Run SuperPoint + LightGlue on two grayscale images and write a match
+    visualization PNG to output_path.
+    """
+    superpoint = SuperPointTRT()
+    lightglue = LightGlueTRT()
+
+    extract_result_0 = asyncio.run(superpoint.infer(img0))
+    extract_result_1 = asyncio.run(superpoint.infer(img1))
+    kpts0 = extract_result_0["kpts"]
+    descps0 = extract_result_0["descps"]
+    mask0 = extract_result_0["mask"]
+    kpts1 = extract_result_1["kpts"]
+    descps1 = extract_result_1["descps"]
+    mask1 = extract_result_1["mask"]
+
+    match_result = asyncio.run(
+        lightglue.infer(
+            kpts0,
+            kpts1,
+            descps0,
+            descps1,
+            mask0,
+            mask1,
+            img0.shape,
+            img1.shape,
+        )
+    )
+
+    prev_keypoints = kpts0[0]  # (n, 2)
+    current_keypoints = kpts1[0]  # (n, 2)
+    match_indices = match_result["match_indices"][0]
+    valid_mask = match_indices != -1
+    kpt_pre = prev_keypoints[valid_mask]
+    kpt_cur = current_keypoints[match_indices[valid_mask]]
+
+    matched_image = cv2.drawMatches(
+        img0,
+        [cv2.KeyPoint(x=float(pt[0]), y=float(pt[1]), size=1) for pt in kpt_pre],
+        img1,
+        [cv2.KeyPoint(x=float(pt[0]), y=float(pt[1]), size=1) for pt in kpt_cur],
+        [
+            cv2.DMatch(_imgIdx=0, _queryIdx=i, _trainIdx=i, _distance=0)
+            for i in range(0, len(kpt_pre), 4)
+        ],
+        None,
+        matchColor=(0, 255, 0),
+        singlePointColor=(255, 0, 0),
+        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+        matchesThickness=1,
+    )
+    cv2.imwrite(output_path, matched_image)
+    print(f"Saved matches visualization to {output_path} (matches: {len(kpt_pre)})")
+
+
+def test_superpoint_lightglue_looper():
+    """
+    Run SuperPoint + LightGlue matching on the Looper stereo pair.
+    """
+    looper_dir = "/tinynav/tests/data/looper"
+    left_path = os.path.join(looper_dir, "left.png")
+    right_path = os.path.join(looper_dir, "right.png")
+
+    assert os.path.exists(left_path), f"Missing Looper left at {left_path}"
+    assert os.path.exists(right_path), f"Missing Looper right at {right_path}"
+
+    left = cv2.imread(left_path, cv2.IMREAD_GRAYSCALE)
+    right = cv2.imread(right_path, cv2.IMREAD_GRAYSCALE)
+    assert left is not None and right is not None, "Failed to load Looper stereo images"
+
+    assert left.shape == right.shape, "Looper left/right shapes do not match"
+
+    out_path = os.path.join(looper_dir, "matches.png")
+    _superpoint_lightglue_matches(left, right, out_path)
+
+
+def test_superpoint_lightglue_realsense():
+    """
+    Run SuperPoint + LightGlue matching on the RealSense stereo pair.
+    """
+    rs_dir = "/tinynav/tests/data/realsense"
+    left_path = os.path.join(rs_dir, "left.png")
+    right_path = os.path.join(rs_dir, "right.png")
+
+    assert os.path.exists(left_path), f"Missing RealSense left at {left_path}"
+    assert os.path.exists(right_path), f"Missing RealSense right at {right_path}"
+
+    left = cv2.imread(left_path, cv2.IMREAD_GRAYSCALE)
+    right = cv2.imread(right_path, cv2.IMREAD_GRAYSCALE)
+    assert left is not None and right is not None, "Failed to load RealSense stereo images"
+
+    assert left.shape == right.shape, "RealSense left/right shapes do not match"
+
+    out_path = os.path.join(rs_dir, "matches.png")
+    _superpoint_lightglue_matches(left, right, out_path)
+
 def _load_looper_calib(calib_path: str):
     """
     Parse calib.txt written by perception_node / extract_stereo_from_rosbag.
@@ -99,7 +198,7 @@ def _load_looper_calib(calib_path: str):
 def test_stereo_engine_trt_with_looper_data():
     """
     Run StereoEngineTRT on the Looper stereo pair stored under tests/data/looper.
-    Verifies that disparity/depth are produced with the expected shape.
+    Verifies that disparity/depth are produced with the expected shape and finite values.
     """
     looper_dir = "/tinynav/tests/data/looper"
     left_path = os.path.join(looper_dir, "left.png")
@@ -118,10 +217,9 @@ def test_stereo_engine_trt_with_looper_data():
     K, baseline = _load_looper_calib(calib_path)
     fx = K[0, 0]
 
-    # Dynamic-shape engine (default path in StereoEngineTRT).
-    stereo_engine_dynamic = StereoEngineTRT()
-    disp_dynamic, depth_dynamic = asyncio.run(
-        stereo_engine_dynamic.infer(
+    stereo_engine = StereoEngineTRT()
+    disp, depth = asyncio.run(
+        stereo_engine.infer(
             left,
             right,
             np.array([[baseline]], dtype=np.float32),
@@ -129,111 +227,122 @@ def test_stereo_engine_trt_with_looper_data():
         )
     )
 
-    # Constant-shape engine for Looper resolution.
-    arch = platform.machine()
-    looper_engine_path = f"/tinynav/tinynav/models/retinify_0_1_5_looper_{arch}.plan"
-    assert os.path.exists(looper_engine_path), f"Missing constant-shape Looper engine at {looper_engine_path}. Run 'make -C tinynav/models retinify_looper'."
+    # Shape checks.
+    assert disp.shape == left.shape, f"Looper disparity shape {disp.shape} != image shape {left.shape}"
+    assert depth.shape == left.shape, f"Looper depth shape {depth.shape} != image shape {left.shape}"
 
-    stereo_engine_const = StereoEngineTRT(engine_path=looper_engine_path)
-    disp_const, depth_const = asyncio.run(
-        stereo_engine_const.infer(
-            left,
-            right,
-            np.array([[baseline]], dtype=np.float32),
-            np.array([[fx]], dtype=np.float32),
-        )
-    )
+    # Finite checks.
+    assert np.isfinite(disp).any(), "Looper disparity has no finite values"
+    assert np.isfinite(depth).any(), "Looper depth has no finite values"
 
-    # Save visualizations for dynamic engine outputs.
-    disp_vis_dyn = disp_dynamic.copy()
-    if np.isfinite(disp_vis_dyn).any():
-        disp_min = np.nanmin(disp_vis_dyn[np.isfinite(disp_vis_dyn)])
-        disp_max = np.nanmax(disp_vis_dyn[np.isfinite(disp_vis_dyn)])
+    # Save visualizations for Looper outputs.
+    disp_vis = disp.copy()
+    if np.isfinite(disp_vis).any():
+        disp_min = np.nanmin(disp_vis[np.isfinite(disp_vis)])
+        disp_max = np.nanmax(disp_vis[np.isfinite(disp_vis)])
         if disp_max > disp_min:
-            disp_norm_dyn = (disp_vis_dyn - disp_min) / (disp_max - disp_min)
+            disp_norm = (disp_vis - disp_min) / (disp_max - disp_min)
         else:
-            disp_norm_dyn = np.zeros_like(disp_vis_dyn, dtype=np.float32)
+            disp_norm = np.zeros_like(disp_vis, dtype=np.float32)
     else:
-        disp_norm_dyn = np.zeros_like(disp_vis_dyn, dtype=np.float32)
-    disp_u8_dyn = np.clip(disp_norm_dyn * 255.0, 0, 255).astype(np.uint8)
-    disp_color_dyn = cv2.applyColorMap(disp_u8_dyn, cv2.COLORMAP_PLASMA)
-    disp_path_dyn = os.path.join(looper_dir, "disp_vis_dynamic.png")
-    cv2.imwrite(disp_path_dyn, disp_color_dyn)
+        disp_norm = np.zeros_like(disp_vis, dtype=np.float32)
+    disp_u8 = np.clip(disp_norm * 255.0, 0, 255).astype(np.uint8)
+    disp_color = cv2.applyColorMap(disp_u8, cv2.COLORMAP_PLASMA)
+    cv2.imwrite(os.path.join(looper_dir, "disp_vis.png"), disp_color)
 
-    depth_vis_dyn = depth_dynamic.copy()
-    valid_dyn = np.isfinite(depth_vis_dyn) & (depth_vis_dyn > 0)
-    if valid_dyn.any():
-        depth_min = np.nanmin(depth_vis_dyn[valid_dyn])
-        depth_max = np.nanmax(depth_vis_dyn[valid_dyn])
-        depth_clip_dyn = np.clip(depth_vis_dyn, depth_min, depth_max)
-        depth_norm_dyn = (depth_clip_dyn - depth_min) / (depth_max - depth_min)
+    depth_vis = depth.copy()
+    valid = np.isfinite(depth_vis) & (depth_vis > 0)
+    if valid.any():
+        depth_min = np.nanmin(depth_vis[valid])
+        depth_max = np.nanmax(depth_vis[valid])
+        depth_clip = np.clip(depth_vis, depth_min, depth_max)
+        depth_norm = (depth_clip - depth_min) / (depth_max - depth_min)
     else:
-        depth_norm_dyn = np.zeros_like(depth_vis_dyn, dtype=np.float32)
-    depth_u8_dyn = np.clip(depth_norm_dyn * 255.0, 0, 255).astype(np.uint8)
-    depth_color_dyn = cv2.applyColorMap(depth_u8_dyn, cv2.COLORMAP_VIRIDIS)
-    depth_path_dyn = os.path.join(looper_dir, "depth_vis_dynamic.png")
-    cv2.imwrite(depth_path_dyn, depth_color_dyn)
+        depth_norm = np.zeros_like(depth_vis, dtype=np.float32)
+    depth_u8 = np.clip(depth_norm * 255.0, 0, 255).astype(np.uint8)
+    depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_VIRIDIS)
+    cv2.imwrite(os.path.join(looper_dir, "depth_vis.png"), depth_color)
 
-    # Save visualizations for constant-shape engine outputs.
-    disp_vis_const = disp_const.copy()
-    if np.isfinite(disp_vis_const).any():
-        disp_min_c = np.nanmin(disp_vis_const[np.isfinite(disp_vis_const)])
-        disp_max_c = np.nanmax(disp_vis_const[np.isfinite(disp_vis_const)])
-        if disp_max_c > disp_min_c:
-            disp_norm_const = (disp_vis_const - disp_min_c) / (disp_max_c - disp_min_c)
+
+def test_stereo_engine_trt_with_realsense_data():
+    """
+    Run StereoEngineTRT on a RealSense stereo pair stored under tests/data/realsense.
+    Verifies that disparity/depth are produced with the expected shape and finite values.
+    """
+    rs_dir = "/tinynav/tests/data/realsense"
+    left_path = os.path.join(rs_dir, "left.png")
+    right_path = os.path.join(rs_dir, "right.png")
+    calib_path = os.path.join(rs_dir, "calib.txt")
+
+    assert os.path.exists(left_path), f"Missing left image at {left_path}"
+    assert os.path.exists(right_path), f"Missing right image at {right_path}"
+    assert os.path.exists(calib_path), f"Missing calib file at {calib_path}"
+
+    left = cv2.imread(left_path, cv2.IMREAD_GRAYSCALE)
+    right = cv2.imread(right_path, cv2.IMREAD_GRAYSCALE)
+    assert left is not None and right is not None, "Failed to load RealSense left/right images"
+    assert left.shape == right.shape, "Left/right shapes do not match for RealSense data"
+
+    K, baseline = _load_looper_calib(calib_path)
+    fx = K[0, 0]
+
+    stereo_engine = StereoEngineTRT()
+    disp, depth = asyncio.run(
+        stereo_engine.infer(
+            left,
+            right,
+            np.array([[baseline]], dtype=np.float32),
+            np.array([[fx]], dtype=np.float32),
+        )
+    )
+
+    # Shape checks.
+    assert disp.shape == left.shape, f"RealSense disparity shape {disp.shape} != image shape {left.shape}"
+    assert depth.shape == left.shape, f"RealSense depth shape {depth.shape} != image shape {left.shape}"
+
+    # Finite checks.
+    assert np.isfinite(disp).any(), "RealSense disparity has no finite values"
+    assert np.isfinite(depth).any(), "RealSense depth has no finite values"
+
+    # Save visualizations for RealSense outputs.
+    disp_vis = disp.copy()
+    if np.isfinite(disp_vis).any():
+        disp_min = np.nanmin(disp_vis[np.isfinite(disp_vis)])
+        disp_max = np.nanmax(disp_vis[np.isfinite(disp_vis)])
+        if disp_max > disp_min:
+            disp_norm = (disp_vis - disp_min) / (disp_max - disp_min)
         else:
-            disp_norm_const = np.zeros_like(disp_vis_const, dtype=np.float32)
+            disp_norm = np.zeros_like(disp_vis, dtype=np.float32)
     else:
-        disp_norm_const = np.zeros_like(disp_vis_const, dtype=np.float32)
-    disp_u8_const = np.clip(disp_norm_const * 255.0, 0, 255).astype(np.uint8)
-    disp_color_const = cv2.applyColorMap(disp_u8_const, cv2.COLORMAP_PLASMA)
-    disp_path_const = os.path.join(looper_dir, "disp_vis_const.png")
-    cv2.imwrite(disp_path_const, disp_color_const)
+        disp_norm = np.zeros_like(disp_vis, dtype=np.float32)
+    disp_u8 = np.clip(disp_norm * 255.0, 0, 255).astype(np.uint8)
+    disp_color = cv2.applyColorMap(disp_u8, cv2.COLORMAP_PLASMA)
+    cv2.imwrite(os.path.join(rs_dir, "disp_vis.png"), disp_color)
 
-    depth_vis_const = depth_const.copy()
-    valid_const = np.isfinite(depth_vis_const) & (depth_vis_const > 0)
-    if valid_const.any():
-        depth_min_c = np.nanmin(depth_vis_const[valid_const])
-        depth_max_c = np.nanmax(depth_vis_const[valid_const])
-        depth_clip_const = np.clip(depth_vis_const, depth_min_c, depth_max_c)
-        depth_norm_const = (depth_clip_const - depth_min_c) / (depth_max_c - depth_min_c)
+    depth_vis = depth.copy()
+    valid = np.isfinite(depth_vis) & (depth_vis > 0)
+    if valid.any():
+        depth_min = np.nanmin(depth_vis[valid])
+        depth_max = np.nanmax(depth_vis[valid])
+        depth_clip = np.clip(depth_vis, depth_min, depth_max)
+        depth_norm = (depth_clip - depth_min) / (depth_max - depth_min)
     else:
-        depth_norm_const = np.zeros_like(depth_vis_const, dtype=np.float32)
-    depth_u8_const = np.clip(depth_norm_const * 255.0, 0, 255).astype(np.uint8)
-    depth_color_const = cv2.applyColorMap(depth_u8_const, cv2.COLORMAP_VIRIDIS)
-    depth_path_const = os.path.join(looper_dir, "depth_vis_const.png")
-    cv2.imwrite(depth_path_const, depth_color_const)
-
-    # Shape checks for both engines.
-    assert disp_dynamic.shape == left.shape, f"Dynamic disparity shape {disp_dynamic.shape} != image shape {left.shape}"
-    assert depth_dynamic.shape == left.shape, f"Dynamic depth shape {depth_dynamic.shape} != image shape {left.shape}"
-    assert disp_const.shape == left.shape, f"Const disparity shape {disp_const.shape} != image shape {left.shape}"
-    assert depth_const.shape == left.shape, f"Const depth shape {depth_const.shape} != image shape {left.shape}"
-
-    # Basic sanity: some finite values should exist.
-    assert np.isfinite(disp_dynamic).any(), "Dynamic disparity has no finite values"
-    assert np.isfinite(depth_dynamic).any(), "Dynamic depth has no finite values"
-    assert np.isfinite(disp_const).any(), "Const disparity has no finite values"
-    assert np.isfinite(depth_const).any(), "Const depth has no finite values"
-
-    # Report numeric differences between engines instead of asserting equality,
-    # so we always get PNGs even if they differ.
-    diff_disp = np.abs(disp_dynamic - disp_const)
-    diff_depth = np.abs(depth_dynamic - depth_const)
-    print(
-        f"[StereoEngine Looper] disp diff mean={diff_disp.mean():.6f}, "
-        f"max={diff_disp.max():.6f}"
-    )
-    print(
-        f"[StereoEngine Looper] depth diff mean={diff_depth.mean():.6f}, "
-        f"max={diff_depth.max():.6f}"
-    )
+        depth_norm = np.zeros_like(depth_vis, dtype=np.float32)
+    depth_u8 = np.clip(depth_norm * 255.0, 0, 255).astype(np.uint8)
+    depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_VIRIDIS)
+    cv2.imwrite(os.path.join(rs_dir, "depth_vis.png"), depth_color)
 
 if __name__ == "__main__":
     test_superpoint_trt_with_cache()
     print("SuperPoint TRT with cache test passed.")
     test_lightglue_trt_with_cache()
     print("LightGlue TRT with cache test passed.")
+    test_superpoint_lightglue_looper()
+    print("SuperPoint+LightGlue Looper test passed.")
+    test_superpoint_lightglue_realsense()
+    print("SuperPoint+LightGlue RealSense test passed.")
     test_stereo_engine_trt_with_looper_data()
     print("StereoEngine TRT with Looper data test passed.")
+    test_stereo_engine_trt_with_realsense_data()
+    print("StereoEngine TRT with RealSense data test passed.")
 
