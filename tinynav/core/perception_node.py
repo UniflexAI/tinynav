@@ -4,8 +4,6 @@ import sys
 import cv2
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 import numpy as np
-import os
-import sys
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
@@ -78,7 +76,7 @@ class PerceptionNode(Node):
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        # models
+        # model
         self.superpoint = SuperPointTRT()
         self.light_glue = LightGlueTRT()
 
@@ -194,9 +192,9 @@ class PerceptionNode(Node):
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
             return
+        self.process_cnt += 1
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
-
         current_timestamp = stamp2second(left_msg.header.stamp)
         if len(self.keyframe_queue) == 0: # first frame
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
