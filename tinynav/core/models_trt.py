@@ -1,6 +1,5 @@
 import tensorrt as trt
 import numpy as np
-import time
 import cv2
 from codetiming import Timer
 import platform
