@@ -194,24 +194,8 @@ class PerceptionNode(Node):
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
             return
-        self.process_cnt += 1
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
-
-        # Optional one-shot capture of stereo inputs + intrinsics for debugging.
-        # Enable by setting env var TINYNAV_CAPTURE_STEREO_DEBUG=1 before running perception_node.
-        if  self.process_cnt == 1:
-            debug_path = "/tinynav/stereo_debug_sample.npz"
-            np.savez(
-                debug_path,
-                left=left_img,
-                right=right_img,
-                K=self.K,
-                baseline=self.baseline,
-            )
-            self.logger.info(f"Saved stereo debug sample to {debug_path}, shutting down for offline debugging.")
-            rclpy.shutdown()
-            sys.exit(0)
 
         current_timestamp = stamp2second(left_msg.header.stamp)
         if len(self.keyframe_queue) == 0: # first frame
