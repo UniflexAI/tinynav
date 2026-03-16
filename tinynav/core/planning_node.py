@@ -794,7 +794,8 @@ class PlanningNode(Node):
                 local_path_world = []
                 for g in grid_path:
                     p = grid_to_world_2d(g, self.origin, self.resolution, robot_z)
-                    p[2] = sample_height_from_map(p[:2], pooled_map, self.origin, self.resolution, robot_z)
+                    # Keep path Z fixed at current robot height for flatter trajectories.
+                    p[2] = robot_z
                     local_path_world.append(p)
 
                 if len(local_path_world) >= 3:
