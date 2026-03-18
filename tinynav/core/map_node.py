@@ -133,6 +133,49 @@ def reconstruct_path_sdf(parent: dict, current: tuple):
     return path[::-1]
 
 
+def downsample_path_by_distance(path: np.ndarray, min_dist: float = 0.08) -> np.ndarray:
+    """Lightweight path downsampling to reduce control jitter/oscillation cost."""
+    if path is None or len(path) <= 2:
+        return path
+    min_dist = max(1e-3, float(min_dist))
+    out = [path[0]]
+    last = path[0]
+    for i in range(1, len(path) - 1):
+        p = path[i]
+        if np.linalg.norm(p[:2] - last[:2]) >= min_dist:
+            out.append(p)
+            last = p
+    out.append(path[-1])
+    return np.asarray(out, dtype=path.dtype)
+
+
+def smooth_path_lightweight(path: np.ndarray, window: int = 5, passes: int = 1) -> np.ndarray:
+    """Low-cost moving-average smoothing (XY only), keeps endpoints and Z profile."""
+    if path is None or len(path) < 3:
+        return path
+
+    arr = np.asarray(path, dtype=np.float32)
+    n = arr.shape[0]
+    window = max(3, int(window))
+    if window % 2 == 0:
+        window += 1
+    half = window // 2
+
+    smoothed = arr.copy()
+    for _ in range(max(1, int(passes))):
+        prev = smoothed.copy()
+        for i in range(1, n - 1):
+            l = max(0, i - half)
+            r = min(n, i + half + 1)
+            smoothed[i, 0] = np.mean(prev[l:r, 0])
+            smoothed[i, 1] = np.mean(prev[l:r, 1])
+            smoothed[i, 2] = prev[i, 2]
+        smoothed[0] = arr[0]
+        smoothed[-1] = arr[-1]
+
+    return smoothed.astype(path.dtype, copy=False)
+
+
 def search_close_to_sdf_map(
     start_index: tuple,
     sdf_map: np.ndarray,
@@ -1047,6 +1090,9 @@ class MapNode(Node):
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
+            # lightweight post-process: smooth then downsample for lower control wear
+            converted_path = smooth_path_lightweight(converted_path, window=5, passes=1)
+            converted_path = downsample_path_by_distance(converted_path, min_dist=0.08)
             return converted_path
         return None
 

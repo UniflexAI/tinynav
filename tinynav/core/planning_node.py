@@ -420,38 +420,33 @@ def build_astar_cost_map(height_map, esdf_map, resolution):
     gx, gy = np.gradient(filled)
     slope = np.sqrt(gx * gx + gy * gy)
 
-    # Stair-friendly handling:
-    # - small slope is almost free
-    # - large slope is penalized but not immediately forbidden
-    slope_penalty = np.clip(slope - 0.08, 0.0, 2.0)
+    # Keep slope debug maps for RViz.
+    slope_block = slope > 1.5
+    slope_feasible = (~slope_block) & finite
 
-    esdf_clamped = np.clip(esdf_map, 0.012, 2.0)
-    clearance_cost = 1.0 / esdf_clamped
-
-    # Stair-like regions get a looser hard threshold to avoid over-blocking steps.
+    # ESDF obstacle source (using robot-relative height derived ESDF).
     stair_like = slope > 0.4
     hard_esdf = np.where(stair_like, 0.015, 0.04)
+    esdf_obstacle = (esdf_map < hard_esdf)
 
-    # Unknown region policy:
-    # - unknown (non-finite height) is NOT a hard obstacle
-    # - but it gets extra traversal penalty so planner prefers known space
-    obstacle = (esdf_map < hard_esdf)
+    # Combine slope and ESDF.
+    obstacle = esdf_obstacle | slope_block
 
-    # Footprint inflation for A*: do not treat robot as a point.
-    # Inflate by lateral half-width (and safety radius) in 2D occupancy.
     inflation_radius_m = max(HALF_SAFETY_WIDTH, SAFETY_RADIUS)
     inflation_radius_px = max(1.0, inflation_radius_m / max(1e-6, resolution))
     dist_to_obstacle_px = distance_transform_edt(~obstacle)
     obstacle_inflated = dist_to_obstacle_px <= inflation_radius_px
 
+    slope_penalty = np.clip(slope - 0.08, 0.0, 2.0)
+    esdf_clamped = np.clip(esdf_map, 0.012, 2.0)
+    clearance_cost = 1.0 / esdf_clamped
     unknown_penalty = np.where(finite, 0.0, 1.6)
 
-    # More permissive on stairs, more conservative on flat area.
     slope_w = np.where(stair_like, 0.08, 0.14)
     clear_w = np.where(stair_like, 0.05, 0.09)
     cost = 1.0 + slope_w * slope_penalty + clear_w * np.clip(clearance_cost, 0.0, 25.0) + unknown_penalty
     cost[obstacle_inflated] = np.inf
-    return obstacle_inflated, cost
+    return obstacle_inflated, cost, slope_feasible, slope_block
 
 
 def smooth_path_world(path_world, window=5, passes=2):
@@ -513,6 +508,8 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
+        self.slope_feasible_pub = self.create_publisher(OccupancyGrid, '/planning/slope_feasible', 10)
+        self.slope_blocked_pub = self.create_publisher(OccupancyGrid, '/planning/slope_blocked', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
@@ -665,6 +662,21 @@ class PlanningNode(Node):
         occupancy_grid_msg.data = flat_data
         self.occupancy_grid_pub.publish(occupancy_grid_msg)
 
+    def publish_binary_grid(self, mask, pub, origin, resolution, stamp, z_offset=0.0):
+        msg = OccupancyGrid()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.info.resolution = resolution
+        msg.info.width = mask.shape[1]
+        msg.info.height = mask.shape[0]
+        msg.info.origin.position.x = origin[0]
+        msg.info.origin.position.y = origin[1]
+        msg.info.origin.position.z = origin[2] + z_offset
+        msg.info.origin.orientation.w = 1.0
+        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
+        pub.publish(msg)
+
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
         occupied = np.argwhere(grid3d > 0.1)
         # vectorized operation to avoid for loop
@@ -811,8 +823,11 @@ class PlanningNode(Node):
         with Timer(name='heightmap', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             height_map = occupancy_grid_to_height_map(self.occupancy_grid, self.origin, self.resolution)
             pooled_map = max_pool_height_map(height_map)
-            ESDF_map = height_map_to_ESDF(pooled_map, self.origin[2]+0.4, self.resolution)
-            
+            robot_z = T[2, 3]
+            # Robot-relative height map for threshold-based ESDF decisions.
+            pooled_map_rel = pooled_map - robot_z
+            ESDF_map = height_map_to_ESDF(pooled_map_rel, 0.4, self.resolution)
+
 
         with Timer(name='vis heighmap and esdf', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
@@ -823,7 +838,9 @@ class PlanningNode(Node):
         with Timer(name='local astar plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             local_path_world = []
             if self.target_pose is not None:
-                obstacle_mask, astar_cost = build_astar_cost_map(pooled_map, ESDF_map, self.resolution)
+                obstacle_mask, astar_cost, slope_feasible, slope_block = build_astar_cost_map(pooled_map_rel, ESDF_map, self.resolution)
+                self.publish_binary_grid(slope_feasible, self.slope_feasible_pub, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+                self.publish_binary_grid(slope_block, self.slope_blocked_pub, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
 
                 start_idx = clip_grid_2d(world_to_grid_2d(T[:2, 3], self.origin, self.resolution), obstacle_mask.shape)
                 goal_idx = clip_grid_2d(world_to_grid_2d(self.target_pose[:2], self.origin, self.resolution), obstacle_mask.shape)
