@@ -414,7 +414,7 @@ def astar_2d(cost_map, obstacle_mask, start, goal):
     return []
 
 
-def build_astar_cost_map(height_map, esdf_map):
+def build_astar_cost_map(height_map, esdf_map, resolution):
     finite = np.isfinite(height_map)
     filled = np.nan_to_num(height_map, nan=0.0, neginf=0.0, posinf=0.0)
     gx, gy = np.gradient(filled)
@@ -436,14 +436,22 @@ def build_astar_cost_map(height_map, esdf_map):
     # - unknown (non-finite height) is NOT a hard obstacle
     # - but it gets extra traversal penalty so planner prefers known space
     obstacle = (esdf_map < hard_esdf)
+
+    # Footprint inflation for A*: do not treat robot as a point.
+    # Inflate by lateral half-width (and safety radius) in 2D occupancy.
+    inflation_radius_m = max(HALF_SAFETY_WIDTH, SAFETY_RADIUS)
+    inflation_radius_px = max(1.0, inflation_radius_m / max(1e-6, resolution))
+    dist_to_obstacle_px = distance_transform_edt(~obstacle)
+    obstacle_inflated = dist_to_obstacle_px <= inflation_radius_px
+
     unknown_penalty = np.where(finite, 0.0, 1.6)
 
     # More permissive on stairs, more conservative on flat area.
     slope_w = np.where(stair_like, 0.08, 0.14)
     clear_w = np.where(stair_like, 0.05, 0.09)
     cost = 1.0 + slope_w * slope_penalty + clear_w * np.clip(clearance_cost, 0.0, 25.0) + unknown_penalty
-    cost[obstacle] = np.inf
-    return obstacle, cost
+    cost[obstacle_inflated] = np.inf
+    return obstacle_inflated, cost
 
 
 def smooth_path_world(path_world, window=5, passes=2):
@@ -815,7 +823,7 @@ class PlanningNode(Node):
         with Timer(name='local astar plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             local_path_world = []
             if self.target_pose is not None:
-                obstacle_mask, astar_cost = build_astar_cost_map(pooled_map, ESDF_map)
+                obstacle_mask, astar_cost = build_astar_cost_map(pooled_map, ESDF_map, self.resolution)
 
                 start_idx = clip_grid_2d(world_to_grid_2d(T[:2, 3], self.origin, self.resolution), obstacle_mask.shape)
                 goal_idx = clip_grid_2d(world_to_grid_2d(self.target_pose[:2], self.origin, self.resolution), obstacle_mask.shape)
