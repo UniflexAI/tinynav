@@ -6,7 +6,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Point32
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import maximum_filter, distance_transform_edt
@@ -17,6 +17,7 @@ from rclpy.time import Time
 import io
 from PIL import Image as PIL_Image
 from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
@@ -504,6 +505,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
+        self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
         self.planning_cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -671,6 +673,37 @@ class PlanningNode(Node):
         pc2_msg = pc2.create_cloud_xyz32(header, points)
         self.occupancy_cloud_pub.publish(pc2_msg)
 
+    def publish_footprint(self, T, stamp):
+        """Publish robot footprint rectangle as a point cloud for RViz."""
+        forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        left = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
+        center = T[:3, 3]
+
+        corners = [
+            center + forward * HALF_SAFETY_LENGTH + left * HALF_SAFETY_WIDTH,
+            center + forward * HALF_SAFETY_LENGTH - left * HALF_SAFETY_WIDTH,
+            center - forward * HALF_SAFETY_LENGTH - left * HALF_SAFETY_WIDTH,
+            center - forward * HALF_SAFETY_LENGTH + left * HALF_SAFETY_WIDTH,
+        ]
+
+        # Draw rectangle edges by sampling points.
+        edge_samples = 20
+        points = []
+        for i in range(4):
+            a = corners[i]
+            b = corners[(i + 1) % 4]
+            for k in range(edge_samples + 1):
+                t = k / edge_samples
+                p = (1.0 - t) * a + t * b
+                points.append(Point32(x=float(p[0]), y=float(p[1]), z=float(p[2])))
+
+        msg = PointCloud()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.points = points
+        self.footprint_pub.publish(msg)
+
     def publish_3d_occupancy_cloud_with_esdf(self, grid3d, ESDF_map, resolution=0.1, origin=(0, 0, 0), max_dist=1.0):
         X, Y, Z = grid3d.shape
         # ground
@@ -777,6 +810,7 @@ class PlanningNode(Node):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='local astar plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             local_path_world = []
