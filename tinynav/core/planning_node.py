@@ -428,7 +428,7 @@ def build_astar_cost_map(height_map, esdf_map):
     clearance_cost = 1.0 / esdf_clamped
 
     # Stair-like regions get a looser hard threshold to avoid over-blocking steps.
-    stair_like = slope > 0.18
+    stair_like = slope > 0.4
     hard_esdf = np.where(stair_like, 0.015, 0.04)
 
     # Unknown region policy:
@@ -572,9 +572,9 @@ class PlanningNode(Node):
         self.cmd_rate_hz = 20.0
         self.path_stale_slow_s = 0.3
         self.path_stale_stop_s = 0.6
-        self.max_linear_speed = 0.8  # m/s
-        self.max_linear_acc = 0.8    # m/s^2
-        self.max_angular_acc = 2.5   # rad/s^2
+        self.max_linear_speed = 0.5  # m/s
+        self.max_linear_acc = 0.3   # m/s^2
+        self.max_angular_acc = 1.0   # rad/s^2
         self.recovery_fast_speed = 0.18
         self.recovery_slow_speed = 0.08
         self.path_smooth_window = 5
