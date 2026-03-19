@@ -362,11 +362,14 @@ def find_nearest_free(start, obstacle_mask, search_radius=8):
     return None
 
 
-def astar_2d(cost_map, obstacle_mask, start, goal):
+def astar_2d(cost_map, obstacle_mask, start, goal, search_mask=None):
     if start is None or goal is None:
         return []
     if obstacle_mask[start] or obstacle_mask[goal]:
         return []
+    if search_mask is not None:
+        if (not search_mask[start]) or (not search_mask[goal]):
+            return []
 
     def heuristic(a, b):
         return np.hypot(a[0] - b[0], a[1] - b[1])
@@ -403,6 +406,8 @@ def astar_2d(cost_map, obstacle_mask, start, goal):
                 continue
             if obstacle_mask[nx, ny]:
                 continue
+            if search_mask is not None and (not search_mask[nx, ny]):
+                continue
             n = (nx, ny)
             trans_cost = step_cost * (0.5 * (cost_map[cx, cy] + cost_map[nx, ny]))
             new_g = g_cur + trans_cost
@@ -421,7 +426,7 @@ def build_astar_cost_map(height_map, esdf_map, resolution):
     slope = np.sqrt(gx * gx + gy * gy)
 
     # Keep slope debug maps for RViz.
-    slope_block = slope > 1.5
+    slope_block = slope > 1.0
     slope_feasible = (~slope_block) & finite
 
     # ESDF obstacle source (using robot-relative height derived ESDF).
@@ -476,6 +481,36 @@ def smooth_path_world(path_world, window=5, passes=2):
     return [smoothed[i] for i in range(n)]
 
 
+def build_global_path_corridor_mask(global_path_xy, origin, resolution, shape, radius_m):
+    """Build a boolean corridor mask around global path polyline in local grid."""
+    h, w = shape
+    if global_path_xy is None or len(global_path_xy) < 1:
+        return np.zeros((h, w), dtype=bool)
+
+    radius_px = max(1, int(np.ceil(radius_m / max(1e-6, resolution))))
+    seeds = np.zeros((h, w), dtype=bool)
+
+    pts = np.asarray(global_path_xy, dtype=np.float32)
+    for i in range(len(pts) - 1):
+        p0 = pts[i]
+        p1 = pts[i + 1]
+        seg_len = np.linalg.norm(p1 - p0)
+        n = max(1, int(np.ceil(seg_len / max(1e-6, resolution * 0.5))))
+        for t in np.linspace(0.0, 1.0, n + 1):
+            p = (1.0 - t) * p0 + t * p1
+            gx, gy = world_to_grid_2d(p, origin, resolution)
+            if 0 <= gx < h and 0 <= gy < w:
+                seeds[gx, gy] = True
+
+    if len(pts) == 1:
+        gx, gy = world_to_grid_2d(pts[0], origin, resolution)
+        if 0 <= gx < h and 0 <= gy < w:
+            seeds[gx, gy] = True
+
+    dist = distance_transform_edt(~seeds)
+    return dist <= radius_px
+
+
 def pick_lookahead_point(path_world, robot_xy, lookahead_dist=0.6):
     if len(path_world) == 0:
         return None
@@ -510,6 +545,7 @@ class PlanningNode(Node):
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.slope_feasible_pub = self.create_publisher(OccupancyGrid, '/planning/slope_feasible', 10)
         self.slope_blocked_pub = self.create_publisher(OccupancyGrid, '/planning/slope_blocked', 10)
+        self.global_corridor_pub = self.create_publisher(OccupancyGrid, '/planning/global_corridor', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
@@ -569,7 +605,9 @@ class PlanningNode(Node):
         self.smoothed_velocity = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
+        self.create_subscription(Path, '/mapping/global_plan', self.global_plan_callback, 10)
         self.target_pose = None
+        self.global_path_xy = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
         self.poi_changed = False
@@ -587,6 +625,10 @@ class PlanningNode(Node):
         self.path_smooth_window = 5
         self.path_smooth_passes = 2
 
+        # Local A* corridor around global path (meters). Fallback to unconstrained if failed.
+        self.corridor_radius_m = 0.3
+        self.corridor_fallback_scale = 1.6
+
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
@@ -601,6 +643,15 @@ class PlanningNode(Node):
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+
+    def global_plan_callback(self, msg: Path):
+        if len(msg.poses) == 0:
+            self.global_path_xy = None
+            return
+        self.global_path_xy = np.array(
+            [[p.pose.position.x, p.pose.position.y] for p in msg.poses],
+            dtype=np.float32,
+        )
 
     def info_callback(self, msg):
         if self.K is None:
@@ -848,7 +899,56 @@ class PlanningNode(Node):
                 start_free = find_nearest_free(start_idx, obstacle_mask)
                 goal_free = find_nearest_free(goal_idx, obstacle_mask)
 
-                grid_path = astar_2d(astar_cost, obstacle_mask, start_free, goal_free)
+                grid_path = []
+                if self.global_path_xy is not None and len(self.global_path_xy) >= 2:
+                    corridor_mask = build_global_path_corridor_mask(
+                        self.global_path_xy,
+                        self.origin,
+                        self.resolution,
+                        obstacle_mask.shape,
+                        self.corridor_radius_m,
+                    )
+                    corridor_mask &= ~obstacle_mask
+                    self.publish_binary_grid(
+                        corridor_mask,
+                        self.global_corridor_pub,
+                        self.origin,
+                        self.resolution,
+                        depth_msg.header.stamp,
+                        z_offset=self.grid_shape[2] * self.resolution / 2,
+                    )
+
+                    # Pass 1: strict corridor-constrained A*.
+                    grid_path = astar_2d(
+                        astar_cost,
+                        obstacle_mask,
+                        start_free,
+                        goal_free,
+                        search_mask=corridor_mask,
+                    )
+
+                    # Pass 2: relaxed corridor if strict one fails.
+                    if len(grid_path) == 0:
+                        relaxed_mask = build_global_path_corridor_mask(
+                            self.global_path_xy,
+                            self.origin,
+                            self.resolution,
+                            obstacle_mask.shape,
+                            self.corridor_radius_m * self.corridor_fallback_scale,
+                        )
+                        relaxed_mask &= ~obstacle_mask
+                        grid_path = astar_2d(
+                            astar_cost,
+                            obstacle_mask,
+                            start_free,
+                            goal_free,
+                            search_mask=relaxed_mask,
+                        )
+
+                # Pass 3 fallback: original unconstrained local A*.
+                if len(grid_path) == 0:
+                    grid_path = astar_2d(astar_cost, obstacle_mask, start_free, goal_free)
+
                 robot_z = T[2, 3]
                 local_path_world = []
                 for g in grid_path:
