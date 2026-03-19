@@ -987,7 +987,7 @@ class PlanningNode(Node):
             else:
                 robot_xy = T[:2, 3]
                 target_dist = np.linalg.norm(self.target_pose[:2] - robot_xy)
-                if target_dist < 0.25:
+                if target_dist < 0.5:
                     cmd.linear.x = 0.0
                     cmd.angular.z = 0.0
                 elif len(local_path_world) < 2:
