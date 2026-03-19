@@ -431,7 +431,8 @@ def build_astar_cost_map(height_map, esdf_map, resolution):
 
     # ESDF obstacle source (using robot-relative height derived ESDF).
     stair_like = slope > 0.4
-    hard_esdf = np.where(stair_like, 0.015, 0.04)
+    # Slightly stricter ESDF hard-obstacle threshold to better reject wall-embedded targets.
+    hard_esdf = np.where(stair_like, 0.02, 0.05)
     esdf_obstacle = (esdf_map < hard_esdf)
 
     # Combine slope and ESDF.
@@ -590,7 +591,7 @@ class PlanningNode(Node):
             time.sleep(0.2)
 
 
-        self.grid_shape = (100, 100, 10)
+        self.grid_shape = (100, 100, 15)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 5
