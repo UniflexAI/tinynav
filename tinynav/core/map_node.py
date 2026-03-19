@@ -949,8 +949,8 @@ class MapNode(Node):
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
-            diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
-            if diff_position_norm < 1.5:
+            diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
+            if diff_position_norm_xy < 1.5:
                 self.poi_index += 1
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(
@@ -985,14 +985,14 @@ class MapNode(Node):
             ):
                 max_speed = 0.5
                 if len(paths_in_map) > 1:
-                    accumulated_distance = 0.0
+                    accumulated_distance_xy = 0.0
                     start_point = pose_in_map_position[:3]
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
-                        accumulated_distance += np.linalg.norm(
-                            paths_in_map[i] - start_point
+                        accumulated_distance_xy += np.linalg.norm(
+                            paths_in_map[i][:2] - start_point[:2]
                         )
-                        if accumulated_distance > 1.0:
+                        if accumulated_distance_xy > 1.0:
                             target_position = paths_in_map[i]
                             break
                         start_point = paths_in_map[i]
