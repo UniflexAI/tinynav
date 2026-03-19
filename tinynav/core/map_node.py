@@ -950,7 +950,8 @@ class MapNode(Node):
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
-            if diff_position_norm_xy < 1.5:
+            diff_position_norm_z = np.abs(poi[2] - pose_in_map_position[2])
+            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 0.6:
                 self.poi_index += 1
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(
