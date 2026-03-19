@@ -6,6 +6,7 @@ import subprocess
 import os
 import shutil
 import threading
+from datetime import datetime
 
 class Ros2NodeManager(Node):
     def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
@@ -16,6 +17,10 @@ class Ros2NodeManager(Node):
         self.bag_path = os.path.join(tinynav_db_path, 'bag')
         self.map_path = os.path.join(tinynav_db_path, 'map')
         self.nav_out_path = os.path.join(tinynav_db_path, 'nav_out')
+        self.log_path = os.path.join(tinynav_db_path, 'logs')
+
+        # Hold opened log file handles to avoid premature close.
+        self._log_files = {}
 
         self.state_pub = self.create_publisher(String, '/service/state', 10)
         self.create_subscription(String, '/service/command', self._cmd_cb, 10)
@@ -144,13 +149,13 @@ class Ros2NodeManager(Node):
             'uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py',
             '--sensor_source', 'realsense'
         ]
-        self.processes['perception'] = self._spawn(cmd_perception)
+        self.processes['perception'] = self._spawn(cmd_perception, name='perception', mode='navigation')
 
         cmd_planning = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py',
             '--sensor_source', 'realsense'
         ]
-        self.processes['planning'] = self._spawn(cmd_planning)
+        self.processes['planning'] = self._spawn(cmd_planning, name='planning', mode='navigation')
 
         # cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
         # self.processes['control'] = self._spawn(cmd_control)
@@ -161,7 +166,7 @@ class Ros2NodeManager(Node):
             '--tinynav_map_path', self.map_path,
             '--sensor_source', 'realsense'
         ]
-        self.processes['map'] = self._spawn(cmd_map)
+        self.processes['mapping'] = self._spawn(cmd_map, name='mapping', mode='navigation')
 
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
 
@@ -203,9 +208,22 @@ class Ros2NodeManager(Node):
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', 'nav_bag'] + topics
         self.processes['bag_record'] = self._spawn(cmd_bag)
 
-    def _spawn(self, cmd):
+    def _spawn(self, cmd, name=None, mode=None):
         env = os.environ.copy()
-        return subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)
+
+        stdout = None
+        stderr = None
+        if name is not None and mode is not None:
+            os.makedirs(self.log_path, exist_ok=True)
+            ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+            log_file = os.path.join(self.log_path, f'{mode}_{name}_{ts}.log')
+            f = open(log_file, 'ab', buffering=0)
+            self._log_files[name] = f
+            stdout = f
+            stderr = subprocess.STDOUT
+            self.get_logger().info(f'Logging {name} -> {log_file}')
+
+        return subprocess.Popen(cmd, env=env, preexec_fn=os.setsid, stdout=stdout, stderr=stderr)
 
     def _stop_all(self):
         for name, proc in list(self.processes.items()):
@@ -218,6 +236,12 @@ class Ros2NodeManager(Node):
                         proc.kill()
                     except:
                         pass
+            f = self._log_files.pop(name, None)
+            if f is not None:
+                try:
+                    f.close()
+                except:
+                    pass
         self.processes.clear()
         if self.state != 'idle':
             self.state = 'idle'
