@@ -31,7 +31,7 @@ from geometry_msgs.msg import Twist
 # set to 3x of resolution.
 SAFETY_RADIUS=0.3
 
-HALF_SAFETY_LENGTH = 0.5
+HALF_SAFETY_LENGTH = 0.7
 HALF_SAFETY_WIDTH = 0.35
 
 # === Helper functions ===
