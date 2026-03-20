@@ -12,6 +12,7 @@ This document provides an overview of the key scripts in the `scripts/` director
 | `run_rosbag_build_map.sh`     | Builds a map from a specified rosbag file, launching all required nodes and RViz.            |
 | `run_realsense_sensor.sh`     | Starts the RealSense camera ROS 2 driver on your host system.                                |
 | `run_realsense_bag_record.sh` | Records RealSense camera and IMU data into a rosbag for later mapping or playback.            |
+| `benchmark_superpoint_cpu.py` | Benchmarks the SuperPoint ONNX model on CPU with single-thread onnxruntime in the devcontainer. |
 
 TinyNav supports several key modes to fit different robotics workflows:
 
@@ -57,3 +58,14 @@ TinyNav supports several key modes to fit different robotics workflows:
      bash scripts/run_navigation.sh
      ```
    - The robot will follow the designated POIs in the order you specify.
+
+4. **Benchmark SuperPoint on CPU (Single Thread)**
+   - Inside the devcontainer, benchmark the SuperPoint ONNX model on CPU with one onnxruntime thread:
+     ```bash
+     python3 scripts/benchmark_superpoint_cpu.py
+     ```
+   - Optional arguments:
+     ```bash
+     python3 scripts/benchmark_superpoint_cpu.py --warmup 20 --iters 200
+     ```
+   - The script reports average latency, p50, p95, and FPS.
