@@ -974,6 +974,12 @@ class PlanningNode(Node):
                         footprint_check_fn=footprint_check,
                     )
 
+                if (len(grid_path) == 0):
+                    self.get_logger().warning("No local path with footprint check found")
+                    return
+                
+                self.get_logger().info(f"Path found: {len(grid_path)} points")
+
                 robot_z = T[2, 3]
                 local_path_world = []
                 for g in grid_path:
