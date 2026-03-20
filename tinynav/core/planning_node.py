@@ -615,7 +615,7 @@ class PlanningNode(Node):
         self.path_stale_stop_s = 0.6
         self.max_linear_speed = 0.5  # m/s
         self.max_linear_acc = 0.3   # m/s^2
-        self.max_angular_acc = 1.0   # rad/s^2
+        self.max_angular_acc = 2.5   # rad/s^2 (unlock turning response)
         self.recovery_fast_speed = 0.18
         self.recovery_slow_speed = 0.08
         self.path_smooth_window = 5
@@ -946,7 +946,7 @@ class PlanningNode(Node):
                         forward_xy = forward_xy / norm_f
                         to_target = to_target / norm_t
                         heading_err = signed_angle_between(forward_xy, to_target)
-                        cmd.angular.z = float(np.clip(1.6 * heading_err, -1.0, 1.0))
+                        cmd.angular.z = float(np.clip(1.6 * heading_err, -2.0, 2.0))
                         cmd.linear.x = self.recovery_fast_speed if abs(heading_err) < 0.6 else self.recovery_slow_speed
                 else:
                     lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=0.6)
@@ -964,12 +964,12 @@ class PlanningNode(Node):
                         to_wp = to_wp / norm_t
                         heading_err = signed_angle_between(forward_xy, to_wp)
 
-                        cmd.angular.z = float(np.clip(1.8 * heading_err, -1.2, 1.2))
+                        cmd.angular.z = float(np.clip(1.8 * heading_err, -2.0, 2.0))
                         heading_scale = max(0.0, np.cos(heading_err))
                         dist_scale = np.clip(target_dist / 1.0, 0.2, 1.0)
                         cmd.linear.x = float(np.clip(self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed))
                         if abs(heading_err) > 1.0:
-                            cmd.linear.x *= 0.15
+                            cmd.linear.x *= 0.40
 
             cmd.linear.y = 0.0
             self.latest_cmd = cmd
