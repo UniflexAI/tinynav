@@ -4,7 +4,6 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
 from scipy.spatial.transform import Rotation as R
-from tinynav.core.math_utils import msg2np
 import numpy as np
 import logging
 
@@ -41,8 +40,15 @@ class CmdVelControlNode(Node):
         path_time_diff = current_time - self.last_path_time
         self.logger.debug(f"diff between path and current time: {path_time_diff}")
         self.last_path_time = current_time
-
-        T1 = msg2np(self.pose.pose)
+        def msg2np(msg):
+            T = np.eye(4)
+            position = msg.pose.position
+            rot = msg.pose.orientation
+            quat = [rot.x, rot.y, rot.z, rot.w]
+            T[:3, :3] = R.from_quat(quat).as_matrix()
+            T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
+            return T
+        T1 = msg2np(self.path.poses[0])
         T2 = msg2np(self.path.poses[1])
         T_robot_1 = T1 @ self.T_robot_to_camera
         T_robot_2 = T2 @ self.T_robot_to_camera
