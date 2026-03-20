@@ -506,7 +506,7 @@ class PlanningNode(Node):
                         if self.poi_changed:
                             self.get_logger().info(f"poi changed, using first point, wait {(depth_msg.header.stamp.sec - self.poi_change_timestamp_sec)} seconds")
                         if self.target_pose is None:
-                            self.get_logger().info(f"target pose is None, using first point")
+                            self.get_logger().info("target pose is None, using first point")
 
                     pose = PoseStamped()
                     pose.header = depth_msg.header
