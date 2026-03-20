@@ -417,7 +417,6 @@ class MapNode(Node):
         self.pois = pois_dict
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
-        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
 
         self.current_pose_pub = self.create_publisher(
             Odometry, "/mapping/current_pose", 10
@@ -433,6 +432,9 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+        self._cached_path_data = None
+        self._pending_path_request = None
+        self._path_timer = self.create_timer(0.5, self._path_timer_callback)
 
     def pois_callback(self, msg: Path):
         new_pois = {}
@@ -441,11 +443,6 @@ class MapNode(Node):
             new_pois[idx] = np.array([p.x, p.y, p.z], dtype=np.float64)
         self.pois = new_pois
         self.poi_index = 0
-
-        dummy_pose = np.eye(4)
-        self.poi_change_pub.publish(
-            np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map")
-        )
         self.get_logger().info(
             f"Received /mapping/pois update: {len(self.pois)} POIs, reset poi_index to 0"
         )
@@ -912,6 +909,51 @@ class MapNode(Node):
         )
         self.T_from_map_to_odom = optimized_parameters[0]
 
+    def _publish_from_path(self, paths_in_map, pose_in_map):
+        if paths_in_map is None or len(paths_in_map) == 0 or self.T_from_map_to_odom is None:
+            return
+        T = self.T_from_map_to_odom
+        start_point = pose_in_map[:3, 3]
+        if len(paths_in_map) > 1:
+            distance_xy = 0.0
+            target_position = paths_in_map[-1]
+            for i in range(len(paths_in_map) - 1):
+                distance_xy = np.linalg.norm(
+                    paths_in_map[i][:2] - start_point[:2]
+                )
+                if distance_xy > 1.0:
+                    target_position = paths_in_map[i]
+                    break
+        else:
+            target_position = paths_in_map[0]
+        target_position_in_map = np.array(
+            [target_position[0], target_position[1], target_position[2]]
+        )
+        target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+        dummy_pose = np.eye(4)
+        dummy_pose[:3, 3] = target_position_in_odom
+        self.target_pose_pub.publish(
+            np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "world")
+        )
+        path_msg = Path()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = "map"
+        for x, y, z in paths_in_map:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.position.z = z
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = 0.0
+            pose.pose.orientation.w = 1.0
+            path_msg.poses.append(pose)
+        self.global_plan_pub.publish(path_msg)
+        self.tf_broadcaster.sendTransform(
+            np2tf(T, self.get_clock().now().to_msg(), "world", "map")
+        )
+
     def try_publish_nav_path(self, timestamp: int):
         self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
         if self.T_from_map_to_odom is None:
@@ -945,18 +987,13 @@ class MapNode(Node):
             np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map")
         )
 
-        pose_in_map_position = pose_in_map[:3, 3]
-
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
-            diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
-            diff_position_norm_z = np.abs(poi[2] - pose_in_map_position[2])
+            pos = pose_in_map[:3, 3]
+            diff_position_norm_xy = np.linalg.norm(poi[:2] - pos[:2])
+            diff_position_norm_z = np.abs(poi[2] - pos[2])
             if diff_position_norm_xy < 0.5 and diff_position_norm_z < 0.6:
                 self.poi_index += 1
-                dummy_pose = np.eye(4)
-                self.poi_change_pub.publish(
-                    np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map")
-                )
                 continue
             else:
                 break
@@ -968,71 +1005,39 @@ class MapNode(Node):
             return
 
         target_poi = self.pois[self.poi_index]
-        with Timer(
-            name="generate nav path in map",
-            text="[{name}] Elapsed time: {milliseconds:.0f} ms",
-            logger=self.timer_logger,
-        ):
-            paths_in_map = self.generate_nav_path_in_map(
-                pose_in_map=pose_in_map, target_poi=target_poi
-            )
 
+        if self._cached_path_data is not None:
+            cached = self._cached_path_data
+            self._publish_from_path(cached["paths"], cached["pose_in_map"])
+
+        self._pending_path_request = {
+            "pose_in_map": pose_in_map,
+            "target_poi": target_poi,
+        }
+
+
+    def _path_timer_callback(self):
+        req = self._pending_path_request
+        if req is None:
+            return
+        t0 = time.perf_counter()
+        self._pending_path_request = None
+        pose_in_map = req["pose_in_map"]
+        target_poi = req["target_poi"]
+
+        paths_in_map = self.generate_nav_path_in_map(
+            pose_in_map=pose_in_map, target_poi=target_poi
+        )
         if paths_in_map is not None:
-            # use the max_speed to publish the position the robot should be after 5 seconds
-            with Timer(
-                name="Find target position",
-                text="[{name}] Elapsed time: {milliseconds:.0f} ms",
-                logger=self.timer_logger,
-            ):
-                max_speed = 0.5
-                if len(paths_in_map) > 1:
-                    accumulated_distance_xy = 0.0
-                    start_point = pose_in_map_position[:3]
-                    target_position = paths_in_map[-1]
-                    for i in range(len(paths_in_map) - 1):
-                        accumulated_distance_xy += np.linalg.norm(
-                            paths_in_map[i][:2] - start_point[:2]
-                        )
-                        if accumulated_distance_xy > 1.0:
-                            target_position = paths_in_map[i]
-                            break
-                        start_point = paths_in_map[i]
-                else:
-                    target_position = paths_in_map[0]
-                target_position_in_map = np.array(
-                    [target_position[0], target_position[1], target_position[2]]
-                )
-                pose_in_origin_odom = self.odom[timestamp]
-                T = pose_in_origin_odom @ se3_inv(pose_in_map)
-                target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
-                dummy_pose = np.eye(4)
-                dummy_pose[:3, 3] = target_position_in_odom
-                # logging.info(f"target_position_in_odom: {target_position_in_odom}")
-                print(f"target_position_in_odom: {target_position_in_odom}")
-
-                self.target_pose_pub.publish(
-                    np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "world")
-                )
-                path_msg = Path()
-                path_msg.header.stamp = self.get_clock().now().to_msg()
-                path_msg.header.frame_id = "map"
-                for x, y, z in paths_in_map:
-                    pose = PoseStamped()
-                    pose.header = path_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = 0.0
-                    pose.pose.orientation.y = 0.0
-                    pose.pose.orientation.z = 0.0
-                    pose.pose.orientation.w = 1.0
-                    path_msg.poses.append(pose)
-                self.global_plan_pub.publish(path_msg)
-                self.tf_broadcaster.sendTransform(
-                    np2tf(T, self.get_clock().now().to_msg(), "world", "map")
-                )
+            self._cached_path_data = {
+                "paths": paths_in_map,
+                "pose_in_map": pose_in_map,
+            }
         else:
-            logging.info("No path found in map")
+            self.get_logger().info("No path found in map")
+        self.get_logger().info(
+            f"[_path_timer_callback] Elapsed time: {(time.perf_counter() - t0) * 1000:.0f} ms"
+        )
 
     def generate_nav_path_in_map(
         self, pose_in_map: np.ndarray, target_poi: np.ndarray

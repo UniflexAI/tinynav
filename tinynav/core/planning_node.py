@@ -610,10 +610,6 @@ class PlanningNode(Node):
         self.target_pose = None
         self.global_path_xy = None
 
-        self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
-        self.poi_changed = False
-        self.poi_change_timestamp_sec = 0.0
-
         # Keep planning event-driven (sync depth+odom), but publish cmd at a fixed rate.
         self.cmd_rate_hz = 20.0
         self.path_stale_slow_s = 0.3
@@ -637,9 +633,6 @@ class PlanningNode(Node):
 
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
-    def poi_change_callback(self, msg):
-        self.poi_changed = True
-        self.poi_change_timestamp_sec = msg.header.stamp.sec
         # Do not clear target_pose here: planner should keep chasing latest /control/target_pose.
 
     def target_pose_callback(self, msg):
@@ -987,7 +980,7 @@ class PlanningNode(Node):
             else:
                 robot_xy = T[:2, 3]
                 target_dist = np.linalg.norm(self.target_pose[:2] - robot_xy)
-                if target_dist < 0.5:
+                if target_dist < 0.25:
                     cmd.linear.x = 0.0
                     cmd.angular.z = 0.0
                 elif len(local_path_world) < 2:
