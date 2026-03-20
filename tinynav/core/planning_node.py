@@ -619,7 +619,7 @@ class PlanningNode(Node):
         self.recovery_fast_speed = 0.18
         self.recovery_slow_speed = 0.08
         self.path_smooth_window = 5
-        self.path_smooth_passes = 2
+        self.path_smooth_passes = 0
 
 
         self.latest_cmd = Twist()
