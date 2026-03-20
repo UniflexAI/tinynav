@@ -29,9 +29,9 @@ from geometry_msgs.msg import Twist
 
 # Footprint params (meters)
 SAFETY_RADIUS = 0.3
-HALF_SAFETY_LENGTH = 0.25
+HALF_SAFETY_LENGTH = 0.4
 HALF_SAFETY_WIDTH = 0.15
-CAMERA_FORWARD_OFFSET = HALF_SAFETY_LENGTH  # camera at front-center
+CAMERA_FORWARD_OFFSET = 2.0 * HALF_SAFETY_LENGTH  # camera(front-center) -> rear reference point
 
 # === Helper functions ===
 @njit(cache=True)
@@ -431,7 +431,7 @@ def build_astar_cost_map(height_map, esdf_map, resolution):
     slope = np.sqrt(gx * gx + gy * gy)
 
     # Keep slope debug maps for RViz.
-    slope_block = slope > 1.0
+    slope_block = slope > 0.6
     slope_feasible = (~slope_block) & finite
 
     # ESDF obstacle source (using robot-relative height derived ESDF).
@@ -743,11 +743,16 @@ class PlanningNode(Node):
         pc2_msg = pc2.create_cloud_xyz32(header, points)
         self.occupancy_cloud_pub.publish(pc2_msg)
 
+    def _camera_to_base_xy(self, camera_xy, yaw):
+        c, s = np.cos(yaw), np.sin(yaw)
+        forward_xy = np.array([c, s], dtype=np.float32)
+        return np.asarray(camera_xy, dtype=np.float32) - forward_xy * CAMERA_FORWARD_OFFSET
+
     def _footprint_corners_xy_from_camera_pose(self, camera_xy, yaw):
         c, s = np.cos(yaw), np.sin(yaw)
         forward_xy = np.array([c, s], dtype=np.float32)
         left_xy = np.array([-s, c], dtype=np.float32)
-        base_xy = np.asarray(camera_xy, dtype=np.float32) - forward_xy * CAMERA_FORWARD_OFFSET
+        base_xy = self._camera_to_base_xy(camera_xy, yaw)
         return [
             base_xy + forward_xy * HALF_SAFETY_LENGTH + left_xy * HALF_SAFETY_WIDTH,
             base_xy + forward_xy * HALF_SAFETY_LENGTH - left_xy * HALF_SAFETY_WIDTH,
@@ -862,9 +867,15 @@ class PlanningNode(Node):
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
+        # 统一参考：XY 使用 base；Z 仍使用 camera
+        forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        yaw = float(np.arctan2(forward_world[1], forward_world[0]))
+        camera_xy = T[:2, 3]
+        base_xy = self._camera_to_base_xy(camera_xy, yaw)
+
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-            robot_pos = T[:3, 3]
+            robot_pos = np.array([base_xy[0], base_xy[1], T[2, 3]], dtype=np.float32)
             delta = robot_pos - center
             if np.linalg.norm(delta) > .1:
                 new_center = robot_pos
@@ -901,15 +912,13 @@ class PlanningNode(Node):
                 self.publish_binary_grid(slope_feasible, self.slope_feasible_pub, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
                 self.publish_binary_grid(slope_block, self.slope_blocked_pub, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
 
-                start_idx = clip_grid_2d(world_to_grid_2d(T[:2, 3], self.origin, self.resolution), obstacle_mask.shape)
+                # 使用前面统一计算出的 yaw/base_xy
+
+                start_idx = clip_grid_2d(world_to_grid_2d(base_xy, self.origin, self.resolution), obstacle_mask.shape)
                 goal_idx = clip_grid_2d(world_to_grid_2d(self.target_pose[:2], self.origin, self.resolution), obstacle_mask.shape)
 
                 start_free = find_nearest_free(start_idx, obstacle_mask)
                 goal_free = find_nearest_free(goal_idx, obstacle_mask)
-
-                # yaw from camera forward direction projected to world XY
-                forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-                yaw = float(np.arctan2(forward_world[1], forward_world[0]))
 
                 def footprint_check(grid_xy):
                     return self._footprint_corners_collide(
@@ -935,34 +944,34 @@ class PlanningNode(Node):
                         z_offset=self.grid_shape[2] * self.resolution / 2,
                     )
 
-                    # Pass 1: strict corridor-constrained A*.
-                    grid_path = astar_2d(
-                        astar_cost,
-                        obstacle_mask,
-                        start_free,
-                        goal_free,
-                        search_mask=corridor_mask,
-                        footprint_check_fn=footprint_check,
-                    )
+                    # # Pass 1: strict corridor-constrained A*.
+                    # grid_path = astar_2d(
+                    #     astar_cost,
+                    #     obstacle_mask,
+                    #     start_free,
+                    #     goal_free,
+                    #     search_mask=corridor_mask,
+                    #     footprint_check_fn=footprint_check,
+                    # )
 
-                    # Pass 2: relaxed corridor if strict one fails.
-                    if len(grid_path) == 0:
-                        relaxed_mask = build_global_path_corridor_mask(
-                            self.global_path_xy,
-                            self.origin,
-                            self.resolution,
-                            obstacle_mask.shape,
-                            self.corridor_radius_m * self.corridor_fallback_scale,
-                        )
-                        relaxed_mask &= ~obstacle_mask
-                        grid_path = astar_2d(
-                            astar_cost,
-                            obstacle_mask,
-                            start_free,
-                            goal_free,
-                            search_mask=relaxed_mask,
-                            footprint_check_fn=footprint_check,
-                        )
+                    # # Pass 2: relaxed corridor if strict one fails.
+                    # if len(grid_path) == 0:
+                    #     relaxed_mask = build_global_path_corridor_mask(
+                    #         self.global_path_xy,
+                    #         self.origin,
+                    #         self.resolution,
+                    #         obstacle_mask.shape,
+                    #         self.corridor_radius_m * self.corridor_fallback_scale,
+                    #     )
+                    #     relaxed_mask &= ~obstacle_mask
+                    #     grid_path = astar_2d(
+                    #         astar_cost,
+                    #         obstacle_mask,
+                    #         start_free,
+                    #         goal_free,
+                    #         search_mask=relaxed_mask,
+                    #         footprint_check_fn=footprint_check,
+                    #     )
 
                 # Pass 3 fallback: original unconstrained local A*.
                 if len(grid_path) == 0:
@@ -1015,7 +1024,7 @@ class PlanningNode(Node):
                 cmd.linear.x = 0.0
                 cmd.angular.z = 0.0
             else:
-                robot_xy = T[:2, 3]
+                robot_xy = base_xy
                 target_dist = np.linalg.norm(self.target_pose[:2] - robot_xy)
                 if target_dist < 0.25:
                     cmd.linear.x = 0.0
