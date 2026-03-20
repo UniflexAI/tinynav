@@ -550,7 +550,11 @@ class MapNode(Node):
             if diff_position_norm < 1.5:
                 self.poi_index += 1
                 dummy_pose = np.eye(4)
-                self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
+
+                stamp_msg = self.get_clock().now().to_msg()
+                stamp_msg.sec = int(timestamp / 1e9)
+                stamp_msg.nanosec = int(timestamp % 1e9)
+                self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
                 continue
             else:
                 break
