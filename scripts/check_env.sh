@@ -11,11 +11,21 @@ else
     echo "✅ Docker is installed."
 fi
 
+# === Check if user is in docker group ===
+if groups | grep -q docker; then
+    echo "✅ User is in the 'docker' group."
+else
+    echo "❌ User is NOT in the 'docker' group."
+    echo "👉 You can add yourself to the docker group with:"
+    echo "   sudo usermod -aG docker \$USER"
+    echo "   Then log out and log back in, or run: newgrp docker"
+    exit 1
+fi
+
 # === Check if Docker daemon is running and accessible ===
 if ! docker info &> /dev/null; then
     echo "❌ Docker is not running or you don't have permission to access it."
     echo "👉 Try running: sudo systemctl start docker"
-    echo "   Or ensure your user is in the 'docker' group."
     exit 1
 else
     echo "✅ Docker daemon is running and accessible."
@@ -54,4 +64,3 @@ if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" || "$ARCH" == arm* ]]; then
 else
     echo "✅ devcontainer.json patched for your x86 platform."
 fi
-
