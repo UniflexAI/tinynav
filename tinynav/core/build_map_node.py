@@ -12,7 +12,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage
-from message_filters import TimeSynchronizer, Subscriber, ApproximateTimeSynchronizer
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
