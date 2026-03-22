@@ -179,6 +179,40 @@ auto_uv_venv() {
     fi
   fi
 }
+check_onnx_files() {
+  MODEL_DIR="/tinynav/tinynav/models"
+  MIN_ONNX_SIZE=1024
+  local bad_files=()
+
+  shopt -s nullglob
+  for onnx in "$MODEL_DIR"/*.onnx; do
+    if [[ ! -f "$onnx" ]]; then
+      continue
+    fi
+    size=$(stat -c%s "$onnx")
+    if [[ "$size" -lt "$MIN_ONNX_SIZE" ]]; then
+      bad_files+=("$(basename "$onnx") (${size} bytes)")
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ ${#bad_files[@]} -gt 0 ]]; then
+    echo
+    echo "======================================================"
+    echo " Invalid ONNX Model Files Detected"
+    echo "======================================================"
+    echo "The following ONNX files look too small and are likely Git LFS pointer files:"
+    for bad_file in "${bad_files[@]}"; do
+      echo "  - $bad_file"
+    done
+    echo
+    echo "Please fetch the real model files before entering the devcontainer:"
+    echo "  git lfs pull"
+    echo
+    echo "Then rebuild / reopen the devcontainer."
+    exit 1
+  fi
+}
 maybe_build_models() {
   MODEL_DIR="/tinynav/tinynav/models"
   PLAN_COUNT=$(ls "$MODEL_DIR"/*.plan 2>/dev/null | wc -l || true)
@@ -218,6 +252,7 @@ RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
 set -e
 source /usr/local/bin/auto_uv_venv.sh
 auto_uv_venv
+check_onnx_files
 maybe_build_models
 exec "$@"
 EOF
