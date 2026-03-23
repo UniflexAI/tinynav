@@ -7,12 +7,13 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 
+# Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
+        self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
@@ -24,7 +25,6 @@ class CmdVelControlNode(Node):
         )
         self.last_path_time = 0.0
         self.pose = None
-        self.logger = logging.getLogger(__name__)
         
     def pose_callback(self, msg):
         self.pose = msg
@@ -34,12 +34,11 @@ class CmdVelControlNode(Node):
         if self.path is None or self.pose is None:
             return
         
-        #last_path_time = self.path.header.stamp.sec + self.path.header.stamp.nanosec * 1e-9
         current_time = self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9
         
         path_time_diff = current_time - self.last_path_time
-        self.logger.debug(f"diff between path and current time: {path_time_diff}")
         self.last_path_time = current_time
+
         def msg2np(msg):
             T = np.eye(4)
             position = msg.pose.position
@@ -48,6 +47,7 @@ class CmdVelControlNode(Node):
             T[:3, :3] = R.from_quat(quat).as_matrix()
             T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
             return T
+        
         T1 = msg2np(self.path.poses[0])
         T2 = msg2np(self.path.poses[1])
         T_robot_1 = T1 @ self.T_robot_to_camera
@@ -66,15 +66,22 @@ class CmdVelControlNode(Node):
         cmd.linear.x = vx
         cmd.linear.y = vy
         cmd.angular.z = vyaw
-        self.logger.debug(f"vx : {vx}, vy : {vy}, az : {vyaw}")
+        self.logger.info(f"vx : {vx:.4f}, vy : {vy:.4f}, az : {vyaw:.4f}")
         self.cmd_pub.publish(cmd)
 
     def destroy_node(self):
-        self.get_logger().info("Destroying cmd_vel_control connection.")
+        self.logger.info("Destroying cmd_vel_control connection.")
         super().destroy_node()
         
 def main(args=None):
     rclpy.init(args=args)
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    
     node = CmdVelControlNode()
     try:
         rclpy.spin(node)
@@ -87,4 +94,3 @@ def main(args=None):
         
 if __name__ == '__main__':
     main()
-
