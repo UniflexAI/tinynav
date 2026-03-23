@@ -1096,9 +1096,9 @@ class MapNode(Node):
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
-            # lightweight post-process: smooth then downsample for lower control wear
-            converted_path = smooth_path_lightweight(converted_path, window=5, passes=1)
-            converted_path = downsample_path_by_distance(converted_path, min_dist=0.08)
+            # # lightweight post-process: smooth then downsample for lower control wear
+            # converted_path = smooth_path_lightweight(converted_path, window=5, passes=1)
+            # converted_path = downsample_path_by_distance(converted_path, min_dist=0.08)
             return converted_path
         return None
 

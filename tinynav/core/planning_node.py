@@ -31,8 +31,20 @@ from geometry_msgs.msg import Twist
 # set to 3x of resolution.
 SAFETY_RADIUS=0.3
 
-HALF_SAFETY_LENGTH = 0.5
-HALF_SAFETY_WIDTH = 0.35
+# Robot body safety footprint in planning frame (camera/world aligned forward).
+# Reference point is robot control-center (near rear), so front/rear are asymmetric.
+FRONT_SAFETY_LENGTH = 0.6
+REAR_SAFETY_LENGTH = 0.0
+HALF_SAFETY_WIDTH = 0.2
+
+# Camera extrinsics wrt robot control center frame (meters)
+# +x: robot left, +y: robot up, +z: robot forward (Tinynav convention in this node)
+# Keep CAM_TO_BOTTOM as the single tuning knob for forward camera placement.
+CAM_TO_BOTTOM = 0.6
+CAM_TO_CENTER = 0.0 # left (negative) or right (positive)
+CAM_TO_ABOVE = 0.0
+ROBOT_TO_CAMERA_XYZ = np.array([CAM_TO_CENTER, CAM_TO_ABOVE, CAM_TO_BOTTOM], dtype=np.float32)
+
 
 # === Helper functions ===
 @njit(cache=True)
@@ -158,6 +170,53 @@ def height_map_to_ESDF(height_map, height_threshold, resolution, method='max'):
 
     return resolution * esdf
 
+
+def build_fused_esdf_from_height(height_map_rel, resolution):
+    """Stair-aware ESDF from height map: cliff/step edges -> obstacles -> ESDF."""
+    finite = np.isfinite(height_map_rel)
+    filled = np.nan_to_num(height_map_rel, nan=0.0, neginf=0.0, posinf=0.0)
+
+    # Pairwise neighbor height jump (meters), only where both cells are valid.
+    h, w = filled.shape
+    step_x = np.zeros((h, w), dtype=np.float32)
+    step_y = np.zeros((h, w), dtype=np.float32)
+
+    if w > 1:
+        valid_x = finite[:, 1:] & finite[:, :-1]
+        diff_x = np.abs(filled[:, 1:] - filled[:, :-1])
+        diff_x = np.where(valid_x, diff_x, 0.0)
+        step_x[:, 1:] = np.maximum(step_x[:, 1:], diff_x)
+        step_x[:, :-1] = np.maximum(step_x[:, :-1], diff_x)
+
+    if h > 1:
+        valid_y = finite[1:, :] & finite[:-1, :]
+        diff_y = np.abs(filled[1:, :] - filled[:-1, :])
+        diff_y = np.where(valid_y, diff_y, 0.0)
+        step_y[1:, :] = np.maximum(step_y[1:, :], diff_y)
+        step_y[:-1, :] = np.maximum(step_y[:-1, :], diff_y)
+
+    step_height = np.maximum(step_x, step_y)
+
+    # Threshold: max traversable height jump per grid cell.
+    max_step_height = 0.30
+    obstacle = (step_height > max_step_height)
+
+    # Light denoise: remove isolated obstacle speckles.
+    obstacle_u8 = (obstacle.astype(np.uint8) * 255)
+    kernel = np.ones((3, 3), np.uint8)
+    obstacle = cv2.morphologyEx(obstacle_u8, cv2.MORPH_OPEN, kernel) > 0
+
+    if np.any(obstacle):
+        fused_esdf = distance_transform_edt(~obstacle) * resolution
+    else:
+        fused_esdf = np.full_like(filled, 100.0, dtype=np.float32)
+
+    # For downstream cost, keep a normalized slope-like magnitude (m/m).
+    slope = step_height / max(1e-6, resolution)
+    unknown_mask = ~finite
+
+    return fused_esdf, slope, unknown_mask
+
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=11, duration=2.0, dt=0.1,
@@ -214,10 +273,11 @@ def score_trajectories_by_height_map(trajectories, height_map, origin, resolutio
         traj = trajectories[t]
         cost = 0.0
         height_value = []
-        cum_distance = 2 * HALF_SAFETY_LENGTH
+        footprint_len = FRONT_SAFETY_LENGTH + REAR_SAFETY_LENGTH
+        cum_distance = max(0.1, 2 * footprint_len)
         for i in range(len(traj)):
             x_world, y_world, z_world = traj[i, 0], traj[i, 1], traj[i, 2]
-            if cum_distance >= HALF_SAFETY_LENGTH or i == len(traj) - 1:
+            if cum_distance >= footprint_len or i == len(traj) - 1:
                 cum_distance = 0.0
             else:
                 cum_distance += np.linalg.norm(traj[i, :3] - traj[i-1, :3])
@@ -226,12 +286,12 @@ def score_trajectories_by_height_map(trajectories, height_map, origin, resolutio
             quat = traj[i, 3:]
             rotation = quat_to_matrix(quat)
             delta_x_index_max = int(HALF_SAFETY_WIDTH / resolution)
-            delta_z_index_max = int(HALF_SAFETY_LENGTH / resolution)
+            delta_z_index_max = int((FRONT_SAFETY_LENGTH + REAR_SAFETY_LENGTH) / resolution)
             grid_in_camera = np.zeros((2 * delta_x_index_max + 1, 2 * delta_z_index_max + 1))
             for delta_x_index in range(-delta_x_index_max, delta_x_index_max + 1):
                 for delta_z_index in range(-delta_z_index_max, delta_z_index_max + 1):
                     x_in_camera = delta_x_index * resolution
-                    z_in_camera = delta_z_index * resolution - HALF_SAFETY_LENGTH
+                    z_in_camera = delta_z_index * resolution - REAR_SAFETY_LENGTH
                     y_in_camera = 0
                     point_in_camera = np.array([x_in_camera, y_in_camera, z_in_camera])
                     point_in_world = rotation @ point_in_camera + np.array([x_world, y_world, z_world])
@@ -419,40 +479,25 @@ def astar_2d(cost_map, obstacle_mask, start, goal, search_mask=None):
     return []
 
 
-def build_astar_cost_map(height_map, esdf_map, resolution):
-    finite = np.isfinite(height_map)
-    filled = np.nan_to_num(height_map, nan=0.0, neginf=0.0, posinf=0.0)
-    gx, gy = np.gradient(filled)
-    slope = np.sqrt(gx * gx + gy * gy)
+def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
+    # Pure ESDF mode: hard obstacle + clearance cost, no extra slope term.
+    hard_esdf = 0.02
+    obstacle = fused_esdf < hard_esdf
 
-    # Keep slope debug maps for RViz.
-    slope_block = slope > 1.0
-    slope_feasible = (~slope_block) & finite
+    inflation_radius_m = 0.0  # set >0 to enable extra inflation
+    if inflation_radius_m > 1e-6:
+        inflation_radius_px = inflation_radius_m / max(1e-6, resolution)
+        dist_to_obstacle_px = distance_transform_edt(~obstacle)
+        obstacle_inflated = dist_to_obstacle_px <= inflation_radius_px
+    else:
+        obstacle_inflated = obstacle
 
-    # ESDF obstacle source (using robot-relative height derived ESDF).
-    stair_like = slope > 0.4
-    # Slightly stricter ESDF hard-obstacle threshold to better reject wall-embedded targets.
-    hard_esdf = np.where(stair_like, 0.02, 0.05)
-    esdf_obstacle = (esdf_map < hard_esdf)
-
-    # Combine slope and ESDF.
-    obstacle = esdf_obstacle | slope_block
-
-    inflation_radius_m = max(HALF_SAFETY_WIDTH, SAFETY_RADIUS)
-    inflation_radius_px = max(1.0, inflation_radius_m / max(1e-6, resolution))
-    dist_to_obstacle_px = distance_transform_edt(~obstacle)
-    obstacle_inflated = dist_to_obstacle_px <= inflation_radius_px
-
-    slope_penalty = np.clip(slope - 0.08, 0.0, 2.0)
-    esdf_clamped = np.clip(esdf_map, 0.012, 2.0)
+    esdf_clamped = np.clip(fused_esdf, 0.012, 2.0)
     clearance_cost = 1.0 / esdf_clamped
-    unknown_penalty = np.where(finite, 0.0, 1.6)
+    unknown_penalty = np.where(unknown_mask, 1.0, 0.0)
 
-    slope_w = np.where(stair_like, 0.08, 0.14)
-    clear_w = np.where(stair_like, 0.05, 0.09)
-    cost = 1.0 + slope_w * slope_penalty + clear_w * np.clip(clearance_cost, 0.0, 25.0) + unknown_penalty
-    cost[obstacle_inflated] = np.inf
-    return obstacle_inflated, cost, slope_feasible, slope_block
+    cost = 1.0 + 0.16 * np.clip(clearance_cost, 0.0, 25.0) + unknown_penalty
+    return obstacle_inflated, cost
 
 
 def smooth_path_world(path_world, window=5, passes=2):
@@ -533,6 +578,35 @@ def signed_angle_between(v_from, v_to):
     dot = v_from[0] * v_to[0] + v_from[1] * v_to[1]
     return np.arctan2(cross, dot)
 
+
+def footprint_corners_xy(center_xy, forward_xy, front_length, rear_length, half_width):
+    n = np.linalg.norm(forward_xy)
+    if n < 1e-6:
+        forward_xy = np.array([1.0, 0.0], dtype=np.float32)
+    else:
+        forward_xy = forward_xy / n
+    left_xy = np.array([-forward_xy[1], forward_xy[0]], dtype=np.float32)
+
+    c = np.asarray(center_xy, dtype=np.float32)
+    return [
+        c + forward_xy * front_length + left_xy * half_width,
+        c + forward_xy * front_length - left_xy * half_width,
+        c - forward_xy * rear_length - left_xy * half_width,
+        c - forward_xy * rear_length + left_xy * half_width,
+    ]
+
+
+def footprint_collision_4corners(center_xy, forward_xy, obstacle_mask, origin, resolution, front_length, rear_length, half_width):
+    h, w = obstacle_mask.shape
+    corners = footprint_corners_xy(center_xy, forward_xy, front_length, rear_length, half_width)
+    for corner in corners:
+        gx, gy = world_to_grid_2d(corner, origin, resolution)
+        if gx < 0 or gx >= h or gy < 0 or gy >= w:
+            return True
+        if obstacle_mask[gx, gy]:
+            return True
+    return False
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self, sensor_source: str = 'auto'):
@@ -540,12 +614,9 @@ class PlanningNode(Node):
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
-        self.traj_scores_pub = self.create_publisher(Image, "/planning/score_traj", 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
-        self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
-        self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.slope_feasible_pub = self.create_publisher(OccupancyGrid, '/planning/slope_feasible', 10)
-        self.slope_blocked_pub = self.create_publisher(OccupancyGrid, '/planning/slope_blocked', 10)
+        self.fused_esdf_pub = self.create_publisher(OccupancyGrid, '/planning/fused_esdf', 10)
+        self.astar_cost_pub = self.create_publisher(Image, '/planning/astar_cost', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
@@ -590,7 +661,7 @@ class PlanningNode(Node):
             time.sleep(0.2)
 
 
-        self.grid_shape = (100, 100, 15)
+        self.grid_shape = (100, 100, 30)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 5
@@ -653,6 +724,10 @@ class PlanningNode(Node):
             self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camera_info_sub)
 
+    def camera_to_robot_center(self, T):
+        """Convert camera pose (T_cam->world) to robot control-center position in world."""
+        return T[:3, 3] - T[:3, :3] @ ROBOT_TO_CAMERA_XYZ
+
     def publish_height_map_traj(self, pooled_map, trajectories, occ_points, top_indices, scores, params, origin, resolution):
         fig, ax = plt.subplots(figsize=(8, 6))
         height_normalized = (np.nan_to_num(pooled_map, nan=0.0) + 5) * 30
@@ -687,7 +762,7 @@ class PlanningNode(Node):
         img_msg.header = header
         self.height_map_pub.publish(img_msg)
 
-    def publish_2d_occupancy_grid(self, ESDF_map, origin, resolution, stamp, z_offset=0.0):
+    def publish_2d_occupancy_grid(self, ESDF_map, origin, resolution, stamp, z_offset=0.0, pub=None):
         occupancy_grid_msg = OccupancyGrid()
         occupancy_grid_msg.header = Header()
         occupancy_grid_msg.header.stamp = stamp
@@ -701,7 +776,8 @@ class PlanningNode(Node):
         occupancy_grid_msg.info.origin.orientation.w = 1.0
         flat_data = np.where(ESDF_map <= 0.00, 100, np.clip(((1-ESDF_map/0.5) * 120).astype(int), 0, 120)).ravel(order="F").tolist()
         occupancy_grid_msg.data = flat_data
-        self.occupancy_grid_pub.publish(occupancy_grid_msg)
+        if pub is not None:
+            pub.publish(occupancy_grid_msg)
 
     def publish_binary_grid(self, mask, pub, origin, resolution, stamp, z_offset=0.0):
         msg = OccupancyGrid()
@@ -717,6 +793,34 @@ class PlanningNode(Node):
         msg.info.origin.orientation.w = 1.0
         msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
         pub.publish(msg)
+
+    def publish_cost_heatmap(self, cost, header):
+        finite = np.isfinite(cost)
+        c = np.nan_to_num(cost, nan=0.0, posinf=1e6, neginf=0.0)
+        if np.any(finite):
+            lo = float(np.min(c[finite]))
+            hi = float(np.max(c[finite]))
+            if hi > lo + 1e-6:
+                norm = (c - lo) / (hi - lo)
+            else:
+                norm = np.zeros_like(c, dtype=np.float32)
+        else:
+            norm = np.zeros_like(c, dtype=np.float32)
+
+        # 0(可行/低代价)->绿, 1(高代价)->红, 中间黄
+        norm = np.clip(norm, 0.0, 1.0)
+        h, w = norm.shape
+        heat = np.zeros((h, w, 3), dtype=np.uint8)  # BGR
+        heat[:, :, 2] = (norm * 255.0).astype(np.uint8)           # R
+        heat[:, :, 1] = ((1.0 - norm) * 255.0).astype(np.uint8)   # G
+        heat[:, :, 0] = 0                                          # B
+
+        # unknown/invalid 置黑，防止误导
+        heat[~finite] = (0, 0, 0)
+
+        img_msg = self.bridge.cv2_to_imgmsg(heat, encoding='bgr8')
+        img_msg.header = header
+        self.astar_cost_pub.publish(img_msg)
 
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
         occupied = np.argwhere(grid3d > 0.1)
@@ -738,13 +842,13 @@ class PlanningNode(Node):
         """Publish robot footprint rectangle as a point cloud for RViz."""
         forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         left = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
-        center = T[:3, 3]
+        center = self.camera_to_robot_center(T)
 
         corners = [
-            center + forward * HALF_SAFETY_LENGTH + left * HALF_SAFETY_WIDTH,
-            center + forward * HALF_SAFETY_LENGTH - left * HALF_SAFETY_WIDTH,
-            center - forward * HALF_SAFETY_LENGTH - left * HALF_SAFETY_WIDTH,
-            center - forward * HALF_SAFETY_LENGTH + left * HALF_SAFETY_WIDTH,
+            center + forward * FRONT_SAFETY_LENGTH + left * HALF_SAFETY_WIDTH,
+            center + forward * FRONT_SAFETY_LENGTH - left * HALF_SAFETY_WIDTH,
+            center - forward * REAR_SAFETY_LENGTH - left * HALF_SAFETY_WIDTH,
+            center - forward * REAR_SAFETY_LENGTH + left * HALF_SAFETY_WIDTH,
         ]
 
         # Draw rectangle edges by sampling points.
@@ -846,7 +950,7 @@ class PlanningNode(Node):
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-            robot_pos = T[:3, 3]
+            robot_pos = self.camera_to_robot_center(T)
             delta = robot_pos - center
             if np.linalg.norm(delta) > .1:
                 new_center = robot_pos
@@ -865,25 +969,32 @@ class PlanningNode(Node):
             height_map = occupancy_grid_to_height_map(self.occupancy_grid, self.origin, self.resolution)
             pooled_map = max_pool_height_map(height_map)
             robot_z = T[2, 3]
-            # Robot-relative height map for threshold-based ESDF decisions.
             pooled_map_rel = pooled_map - robot_z
-            ESDF_map = height_map_to_ESDF(pooled_map_rel, 0.4, self.resolution)
+            fused_esdf, _, unknown_mask = build_fused_esdf_from_height(pooled_map_rel, self.resolution)
 
 
         with Timer(name='vis heighmap and esdf', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
-            self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            self.publish_height_map(T[:3,3], pooled_map_rel, depth_msg.header)
+            self.publish_2d_occupancy_grid(
+                fused_esdf,
+                self.origin,
+                self.resolution,
+                depth_msg.header.stamp,
+                z_offset=self.grid_shape[2]*self.resolution/2,
+                pub=self.fused_esdf_pub,
+            )
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='local astar plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             local_path_world = []
             if self.target_pose is not None:
-                obstacle_mask, astar_cost, slope_feasible, slope_block = build_astar_cost_map(pooled_map_rel, ESDF_map, self.resolution)
-                self.publish_binary_grid(slope_feasible, self.slope_feasible_pub, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
-                self.publish_binary_grid(slope_block, self.slope_blocked_pub, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+                obstacle_mask, astar_cost = build_astar_cost_map_from_fused_esdf(
+                    fused_esdf, unknown_mask, self.resolution
+                )
+                self.publish_cost_heatmap(astar_cost, depth_msg.header)
 
-                start_idx = clip_grid_2d(world_to_grid_2d(T[:2, 3], self.origin, self.resolution), obstacle_mask.shape)
+                robot_center = self.camera_to_robot_center(T)
+                start_idx = clip_grid_2d(world_to_grid_2d(robot_center[:2], self.origin, self.resolution), obstacle_mask.shape)
                 goal_idx = clip_grid_2d(world_to_grid_2d(self.target_pose[:2], self.origin, self.resolution), obstacle_mask.shape)
 
                 start_free = find_nearest_free(start_idx, obstacle_mask)
@@ -891,6 +1002,49 @@ class PlanningNode(Node):
 
                 # 单通道策略：只保留 pass3（基于 ESDF+slope 生成的 obstacle/cost）
                 grid_path = astar_2d(astar_cost, obstacle_mask, start_free, goal_free)
+
+                # 4-corner footprint collision filtering (robust mode):
+                # progressively relax footprint size to avoid over-pruning and "freeze" behavior.
+                if len(grid_path) >= 2:
+                    relax_scales = (1.0, 0.9, 0.8, 0.7)
+                    min_keep = max(3, int(0.25 * len(grid_path)))
+                    best_filtered = None
+
+                    for s in relax_scales:
+                        front_len = FRONT_SAFETY_LENGTH * s
+                        rear_len = REAR_SAFETY_LENGTH * s
+                        half_w = HALF_SAFETY_WIDTH * s
+
+                        filtered = [grid_path[0]]
+                        for i in range(1, len(grid_path)):
+                            p_prev = grid_to_world_2d(filtered[-1], self.origin, self.resolution, 0.0)[:2]
+                            p_cur = grid_to_world_2d(grid_path[i], self.origin, self.resolution, 0.0)[:2]
+                            fwd = p_cur - p_prev
+                            if np.linalg.norm(fwd) < 1e-6:
+                                fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                                fwd = fwd[:2]
+                            if footprint_collision_4corners(
+                                p_cur,
+                                fwd,
+                                obstacle_mask,
+                                self.origin,
+                                self.resolution,
+                                front_len,
+                                rear_len,
+                                half_w,
+                            ):
+                                break
+                            filtered.append(grid_path[i])
+
+                        if best_filtered is None or len(filtered) > len(best_filtered):
+                            best_filtered = filtered
+                        if len(filtered) >= min_keep:
+                            best_filtered = filtered
+                            break
+
+                    # Fail-open fallback: avoid losing tracking completely when footprint is too strict.
+                    if best_filtered is not None and len(best_filtered) >= 2:
+                        grid_path = best_filtered
 
                 robot_z = T[2, 3]
                 local_path_world = []
@@ -927,13 +1081,14 @@ class PlanningNode(Node):
                 cmd.linear.x = 0.0
                 cmd.angular.z = 0.0
             else:
-                robot_xy = T[:2, 3]
+                robot_xy = self.camera_to_robot_center(T)[:2]
                 target_dist = np.linalg.norm(self.target_pose[:2] - robot_xy)
                 if target_dist < 0.25:
                     cmd.linear.x = 0.0
                     cmd.angular.z = 0.0
                 elif len(local_path_world) < 2:
                     # Recovery behavior: cautiously probe toward target instead of pure spinning.
+                    # This keeps the robot moving even when footprint filtering truncates the path.
                     forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
                     forward_xy = forward_world[:2]
                     to_target = self.target_pose[:2] - robot_xy
