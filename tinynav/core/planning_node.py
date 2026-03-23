@@ -718,18 +718,26 @@ class PlanningNode(Node):
         msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
         pub.publish(msg)
 
-    def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
+    def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0), stamp=None):
+        """Publish occupied voxels as PointCloud2. First 3 points are metadata for map_node:
+        (ox,oy,oz), (resolution, X, Y), (Z, 0, 0); rest are world XYZ of occupied cells."""
+        X, Y, Z = grid3d.shape
+        origin_np = np.asarray(origin, dtype=np.float64)
         occupied = np.argwhere(grid3d > 0.1)
-        # vectorized operation to avoid for loop
         if len(occupied) == 0:
-            points = []
+            voxel_pts = []
         else:
-            origin_np = np.array(origin)
             world_coords = origin_np + occupied * resolution
-            points = world_coords.tolist()
+            voxel_pts = world_coords.tolist()
+        meta = [
+            [float(origin_np[0]), float(origin_np[1]), float(origin_np[2])],
+            [float(resolution), float(X), float(Y)],
+            [float(Z), 0.0, 0.0],
+        ]
+        points = meta + voxel_pts
 
         header = Header()
-        header.stamp = self.get_clock().now().to_msg()
+        header.stamp = stamp if stamp is not None else self.get_clock().now().to_msg()
         header.frame_id = "world"
         pc2_msg = pc2.create_cloud_xyz32(header, points)
         self.occupancy_cloud_pub.publish(pc2_msg)
@@ -853,13 +861,16 @@ class PlanningNode(Node):
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
+            
 
             # seconds = log(0.5) / log(0.998) = 347.22 timestamp / 10 hz = around 35 seconds
             self.occupancy_grid *= 0.998
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            self.publish_3d_occupancy_cloud(
+                self.occupancy_grid, self.resolution, self.origin, stamp=depth_msg.header.stamp
+            )
 
         with Timer(name='heightmap', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             height_map = occupancy_grid_to_height_map(self.occupancy_grid, self.origin, self.resolution)
@@ -875,6 +886,7 @@ class PlanningNode(Node):
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_footprint(T, depth_msg.header.stamp)
+
 
         with Timer(name='local astar plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             local_path_world = []
