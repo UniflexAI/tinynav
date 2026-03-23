@@ -9,9 +9,6 @@ from std_msgs.msg import Float32
 import time
 import logging
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
 
 class Ros2UnitreeManagerNode(Node):
     def __init__(self, networkInterface: str = "eno1"):
@@ -33,7 +30,8 @@ class Ros2UnitreeManagerNode(Node):
         
         self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
         self.battery = 0.0
-        self.logger = logging.getLogger(__name__)
+        self.logger = self.get_logger()
+        self.logger.info("unitree is connected")
 
     # /cmd_vel message handler
     def CmdVelMessageHandler(self, msg: Twist):
