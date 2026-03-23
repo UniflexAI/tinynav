@@ -161,68 +161,54 @@ USER root
 RUN curl -LsSf https://astral.sh/uv/0.7.3/install.sh | sh
 ENV PATH=$PATH:/root/.local/bin/
 
-# Write auto_uv_venv.sh
-RUN cat > /usr/local/bin/auto_uv_venv.sh <<'EOF'
-#!/usr/bin/env bash
-auto_uv_venv() {
-  if [[ $PWD == "/tinynav" ]]; then
-    if [[ ! -d ".venv" ]]; then
-      echo "[auto_uv_venv] Creating virtual environment..."
-      uv venv --system-site-packages
-    else
-         if [[ $(cat ".venv/pyvenv.cfg") == *"include-system-site-packages = true"* ]]; then
-            echo "[auto_uv_venv] .venv/pyvenv.cfg already exists, skipping."
-         else
-            echo "[auto_uv_venv] .venv/pyvenv.cfg already exists, but include-system-site-packages is false, creating virtual environment..."
-            uv venv --system-site-packages
-         fi
-    fi
-  fi
-}
-maybe_build_models() {
-  MODEL_DIR="/tinynav/tinynav/models"
-  PLAN_COUNT=$(ls "$MODEL_DIR"/*.plan 2>/dev/null | wc -l || true)
+# Pre-create venv and sync dependencies at build time
+COPY pyproject.toml uv.lock ./
+RUN /root/.local/bin/uv venv /opt/venv --system-site-packages
+RUN /root/.local/bin/uv sync --no-install-project -d /opt/venv
 
-  if [[ "$PLAN_COUNT" -eq 0 ]]; then
-    echo
-    echo "======================================================"
-    echo " Model Optimization for Your Platform"
-    echo "======================================================"
-    echo "No TensorRT engine (*.plan) files found in:"
-    echo "  $MODEL_DIR"
-    echo
-    echo "This step will run 'make all' to generate them."
-    echo "It may take 5–10 minutes."
-    echo "This only needs to happen once per platform — we'll reuse '*_${ARCH}.plan' next time."
-    echo
-    read -p "Do you want to generate models now? [y/N]: " reply
-    case "$reply" in
-      [yY]|[yY][eE][sS])
-        echo "[entrypoint] Starting model build..."
-        make -C "$MODEL_DIR" all
-        echo "[entrypoint] Model build finished."
-        ;;
-      *)
-        echo "[entrypoint] Skipping model build."
-        ;;
-    esac
-  else
-    echo "[entrypoint] Found $PLAN_COUNT plan file(s), skipping model build prompt."
-  fi
-}
-EOF
+# Auto-activate venv via environment variables
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Write entrypoint.sh
+# Write entrypoint.sh (model build prompt only)
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
 #!/usr/bin/env bash
 set -e
-source /usr/local/bin/auto_uv_venv.sh
-auto_uv_venv
-maybe_build_models
+
+MODEL_DIR="/tinynav/tinynav/models"
+PLAN_COUNT=$(ls "$MODEL_DIR"/*.plan 2>/dev/null | wc -l || true)
+
+if [[ "$PLAN_COUNT" -eq 0 ]]; then
+  echo
+  echo "======================================================"
+  echo " Model Optimization for Your Platform"
+  echo "======================================================"
+  echo "No TensorRT engine (*.plan) files found in:"
+  echo "  $MODEL_DIR"
+  echo
+  echo "This step will run 'make all' to generate them."
+  echo "It may take 5–10 minutes."
+  echo "This only needs to happen once per platform — we'll reuse '*_${ARCH}.plan' next time."
+  echo
+  read -p "Do you want to generate models now? [y/N]: " reply
+  case "$reply" in
+    [yY]|[yY][eE][sS])
+      echo "[entrypoint] Starting model build..."
+      make -C "$MODEL_DIR" all
+      echo "[entrypoint] Model build finished."
+      ;;
+    *)
+      echo "[entrypoint] Skipping model build."
+      ;;
+  esac
+else
+  echo "[entrypoint] Found $PLAN_COUNT plan file(s), skipping model build prompt."
+fi
+
 exec "$@"
 EOF
 
-RUN chmod +x /usr/local/bin/auto_uv_venv.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
