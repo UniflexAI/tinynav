@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
-from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT, TRTFusionModel
+from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
@@ -79,7 +79,6 @@ class PerceptionNode(Node):
         # model
         self.superpoint = SuperPointTRT()
         self.light_glue = LightGlueTRT()
-        self.trt_fusion_model = TRTFusionModel()
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
@@ -97,15 +96,6 @@ class PerceptionNode(Node):
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
         qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
-
-        # previous methods to process imu data.
-        # this should be remove after other user update the recording rosbag scripts.
-        self.imu_accel_sub = Subscriber(self, Imu, "/camera/camera/accel/sample", qos_profile=qos_profile)
-        self.imu_gyro_sub = Subscriber(self, Imu, "/camera/camera/gyro/sample", qos_profile=qos_profile)
-        self.imu_ts = ApproximateTimeSynchronizer([self.imu_accel_sub, self.imu_gyro_sub], queue_size=100, slop=0.001)
-        self.imu_ts.registerCallback(self.imu_callback)
-        self.accel_sub = self.create_subscription(Imu, "/camera/camera/accel/sample", self.accel_callback, qos_profile)
-
 
         # use a single topic to handle the imu data.
         self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.sync_imu_callback, qos_profile)
@@ -167,34 +157,6 @@ class PerceptionNode(Node):
             self.camera_info_msg = msg
             self.destroy_subscription(self.camerainfo_sub)
 
-    def accel_callback(self, msg):
-        self.accel_readings.append(msg.linear_acceleration)
-        if len(self.accel_readings) >= 10 and self.T_body_last is None:
-            accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
-            gravity_cam = np.mean(accel_data, axis=0)
-            gravity_cam /= np.linalg.norm(gravity_cam)
-            gravity_world = np.array([0.0, 0.0, 1.0])
-
-            self.T_body_last = np.eye(4)
-            self.T_body_last[:3, :3] = rot_from_two_vector(gravity_cam, gravity_world)
-
-            self.get_logger().info("Initial pose set from accelerometer data.")
-            self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
-            self.destroy_subscription(self.accel_sub)
-
-    def imu_callback(self, accel_msg, gyro_msg):
-        current_timestamp = stamp2second(accel_msg.header.stamp)
-
-        # if the timestamp jump is too large, it means the IMU is not working properly
-        if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
-            delta_timestamp = current_timestamp - self.imu_last_received_timestamp
-            self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
-        self.imu_last_received_timestamp = current_timestamp
-
-        accel_data = np.array([[accel_msg.linear_acceleration.x], [accel_msg.linear_acceleration.y], [accel_msg.linear_acceleration.z]])
-        gyro_data = np.array([[gyro_msg.angular_velocity.x], [gyro_msg.angular_velocity.y], [gyro_msg.angular_velocity.z]])
-        self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
-
     def sync_imu_callback(self, imu_msg):
         current_timestamp = stamp2second(imu_msg.header.stamp)
         if len(self.accel_readings) >= 10 and self.T_body_last is None:
@@ -209,14 +171,12 @@ class PerceptionNode(Node):
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
         elif len(self.accel_readings) < 10:
             self.accel_readings.append(imu_msg.linear_acceleration)
-        #print(f"accel_readings : {len(self.accel_readings)}")
 
         # if the timestamp jump is too large, it means the IMU is not working properly
         if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
             delta_timestamp = current_timestamp - self.imu_last_received_timestamp
             self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
         self.imu_last_received_timestamp = current_timestamp
-
         accel_data = np.array([[imu_msg.linear_acceleration.x], [imu_msg.linear_acceleration.y], [imu_msg.linear_acceleration.z]])
         gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
@@ -274,7 +234,7 @@ class PerceptionNode(Node):
             timestamp, accel, gyro = self.imu_measurements[0]
             dt = timestamp - self.keyframe_queue[-1].latest_imu_timestamp
 
-            if timestamp < self.keyframe_queue[-1].latest_imu_timestamp:
+            if timestamp <= self.keyframe_queue[-1].latest_imu_timestamp:
                 self.imu_measurements.popleft()
                 self.logger.warning("should only happen at beginning")
                 continue
@@ -424,16 +384,26 @@ class PerceptionNode(Node):
                             idx_valid
                         )
                         inlier_set = set(inliers)
-                        for idx in range(len(match_indices)):
-                            if idx not in inlier_set:
+                        if len(inlier_set) > 20:
+                            for idx in range(len(match_indices)):
+                                if idx not in inlier_set:
+                                    match_indices[idx] = -1
+                        else:
+                            for idx in range(len(match_indices)):
                                 match_indices[idx] = -1
+                            self.logger.warning(f"match cnt: {len(kpt_pre)} is too small, {len(inlier_set)} inliers.enable velocity constraint")
+                            velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
+                            graph.add(velocity_constraint)
 
                     with Timer(name="[cached result[3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        count = 0
                         for k, match_idx in enumerate(match_indices):
                             if match_idx != -1:
                                 idx_prev = i * _M + k
                                 idx_curr = j * _M + match_idx
                                 uf_union(idx_prev, idx_curr, parent, rank)
+                                count += 1
+                        self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 tracks = [track for track in uf_all_sets_list(parent) if len(track) >= 2]
@@ -488,6 +458,7 @@ class PerceptionNode(Node):
             for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                 T_i = result.atPose3(X(i)).matrix()
                 keyframe.pose = T_i
+                keyframe.velocity = result.atVector(V(i))
                 self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
                 self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
@@ -514,15 +485,16 @@ class PerceptionNode(Node):
 
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
+            self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
             # publish odometry
-            self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera"))
+            self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
 
             last_keyframe = self.keyframe_queue[-2]
             current_keyframe = self.keyframe_queue[-1]
             if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
-                self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera"))
+                self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera", current_keyframe.velocity))
                 self.keyframe_image_pub.publish(left_msg)
                 self.keyframe_depth_pub.publish(depth_msg)
             else:
@@ -555,16 +527,7 @@ def main(args=None):
     executor.spin()
     perception_node.destroy_node()
     executor.shutdown()
-    #try:
-    #    executor.spin()
-    #    perception_node.destroy_node()
-    #    executor.shutdown()
-    #except KeyboardInterrupt:
-    #    logging.info("Keyboard interrupt received, perception node is shut down")
-    #except Exception as e:
-    #    logging.error(f"Error occurred: {e}")
-    #finally:
-    #    rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

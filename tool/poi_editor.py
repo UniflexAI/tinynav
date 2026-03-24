@@ -1,4 +1,6 @@
 from __future__ import annotations
+import sys
+sys.path.append("/tinynav/tinynav/core")
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -16,7 +18,7 @@ import json
 from rclpy.node import Node
 import rclpy
 import os
-from tinynav.core.math_utils import msg2np, matrix_to_quat
+from math_utils import msg2np, matrix_to_quat
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -189,6 +191,9 @@ class RelocalizationPose(Node):
         self.planning_path_sub = self.create_subscription(nav_msgs.msg.Path, '/planning/trajectory_path', self.planning_path_callback, 10)
         self.targegt_pose_sub = self.create_subscription(Odometry, "/control/target_pose", self.target_pose_callback, 10)
         self.odom_sub = self.create_subscription(Odometry, "/slam/odometry", self.odometry_callback, 10)
+        self.current_pose_in_map_sub = self.create_subscription(
+            Odometry, "/mapping/current_pose_in_map", self.current_pose_in_map_callback, 10
+        )
 
     def relocalization_pose_callback(self, msg: Odometry):
         position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -246,20 +251,30 @@ class RelocalizationPose(Node):
         )
 
     def odometry_callback(self, msg:Odometry):
-        odom = msg2np(msg)
+        odom, _ = msg2np(msg)
         xyzw = matrix_to_quat(odom[:3, :3])
         position = odom[:3, 3]
         gizmo = self.viser_server.scene.add_transform_controls("/odom_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
 
     def target_pose_callback(self, msg:Odometry):
-        odom = msg2np(msg)
+        odom, _ = msg2np(msg)
         xyzw = matrix_to_quat(odom[:3, :3])
         position = odom[:3, 3]
         gizmo = self.viser_server.scene.add_transform_controls("/target_pose_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
 
+    def current_pose_in_map_callback(self, msg: Odometry):
+        odom, _ = msg2np(msg)
+        xyzw = matrix_to_quat(odom[:3, :3])
+        position = odom[:3, 3]
+        self.viser_server.scene.add_transform_controls(
+            "/current_pose_in_map_gizmo",
+            position=position,
+            wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]),
+        )
+
 
 def main(
-    tinynav_db_path: Path,
+    tinynav_map_path: Path,
 ) -> None:
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
@@ -269,8 +284,8 @@ def main(
     poi_points = {}
     poi_id_counter = 0
 
-    if os.path.exists(f"{tinynav_db_path}/pois.json"):
-        with open(f"{tinynav_db_path}/pois.json", "r") as f:
+    if os.path.exists(f"{tinynav_map_path}/pois.json"):
+        with open(f"{tinynav_map_path}/pois.json", "r") as f:
             poi_points = json.load(f)
             poi_points = {int(k): v for k, v in poi_points.items()}
             for k, v in poi_points.items():
@@ -285,7 +300,7 @@ def main(
 
         @add_save_poi_button.on_click
         def _(_) -> None:
-            with open(f"{tinynav_db_path}/pois.json", "w") as f:
+            with open(f"{tinynav_map_path}/pois.json", "w") as f:
                 json.dump(poi_points, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
 
 
@@ -321,10 +336,106 @@ def main(
             )
             create_poi_ui(server, poi_list_container,poi_id, poi_points, sphere_handle)
     
-    poses = np.load(tinynav_db_path / "poses.npy", allow_pickle=True).item()
-    rgb_camera_K = np.load(tinynav_db_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
-    rgb_images = shelve.open(f"{tinynav_db_path}/rgb_images")
-    T_rgb_to_infra1 = np.load(tinynav_db_path / "T_rgb_to_infra1.npy", allow_pickle=True)
+    # Load and visualize occupancy grid
+    occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
+    occupancy_meta_path = tinynav_map_path / "occupancy_meta.npy"
+    
+    if occupancy_grid_path.exists() and occupancy_meta_path.exists():
+        print(f"Loading occupancy grid from {tinynav_map_path}")
+        occupancy_grid = np.load(occupancy_grid_path)
+        occupancy_meta = np.load(occupancy_meta_path)
+        
+        # occupancy_meta format: [origin_x, origin_y, origin_z, resolution]
+        origin = occupancy_meta[:3]
+        resolution = occupancy_meta[3]
+        
+        print(f"Occupancy grid shape: {occupancy_grid.shape}")
+        print(f"Origin: ({origin[0]:.3f}, {origin[1]:.3f}, {origin[2]:.3f})")
+        print(f"Resolution: {resolution:.3f} m")
+        
+        # Convert occupancy grid to point cloud
+        # Values follow build_map_node.generate_occupancy_map:
+        #   0 = Unknown, 1 = Free, 2 = Occupied
+        free_indices = np.argwhere(occupancy_grid == 1)  # Free
+        occupied_indices = np.argwhere(occupancy_grid == 2)  # Occupied
+        
+        # Convert voxel indices to world coordinates
+        origin_np = np.array(origin)
+        free_points = origin_np + free_indices * resolution if len(free_indices) > 0 else np.array([]).reshape(0, 3)
+        occupied_points = origin_np + occupied_indices * resolution if len(occupied_indices) > 0 else np.array([]).reshape(0, 3)
+
+        # Create colors: Free = green, Occupied = red
+        free_handle = None
+        occupied_handle = None
+        if len(free_points) > 0:
+            free_colors = np.zeros((len(free_points), 3), dtype=np.float32)
+            free_colors[:, 1] = 1.0  # Green for free space
+            print(f"Adding {len(free_points)} free space points (green)")
+            
+            # Add free space point cloud
+            free_handle = server.scene.add_point_cloud(
+                "/occupancy_grid/free",
+                points=free_points,
+                colors=free_colors,
+                point_size=resolution * 0.8,  # Slightly smaller than voxel size
+                point_shape="rounded",
+            )
+        
+        if len(occupied_points) > 0:
+            occupied_colors = np.zeros((len(occupied_points), 3), dtype=np.float32)
+            occupied_colors[:, 0] = 1.0  # Red for occupied
+            print(f"Adding {len(occupied_points)} occupied points (red)")
+            # Add occupied space point cloud
+            occupied_handle = server.scene.add_point_cloud(
+                "/occupancy_grid/occupied",
+                points=occupied_points,
+                colors=occupied_colors,
+                point_size=resolution * 0.8,  # Slightly smaller than voxel size
+                point_shape="rounded",
+            )
+        
+        # Add UI controls for occupancy grid
+        if free_handle is not None or occupied_handle is not None:
+            # Default: show occupied, hide free
+            if free_handle is not None:
+                free_handle.visible = False
+            if occupied_handle is not None:
+                occupied_handle.visible = True
+
+            with server.gui.add_folder("Occupancy Grid") as _:
+                show_free = server.gui.add_checkbox("Show Free Space", initial_value=False)
+                show_occupied = server.gui.add_checkbox("Show Occupied", initial_value=True)
+                point_size_slider = server.gui.add_slider(
+                    "Point Size", min=0.001, max=0.1, step=0.001, initial_value=float(resolution * 0.8)
+                )
+                
+                @show_free.on_update
+                def _(_) -> None:
+                    if free_handle is not None:
+                        free_handle.visible = show_free.value
+                
+                @show_occupied.on_update
+                def _(_) -> None:
+                    if occupied_handle is not None:
+                        occupied_handle.visible = show_occupied.value
+                
+                @point_size_slider.on_update
+                def _(_) -> None:
+                    if free_handle is not None:
+                        free_handle.point_size = point_size_slider.value
+                    if occupied_handle is not None:
+                        occupied_handle.point_size = point_size_slider.value
+    else:
+        print(f"Warning: Occupancy grid files not found in {tinynav_map_path}")
+        if not occupancy_grid_path.exists():
+            print(f"  Missing: {occupancy_grid_path}")
+        if not occupancy_meta_path.exists():
+            print(f"  Missing: {occupancy_meta_path}")
+    
+    poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
+    rgb_camera_K = np.load(tinynav_map_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
+    rgb_images = shelve.open(f"{tinynav_map_path}/rgb_images")
+    T_rgb_to_infra1 = np.load(tinynav_map_path / "T_rgb_to_infra1.npy", allow_pickle=True)
 
     fx, _, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
     with server.gui.add_folder("cameras") as _:
@@ -347,8 +458,8 @@ def main(
             )
 
     # Load splat or point cloud files
-    splat_path = Path(f"{tinynav_db_path}/splat.ply")
-    pointcloud_path = Path(f"{tinynav_db_path}/pointcloud.ply")
+    splat_path = Path(f"{tinynav_map_path}/splat.ply")
+    pointcloud_path = Path(f"{tinynav_map_path}/pointcloud.ply")
 
     if splat_path.exists():
         # Load as Gaussian splat
