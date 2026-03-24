@@ -139,7 +139,7 @@ RUN git clone https://github.com/dvorak0/gtsam.git -b yzf/add_smart_factor_pytho
     && cd gtsam \
     && mkdir build && cd build \
     && cmake -DCMAKE_BUILD_TYPE=Release -DGTSAM_BUILD_PYTHON=ON -DGTSAM_THROW_CHEIRALITY_EXCEPTION=OFF .. \
-    && make -j1
+    && make -j2
 ENV PYTHONPATH="/3rdparty/gtsam/build/python:${PYTHONPATH}"
 
 # clean
