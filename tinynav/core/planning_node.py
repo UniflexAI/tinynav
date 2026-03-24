@@ -1,10 +1,8 @@
 import argparse
-import matplotlib
-matplotlib.use('Agg')
 import time
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo, PointField
+from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32
 from cv_bridge import CvBridge
@@ -12,10 +10,7 @@ import numpy as np
 from scipy.ndimage import maximum_filter, distance_transform_edt
 from numba import njit
 import message_filters
-import matplotlib.pyplot as plt
 from rclpy.time import Time
-import io
-from PIL import Image as PIL_Image
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs.msg import PointCloud
 import sensor_msgs_py.point_cloud2 as pc2
@@ -23,7 +18,7 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 import heapq
-from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from math_utils import quat_to_matrix, msg2np
 from geometry_msgs.msg import Twist
 
 
@@ -33,9 +28,9 @@ SAFETY_RADIUS=0.3
 
 # Robot body safety footprint in planning frame (camera/world aligned forward).
 # Reference point is robot control-center (near rear), so front/rear are asymmetric.
-FRONT_SAFETY_LENGTH = 0.6
+FRONT_SAFETY_LENGTH = 0.8
 REAR_SAFETY_LENGTH = 0.0
-HALF_SAFETY_WIDTH = 0.2
+HALF_SAFETY_WIDTH = 0.3
 
 # Camera extrinsics wrt robot control center frame (meters)
 # +x: robot left, +y: robot up, +z: robot forward (Tinynav convention in this node)
@@ -155,24 +150,8 @@ def max_pool_height_map(height_map, kernel_size=1):
     pooled = maximum_filter(filled, size=kernel_size, mode='nearest')
     return pooled
 
-def height_map_to_ESDF(height_map, height_threshold, resolution, method='max'):
-    if method == 'max':
-        occupancy = (height_map > height_threshold).astype(np.float32)
-    elif method == 'min':
-        occupancy = (height_map < height_threshold).astype(np.float32)
-    else:
-        raise ValueError(f"Invalid method: {method}. Use 'max' or 'min'.")
-    
-    if np.any(occupancy):
-        esdf = distance_transform_edt(occupancy == 0)
-    else:
-        esdf = np.full_like(occupancy, 100.0, dtype=np.float32)
-
-    return resolution * esdf
-
-
-def build_fused_esdf_from_height(height_map_rel, resolution):
-    """Stair-aware ESDF from height map: cliff/step edges -> obstacles -> ESDF."""
+def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolution, robot_z):
+    """Fuse step/cliff edges from height map with wall/solid obstacles from 3D occupancy."""
     finite = np.isfinite(height_map_rel)
     filled = np.nan_to_num(height_map_rel, nan=0.0, neginf=0.0, posinf=0.0)
 
@@ -197,14 +176,28 @@ def build_fused_esdf_from_height(height_map_rel, resolution):
 
     step_height = np.maximum(step_x, step_y)
 
-    # Threshold: max traversable height jump per grid cell.
+    # Step/cliff obstacle source from 2D height discontinuity.
     max_step_height = 0.30
-    obstacle = (step_height > max_step_height)
+    step_obstacle = (step_height > max_step_height)
 
-    # Light denoise: remove isolated obstacle speckles.
-    obstacle_u8 = (obstacle.astype(np.uint8) * 255)
+    # Wall/solid obstacle source from 3D occupancy projection around robot body height band.
+    occ_threshold = 0.1
+    wall_band_bottom = robot_z - 0.2
+    wall_band_top = robot_z + 0.8
+    z_world = origin[2] + (np.arange(occupancy_grid.shape[2]) + 0.5) * resolution
+    z_mask = (z_world >= wall_band_bottom) & (z_world <= wall_band_top)
+    if np.any(z_mask):
+        wall_obstacle = np.any(occupancy_grid[:, :, z_mask] > occ_threshold, axis=2)
+    else:
+        wall_obstacle = np.zeros((h, w), dtype=bool)
+
+    obstacle = step_obstacle | wall_obstacle
+
+    # Light denoise for step speckles, but keep projected wall obstacles.
+    step_u8 = (step_obstacle.astype(np.uint8) * 255)
     kernel = np.ones((3, 3), np.uint8)
-    obstacle = cv2.morphologyEx(obstacle_u8, cv2.MORPH_OPEN, kernel) > 0
+    step_obstacle_denoised = cv2.morphologyEx(step_u8, cv2.MORPH_OPEN, kernel) > 0
+    obstacle = step_obstacle_denoised | wall_obstacle
 
     if np.any(obstacle):
         fused_esdf = distance_transform_edt(~obstacle) * resolution
@@ -213,145 +206,9 @@ def build_fused_esdf_from_height(height_map_rel, resolution):
 
     # For downstream cost, keep a normalized slope-like magnitude (m/m).
     slope = step_height / max(1e-6, resolution)
-    unknown_mask = ~finite
+    unknown_mask = (~finite) & (~wall_obstacle)
 
     return fused_esdf, slope, unknown_mask
-
-@njit(cache=True)
-def generate_trajectory_library_3d(
-    num_samples=11, duration=2.0, dt=0.1,
-    acc_std=0.00001, omega_y_std_deg=20.0,
-    init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
-):
-    num_steps = int(duration / dt) + 1
-    max_velocity = 0.5
-    velocity_samples = np.linspace(-max_velocity * 0.4, max_velocity, num_samples)
-    max_omega = np.pi / 6
-    omega_y_samples = np.linspace(-max_omega, max_omega, num_samples * 2)
-    num_samples = len(velocity_samples) * len(omega_y_samples)
-
-    trajectories = np.empty((num_samples, num_steps, 7))
-    params = np.empty((num_samples, 2))
-
-    k = -1
-    for i_velocity in range(len(velocity_samples)):
-        for i_omega in range(len(omega_y_samples)):
-            k += 1
-            dv = velocity_samples[i_velocity]
-            omega_y = omega_y_samples[i_omega]
-            p = init_p.copy()
-            v_world = init_v.copy()
-            q = quat_to_matrix(init_q)
-            traj = np.empty((num_steps, 7))
-            for i in range(num_steps):
-                dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
-                v_world = (q @ dq) @ q.T @ v_world
-                q = q @ dq
-                dv_camera = np.array([0.0, 0.0, dv])
-                dv_world = q @ dv_camera
-                v_world += dv_world * dt
-                v_world = np.clip(v_world, -0.5, 0.5)
-                p += v_world * dt
-                traj[i, :3] = p
-                traj[i, 3:] = matrix_to_quat(q)
-            #hack
-            for i in range(num_steps):
-                traj[i, 2] = traj[0, 2]
-            trajectories[k] = traj
-            params[k, 0] = dv
-            params[k, 1] = omega_y
-    trajectories = trajectories[:k+1]
-    params = params[:k+1]
-    return trajectories, params
-
-@njit(cache=True)
-def score_trajectories_by_height_map(trajectories, height_map, origin, resolution):
-    scores = []
-    height_map_rows, height_map_cols = height_map.shape
-    height_values = []
-    for t in range(len(trajectories)):
-        traj = trajectories[t]
-        cost = 0.0
-        height_value = []
-        footprint_len = FRONT_SAFETY_LENGTH + REAR_SAFETY_LENGTH
-        cum_distance = max(0.1, 2 * footprint_len)
-        for i in range(len(traj)):
-            x_world, y_world, z_world = traj[i, 0], traj[i, 1], traj[i, 2]
-            if cum_distance >= footprint_len or i == len(traj) - 1:
-                cum_distance = 0.0
-            else:
-                cum_distance += np.linalg.norm(traj[i, :3] - traj[i-1, :3])
-                continue
-
-            quat = traj[i, 3:]
-            rotation = quat_to_matrix(quat)
-            delta_x_index_max = int(HALF_SAFETY_WIDTH / resolution)
-            delta_z_index_max = int((FRONT_SAFETY_LENGTH + REAR_SAFETY_LENGTH) / resolution)
-            grid_in_camera = np.zeros((2 * delta_x_index_max + 1, 2 * delta_z_index_max + 1))
-            for delta_x_index in range(-delta_x_index_max, delta_x_index_max + 1):
-                for delta_z_index in range(-delta_z_index_max, delta_z_index_max + 1):
-                    x_in_camera = delta_x_index * resolution
-                    z_in_camera = delta_z_index * resolution - REAR_SAFETY_LENGTH
-                    y_in_camera = 0
-                    point_in_camera = np.array([x_in_camera, y_in_camera, z_in_camera])
-                    point_in_world = rotation @ point_in_camera + np.array([x_world, y_world, z_world])
-                    x_img = int((point_in_world[0] - origin[0]) / resolution)
-                    y_img = int((point_in_world[1] - origin[1]) / resolution)
-                    if 0 <= x_img < height_map_rows and 0 <= y_img < height_map_cols:
-                        delta_height = point_in_world[2] - height_map[x_img, y_img]
-                        # magic number
-                        if (delta_height > 0.05):
-                            cost += 0.0  # Trajectory is above the height map, no collision
-                        else:
-                            # Trajectory is at or below the height map, add collision cost
-                            bounding_distance = np.sqrt(x_in_camera**2 + z_in_camera**2)
-                            cost += 1.0 + (2.0 - bounding_distance)
-                        height_value.append(height_map[x_img, y_img])
-                        grid_in_camera[delta_x_index + delta_x_index_max, delta_z_index + delta_z_index_max] = height_map[x_img, y_img]
-                    else:
-                        height_value.append(-np.inf)
-                        grid_in_camera[delta_x_index + delta_x_index_max, delta_z_index + delta_z_index_max] = -np.inf
-        height_values.append(height_value)
-        scores.append(cost)
-
-    return scores, height_values
-
-@njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution):
-    scores = []
-    occ_points = []
-    ESDF_rows, ESDF_cols = ESDF_map.shape
-
-    for t in range(len(trajectories)):
-        traj = trajectories[t]
-        min_dist_for_traj = float('inf')
-        closest_step_for_traj = -1  # Initialize as -1 to indicate no step found
-
-        for i in range(len(traj)):
-            x_world, y_world, _ = traj[i, 0], traj[i, 1], traj[i, 2]
-            x_img = int((x_world - origin[0]) / resolution)
-            y_img = int((y_world - origin[1]) / resolution)
-            if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
-                dist = ESDF_map[x_img, y_img]
-                if dist < min_dist_for_traj:
-                    min_dist_for_traj = dist
-                    closest_step_for_traj = i
-        # Scoring based on the found minimum distance and the step it occurred
-        if min_dist_for_traj < 1e-3: # Consider it a collision
-            scores.append(float('inf'))
-        elif min_dist_for_traj != float('inf'):
-            if min_dist_for_traj > SAFETY_RADIUS:
-                scores.append(0.0)
-            else:
-                max_steps = len(traj)
-                decay_factor = (max_steps - closest_step_for_traj) / max_steps
-                base_score = 1.0 / (min_dist_for_traj+1e-3)
-                scores.append(decay_factor * base_score)
-        else:
-            # If no obstacle is near, score is 0, closest_step_for_traj is the last step
-            scores.append(0.0)
-        occ_points.append(closest_step_for_traj)
-    return scores, occ_points
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
@@ -388,17 +245,6 @@ def grid_to_world_2d(grid_xy, origin, resolution, z):
         origin[1] + (grid_xy[1] + 0.5) * resolution,
         z,
     ])
-
-
-def sample_height_from_map(point_xy, height_map, origin, resolution, default_z):
-    gx = int((point_xy[0] - origin[0]) / resolution)
-    gy = int((point_xy[1] - origin[1]) / resolution)
-    h, w = height_map.shape
-    if 0 <= gx < h and 0 <= gy < w:
-        z = height_map[gx, gy]
-        if np.isfinite(z):
-            return float(z)
-    return float(default_z)
 
 
 def clip_grid_2d(grid_xy, shape):
@@ -480,24 +326,26 @@ def astar_2d(cost_map, obstacle_mask, start, goal, search_mask=None):
 
 
 def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
-    # Pure ESDF mode: hard obstacle + clearance cost, no extra slope term.
-    hard_esdf = 0.02
+    # Pure ESDF mode: keep hard obstacle narrow, but add a stronger clearance barrier
+    # so A* naturally prefers center-of-free-space instead of edge-hugging.
+    hard_esdf = 0.15
     obstacle = fused_esdf < hard_esdf
 
-    inflation_radius_m = 0.0  # set >0 to enable extra inflation
-    if inflation_radius_m > 1e-6:
-        inflation_radius_px = inflation_radius_m / max(1e-6, resolution)
-        dist_to_obstacle_px = distance_transform_edt(~obstacle)
-        obstacle_inflated = dist_to_obstacle_px <= inflation_radius_px
-    else:
-        obstacle_inflated = obstacle
+    d = np.clip(fused_esdf, hard_esdf, 2.0)
 
-    esdf_clamped = np.clip(fused_esdf, 0.012, 2.0)
-    clearance_cost = 1.0 / esdf_clamped
-    unknown_penalty = np.where(unknown_mask, 1.0, 0.0)
+    # Preferred clearance band (meters). Inside this band, cost rises rapidly.
+    safe_clearance = 0.45
+    barrier = np.where(
+        d >= safe_clearance,
+        0.0,
+        ((safe_clearance - d) / max(1e-6, safe_clearance)) ** 2,
+    )
 
-    cost = 1.0 + 0.16 * np.clip(clearance_cost, 0.0, 25.0) + unknown_penalty
-    return obstacle_inflated, cost
+    unknown_penalty = np.where(unknown_mask, 15.0, 0.0)
+
+    # Do not inflate obstacles geometrically here; let ESDF barrier shape the route.
+    cost = 1.0 + 10.0 * barrier + unknown_penalty
+    return obstacle, cost
 
 
 def smooth_path_world(path_world, window=5, passes=2):
@@ -525,36 +373,6 @@ def smooth_path_world(path_world, window=5, passes=2):
         smoothed[-1] = arr[-1]
 
     return [smoothed[i] for i in range(n)]
-
-
-def build_global_path_corridor_mask(global_path_xy, origin, resolution, shape, radius_m):
-    """Build a boolean corridor mask around global path polyline in local grid."""
-    h, w = shape
-    if global_path_xy is None or len(global_path_xy) < 1:
-        return np.zeros((h, w), dtype=bool)
-
-    radius_px = max(1, int(np.ceil(radius_m / max(1e-6, resolution))))
-    seeds = np.zeros((h, w), dtype=bool)
-
-    pts = np.asarray(global_path_xy, dtype=np.float32)
-    for i in range(len(pts) - 1):
-        p0 = pts[i]
-        p1 = pts[i + 1]
-        seg_len = np.linalg.norm(p1 - p0)
-        n = max(1, int(np.ceil(seg_len / max(1e-6, resolution * 0.5))))
-        for t in np.linspace(0.0, 1.0, n + 1):
-            p = (1.0 - t) * p0 + t * p1
-            gx, gy = world_to_grid_2d(p, origin, resolution)
-            if 0 <= gx < h and 0 <= gy < w:
-                seeds[gx, gy] = True
-
-    if len(pts) == 1:
-        gx, gy = world_to_grid_2d(pts[0], origin, resolution)
-        if 0 <= gx < h and 0 <= gy < w:
-            seeds[gx, gy] = True
-
-    dist = distance_transform_edt(~seeds)
-    return dist <= radius_px
 
 
 def pick_lookahead_point(path_world, robot_xy, lookahead_dist=0.6):
@@ -728,32 +546,6 @@ class PlanningNode(Node):
         """Convert camera pose (T_cam->world) to robot control-center position in world."""
         return T[:3, 3] - T[:3, :3] @ ROBOT_TO_CAMERA_XYZ
 
-    def publish_height_map_traj(self, pooled_map, trajectories, occ_points, top_indices, scores, params, origin, resolution):
-        fig, ax = plt.subplots(figsize=(8, 6))
-        height_normalized = (np.nan_to_num(pooled_map, nan=0.0) + 5) * 30
-        height_uint8 = height_normalized.astype(np.uint8)
-        ax.imshow(height_uint8, cmap='jet', vmin=0, vmax=255, origin='upper', interpolation='nearest')
-        for idx in top_indices:
-            if scores[idx] > -1:
-                traj = trajectories[idx]
-                occ_idx = occ_points[idx]
-                x = (traj[:, 0] - origin[0]) / resolution
-                y = (traj[:, 1] - origin[1]) / resolution
-                ax.plot(y, x, label=f"score:{scores[idx]:.1f}, gyro:{params[idx][1]:.1f}", alpha=0.8)
-                ax.plot(y[occ_idx], x[occ_idx], 'r*', markersize=8, label=None)
-        ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), borderaxespad=0.)
-
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
-        buf.seek(0)
-        img = np.array(PIL_Image.open(buf))[:, :, :3]  # Convert to RGB NumPy array
-        buf.close()
-
-        bridge = CvBridge()
-        img_msg = bridge.cv2_to_imgmsg(img, encoding='rgb8')
-        self.traj_scores_pub.publish(img_msg)
-
     def publish_height_map(self, origin, pooled_map, header):
         height_normalized = (np.nan_to_num(pooled_map, nan=0.0) + 5) * 30
         height_uint8 = height_normalized.astype(np.uint8)
@@ -778,21 +570,6 @@ class PlanningNode(Node):
         occupancy_grid_msg.data = flat_data
         if pub is not None:
             pub.publish(occupancy_grid_msg)
-
-    def publish_binary_grid(self, mask, pub, origin, resolution, stamp, z_offset=0.0):
-        msg = OccupancyGrid()
-        msg.header = Header()
-        msg.header.stamp = stamp
-        msg.header.frame_id = "world"
-        msg.info.resolution = resolution
-        msg.info.width = mask.shape[1]
-        msg.info.height = mask.shape[0]
-        msg.info.origin.position.x = origin[0]
-        msg.info.origin.position.y = origin[1]
-        msg.info.origin.position.z = origin[2] + z_offset
-        msg.info.origin.orientation.w = 1.0
-        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
-        pub.publish(msg)
 
     def publish_cost_heatmap(self, cost, header):
         finite = np.isfinite(cost)
@@ -869,35 +646,6 @@ class PlanningNode(Node):
         msg.points = points
         self.footprint_pub.publish(msg)
 
-    def publish_3d_occupancy_cloud_with_esdf(self, grid3d, ESDF_map, resolution=0.1, origin=(0, 0, 0), max_dist=1.0):
-        X, Y, Z = grid3d.shape
-        # ground
-        gx, gy = np.meshgrid(np.arange(X), np.arange(Y), indexing='ij')
-        ground = np.stack([gx.ravel(), gy.ravel(), np.zeros_like(gx).ravel()+2], axis=-1)
-        coords = ground * resolution + np.asarray(origin)
-        # query ESDF
-        ix, iy = ground[:, 0].astype(int), ground[:, 1].astype(int)
-        valid = (0 <= ix) & (ix < ESDF_map.shape[0]) & (0 <= iy) & (iy < ESDF_map.shape[1])
-        dist = np.full(len(ground), max_dist, dtype=np.float32)
-        dist[valid] = np.clip(ESDF_map[ix[valid], iy[valid]], 0, max_dist)
-        # map color
-        v = np.uint8((1 - dist / max_dist) * 255)
-        colors = cv2.applyColorMap(v.reshape(-1, 1), cv2.COLORMAP_JET).reshape(-1, 3)
-        rgb = (colors[:, 2].astype(np.uint32) << 16) | (colors[:, 1].astype(np.uint32) << 8) | colors[:, 0].astype(np.uint32)
-        # build point cloud
-        dtype = np.dtype([('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.uint32)])
-        points = np.zeros(coords.shape[0], dtype=dtype)
-        points['x'], points['y'], points['z'] = coords[:, 0], coords[:, 1], coords[:, 2]
-        points['rgb'] = rgb
-        header = Header(stamp=self.get_clock().now().to_msg(), frame_id="world")
-        fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
-        ]
-        self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
-
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
@@ -970,7 +718,13 @@ class PlanningNode(Node):
             pooled_map = max_pool_height_map(height_map)
             robot_z = T[2, 3]
             pooled_map_rel = pooled_map - robot_z
-            fused_esdf, _, unknown_mask = build_fused_esdf_from_height(pooled_map_rel, self.resolution)
+            fused_esdf, _, unknown_mask = build_fused_esdf_from_height(
+                pooled_map_rel,
+                self.occupancy_grid,
+                self.origin,
+                self.resolution,
+                robot_z,
+            )
 
 
         with Timer(name='vis heighmap and esdf', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -1146,6 +900,11 @@ def main(args=None):
     node = PlanningNode(sensor_source=parsed_args.sensor_source)
 
     rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
     node.destroy_node()
     rclpy.shutdown()
 

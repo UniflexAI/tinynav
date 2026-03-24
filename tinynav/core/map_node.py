@@ -921,7 +921,7 @@ class MapNode(Node):
                 distance_xy = np.linalg.norm(
                     paths_in_map[i][:2] - start_point[:2]
                 )
-                if distance_xy > 1.0:
+                if distance_xy > 0.5:
                     target_position = paths_in_map[i]
                     break
         else:
@@ -1097,8 +1097,8 @@ class MapNode(Node):
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
             # # lightweight post-process: smooth then downsample for lower control wear
-            # converted_path = smooth_path_lightweight(converted_path, window=5, passes=1)
-            # converted_path = downsample_path_by_distance(converted_path, min_dist=0.08)
+            converted_path = smooth_path_lightweight(converted_path, window=3, passes=1)
+            converted_path = downsample_path_by_distance(converted_path, min_dist=0.08)
             return converted_path
         return None
 
