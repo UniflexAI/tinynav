@@ -131,25 +131,6 @@ RUN apt-get update && \
     apt-get install -y clang-tidy ros-humble-ament-clang-tidy ros-humble-ament-lint \
     && rm -rf /var/lib/apt/lists/*
 
-# gtsam
-RUN apt-get update && apt-get install -y python3-pip \
-    && rm -rf /var/lib/apt/lists/*
-RUN pip3 install pyparsing==3.1.1
-RUN git clone https://github.com/dvorak0/gtsam.git -b yzf/add_smart_factor_python_export \
-    && cd gtsam \
-    && mkdir build && cd build \
-    && cmake -DCMAKE_BUILD_TYPE=Release -DGTSAM_BUILD_PYTHON=ON -DGTSAM_THROW_CHEIRALITY_EXCEPTION=OFF .. \
-    && make -j1
-ENV PYTHONPATH="/3rdparty/gtsam/build/python:${PYTHONPATH}"
-
-
-# foxglove streaming
-RUN apt-get update && apt-get install -y \
-    ros-humble-foxglove-bridge \
-    ros-humble-foxglove-msgs \
-    ros-humble-foxglove-compressed-video-transport \
-    && rm -rf /var/lib/apt/lists/*
-
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
