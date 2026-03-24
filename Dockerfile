@@ -150,7 +150,7 @@ WORKDIR /tinynav
 USER root
 
 # Install uv
-RUN curl -LsSf https://astral.sh/uv/0.7.3/install.sh | sh
+RUN curl -LsSf https://astral.sh/uv/0.7.3/install.sh | sh && test -f /root/.local/bin/uv
 ENV PATH=$PATH:/root/.local/bin/
 
 # Pre-create venv and sync dependencies at build time
