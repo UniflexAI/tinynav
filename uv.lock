@@ -1822,6 +1822,18 @@ wheels = [
 ]
 
 [[package]]
+name = "mako"
+version = "1.3.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markupsafe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9e/38/bd5b78a920a64d708fe6bc8e0a2c075e1389d53bef8413725c63ba041535/mako-1.3.10.tar.gz", hash = "sha256:99579a6f39583fa7e5630a28c3c1f440e4e97a414b80372649c0ce338da2ea28", size = 392474, upload-time = "2025-04-10T12:44:31.16Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/fb/99f81ac72ae23375f22b7afdb7642aba97c00a713c217124420147681a2f/mako-1.3.10-py3-none-any.whl", hash = "sha256:baef24a52fc4fc514a0887ac600f9f1cff3d82c61d4d700a1fa84d597b88db59", size = 78509, upload-time = "2025-04-10T12:50:53.297Z" },
+]
+
+[[package]]
 name = "manifold3d"
 version = "3.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2921,6 +2933,17 @@ wheels = [
 ]
 
 [[package]]
+name = "pycuda"
+version = "2026.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mako" },
+    { name = "platformdirs" },
+    { name = "pytools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/75/93/36ffd54430924dcb03a88c97519d56589e573d0dcc999c77a4c4d8a90306/pycuda-2026.1.tar.gz", hash = "sha256:759516160628ba06f32ce7e563e3f5b9214691dc9528a03ea99ea1073f4e14ba", size = 1691047, upload-time = "2026-01-15T22:23:07.533Z" }
+
+[[package]]
 name = "pydantic"
 version = "2.11.9"
 source = { registry = "https://pypi.org/simple" }
@@ -3203,6 +3226,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/86/f5/8c0653e5bb54e0cbdfe27bf32d41f27bc4e12faa8742778c17f2a71be2c0/python-xlib-0.33.tar.gz", hash = "sha256:55af7906a2c75ce6cb280a584776080602444f75815a7aff4d287bb2d7018b32", size = 269068, upload-time = "2022-12-25T18:53:00.824Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fc/b8/ff33610932e0ee81ae7f1269c890f697d56ff74b9f5b2ee5d9b7fa2c5355/python_xlib-0.33-py2.py3-none-any.whl", hash = "sha256:c3534038d42e0df2f1392a1b30a15a4ff5fdc2b86cfa94f072bf11b10a164398", size = 182185, upload-time = "2022-12-25T18:52:58.662Z" },
+]
+
+[[package]]
+name = "pytools"
+version = "2025.2.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "platformdirs" },
+    { name = "siphash24" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c3/7b/f885a57e61ded45b5b10ca60f0b7575c9fb9a282e7513d0e23a33ee647e1/pytools-2025.2.5.tar.gz", hash = "sha256:a7f5350644d46d98ee9c7e67b4b41693308aa0f5e9b188d8f0694b27dc94e3a2", size = 85594, upload-time = "2025-10-07T15:53:30.49Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f6/84/c42c29ca4bff35baa286df70b0097e0b1c88fd57e8e6bdb09cb161a6f3c1/pytools-2025.2.5-py3-none-any.whl", hash = "sha256:42e93751ec425781e103bbcd769ba35ecbacd43339c2905401608f2fdc30cf19", size = 98811, upload-time = "2025-10-07T15:53:29.089Z" },
 ]
 
 [[package]]
@@ -3733,6 +3770,20 @@ wheels = [
 ]
 
 [[package]]
+name = "siphash24"
+version = "1.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/67/a2/e049b6fccf7a94bd1b2f68b3059a7d6a7aea86a808cac80cb9ae71ab6254/siphash24-1.8.tar.gz", hash = "sha256:aa932f0af4a7335caef772fdaf73a433a32580405c41eb17ff24077944b0aa97", size = 19946, upload-time = "2025-09-02T20:42:04.856Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/0a/b98666b7089b35143f27ea4e03eddd9da1f117073c0ca01d96bfbf01885e/siphash24-1.8-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:53aba67b3437d7b56d85ad77879dfe314094f687df1de746fa7c6f5b3f6c1436", size = 76704, upload-time = "2025-09-02T20:40:53.19Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/ed/e919afa4769a93ea44c052e0cbc187c5f2c2bcae59018729c60e30cbe0d2/siphash24-1.8-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:3c28925b79954244c8e36ced9b8e88b1cb2d0919baf2b92ef7e8b8f96fd274aa", size = 74196, upload-time = "2025-09-02T20:40:54.531Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/c4/1f206db82f27b4e91528678c9ec21ae558e51aadce43ae5bf4ed2da624cb/siphash24-1.8-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:a665c1d8ae3a46fdec7c35db69823a0247b35957c4686c6b14156d5dc4ed8920", size = 99433, upload-time = "2025-09-02T20:40:55.761Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/9a/cf46eb22a351eeaa06fc1b01984b9feb55d27f878c74ba3f62b8944849de/siphash24-1.8-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:2b9b15af0db3ff357b432c7e51c7cc1a27891aa1b341cc2a2fc1764e3fb5e605", size = 103131, upload-time = "2025-09-02T20:40:57.044Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/74/c811dab8b6c4968f321f2f01e26733f2854a3c5ac75fa8feb99d796fb190/siphash24-1.8-cp310-cp310-win32.whl", hash = "sha256:6fd22c0182518c7b17a9be35128c5b00dbb810751de73d9ab85e39494effab0b", size = 62597, upload-time = "2025-09-02T20:40:58.582Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/02/be6d3c614425371bffc6918b15b27f3839a4b168454b25c6a26da8e9bfcc/siphash24-1.8-cp310-cp310-win_amd64.whl", hash = "sha256:876ed2507a9573c663b1f6deb29b5ccca41e5a5099f848ed18272e709e6848ca", size = 77313, upload-time = "2025-09-02T20:40:59.742Z" },
+]
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3952,7 +4003,9 @@ dependencies = [
     { name = "numba" },
     { name = "numpy" },
     { name = "opencv-python" },
+    { name = "plyfile" },
     { name = "pybind11" },
+    { name = "pycuda" },
     { name = "pygame" },
     { name = "reportlab" },
     { name = "scipy" },
@@ -3998,8 +4051,10 @@ requires-dist = [
     { name = "numba" },
     { name = "numpy", specifier = "==1.26.1" },
     { name = "opencv-python" },
+    { name = "plyfile" },
     { name = "plyfile", marker = "extra == '3dgs'" },
     { name = "pybind11" },
+    { name = "pycuda" },
     { name = "pygame" },
     { name = "pymeshlab", marker = "extra == '3dgs'", specifier = "==2022.2.post4" },
     { name = "reportlab", specifier = ">=4.4.3" },
