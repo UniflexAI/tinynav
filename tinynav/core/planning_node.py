@@ -28,9 +28,9 @@ SAFETY_RADIUS=0.3
 
 # Robot body safety footprint in planning frame (camera/world aligned forward).
 # Reference point is robot control-center (near rear), so front/rear are asymmetric.
-FRONT_SAFETY_LENGTH = 0.8
+FRONT_SAFETY_LENGTH = 0.6
 REAR_SAFETY_LENGTH = 0.0
-HALF_SAFETY_WIDTH = 0.3
+HALF_SAFETY_WIDTH = 0.2
 
 # Camera extrinsics wrt robot control center frame (meters)
 # +x: robot left, +y: robot up, +z: robot forward (Tinynav convention in this node)
@@ -341,7 +341,7 @@ def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
         ((safe_clearance - d) / max(1e-6, safe_clearance)) ** 2,
     )
 
-    unknown_penalty = np.where(unknown_mask, 15.0, 0.0)
+    unknown_penalty = np.where(unknown_mask, 3.0, 0.0)
 
     # Do not inflate obstacles geometrically here; let ESDF barrier shape the route.
     cost = 1.0 + 10.0 * barrier + unknown_penalty
@@ -373,6 +373,73 @@ def smooth_path_world(path_world, window=5, passes=2):
         smoothed[-1] = arr[-1]
 
     return [smoothed[i] for i in range(n)]
+
+
+def plan_dwa_minimal(robot_xy, robot_forward_xy, target_xy, fused_esdf, obstacle_mask, cost_map, origin, resolution,
+                     horizon_s=1.2, dt=0.2, v_samples=None, w_samples=None,
+                     front_len=FRONT_SAFETY_LENGTH, rear_len=REAR_SAFETY_LENGTH, half_w=HALF_SAFETY_WIDTH):
+    if v_samples is None:
+        v_samples = np.linspace(-0.1, 0.5, 10, dtype=np.float32)
+    if w_samples is None:
+        w_samples = np.array([-1.2, -0.8, -0.4, 0.0, 0.4, 0.8, 1.2], dtype=np.float32)
+
+    rf = np.asarray(robot_forward_xy, dtype=np.float32)
+    nrf = np.linalg.norm(rf)
+    if nrf < 1e-6:
+        rf = np.array([1.0, 0.0], dtype=np.float32)
+    else:
+        rf = rf / nrf
+    theta0 = float(np.arctan2(rf[1], rf[0]))
+
+    best_score = float('inf')
+    best_path = []
+    steps = max(1, int(np.ceil(horizon_s / dt)))
+
+    for v in v_samples:
+        for w in w_samples:
+            x, y, theta = float(robot_xy[0]), float(robot_xy[1]), theta0
+            traj = []
+            score = 0.0
+            collided = False
+            for _ in range(steps):
+                theta += float(w) * dt
+                x += float(v) * np.cos(theta) * dt
+                y += float(v) * np.sin(theta) * dt
+                traj.append(np.array([x, y], dtype=np.float32))
+
+                gx, gy = world_to_grid_2d((x, y), origin, resolution)
+                if gx < 0 or gy < 0 or gx >= obstacle_mask.shape[0] or gy >= obstacle_mask.shape[1]:
+                    collided = True
+                    score += 1e6
+                    break
+
+                fwd = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+                if footprint_collision_4corners(
+                    np.array([x, y], dtype=np.float32),
+                    fwd,
+                    obstacle_mask,
+                    origin,
+                    resolution,
+                    front_len,
+                    rear_len,
+                    half_w,
+                ):
+                    collided = True
+                    score += 1e6
+                    break
+
+                score += float(cost_map[gx, gy]) * dt
+                score += 0.5 * np.linalg.norm(np.array([x, y], dtype=np.float32) - target_xy) * dt
+                score += 0.05 * abs(float(w)) * dt
+
+            if not collided and len(traj) > 0:
+                score += 2.0 * np.linalg.norm(traj[-1] - target_xy)
+
+            if score < best_score:
+                best_score = score
+                best_path = traj
+
+    return best_path
 
 
 def pick_lookahead_point(path_world, robot_xy, lookahead_dist=0.6):
@@ -425,12 +492,69 @@ def footprint_collision_4corners(center_xy, forward_xy, obstacle_mask, origin, r
             return True
     return False
 
+
+def min_clearance_in_direction(robot_xy, dir_xy, fused_esdf, obstacle_mask, origin, resolution,
+                               max_dist=0.6, step=0.05, lateral_half=0.15):
+    d = np.asarray(dir_xy, dtype=np.float32)
+    nd = np.linalg.norm(d)
+    if nd < 1e-6:
+        return 0.0
+    d = d / nd
+    left = np.array([-d[1], d[0]], dtype=np.float32)
+    h, w = obstacle_mask.shape
+    min_clear = float('inf')
+    n_long = max(1, int(np.ceil(max_dist / step)))
+    n_lat = max(0, int(np.ceil(lateral_half / step)))
+    for i in range(1, n_long + 1):
+        s = i * step
+        for j in range(-n_lat, n_lat + 1):
+            off = j * step
+            p = robot_xy + d * s + left * off
+            gx, gy = world_to_grid_2d(p, origin, resolution)
+            if gx < 0 or gx >= h or gy < 0 or gy >= w:
+                return 0.0
+            if obstacle_mask[gx, gy]:
+                return 0.0
+            min_clear = min(min_clear, float(fused_esdf[gx, gy]))
+    return 0.0 if min_clear == float('inf') else min_clear
+
+
+def apply_shared_safety_gate(cmd, robot_xy, forward_xy, fused_esdf, obstacle_mask, origin, resolution):
+    out = Twist()
+    out.linear.x = cmd.linear.x
+    out.angular.z = cmd.angular.z
+
+    front_clear = min_clearance_in_direction(robot_xy, forward_xy, fused_esdf, obstacle_mask, origin, resolution,
+                                             max_dist=0.55, step=0.05, lateral_half=0.18)
+    back_clear = min_clearance_in_direction(robot_xy, -np.asarray(forward_xy, dtype=np.float32), fused_esdf, obstacle_mask, origin, resolution,
+                                            max_dist=0.35, step=0.05, lateral_half=0.18)
+
+    front_danger = front_clear < 0.18
+    back_safe = back_clear > 0.16
+
+    if out.linear.x >= 0.0 and front_danger:
+        if back_safe:
+            out.linear.x = -0.08
+            if abs(out.angular.z) < 0.4:
+                out.angular.z = 0.4
+        else:
+            out.linear.x = 0.0
+            if abs(out.angular.z) < 0.5:
+                out.angular.z = 0.5
+
+    if out.linear.x < 0.0 and not back_safe:
+        out.linear.x = 0.0
+
+    out.linear.y = 0.0
+    return out
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self, sensor_source: str = 'auto'):
         super().__init__('planning_node')
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
+        self.safety_path_pub = self.create_publisher(Path, '/planning/safety_gate_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.fused_esdf_pub = self.create_publisher(OccupancyGrid, '/planning/fused_esdf', 10)
@@ -509,7 +633,7 @@ class PlanningNode(Node):
         self.recovery_slow_speed = 0.08
         self.path_smooth_window = 5
         self.path_smooth_passes = 0
-
+        self.planner_mode = 'dwa'  # 'astar' | 'dwa'
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -645,6 +769,40 @@ class PlanningNode(Node):
         msg.points = points
         self.footprint_pub.publish(msg)
 
+    def publish_safety_gate_path(self, robot_xy, forward_xy, cmd, stamp, robot_z):
+        path_msg = Path()
+        path_msg.header.stamp = stamp
+        path_msg.header.frame_id = 'world'
+
+        p0 = PoseStamped()
+        p0.header = path_msg.header
+        p0.pose.position.x = float(robot_xy[0])
+        p0.pose.position.y = float(robot_xy[1])
+        p0.pose.position.z = float(robot_z)
+        p0.pose.orientation.w = 1.0
+        path_msg.poses.append(p0)
+
+        d = np.asarray(forward_xy, dtype=np.float32)
+        nd = np.linalg.norm(d)
+        if nd < 1e-6:
+            d = np.array([1.0, 0.0], dtype=np.float32)
+        else:
+            d = d / nd
+        if cmd.linear.x < -1e-3:
+            d = -d
+        if abs(cmd.linear.x) < 1e-3:
+            d = np.array([0.0, 0.0], dtype=np.float32)
+
+        p1 = PoseStamped()
+        p1.header = path_msg.header
+        p1.pose.position.x = float(robot_xy[0] + d[0] * 0.35)
+        p1.pose.position.y = float(robot_xy[1] + d[1] * 0.35)
+        p1.pose.position.z = float(robot_z)
+        p1.pose.orientation.w = 1.0
+        path_msg.poses.append(p1)
+
+        self.safety_path_pub.publish(path_msg)
+
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
@@ -742,7 +900,7 @@ class PlanningNode(Node):
             self.publish_footprint(T, depth_msg.header.stamp)
 
 
-        with Timer(name='local astar plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name='local plan', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             local_path_world = []
             if self.target_pose is not None:
                 obstacle_mask, astar_cost = build_astar_cost_map_from_fused_esdf(
@@ -751,72 +909,82 @@ class PlanningNode(Node):
                 self.publish_cost_heatmap(astar_cost, depth_msg.header)
 
                 robot_center = self.camera_to_robot_center(T)
-                start_idx = clip_grid_2d(world_to_grid_2d(robot_center[:2], self.origin, self.resolution), obstacle_mask.shape)
-                goal_idx = clip_grid_2d(world_to_grid_2d(self.target_pose[:2], self.origin, self.resolution), obstacle_mask.shape)
-
-                start_free = find_nearest_free(start_idx, obstacle_mask)
-                goal_free = find_nearest_free(goal_idx, obstacle_mask)
-
-                # 单通道策略：只保留 pass3（基于 ESDF+slope 生成的 obstacle/cost）
-                grid_path = astar_2d(astar_cost, obstacle_mask, start_free, goal_free)
-
-                # 4-corner footprint collision filtering (robust mode):
-                # progressively relax footprint size to avoid over-pruning and "freeze" behavior.
-                if len(grid_path) >= 2:
-                    relax_scales = (1.0, 0.9, 0.8, 0.7)
-                    min_keep = max(3, int(0.25 * len(grid_path)))
-                    best_filtered = None
-
-                    for s in relax_scales:
-                        front_len = FRONT_SAFETY_LENGTH * s
-                        rear_len = REAR_SAFETY_LENGTH * s
-                        half_w = HALF_SAFETY_WIDTH * s
-
-                        filtered = [grid_path[0]]
-                        for i in range(1, len(grid_path)):
-                            p_prev = grid_to_world_2d(filtered[-1], self.origin, self.resolution, 0.0)[:2]
-                            p_cur = grid_to_world_2d(grid_path[i], self.origin, self.resolution, 0.0)[:2]
-                            fwd = p_cur - p_prev
-                            if np.linalg.norm(fwd) < 1e-6:
-                                fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-                                fwd = fwd[:2]
-                            if footprint_collision_4corners(
-                                p_cur,
-                                fwd,
-                                obstacle_mask,
-                                self.origin,
-                                self.resolution,
-                                front_len,
-                                rear_len,
-                                half_w,
-                            ):
-                                break
-                            filtered.append(grid_path[i])
-
-                        if best_filtered is None or len(filtered) > len(best_filtered):
-                            best_filtered = filtered
-                        if len(filtered) >= min_keep:
-                            best_filtered = filtered
-                            break
-
-                    # Fail-open fallback: avoid losing tracking completely when footprint is too strict.
-                    if best_filtered is not None and len(best_filtered) >= 2:
-                        grid_path = best_filtered
-
                 robot_z = T[2, 3]
-                local_path_world = []
-                for g in grid_path:
-                    p = grid_to_world_2d(g, self.origin, self.resolution, robot_z)
-                    # Keep path Z fixed at current robot height for flatter trajectories.
-                    p[2] = robot_z
-                    local_path_world.append(p)
 
-                if len(local_path_world) >= 3:
-                    local_path_world = smooth_path_world(
-                        local_path_world,
-                        window=self.path_smooth_window,
-                        passes=self.path_smooth_passes,
+                if self.planner_mode == 'dwa':
+                    forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                    dwa_path_xy = plan_dwa_minimal(
+                        robot_center[:2],
+                        forward_world[:2],
+                        self.target_pose[:2],
+                        fused_esdf,
+                        obstacle_mask,
+                        astar_cost,
+                        self.origin,
+                        self.resolution,
                     )
+                    for pxy in dwa_path_xy:
+                        local_path_world.append(np.array([pxy[0], pxy[1], robot_z], dtype=np.float32))
+                else:
+                    start_idx = clip_grid_2d(world_to_grid_2d(robot_center[:2], self.origin, self.resolution), obstacle_mask.shape)
+                    goal_idx = clip_grid_2d(world_to_grid_2d(self.target_pose[:2], self.origin, self.resolution), obstacle_mask.shape)
+
+                    start_free = find_nearest_free(start_idx, obstacle_mask)
+                    goal_free = find_nearest_free(goal_idx, obstacle_mask)
+
+                    grid_path = astar_2d(astar_cost, obstacle_mask, start_free, goal_free)
+
+                    if len(grid_path) >= 2:
+                        relax_scales = (1.0, 0.9, 0.8, 0.7)
+                        min_keep = max(3, int(0.25 * len(grid_path)))
+                        best_filtered = None
+
+                        for s in relax_scales:
+                            front_len = FRONT_SAFETY_LENGTH * s
+                            rear_len = REAR_SAFETY_LENGTH * s
+                            half_w = HALF_SAFETY_WIDTH * s
+
+                            filtered = [grid_path[0]]
+                            for i in range(1, len(grid_path)):
+                                p_prev = grid_to_world_2d(filtered[-1], self.origin, self.resolution, 0.0)[:2]
+                                p_cur = grid_to_world_2d(grid_path[i], self.origin, self.resolution, 0.0)[:2]
+                                fwd = p_cur - p_prev
+                                if np.linalg.norm(fwd) < 1e-6:
+                                    fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                                    fwd = fwd[:2]
+                                if footprint_collision_4corners(
+                                    p_cur,
+                                    fwd,
+                                    obstacle_mask,
+                                    self.origin,
+                                    self.resolution,
+                                    front_len,
+                                    rear_len,
+                                    half_w,
+                                ):
+                                    break
+                                filtered.append(grid_path[i])
+
+                            if best_filtered is None or len(filtered) > len(best_filtered):
+                                best_filtered = filtered
+                            if len(filtered) >= min_keep:
+                                best_filtered = filtered
+                                break
+
+                        if best_filtered is not None and len(best_filtered) >= 2:
+                            grid_path = best_filtered
+
+                    for g in grid_path:
+                        p = grid_to_world_2d(g, self.origin, self.resolution, robot_z)
+                        p[2] = robot_z
+                        local_path_world.append(p)
+
+                    if len(local_path_world) >= 3:
+                        local_path_world = smooth_path_world(
+                            local_path_world,
+                            window=self.path_smooth_window,
+                            passes=self.path_smooth_passes,
+                        )
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             path_msg = Path()
@@ -883,7 +1051,19 @@ class PlanningNode(Node):
                         if abs(heading_err) > 1.0:
                             cmd.linear.x *= 0.40
 
-            cmd.linear.y = 0.0
+            if self.target_pose is not None:
+                forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                robot_xy_gate = self.camera_to_robot_center(T)[:2]
+                cmd = apply_shared_safety_gate(
+                    cmd,
+                    robot_xy_gate,
+                    forward_world[:2],
+                    fused_esdf,
+                    obstacle_mask,
+                    self.origin,
+                    self.resolution,
+                )
+                self.publish_safety_gate_path(robot_xy_gate, forward_world[:2], cmd, depth_msg.header.stamp, T[2, 3])
             self.latest_cmd = cmd
             self.last_path_update_time = time.monotonic()
 
