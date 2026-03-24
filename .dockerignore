@@ -1,0 +1,20 @@
+# git
+.git
+.git-lfs
+
+# models
+tinynav/models
+
+# data
+rosbag*
+data
+datasets
+
+# python
+.venv
+__pycache__
+
+# build
+build
+dist
+.buildx-cache*
