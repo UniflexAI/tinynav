@@ -11,7 +11,8 @@ import json
 
 import heapq
 from math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, se3_inv
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2
+import sensor_msgs_py.point_cloud2 as pc2_read
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
@@ -76,7 +77,6 @@ def draw_image_match_origin(
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
     )
     return output_image
-
 
 def depth_to_cloud(depth: np.ndarray, K: np.ndarray) -> np.ndarray:
     """
@@ -436,6 +436,12 @@ class MapNode(Node):
         self._pending_path_request = None
         self._path_timer = self.create_timer(0.5, self._path_timer_callback)
 
+        self.live_occ_sub = self.create_subscription(
+            PointCloud2, '/planning/occupied_voxels', self._live_occ_callback, 10
+        )
+        self._live_occ_buffer = {}
+        self._yaw_correction_filtered = 0.0
+
     def pois_callback(self, msg: Path):
         new_pois = {}
         for idx, pose_stamped in enumerate(msg.poses):
@@ -446,6 +452,191 @@ class MapNode(Node):
         self.get_logger().info(
             f"Received /mapping/pois update: {len(self.pois)} POIs, reset poi_index to 0"
         )
+
+    def _live_occ_callback(self, msg: PointCloud2):
+        """Decode planning publish_3d_occupancy_cloud: 3 meta points + occupied voxel centers → 3D occ grid."""
+        raw = list(pc2_read.read_points(msg, field_names=("x", "y", "z"), skip_nans=True))
+        if len(raw) < 3:
+            return
+        arr = np.asarray(raw)
+        if arr.dtype.names:
+            pts = np.column_stack((arr["x"], arr["y"], arr["z"])).astype(np.float64)
+        else:
+            pts = np.asarray(raw, dtype=np.float64)
+        origin = pts[0].copy()
+        res = float(pts[1, 0])
+        X, Y = int(pts[1, 1]), int(pts[1, 2])
+        Z = int(pts[2, 0])
+        if X <= 0 or Y <= 0 or Z <= 0 or res <= 0:
+            return
+        occ_3d = np.zeros((X, Y, Z), dtype=np.float32)
+        for p in pts[3:]:
+            ijk = np.floor((p[:3] - origin) / res + 1e-6).astype(np.int32)
+            if 0 <= ijk[0] < X and 0 <= ijk[1] < Y and 0 <= ijk[2] < Z:
+                occ_3d[ijk[0], ijk[1], ijk[2]] = 1.0
+        stamp_ns = int(msg.header.stamp.sec * 1e9) + int(msg.header.stamp.nanosec)
+        self._live_occ_buffer[stamp_ns] = (occ_3d, origin, res)
+        if len(self._live_occ_buffer) > 30:
+            oldest = min(self._live_occ_buffer.keys())
+            del self._live_occ_buffer[oldest]
+
+    @staticmethod
+    def _occ3d_to_z_slice(occ_3d, origin, resolution, robot_z, z_half=0.3, threshold=0.05):
+        """Project a z-band of a 3D occupancy grid to a 2D binary image.
+        Returns binary (X, Y) float32 array: 1.0 where any voxel in [robot_z-z_half, robot_z+z_half] is occupied."""
+        z_lo = int(max(0, (robot_z - z_half - origin[2]) / resolution))
+        z_hi = int(min(occ_3d.shape[2], (robot_z + z_half - origin[2]) / resolution + 1))
+        if z_lo >= z_hi:
+            return np.zeros((occ_3d.shape[0], occ_3d.shape[1]), dtype=np.float32)
+        slab = occ_3d[:, :, z_lo:z_hi]
+        return (np.max(slab, axis=2) > threshold).astype(np.float32)
+
+    def _yaw_correlation_matching(self, live_occ, live_origin, live_res, pose_in_odom):
+        
+        if self.T_from_map_to_odom is None:
+            return 0.0
+
+        # -----------------------------
+        # 1. 取 robot pose
+        # -----------------------------
+        robot_xyz_odom = pose_in_odom[:3, 3]
+        robot_in_map = se3_inv(self.T_from_map_to_odom) @ pose_in_odom
+        robot_xyz_map = robot_in_map[:3, 3]
+
+        # -----------------------------
+        # 2. z-slice → 2D (live 3D from point cloud meta + voxels; offline map 3D)
+        # -----------------------------
+        live_slice = self._occ3d_to_z_slice(
+            live_occ, live_origin, live_res, robot_xyz_odom[2]
+        )
+
+        offline_origin = self.occupancy_map_meta[:3].astype(np.float64)
+        offline_res = float(self.occupancy_map_meta[3])
+
+        offline_slice = self._occ3d_to_z_slice(
+            self.occupancy_map, offline_origin, offline_res, robot_xyz_map[2]
+        )
+
+        # -----------------------------
+        # 3. crop patch
+        # -----------------------------
+        patch_radius_m = 3.0
+
+        def extract_patch(img2d, origin, res, center_xy, radius_m):
+            cx = int((center_xy[0] - origin[0]) / res)
+            cy = int((center_xy[1] - origin[1]) / res)
+            r = int(radius_m / res)
+            rows, cols = img2d.shape
+            x0, x1 = max(0, cx - r), min(rows, cx + r)
+            y0, y1 = max(0, cy - r), min(cols, cy + r)
+            return img2d[x0:x1, y0:y1].copy()
+
+        live_patch = extract_patch(
+            live_slice, live_origin, live_res,
+            robot_xyz_odom[:2], patch_radius_m
+        )
+
+        offline_patch = extract_patch(
+            offline_slice, offline_origin, offline_res,
+            robot_xyz_map[:2], patch_radius_m
+        )
+
+        if live_patch.size < 20 or offline_patch.size < 20:
+            return 0.0
+
+        # -----------------------------
+        # 4. resize 到同一分辨率（关键）
+        # -----------------------------
+        target_size = 96  # 控制计算量（经验值）
+        live_patch = cv2.resize(live_patch, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+        offline_patch = cv2.resize(offline_patch, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+
+        # -----------------------------
+        # 5. distance transform（核心）
+        # -----------------------------
+        occ_bin = (offline_patch > 0.5).astype(np.uint8)
+        dist_map = cv2.distanceTransform(1 - occ_bin, cv2.DIST_L2, 3)
+
+        # -----------------------------
+        # 6. 提取 live 占用点（采样优化）
+        # -----------------------------
+        pts = np.argwhere(live_patch > 0.5).astype(np.float32)
+
+        if len(pts) < 20:
+            return 0.0
+
+        # 👉 关键优化：最多 300 点（控制时间）
+        if len(pts) > 300:
+            idx = np.random.choice(len(pts), 300, replace=False)
+            pts = pts[idx]
+
+        # 坐标中心化（以 patch 中心为原点）
+        center = np.array([target_size / 2, target_size / 2], dtype=np.float32)
+        pts -= center
+
+        H, W = dist_map.shape
+
+        # -----------------------------
+        # 7. 向量化误差函数
+        # -----------------------------
+        def compute_error(tx, ty, yaw):
+            c, s = np.cos(yaw), np.sin(yaw)
+
+            rot = np.array([[c, -s], [s, c]], dtype=np.float32)
+            pts2 = pts @ rot.T
+
+            pts2[:, 0] += tx + center[0]
+            pts2[:, 1] += ty + center[1]
+
+            xi = pts2[:, 0].astype(np.int32)
+            yi = pts2[:, 1].astype(np.int32)
+
+            valid = (xi >= 0) & (xi < H) & (yi >= 0) & (yi < W)
+
+            if not np.any(valid):
+                return 1e6
+
+            d = dist_map[xi[valid], yi[valid]]
+
+            return np.mean(d * d)
+
+        # -----------------------------
+        # 8. 第一阶段：粗 yaw 搜索
+        # -----------------------------
+        best_yaw = 0.0
+        best_err = 1e9
+
+        for deg in range(-30, 31, 6):  # 步长加大 → 提速
+            yaw = np.deg2rad(deg)
+            err = compute_error(0.0, 0.0, yaw)
+            if err < best_err:
+                best_err = err
+                best_yaw = yaw
+
+        # -----------------------------
+        # 9. 第二阶段：局部 SE(2) 搜索
+        # -----------------------------
+        tx, ty, yaw = 0.0, 0.0, best_yaw
+
+        for _ in range(2):  # 只迭代 2 次（控制时间）
+            best_local = (1e9, tx, ty, yaw)
+
+            for dx in [-1.5, 0.0, 1.5]:
+                for dy in [-1.5, 0.0, 1.5]:
+                    for dyaw in [-0.05, 0.0, 0.05]:
+
+                        err = compute_error(
+                            tx + dx,
+                            ty + dy,
+                            yaw + dyaw
+                        )
+
+                        if err < best_local[0]:
+                            best_local = (err, tx + dx, ty + dy, yaw + dyaw)
+
+            _, tx, ty, yaw = best_local
+
+        return float(yaw)
 
     def info_callback(self, msg: CameraInfo):
         if self.K is None:
@@ -500,6 +691,22 @@ class MapNode(Node):
         )
         if success:
             self.compute_transform_from_map_to_odom()
+
+        if self.T_from_map_to_odom is not None and keyframe_image_timestamp_ns in self._live_occ_buffer:
+            live_occ, live_origin, live_res = self._live_occ_buffer.pop(keyframe_image_timestamp_ns)
+            pose_in_odom = self.pose_graph_used_pose.get(keyframe_image_timestamp_ns)
+            if pose_in_odom is not None:
+                with Timer(name="yaw corr", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                    yaw_raw = self._yaw_correlation_matching(live_occ, live_origin, live_res, pose_in_odom)
+                self._yaw_correction_filtered = 0.9 * self._yaw_correction_filtered + 0.1 * yaw_raw
+                if abs(self._yaw_correction_filtered) > np.deg2rad(1.0):
+                    c, s = np.cos(self._yaw_correction_filtered), np.sin(self._yaw_correction_filtered)
+                    R_yaw = np.eye(4)
+                    R_yaw[0, 0] = c;  R_yaw[0, 1] = -s
+                    R_yaw[1, 0] = s;  R_yaw[1, 1] = c
+                    self.T_from_map_to_odom = self.T_from_map_to_odom @ R_yaw
+                    self._yaw_correction_filtered = 0.0
+                    self.get_logger().info(f"Yaw correction applied: {np.rad2deg(yaw_raw):.1f} deg raw, filtered triggered")
 
         with Timer(
             name="nav path",
@@ -1014,7 +1221,6 @@ class MapNode(Node):
             "pose_in_map": pose_in_map,
             "target_poi": target_poi,
         }
-
 
     def _path_timer_callback(self):
         req = self._pending_path_request
