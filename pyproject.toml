@@ -29,7 +29,6 @@ dependencies = [
     "tabulate",
     "plyfile",
     "viser",
-
 ]
 
 [tool.scikit-build]
