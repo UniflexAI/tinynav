@@ -143,9 +143,10 @@ RUN curl -LsSf https://astral.sh/uv/0.7.3/install.sh | sh
 ENV PATH=$PATH:/root/.local/bin/
 
 # Pre-create venv and sync dependencies at build time
+WORKDIR /tinynav
 COPY pyproject.toml uv.lock ./
 RUN /root/.local/bin/uv venv /opt/venv --system-site-packages
-RUN /root/.local/bin/uv sync --no-install-project -d /opt/venv
+RUN /root/.local/bin/uv sync --no-install-project --python /opt/venv/bin/python
 
 # Auto-activate venv via environment variables
 ENV VIRTUAL_ENV=/opt/venv
