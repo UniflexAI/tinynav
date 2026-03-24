@@ -600,22 +600,13 @@ class PlanningNode(Node):
         self.astar_cost_pub.publish(img_msg)
 
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0), stamp=None):
-        """Publish occupied voxels as PointCloud2. First 3 points are metadata for map_node:
-        (ox,oy,oz), (resolution, X, Y), (Z, 0, 0); rest are world XYZ of occupied cells."""
-        X, Y, Z = grid3d.shape
-        origin_np = np.asarray(origin, dtype=np.float64)
         occupied = np.argwhere(grid3d > 0.1)
         if len(occupied) == 0:
-            voxel_pts = []
+            points = []
         else:
+            origin_np = np.asarray(origin, dtype=np.float64)
             world_coords = origin_np + occupied * resolution
-            voxel_pts = world_coords.tolist()
-        meta = [
-            [float(origin_np[0]), float(origin_np[1]), float(origin_np[2])],
-            [float(resolution), float(X), float(Y)],
-            [float(Z), 0.0, 0.0],
-        ]
-        points = meta + voxel_pts
+            points = world_coords.tolist()
 
         header = Header()
         header.stamp = stamp if stamp is not None else self.get_clock().now().to_msg()
