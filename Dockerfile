@@ -149,12 +149,9 @@ RUN rm -rf .venv
 RUN /root/.local/bin/uv venv /opt/venv --system-site-packages --seed
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONPATH="/tinynav:/opt/venv/lib/python3.10/site-packages"
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 RUN /root/.local/bin/uv sync --python /opt/venv/bin/python
-
-# Auto-activate venv via environment variables
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Write entrypoint.sh (model build prompt only)
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
