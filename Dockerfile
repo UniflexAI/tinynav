@@ -147,6 +147,8 @@ WORKDIR /tinynav
 COPY . .
 RUN rm -rf .venv
 RUN /root/.local/bin/uv venv /opt/venv --system-site-packages --seed
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 RUN /root/.local/bin/uv sync --python /opt/venv/bin/python
 
 # Auto-activate venv via environment variables
