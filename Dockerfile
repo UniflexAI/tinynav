@@ -148,7 +148,7 @@ COPY pyproject.toml uv.lock ./
 RUN if [ -d ".venv" ]; then rm -rf .venv; fi
 RUN /root/.local/bin/uv venv /opt/venv --system-site-packages
 RUN /root/.local/bin/uv pip install --python /opt/venv/bin/python pip
-RUN /root/.local/bin/uv sync --no-install-project --python /opt/venv/bin/python
+RUN /root/.local/bin/uv sync --python /opt/venv/bin/python
 
 # Auto-activate venv via environment variables
 ENV VIRTUAL_ENV=/opt/venv
