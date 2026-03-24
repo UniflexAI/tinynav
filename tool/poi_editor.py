@@ -274,7 +274,7 @@ class RelocalizationPose(Node):
 
 
 def main(
-    tinynav_db_path: Path,
+    tinynav_map_path: Path,
 ) -> None:
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
@@ -284,8 +284,8 @@ def main(
     poi_points = {}
     poi_id_counter = 0
 
-    if os.path.exists(f"{tinynav_db_path}/pois.json"):
-        with open(f"{tinynav_db_path}/pois.json", "r") as f:
+    if os.path.exists(f"{tinynav_map_path}/pois.json"):
+        with open(f"{tinynav_map_path}/pois.json", "r") as f:
             poi_points = json.load(f)
             poi_points = {int(k): v for k, v in poi_points.items()}
             for k, v in poi_points.items():
@@ -300,7 +300,7 @@ def main(
 
         @add_save_poi_button.on_click
         def _(_) -> None:
-            with open(f"{tinynav_db_path}/pois.json", "w") as f:
+            with open(f"{tinynav_map_path}/pois.json", "w") as f:
                 json.dump(poi_points, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
 
 
@@ -337,11 +337,11 @@ def main(
             create_poi_ui(server, poi_list_container,poi_id, poi_points, sphere_handle)
     
     # Load and visualize occupancy grid
-    occupancy_grid_path = tinynav_db_path / "occupancy_grid.npy"
-    occupancy_meta_path = tinynav_db_path / "occupancy_meta.npy"
+    occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
+    occupancy_meta_path = tinynav_map_path / "occupancy_meta.npy"
     
     if occupancy_grid_path.exists() and occupancy_meta_path.exists():
-        print(f"Loading occupancy grid from {tinynav_db_path}")
+        print(f"Loading occupancy grid from {tinynav_map_path}")
         occupancy_grid = np.load(occupancy_grid_path)
         occupancy_meta = np.load(occupancy_meta_path)
         
@@ -426,16 +426,16 @@ def main(
                     if occupied_handle is not None:
                         occupied_handle.point_size = point_size_slider.value
     else:
-        print(f"Warning: Occupancy grid files not found in {tinynav_db_path}")
+        print(f"Warning: Occupancy grid files not found in {tinynav_map_path}")
         if not occupancy_grid_path.exists():
             print(f"  Missing: {occupancy_grid_path}")
         if not occupancy_meta_path.exists():
             print(f"  Missing: {occupancy_meta_path}")
     
-    poses = np.load(tinynav_db_path / "poses.npy", allow_pickle=True).item()
-    rgb_camera_K = np.load(tinynav_db_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
-    rgb_images = shelve.open(f"{tinynav_db_path}/rgb_images")
-    T_rgb_to_infra1 = np.load(tinynav_db_path / "T_rgb_to_infra1.npy", allow_pickle=True)
+    poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
+    rgb_camera_K = np.load(tinynav_map_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
+    rgb_images = shelve.open(f"{tinynav_map_path}/rgb_images")
+    T_rgb_to_infra1 = np.load(tinynav_map_path / "T_rgb_to_infra1.npy", allow_pickle=True)
 
     fx, _, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
     with server.gui.add_folder("cameras") as _:
@@ -458,8 +458,8 @@ def main(
             )
 
     # Load splat or point cloud files
-    splat_path = Path(f"{tinynav_db_path}/splat.ply")
-    pointcloud_path = Path(f"{tinynav_db_path}/pointcloud.ply")
+    splat_path = Path(f"{tinynav_map_path}/splat.ply")
+    pointcloud_path = Path(f"{tinynav_map_path}/pointcloud.ply")
 
     if splat_path.exists():
         # Load as Gaussian splat

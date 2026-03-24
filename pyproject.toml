@@ -26,6 +26,7 @@ dependencies = [
     "tyro",
     "reportlab>=4.4.3",
     "tabulate",
+    "plyfile",
     "viser",
 ]
 
