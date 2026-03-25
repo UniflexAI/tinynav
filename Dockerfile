@@ -1,7 +1,8 @@
 # FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 for amd64
 # FROM nvcr.io/nvidia/l4t-jetpack:r36.4.0 for arm64
 FROM uniflexai/base_image:latest
-ENV ARCH=$ARCH
+ARG ARCH
+ENV ARCH=${ARCH}
 RUN echo "ARCH is $ARCH"
 
 # Configure image
@@ -59,7 +60,7 @@ RUN if [ "$ARCH" = "x86_64" ]; then \
             tensorrt=10.3.0.30-1+cuda12.5 \
         && rm -rf /var/lib/apt/lists/*; \
     else \
-        echo "Unsupported architecture: $arch"; exit 1; \
+        echo "Unsupported architecture: $ARCH"; exit 1; \
     fi
 
 # ros2
