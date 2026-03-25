@@ -18,6 +18,7 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 import heapq
+from dataclasses import dataclass
 from math_utils import quat_to_matrix, msg2np
 from geometry_msgs.msg import Twist
 
@@ -150,12 +151,20 @@ def max_pool_height_map(height_map, kernel_size=1):
     pooled = maximum_filter(filled, size=kernel_size, mode='nearest')
     return pooled
 
-def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolution, robot_z):
-    """Fuse step/cliff edges from height map with wall/solid obstacles from 3D occupancy."""
+@dataclass
+class FusedESDFConfig:
+    max_step_height: float = 0.30
+    robot_z_bottom: float = -0.2
+    robot_z_top: float = 0.8
+    occ_threshold: float = 0.1
+    step_denoise_kernel: int = 3
+    default_clear_distance: float = 100.0
+
+
+def _build_step_obstacle_from_height(height_map_rel, resolution, config: FusedESDFConfig):
     finite = np.isfinite(height_map_rel)
     filled = np.nan_to_num(height_map_rel, nan=0.0, neginf=0.0, posinf=0.0)
 
-    # Pairwise neighbor height jump (meters), only where both cells are valid.
     h, w = filled.shape
     step_x = np.zeros((h, w), dtype=np.float32)
     step_y = np.zeros((h, w), dtype=np.float32)
@@ -175,40 +184,62 @@ def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolut
         step_y[:-1, :] = np.maximum(step_y[:-1, :], diff_y)
 
     step_height = np.maximum(step_x, step_y)
+    step_obstacle = step_height > config.max_step_height
 
-    # Step/cliff obstacle source from 2D height discontinuity.
-    max_step_height = 0.30
-    step_obstacle = (step_height > max_step_height)
+    kernel_size = max(1, int(config.step_denoise_kernel))
+    if kernel_size > 1:
+        step_u8 = step_obstacle.astype(np.uint8) * 255
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        step_obstacle = cv2.morphologyEx(step_u8, cv2.MORPH_OPEN, kernel) > 0
 
-    # Wall/solid obstacle source from 3D occupancy projection around robot body height band.
-    occ_threshold = 0.1
-    wall_band_bottom = robot_z - 0.2
-    wall_band_top = robot_z + 0.8
+    slope = step_height / max(1e-6, resolution)
+    return step_obstacle, slope, finite, filled, step_height
+
+
+def _build_wall_obstacle_from_occupancy(occupancy_grid, origin, resolution, robot_z, out_shape, config: FusedESDFConfig):
+    wall_band_bottom = robot_z + config.robot_z_bottom
+    wall_band_top = robot_z + config.robot_z_top
     z_world = origin[2] + (np.arange(occupancy_grid.shape[2]) + 0.5) * resolution
     z_mask = (z_world >= wall_band_bottom) & (z_world <= wall_band_top)
     if np.any(z_mask):
-        wall_obstacle = np.any(occupancy_grid[:, :, z_mask] > occ_threshold, axis=2)
-    else:
-        wall_obstacle = np.zeros((h, w), dtype=bool)
+        return np.any(occupancy_grid[:, :, z_mask] > config.occ_threshold, axis=2)
+    return np.zeros(out_shape, dtype=bool)
 
-    obstacle = step_obstacle | wall_obstacle
 
-    # Light denoise for step speckles, but keep projected wall obstacles.
-    step_u8 = (step_obstacle.astype(np.uint8) * 255)
-    kernel = np.ones((3, 3), np.uint8)
-    step_obstacle_denoised = cv2.morphologyEx(step_u8, cv2.MORPH_OPEN, kernel) > 0
-    obstacle = step_obstacle_denoised | wall_obstacle
-
+def _build_esdf_from_obstacle(obstacle, resolution, default_clear_distance):
     if np.any(obstacle):
-        fused_esdf = distance_transform_edt(~obstacle) * resolution
-    else:
-        fused_esdf = np.full_like(filled, 100.0, dtype=np.float32)
+        return (distance_transform_edt(~obstacle) * resolution).astype(np.float32)
+    return np.full(obstacle.shape, default_clear_distance, dtype=np.float32)
 
-    # For downstream cost, keep a normalized slope-like magnitude (m/m).
-    slope = step_height / max(1e-6, resolution)
+
+def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolution, robot_z, config=None, return_debug=False):
+    """Fuse step/cliff edges from height map with wall/solid obstacles from 3D occupancy."""
+    config = config or FusedESDFConfig()
+
+    step_obstacle, slope, finite, _filled, _step_height = _build_step_obstacle_from_height(
+        height_map_rel, resolution, config
+    )
+    wall_obstacle = _build_wall_obstacle_from_occupancy(
+        occupancy_grid, origin, resolution, robot_z, step_obstacle.shape, config
+    )
+
+    step_esdf = _build_esdf_from_obstacle(step_obstacle, resolution, config.default_clear_distance)
+    wall_esdf = _build_esdf_from_obstacle(wall_obstacle, resolution, config.default_clear_distance)
+    fused_esdf = np.minimum(step_esdf, wall_esdf)
+
     unknown_mask = (~finite) & (~wall_obstacle)
+    if not return_debug:
+        return fused_esdf, slope, unknown_mask
 
-    return fused_esdf, slope, unknown_mask
+    debug = {
+        'step_obstacle_mask': step_obstacle,
+        'wall_obstacle_mask': wall_obstacle,
+        'step_esdf': step_esdf,
+        'wall_esdf': wall_esdf,
+        'fused_esdf': fused_esdf,
+        'unknown_mask': unknown_mask,
+    }
+    return fused_esdf, slope, unknown_mask, debug
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
