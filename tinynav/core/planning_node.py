@@ -158,6 +158,7 @@ class FusedESDFConfig:
     robot_z_top: float = 0.8
     occ_threshold: float = 0.1
     step_denoise_kernel: int = 3
+    step_nearby_kernel: int = 3
     default_clear_distance: float = 100.0
 
 
@@ -222,6 +223,14 @@ def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolut
     wall_obstacle = _build_wall_obstacle_from_occupancy(
         occupancy_grid, origin, resolution, robot_z, step_obstacle.shape, config
     )
+
+    nearby_kernel = max(1, int(config.step_nearby_kernel))
+    if nearby_kernel > 1 and np.any(step_obstacle):
+        step_nearby_mask = cv2.dilate(
+            step_obstacle.astype(np.uint8),
+            np.ones((nearby_kernel, nearby_kernel), np.uint8),
+        ) > 0
+        wall_obstacle = wall_obstacle & (~step_nearby_mask)
 
     step_esdf = _build_esdf_from_obstacle(step_obstacle, resolution, config.default_clear_distance)
     wall_esdf = _build_esdf_from_obstacle(wall_obstacle, resolution, config.default_clear_distance)

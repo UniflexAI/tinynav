@@ -84,6 +84,29 @@ def test_unknown_mask_only_tracks_invalid_height_without_wall_override():
     assert slope.shape == height.shape
 
 
+def test_step_nearby_mask_suppresses_wall_overlap():
+    height = np.zeros((7, 7), dtype=np.float32)
+    height[:, 4:] = 0.5  # step edge near col 3/4
+
+    occupancy = np.zeros((7, 7, 5), dtype=np.float32)
+    occupancy[:, 4, 2] = 1.0  # projected wall exactly on the step edge band
+    origin = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    cfg = FusedESDFConfig(
+        max_step_height=0.3,
+        robot_z_bottom=-0.2,
+        robot_z_top=3.0,
+        step_denoise_kernel=1,
+        step_nearby_kernel=3,
+    )
+    _, _, _, debug = build_fused_esdf_from_height(
+        height, occupancy, origin, 1.0, 0.0, config=cfg, return_debug=True
+    )
+
+    assert debug['step_obstacle_mask'].any()
+    assert not debug['wall_obstacle_mask'][:, 4].any()
+
+
 def test_config_controls_wall_height_band_and_step_denoise_kernel():
     height = np.zeros((5, 5), dtype=np.float32)
     height[2, 2] = 1.0  # isolated spike
