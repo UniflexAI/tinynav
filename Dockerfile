@@ -3,6 +3,7 @@
 FROM uniflexai/base_image:latest
 ARG ARCH
 ENV ARCH=${ARCH}
+ENV PYTHONPATH="/tinynav"
 RUN echo "ARCH is $ARCH"
 
 # Configure image
@@ -141,9 +142,7 @@ RUN git clone https://github.com/dvorak0/gtsam.git -b yzf/add_smart_factor_pytho
     && mkdir build && cd build \
     && cmake -DCMAKE_BUILD_TYPE=Release -DGTSAM_BUILD_PYTHON=ON -DGTSAM_THROW_CHEIRALITY_EXCEPTION=OFF .. \
     && make -j2
-
-# Ensure the GTSAM python bindings are discoverable during subsequent build steps.
-ENV PYTHONPATH="/3rdparty/gtsam/build/python"
+ENV PYTHONPATH="/3rdparty/gtsam/build/python:${PYTHONPATH}"
 
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -163,7 +162,7 @@ RUN rm -rf .venv
 RUN /root/.local/bin/uv venv /opt/venv --system-site-packages --seed
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-ENV PYTHONPATH="/tinynav:/3rdparty/gtsam/build/python:/opt/venv/lib/python3.10/site-packages"
+ENV PYTHONPATH="${PYTHONPATH}:/opt/venv/lib/python3.10/site-packages"
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 RUN /root/.local/bin/uv sync --python /opt/venv/bin/python
 
