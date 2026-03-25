@@ -29,14 +29,14 @@ SAFETY_RADIUS=0.3
 
 # Robot body safety footprint in planning frame (camera/world aligned forward).
 # Reference point is robot control-center (near rear), so front/rear are asymmetric.
-FRONT_SAFETY_LENGTH = 0.6
+FRONT_SAFETY_LENGTH = 0.4
 REAR_SAFETY_LENGTH = 0.0
-HALF_SAFETY_WIDTH = 0.2
+HALF_SAFETY_WIDTH = 0.15
 
 # Camera extrinsics wrt robot control center frame (meters)
 # +x: robot left, +y: robot up, +z: robot forward (Tinynav convention in this node)
 # Keep CAM_TO_BOTTOM as the single tuning knob for forward camera placement.
-CAM_TO_BOTTOM = 0.6
+CAM_TO_BOTTOM = 0.4
 CAM_TO_CENTER = 0.0 # left (negative) or right (positive)
 CAM_TO_ABOVE = 0.0
 ROBOT_TO_CAMERA_XYZ = np.array([CAM_TO_CENTER, CAM_TO_ABOVE, CAM_TO_BOTTOM], dtype=np.float32)
@@ -153,9 +153,9 @@ def max_pool_height_map(height_map, kernel_size=1):
 
 @dataclass
 class FusedESDFConfig:
-    max_step_height: float = 0.30
-    robot_z_bottom: float = -0.2
-    robot_z_top: float = 0.8
+    max_step_height: float = 0.70
+    robot_z_bottom: float = 0.3
+    robot_z_top: float = 0.5
     occ_threshold: float = 0.1
     step_denoise_kernel: int = 3
     step_nearby_kernel: int = 3
@@ -643,7 +643,7 @@ class PlanningNode(Node):
             time.sleep(0.2)
 
 
-        self.grid_shape = (100, 100, 30)
+        self.grid_shape = (100, 100, 40)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 5
@@ -905,7 +905,7 @@ class PlanningNode(Node):
             
 
             # seconds = log(0.5) / log(0.998) = 347.22 timestamp / 10 hz = around 35 seconds
-            self.occupancy_grid *= 0.998
+            self.occupancy_grid *= 0.995
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
