@@ -205,7 +205,7 @@ class Ros2NodeManager(Node):
             '/planning/occupied_voxels_with_esdf',
             '/mapping/current_pose_in_map'
         ]
-        cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', 'nav_bag'] + topics
+        cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648'] + topics
         self.processes['bag_record'] = self._spawn(cmd_bag)
 
     def _spawn(self, cmd, name=None, mode=None):

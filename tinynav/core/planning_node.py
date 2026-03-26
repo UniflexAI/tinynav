@@ -153,60 +153,12 @@ def max_pool_height_map(height_map, kernel_size=1):
 
 @dataclass
 class FusedESDFConfig:
-    max_step_height: float = 0.70
-    robot_z_bottom: float = 0.3
+    robot_z_bottom: float = -0.1
     robot_z_top: float = 0.5
     occ_threshold: float = 0.1
-    step_denoise_kernel: int = 3
-    step_nearby_kernel: int = 3
-    wall_suppress_step_edge_height: float = 0.06
-    wall_suppress_step_edge_height_max: float = 0.3
+    stair_allow_height: float = 0.4
+    slope_threshold_deg: float = 45.0
     default_clear_distance: float = 100.0
-
-
-def _build_step_obstacle_from_height(height_map_rel, resolution, config: FusedESDFConfig):
-    finite = np.isfinite(height_map_rel)
-    filled = np.nan_to_num(height_map_rel, nan=0.0, neginf=0.0, posinf=0.0)
-
-    h, w = filled.shape
-    step_x = np.zeros((h, w), dtype=np.float32)
-    step_y = np.zeros((h, w), dtype=np.float32)
-
-    if w > 1:
-        valid_x = finite[:, 1:] & finite[:, :-1]
-        diff_x = np.abs(filled[:, 1:] - filled[:, :-1])
-        diff_x = np.where(valid_x, diff_x, 0.0)
-        step_x[:, 1:] = np.maximum(step_x[:, 1:], diff_x)
-        step_x[:, :-1] = np.maximum(step_x[:, :-1], diff_x)
-
-    if h > 1:
-        valid_y = finite[1:, :] & finite[:-1, :]
-        diff_y = np.abs(filled[1:, :] - filled[:-1, :])
-        diff_y = np.where(valid_y, diff_y, 0.0)
-        step_y[1:, :] = np.maximum(step_y[1:, :], diff_y)
-        step_y[:-1, :] = np.maximum(step_y[:-1, :], diff_y)
-
-    step_height = np.maximum(step_x, step_y)
-    step_obstacle = step_height > config.max_step_height
-
-    kernel_size = max(1, int(config.step_denoise_kernel))
-    if kernel_size > 1:
-        step_u8 = step_obstacle.astype(np.uint8) * 255
-        kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        step_obstacle = cv2.morphologyEx(step_u8, cv2.MORPH_OPEN, kernel) > 0
-
-    slope = step_height / max(1e-6, resolution)
-    return step_obstacle, slope, finite, filled, step_height
-
-
-def _build_wall_obstacle_from_occupancy(occupancy_grid, origin, resolution, robot_z, out_shape, config: FusedESDFConfig):
-    wall_band_bottom = robot_z + config.robot_z_bottom
-    wall_band_top = robot_z + config.robot_z_top
-    z_world = origin[2] + (np.arange(occupancy_grid.shape[2]) + 0.5) * resolution
-    z_mask = (z_world >= wall_band_bottom) & (z_world <= wall_band_top)
-    if np.any(z_mask):
-        return np.any(occupancy_grid[:, :, z_mask] > config.occ_threshold, axis=2)
-    return np.zeros(out_shape, dtype=bool)
 
 
 def _build_esdf_from_obstacle(obstacle, resolution, default_clear_distance):
@@ -216,45 +168,53 @@ def _build_esdf_from_obstacle(obstacle, resolution, default_clear_distance):
 
 
 def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolution, robot_z, config=None, return_debug=False):
-    """Fuse step/cliff edges from height map with wall/solid obstacles from 3D occupancy."""
+    """Build ESDF from occupied voxels inside a robot-relative height band, with a simple stair filter."""
     config = config or FusedESDFConfig()
 
-    step_obstacle, slope, finite, _filled, _step_height = _build_step_obstacle_from_height(
-        height_map_rel, resolution, config
-    )
-    wall_obstacle = _build_wall_obstacle_from_occupancy(
-        occupancy_grid, origin, resolution, robot_z, step_obstacle.shape, config
-    )
+    h, w, z_dim = occupancy_grid.shape
+    z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
+    z_rel = z_world - robot_z
+    z_mask = (z_rel >= float(config.robot_z_bottom)) & (z_rel <= float(config.robot_z_top))
 
-    nearby_kernel = max(1, int(config.step_nearby_kernel))
-    if nearby_kernel > 1 and np.any(wall_obstacle):
-        # Stairs often appear as "walls" in the robot body-height occupancy band.
-        # Suppress wall obstacles near step edges inferred from the height map.
-        edge_h = float(config.wall_suppress_step_edge_height)
-        edge_h_max = float(config.wall_suppress_step_edge_height_max)
-        # Use a height-diff window: suppress "wall" only near medium step edges (stairs),
-        # but keep true walls (large height jumps) intact.
-        edge_mask = (_step_height > edge_h) & (_step_height < edge_h_max) & finite
-        if np.any(edge_mask):
-            step_nearby_mask = cv2.dilate(
-                edge_mask.astype(np.uint8),
-                np.ones((nearby_kernel, nearby_kernel), np.uint8),
-            ) > 0
-            wall_obstacle = wall_obstacle & (~step_nearby_mask)
+    finite = np.isfinite(height_map_rel)
+    filled = np.nan_to_num(height_map_rel, nan=0.0, neginf=0.0, posinf=0.0)
 
-    step_esdf = _build_esdf_from_obstacle(step_obstacle, resolution, config.default_clear_distance)
-    wall_esdf = _build_esdf_from_obstacle(wall_obstacle, resolution, config.default_clear_distance)
-    fused_esdf = np.minimum(step_esdf, wall_esdf)
+    step_x = np.zeros((h, w), dtype=np.float32)
+    step_y = np.zeros((h, w), dtype=np.float32)
+    if w > 1:
+        valid_x = finite[:, 1:] & finite[:, :-1]
+        diff_x = np.abs(filled[:, 1:] - filled[:, :-1])
+        diff_x = np.where(valid_x, diff_x, 0.0)
+        step_x[:, 1:] = np.maximum(step_x[:, 1:], diff_x)
+        step_x[:, :-1] = np.maximum(step_x[:, :-1], diff_x)
+    if h > 1:
+        valid_y = finite[1:, :] & finite[:-1, :]
+        diff_y = np.abs(filled[1:, :] - filled[:-1, :])
+        diff_y = np.where(valid_y, diff_y, 0.0)
+        step_y[1:, :] = np.maximum(step_y[1:, :], diff_y)
+        step_y[:-1, :] = np.maximum(step_y[:-1, :], diff_y)
 
-    unknown_mask = (~finite) & (~wall_obstacle)
+    local_height_diff = np.maximum(step_x, step_y)
+    slope = local_height_diff / max(1e-6, resolution)
+
+    obstacle = np.zeros((h, w), dtype=bool)
+    stair_like = np.zeros((h, w), dtype=bool)
+    if np.any(z_mask):
+        band_obstacle = np.any(occupancy_grid[:, :, z_mask] > float(config.occ_threshold), axis=2)
+        stair_like = finite & (local_height_diff <= float(config.stair_allow_height))
+        obstacle = band_obstacle & (~stair_like)
+
+    fused_esdf = _build_esdf_from_obstacle(obstacle, resolution, config.default_clear_distance)
+    unknown_mask = ~finite
+
     if not return_debug:
         return fused_esdf, slope, unknown_mask
 
     debug = {
-        'step_obstacle_mask': step_obstacle,
-        'wall_obstacle_mask': wall_obstacle,
-        'step_esdf': step_esdf,
-        'wall_esdf': wall_esdf,
+        'step_obstacle_mask': obstacle,
+        'wall_obstacle_mask': np.zeros_like(obstacle, dtype=bool),
+        'step_esdf': fused_esdf,
+        'wall_esdf': np.full_like(fused_esdf, config.default_clear_distance, dtype=np.float32),
         'fused_esdf': fused_esdf,
         'unknown_mask': unknown_mask,
     }
