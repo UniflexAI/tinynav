@@ -27,7 +27,12 @@ dependencies = [
     "reportlab>=4.4.3",
     "tabulate",
     "viser",
+    "typer>=0.12",
+    "rich>=13",
 ]
+
+[project.scripts]
+tinynav = "tinynav.cli:main"
 
 [tool.scikit-build]
 cmake.source-dir = "tinynav/cpp"
