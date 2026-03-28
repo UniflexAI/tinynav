@@ -696,7 +696,7 @@ class PlanningNode(Node):
         self.recovery_slow_speed = 0.08
         self.path_smooth_window = 3
         self.path_smooth_passes = 1
-        self.planner_mode = 'astar'  # 'astar' | 'dwa'
+        self.planner_mode = 'dwa'  # 'astar' | 'dwa'
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
