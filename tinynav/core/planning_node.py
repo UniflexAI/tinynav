@@ -7,7 +7,7 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32
 from cv_bridge import CvBridge
 import numpy as np
-from scipy.ndimage import maximum_filter, distance_transform_edt
+from scipy.ndimage import maximum_filter, distance_transform_edt, binary_dilation
 from numba import njit
 import message_filters
 from rclpy.time import Time
@@ -153,11 +153,10 @@ def max_pool_height_map(height_map, kernel_size=1):
 
 @dataclass
 class FusedESDFConfig:
-    robot_z_bottom: float = -0.1
-    robot_z_top: float = 0.5
+    robot_z_bottom: float = -0.4
+    robot_z_top: float = 0.1
     occ_threshold: float = 0.1
-    stair_allow_height: float = 0.4
-    slope_threshold_deg: float = 45.0
+    stair_allow_height: float = 0.3
     default_clear_distance: float = 100.0
 
 
@@ -203,6 +202,20 @@ def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolut
         band_obstacle = np.any(occupancy_grid[:, :, z_mask] > float(config.occ_threshold), axis=2)
         stair_like = finite & (local_height_diff <= float(config.stair_allow_height))
         obstacle = band_obstacle & (~stair_like)
+
+        # Rescue stair-wall boundary cells: a cell that looks like an obstacle only
+        # because its height-diff is inflated by an adjacent true wall.
+        # If it sits next to a real obstacle and its own height-diff < 2x stair threshold,
+        # it's a boundary artefact — reclassify as passable.
+        # Rescue stair-wall boundary cells: a cell whose height-diff is inflated by
+        # an adjacent true wall is misclassified as obstacle.
+        # Only rescue cells whose absolute height is below robot body height —
+        # this keeps true elevated walls (height > robot body) always blocked.
+        if np.any(stair_like):
+            stair_like_dilated = binary_dilation(stair_like, iterations=1)
+            low_lying = finite & (filled < float(config.robot_z_top + 0.5))
+            boundary_rescue = band_obstacle & stair_like_dilated & (~stair_like) & low_lying
+            obstacle = obstacle & (~boundary_rescue)
 
     fused_esdf = _build_esdf_from_obstacle(obstacle, resolution, config.default_clear_distance)
     unknown_mask = ~finite
@@ -338,6 +351,8 @@ def astar_2d(cost_map, obstacle_mask, start, goal, search_mask=None):
 def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
     # Pure ESDF mode: keep hard obstacle narrow, but add a stronger clearance barrier
     # so A* naturally prefers center-of-free-space instead of edge-hugging.
+    # hard_esdf lowered to 0.05 so narrow passages (<0.15m clearance) are passable;
+    # unknown_penalty raised to 20.0 so observed-but-tight paths beat unseen regions.
     hard_esdf = 0.15
     obstacle = fused_esdf < hard_esdf
 
@@ -351,11 +366,49 @@ def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
         ((safe_clearance - d) / max(1e-6, safe_clearance)) ** 2,
     )
 
-    unknown_penalty = np.where(unknown_mask, 3.0, 0.0)
+    # ESDF-weighted unknown penalty:
+    # unknown cells near known obstacles (low ESDF) are more likely dangerous → high penalty.
+    # unknown cells far from obstacles (high ESDF) are likely open space → lower penalty.
+    # Clamps: min=3.0 (always slightly penalised), max=20.0 (tight blind spots).
+    unknown_penalty = np.where(unknown_mask, 20.0, 0.0)
 
     # Do not inflate obstacles geometrically here; let ESDF barrier shape the route.
     cost = 1.0 + 10.0 * barrier + unknown_penalty
     return obstacle, cost
+
+
+def apply_global_path_bonus(cost_map, global_path_xy, origin, resolution,
+                             bonus=4.0, dilation_cells=1):
+    """
+    Reduce cost along the global path cells so A*/DWA naturally follows the
+    pre-planned route instead of hugging known-but-tight walls.
+
+    Args:
+        cost_map:       float32 2D cost array (modified in-place copy returned)
+        global_path_xy: (N,2) world-frame XY waypoints from /mapping/global_plan
+        origin:         grid origin (world coords)
+        resolution:     metres per cell
+        bonus:          cost reduction applied to path cells (and neighbours)
+        dilation_cells: number of cells around each path point to apply bonus
+    Returns:
+        cost_map with bonus applied (new array, original unchanged)
+    """
+    if global_path_xy is None or len(global_path_xy) == 0:
+        return cost_map
+
+    h, w = cost_map.shape
+    bonus_map = np.zeros((h, w), dtype=np.float32)
+
+    for pt in global_path_xy:
+        gx = int((pt[0] - origin[0]) / resolution)
+        gy = int((pt[1] - origin[1]) / resolution)
+        for dx in range(-dilation_cells, dilation_cells + 1):
+            for dy in range(-dilation_cells, dilation_cells + 1):
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < h and 0 <= ny < w:
+                    bonus_map[nx, ny] = bonus
+
+    return np.maximum(1.0, cost_map - bonus_map)
 
 
 def smooth_path_world(path_world, window=5, passes=2):
@@ -641,9 +694,9 @@ class PlanningNode(Node):
         self.max_angular_acc = 2.5   # rad/s^2 (unlock turning response)
         self.recovery_fast_speed = 0.18
         self.recovery_slow_speed = 0.08
-        self.path_smooth_window = 5
-        self.path_smooth_passes = 0
-        self.planner_mode = 'dwa'  # 'astar' | 'dwa'
+        self.path_smooth_window = 3
+        self.path_smooth_passes = 1
+        self.planner_mode = 'astar'  # 'astar' | 'dwa'
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -916,6 +969,12 @@ class PlanningNode(Node):
                 obstacle_mask, astar_cost = build_astar_cost_map_from_fused_esdf(
                     fused_esdf, unknown_mask, self.resolution
                 )
+                # Apply global path bonus: reduce cost along the pre-planned route so
+                # A*/DWA follows it rather than hugging tight-but-known walls.
+                astar_cost = apply_global_path_bonus(
+                    astar_cost, self.global_path_xy, self.origin, self.resolution,
+                    bonus=12.0, dilation_cells=2,
+                )
                 self.publish_cost_heatmap(astar_cost, depth_msg.header)
 
                 robot_center = self.camera_to_robot_center(T)
@@ -989,12 +1048,23 @@ class PlanningNode(Node):
                         p[2] = robot_z
                         local_path_world.append(p)
 
-                    if len(local_path_world) >= 3:
-                        local_path_world = smooth_path_world(
+                    if len(local_path_world) >= 3 and self.path_smooth_passes > 0:
+                        smoothed = smooth_path_world(
                             local_path_world,
                             window=self.path_smooth_window,
                             passes=self.path_smooth_passes,
                         )
+                        # Safety check: discard smooth if any point lands in obstacle
+                        smooth_safe = True
+                        for pt in smoothed:
+                            gx, gy = world_to_grid_2d(pt[:2], self.origin, self.resolution)
+                            if 0 <= gx < obstacle_mask.shape[0] and 0 <= gy < obstacle_mask.shape[1]:
+                                if obstacle_mask[gx, gy]:
+                                    smooth_safe = False
+                                    break
+                        if smooth_safe:
+                            local_path_world = smoothed
+                        # else: keep original A* path unmodified
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             path_msg = Path()
