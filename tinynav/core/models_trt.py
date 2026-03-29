@@ -4,7 +4,7 @@ import cv2
 from codetiming import Timer
 import platform
 import asyncio
-from tinynav.core.func import alru_cache_numpy
+from tinynav.core.func import alru_cache_numpy, lru_cache_numpy
 
 from cuda import cudart
 import ctypes
@@ -126,6 +126,36 @@ class TRTBase:
             results[out["name"]] = out["host"].copy()
         return results
 
+    def run_graph_sync(self):
+        if "aarch64" not in platform.machine():
+            for inp in self.inputs:
+                cudart.cudaMemcpyAsync(
+                    inp["device"],
+                    inp["host"].ctypes.data,
+                    inp["nbytes"],
+                    cudart.cudaMemcpyKind.cudaMemcpyHostToDevice,
+                    self.stream,
+                )
+
+        cudart.cudaGraphLaunch(self.graph_exec, self.stream)
+
+        if "aarch64" not in platform.machine():
+            for out in self.outputs:
+                cudart.cudaMemcpyAsync(
+                    out["host"].ctypes.data,
+                    out["device"],
+                    out["nbytes"],
+                    cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                    self.stream,
+                )
+
+        cudart.cudaStreamSynchronize(self.stream)
+
+        results = {}
+        for out in self.outputs:
+            results[out["name"]] = out["host"].copy()
+        return results
+
 
 class SuperPointTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_fp16_dynamic_{platform.machine()}.plan"):
@@ -133,24 +163,9 @@ class SuperPointTRT(TRTBase):
         # model input [1,1,H,W]
         self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
 
-    # default threshold as
-    # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
-    #
-    @alru_cache_numpy(maxsize=32)
-    async def infer(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):
-        # Resize to engine input size (may change aspect ratio for non-matching resolutions).
+    def _postprocess(self, input_image: np.ndarray, results: dict):
         h_in, w_in = input_image.shape[0], input_image.shape[1]
         h_net, w_net = self.input_shape[0], self.input_shape[1]
-        image = cv2.resize(input_image, (w_net, h_net))
-        image = image[None, None, :, :]
-
-        np.copyto(self.inputs[0]["host"], image)
-        np.copyto(self.inputs[1]["host"], threshold)
-
-        results = await self.run_graph()
-
-        # Scale keypoints from network coords (h_net, w_net) back to input image coords (h_in, w_in).
-        # Use per-axis scale so Looper (640x544) and other resolutions match; img_shape is (width, height).
         scale_x = w_in / w_net
         scale_y = h_in / h_net
         k = results["kpts"][0]
@@ -162,6 +177,33 @@ class SuperPointTRT(TRTBase):
             k[:, 1] = (k[:, 1] + 0.5) * scale_y - 0.5
         results["mask"] = results["mask"][:, :, None]
         return results
+
+    # default threshold as
+    # https://github.com/cvg/LightGlue/blob/746fac2c042e05d1865315b1413419f1c1e7ba55/lightglue/superpoint.py#L111
+    #
+    @alru_cache_numpy(maxsize=32)
+    async def infer(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):
+        h_net, w_net = self.input_shape[0], self.input_shape[1]
+        image = cv2.resize(input_image, (w_net, h_net))
+        image = image[None, None, :, :]
+
+        np.copyto(self.inputs[0]["host"], image)
+        np.copyto(self.inputs[1]["host"], threshold)
+
+        results = await self.run_graph()
+        return self._postprocess(input_image, results)
+
+    @lru_cache_numpy(maxsize=32)
+    def infer_sync(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):
+        h_net, w_net = self.input_shape[0], self.input_shape[1]
+        image = cv2.resize(input_image, (w_net, h_net))
+        image = image[None, None, :, :]
+
+        np.copyto(self.inputs[0]["host"], image)
+        np.copyto(self.inputs[1]["host"], threshold)
+
+        results = self.run_graph_sync()
+        return self._postprocess(input_image, results)
 
 class LightGlueTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/lightglue_fp16_{platform.machine()}.plan"):
@@ -184,6 +226,20 @@ class LightGlueTRT(TRTBase):
 
         return await self.run_graph()
 
+    @lru_cache_numpy(maxsize=32)
+    def infer_sync(self, kpts0, kpts1, desc0, desc1, mask0, mask1, img_shape0, img_shape1, match_threshold = np.array([[0.1]], dtype=np.float32)):
+        np.copyto(self.inputs[0]["host"], kpts0)
+        np.copyto(self.inputs[1]["host"], kpts1)
+        np.copyto(self.inputs[2]["host"], desc0)
+        np.copyto(self.inputs[3]["host"], desc1)
+        np.copyto(self.inputs[4]["host"], mask0)
+        np.copyto(self.inputs[5]["host"], mask1)
+        np.copyto(self.inputs[6]["host"], img_shape0)
+        np.copyto(self.inputs[7]["host"], img_shape1)
+        np.copyto(self.inputs[8]["host"], match_threshold)
+
+        return self.run_graph_sync()
+
 class Dinov2TRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/dinov2_base_224x224_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
@@ -204,6 +260,12 @@ class Dinov2TRT(TRTBase):
         image = self.preprocess_image(image)
         np.copyto(self.inputs[0]["host"], image)
         results = await self.run_graph()
+        return results["last_hidden_state"][:, 0, :].squeeze(0)
+
+    def infer_sync(self, image):
+        image = self.preprocess_image(image)
+        np.copyto(self.inputs[0]["host"], image)
+        results = self.run_graph_sync()
         return results["last_hidden_state"][:, 0, :].squeeze(0)
 
 
@@ -285,6 +347,47 @@ class StereoEngineTRT(TRTBase):
                 results[name] = np.array(arr).copy() if arr.ndim == 0 else arr.copy()
         return results
 
+    def run_graph_sync(self):
+        input_shapes = self._current_input_shapes
+        if "aarch64" not in platform.machine():
+            cudart.cudaMemcpyAsync(self.inputs[0]["device"], self.inputs[0]["host"].ctypes.data,
+                                   self._current_input_nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+            cudart.cudaMemcpyAsync(self.inputs[1]["device"], self.inputs[1]["host"].ctypes.data,
+                                   self._current_input_nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+            for inp in self.inputs[2:]:
+                cudart.cudaMemcpyAsync(inp["device"], inp["host"].ctypes.data,
+                                       inp["nbytes"], cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+        self.context.set_optimization_profile_async(0, self.stream)
+        self.context.set_input_shape("left", input_shapes)
+        self.context.set_input_shape("right", input_shapes)
+        self.context.execute_async_v3(stream_handle=self.stream)
+        h_net, w_net = input_shapes[2], input_shapes[3]
+        if "aarch64" not in platform.machine():
+            for out in self.outputs:
+                if out["name"] in ("disp", "depth"):
+                    nbytes = input_shapes[2] * input_shapes[3] * np.float32().itemsize
+                else:
+                    nbytes = out["nbytes"]
+                cudart.cudaMemcpyAsync(
+                    out["host"].ctypes.data,
+                    out["device"],
+                    nbytes,
+                    cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                    self.stream,
+                )
+        cudart.cudaStreamSynchronize(self.stream)
+        results = {}
+        for out in self.outputs:
+            arr = out["host"]
+            name = out["name"]
+            if name in ("disp", "depth"):
+                flat = np.asarray(arr).reshape(-1)
+                needed = h_net * w_net
+                results[name] = flat[:needed].reshape(h_net, w_net).copy()
+            else:
+                results[name] = np.array(arr).copy() if arr.ndim == 0 else arr.copy()
+        return results
+
     async def infer(self, left_img, right_img, baseline, focal_length):
         h_in, w_in = left_img.shape[0], left_img.shape[1]
 
@@ -300,6 +403,28 @@ class StereoEngineTRT(TRTBase):
         np.copyto(self.inputs[3]["host"], focal_length)
 
         results = await self.run_graph()
+        disp = results["disp"]
+        depth = results["depth"]
+        if disp.shape != (h_in, w_in) or depth.shape != (h_in, w_in):
+            raise RuntimeError(
+                f"StereoEngine output shape mismatch: got disp {disp.shape}, depth {depth.shape}, expected ({h_in}, {w_in})"
+            )
+        return disp.astype(np.float32), depth.astype(np.float32)
+
+    def infer_sync(self, left_img, right_img, baseline, focal_length):
+        h_in, w_in = left_img.shape[0], left_img.shape[1]
+
+        self._current_input_shapes = (1, 1, h_in, w_in)
+        self._current_input_nbytes = h_in * w_in * np.uint8().itemsize
+
+        left_tensor = left_img.astype(np.uint8).ravel()
+        right_tensor = right_img.astype(np.uint8).ravel()
+        np.copyto(self.inputs[0]["host"].reshape(-1)[: left_tensor.size], left_tensor)
+        np.copyto(self.inputs[1]["host"].reshape(-1)[: right_tensor.size], right_tensor)
+        np.copyto(self.inputs[2]["host"], baseline)
+        np.copyto(self.inputs[3]["host"], focal_length)
+
+        results = self.run_graph_sync()
         disp = results["disp"]
         depth = results["depth"]
         if disp.shape != (h_in, w_in) or depth.shape != (h_in, w_in):

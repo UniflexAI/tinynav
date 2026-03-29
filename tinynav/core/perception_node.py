@@ -17,7 +17,6 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
-import asyncio
 import gtsam
 import gtsam_unstable
 from collections import deque
@@ -191,12 +190,12 @@ class PerceptionNode(Node):
         self.last_processed_timestamp = current_timestamp
         loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            processed = asyncio.run(self.process(left_msg, right_msg))
+            processed = self.process(left_msg, right_msg)
         if processed:
             loop_ms = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(Float32MultiArray(data=[float(loop_ms)]))
 
-    async def process(self, left_msg, right_msg):
+    def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
             return False
         self.process_cnt += 1
@@ -204,7 +203,7 @@ class PerceptionNode(Node):
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
         current_timestamp = stamp2second(left_msg.header.stamp)
         if len(self.keyframe_queue) == 0: # first frame
-            disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
+            disparity, depth = self.stereo_engine.infer_sync(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
             self.keyframe_queue.append(
                 Keyframe(
                     timestamp=current_timestamp,
@@ -221,12 +220,12 @@ class PerceptionNode(Node):
             return True
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-            disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
+            disparity, depth = self.stereo_engine.infer_sync(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
             kf_prev = self.keyframe_queue[-1]
-            prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
-            current_left_extract_result = await self.superpoint.infer(left_img)
+            prev_left_extract_result = self.superpoint.infer_sync(kf_prev.image)
+            current_left_extract_result = self.superpoint.infer_sync(left_img)
 
-            match_result = await self.light_glue.infer(
+            match_result = self.light_glue.infer_sync(
                 prev_left_extract_result["kpts"],
                 current_left_extract_result["kpts"],
                 prev_left_extract_result["descps"],
@@ -337,7 +336,7 @@ class PerceptionNode(Node):
             #current_i = len(self.keyframe_queue[-_N:])
 
             with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
+                extract_info = [self.superpoint.infer_sync(kf.image) for kf in self.keyframe_queue[-_N:]]
             parent, rank = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
@@ -355,12 +354,12 @@ class PerceptionNode(Node):
                     self.logger.debug("timestamp prev: ", kf_prev.timestamp)
                     self.logger.debug("timestamp curr: ", kf_curr.timestamp)
                     with Timer(name="[cached result[1.1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
+                        prev_left_extract_result = self.superpoint.infer_sync(kf_prev.image)
                     with Timer(name="[cached result[1.2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        current_left_extract_result = await self.superpoint.infer(kf_curr.image)
+                        current_left_extract_result = self.superpoint.infer_sync(kf_curr.image)
 
                     with Timer(name="[cached result[1.3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        match_result = await self.light_glue.infer(
+                        match_result = self.light_glue.infer_sync(
                             prev_left_extract_result["kpts"],
                             current_left_extract_result["kpts"],
                             prev_left_extract_result["descps"],
