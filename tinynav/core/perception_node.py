@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import time
 import cv2
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 import numpy as np
@@ -11,6 +12,7 @@ from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
+from std_msgs.msg import Float32MultiArray
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from math_utils import uf_init, uf_union, uf_all_sets_list
@@ -114,6 +116,7 @@ class PerceptionNode(Node):
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
+        self.stats_pub = self.create_publisher(Float32MultiArray, "/slam/stats", 10)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -186,12 +189,16 @@ class PerceptionNode(Node):
         if current_timestamp - self.last_processed_timestamp < 0.1333:
             return
         self.last_processed_timestamp = current_timestamp
+        loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            asyncio.run(self.process(left_msg, right_msg))
+            processed = asyncio.run(self.process(left_msg, right_msg))
+        if processed:
+            loop_ms = (time.perf_counter() - loop_start) * 1000.0
+            self.stats_pub.publish(Float32MultiArray(data=[float(loop_ms)]))
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
-            return
+            return False
         self.process_cnt += 1
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
@@ -211,7 +218,7 @@ class PerceptionNode(Node):
                     latest_imu_timestamp=current_timestamp
                 )
             )
-            return
+            return True
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
@@ -500,6 +507,7 @@ class PerceptionNode(Node):
             else:
                 self.keyframe_queue.pop()
 
+        return True
 
 
 def main(args=None):
