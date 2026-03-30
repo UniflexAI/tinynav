@@ -6,6 +6,8 @@ build-backend = "scikit_build_core.build"
 name = "tinynav"
 version = "0.1.3"
 description = "minimal implementation of navigation"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10.12,<3.11"
 authors = [{ name = "Zhenfei Yang", email = "zhenfei.yang@deepmirror.com" }]
 dependencies = [
@@ -33,6 +35,11 @@ dependencies = [
 
 [project.scripts]
 tinynav = "tinynav.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/UniflexAI/tinynav"
+Repository = "https://github.com/UniflexAI/tinynav"
+Issues = "https://github.com/UniflexAI/tinynav/issues"
 
 [tool.scikit-build]
 cmake.source-dir = "tinynav/cpp"
