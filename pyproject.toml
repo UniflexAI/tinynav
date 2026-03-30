@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "tinynav"
-version = "0.1.3"
+version = "0.0.1"
 description = "minimal implementation of navigation"
 readme = "README.md"
 license = { file = "LICENSE" }
