@@ -12,6 +12,7 @@ from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
+from std_msgs.msg import Float64
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from math_utils import uf_init, uf_union, uf_all_sets_list
@@ -167,6 +168,12 @@ class PerceptionNode(Node):
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
+        self.isam_processing_time_pub = self.create_publisher(
+            Float64, "/slam/perception/isam_processing_time_sec", 10
+        )
+        self.found_track_time_pub = self.create_publisher(
+            Float64, "/slam/perception/found_track_time_sec", 10
+        )
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -197,6 +204,8 @@ class PerceptionNode(Node):
         self.imu_measurements = deque(maxlen=1000)
 
         self.keyframe_queue = []
+        # Reused for uf_all_sets_list to avoid per-frame np.empty on the hot path.
+        self._uf_track_roots_buf = np.empty(_N * _M, dtype=np.int64)
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
@@ -292,7 +301,9 @@ class PerceptionNode(Node):
 
             if timestamp <= self.keyframe_queue[-1].latest_imu_timestamp:
                 self.imu_measurements.popleft()
-                self.logger.warning("should only happen at beginning")
+                self.logger.debug(
+                    "Dropping IMU sample <= latest_imu_timestamp (reorder/duplicate or stale queue)"
+                )
                 continue
 
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt) #todo
@@ -341,6 +352,7 @@ class PerceptionNode(Node):
         )
         if len(self.keyframe_queue) > _N:
             self.keyframe_queue.pop(0)
+        _t_isam_processing0 = time.perf_counter()
         with Timer(name="[ISAM Processing]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
             with Timer(name="[adding imu]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                 # we have new graph each time
@@ -464,7 +476,15 @@ class PerceptionNode(Node):
                         self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                tracks = [track for track in uf_all_sets_list(parent) if len(track) >= 2]
+                _t_found_track0 = time.perf_counter()
+                tracks = uf_all_sets_list(
+                    parent,
+                    min_component_size=2,
+                    out_roots=self._uf_track_roots_buf,
+                )
+                self.found_track_time_pub.publish(
+                    Float64(data=time.perf_counter() - _t_found_track0)
+                )
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -501,7 +521,11 @@ class PerceptionNode(Node):
                         )
                         smart_factor.add(stereo_meas, X(pose_idx), calib)
                     graph.add(smart_factor)
-            
+
+        self.isam_processing_time_pub.publish(
+            Float64(data=time.perf_counter() - _t_isam_processing0)
+        )
+
         with Timer(name="[Solver]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             params = gtsam.LevenbergMarquardtParams()
             # set iteration limit
@@ -602,11 +626,6 @@ def main(args=None):
     executor.spin()
     perception_node.destroy_node()
     executor.shutdown()
-
-
-if __name__ == "__main__":
-    main()
-()
 
 
 if __name__ == "__main__":
