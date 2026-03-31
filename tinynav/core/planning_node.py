@@ -153,12 +153,16 @@ def max_pool_height_map(height_map, kernel_size=1):
 
 @dataclass
 class FusedESDFConfig:
-    robot_z_bottom: float = -0.4
+    robot_z_bottom: float = -0.3
     robot_z_top: float = 0.1
     occ_threshold: float = 0.1
-    stair_allow_height: float = 0.3
-    wall_min_hits: int = 2
-    wall_min_hits_near_stair: int = 3
+    # Simplified knobs:
+    # - stair_sensitivity: larger -> easier to classify/keep stairs passable
+    # - wall_strictness: larger -> stronger wall blocking
+    # - clearance_margin_m: hard obstacle ESDF margin in cost map
+    stair_sensitivity: float = 0.55
+    wall_strictness: float = 0.55
+    clearance_margin_m: float = 0.10
     default_clear_distance: float = 100.0
 
 
@@ -168,9 +172,73 @@ def _build_esdf_from_obstacle(obstacle, resolution, default_clear_distance):
     return np.full(obstacle.shape, default_clear_distance, dtype=np.float32)
 
 
+def _derived_fused_esdf_params(config: FusedESDFConfig):
+    s = float(np.clip(config.stair_sensitivity, 0.0, 1.0))
+    w = float(np.clip(config.wall_strictness, 0.0, 1.0))
+    return {
+        "stair_allow_height": float(np.interp(s, [0.0, 1.0], [0.35, 0.60])),
+        "stair_diff_high": float(np.interp(s, [0.0, 1.0], [0.14, 0.08])),
+        "stair_diff_low": float(np.interp(s, [0.0, 1.0], [0.08, 0.05])),
+        "stair_open_kernel": 3,
+        "stair_close_kernel": 3,
+        "stair_min_component_area": int(round(np.interp(s, [0.0, 1.0], [12, 5]))),
+        "stair_hysteresis_iters": int(round(np.interp(s, [0.0, 1.0], [1, 4]))),
+        "wall_min_hits": int(round(np.interp(w, [0.0, 1.0], [2, 4]))),
+        "wall_min_hits_near_stair": int(round(np.interp(w, [0.0, 1.0], [1, 4]))),
+    }
+
+
+def _refine_stair_like_mask(local_height_diff, finite, params):
+    low_th = float(params["stair_diff_low"])
+    high_th = float(params["stair_diff_high"])
+    if high_th < low_th:
+        high_th = low_th
+
+    weak = finite & (local_height_diff >= low_th)
+    strong = finite & (local_height_diff >= high_th)
+    stair_like = strong.copy()
+
+    iters = max(0, int(params["stair_hysteresis_iters"]))
+    if iters > 0 and np.any(stair_like):
+        grow = stair_like.astype(np.uint8)
+        weak_u8 = weak.astype(np.uint8)
+        kernel = np.ones((3, 3), np.uint8)
+        for _ in range(iters):
+            grow = cv2.dilate(grow, kernel, iterations=1)
+            grow = ((grow > 0).astype(np.uint8) & weak_u8)
+        stair_like = grow > 0
+
+    stair_u8 = (stair_like.astype(np.uint8) * 255)
+    open_k = max(1, int(params["stair_open_kernel"]))
+    close_k = max(1, int(params["stair_close_kernel"]))
+    if open_k > 1:
+        stair_u8 = cv2.morphologyEx(
+            stair_u8, cv2.MORPH_OPEN, np.ones((open_k, open_k), np.uint8)
+        )
+    if close_k > 1:
+        stair_u8 = cv2.morphologyEx(
+            stair_u8, cv2.MORPH_CLOSE, np.ones((close_k, close_k), np.uint8)
+        )
+    stair_like = stair_u8 > 0
+
+    min_area = max(1, int(params["stair_min_component_area"]))
+    if np.any(stair_like):
+        labels_cnt, labels, stats, _ = cv2.connectedComponentsWithStats(
+            stair_like.astype(np.uint8), connectivity=8
+        )
+        keep = np.zeros_like(stair_like, dtype=bool)
+        for idx in range(1, labels_cnt):
+            if stats[idx, cv2.CC_STAT_AREA] >= min_area:
+                keep |= labels == idx
+        stair_like = keep
+
+    return stair_like
+
+
 def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolution, robot_z, config=None, return_debug=False):
     """Build ESDF from occupied voxels inside a robot-relative height band, with a simple stair filter."""
     config = config or FusedESDFConfig()
+    derived = _derived_fused_esdf_params(config)
 
     h, w, z_dim = occupancy_grid.shape
     z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
@@ -203,8 +271,10 @@ def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolut
     if np.any(z_mask):
         band_occ = occupancy_grid[:, :, z_mask] > float(config.occ_threshold)
         band_hit_count = np.sum(band_occ, axis=2)
-        band_obstacle = band_hit_count >= int(config.wall_min_hits)
-        stair_like = finite & (local_height_diff <= float(config.stair_allow_height))
+        band_obstacle = band_hit_count >= int(derived["wall_min_hits"])
+        stair_like = _refine_stair_like_mask(local_height_diff, finite, derived)
+        # Keep true wall edges blocked: only treat medium height-diff as stair-like.
+        stair_like = stair_like & (local_height_diff <= float(derived["stair_allow_height"]))
         obstacle = band_obstacle & (~stair_like)
 
         # Rescue stair-wall boundary cells: a cell that looks like an obstacle only
@@ -222,7 +292,7 @@ def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolut
             obstacle = obstacle & (~boundary_rescue)
             # Near stairs, require stronger occupancy evidence before calling it a wall.
             near_stair_weak_wall = stair_like_dilated & (
-                band_hit_count < int(config.wall_min_hits_near_stair)
+                band_hit_count < int(derived["wall_min_hits_near_stair"])
             )
             obstacle = obstacle & (~near_stair_weak_wall)
 
@@ -357,11 +427,10 @@ def astar_2d(cost_map, obstacle_mask, start, goal, search_mask=None):
     return []
 
 
-def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
+def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution, clearance_margin_m=0.10):
     # Pure ESDF mode: keep hard obstacle narrow, but add a stronger clearance barrier
     # so A* naturally prefers center-of-free-space instead of edge-hugging.
-    # hard_esdf lowered to 0.05 so narrow passages (<0.15m clearance) are passable;
-    hard_esdf = 0.10
+    hard_esdf = float(max(1e-3, clearance_margin_m))
     obstacle = fused_esdf < hard_esdf
 
     d = np.clip(fused_esdf, hard_esdf, 2.0)
@@ -629,6 +698,7 @@ class PlanningNode(Node):
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.fused_esdf_pub = self.create_publisher(OccupancyGrid, '/planning/fused_esdf', 10)
+        self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.astar_cost_pub = self.create_publisher(Image, '/planning/astar_cost', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
@@ -679,6 +749,7 @@ class PlanningNode(Node):
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 5
         self.occupancy_grid = np.zeros(self.grid_shape)
+        self.fused_esdf_config = FusedESDFConfig()
         self.K = None
         self.baseline = None
         self.last_T = None
@@ -765,6 +836,22 @@ class PlanningNode(Node):
         occupancy_grid_msg.data = flat_data
         if pub is not None:
             pub.publish(occupancy_grid_msg)
+
+    def publish_binary_mask_grid(self, mask, origin, resolution, stamp, z_offset=0.0, pub=None):
+        msg = OccupancyGrid()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.info.resolution = resolution
+        msg.info.width = mask.shape[1]
+        msg.info.height = mask.shape[0]
+        msg.info.origin.position.x = origin[0]
+        msg.info.origin.position.y = origin[1]
+        msg.info.origin.position.z = origin[2] + z_offset
+        msg.info.origin.orientation.w = 1.0
+        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
+        if pub is not None:
+            pub.publish(msg)
 
     def publish_cost_heatmap(self, cost, header):
         finite = np.isfinite(cost)
@@ -955,6 +1042,7 @@ class PlanningNode(Node):
                 self.origin,
                 self.resolution,
                 robot_z,
+                config=self.fused_esdf_config,
             )
 
 
@@ -975,7 +1063,18 @@ class PlanningNode(Node):
             local_path_world = []
             if self.target_pose is not None:
                 obstacle_mask, astar_cost = build_astar_cost_map_from_fused_esdf(
-                    fused_esdf, unknown_mask, self.resolution
+                    fused_esdf,
+                    unknown_mask,
+                    self.resolution,
+                    clearance_margin_m=self.fused_esdf_config.clearance_margin_m,
+                )
+                self.publish_binary_mask_grid(
+                    obstacle_mask,
+                    self.origin,
+                    self.resolution,
+                    depth_msg.header.stamp,
+                    z_offset=self.grid_shape[2] * self.resolution / 2,
+                    pub=self.obstacle_mask_pub,
                 )
                 # Apply global path bonus: reduce cost along the pre-planned route so
                 # A*/DWA follows it rather than hugging tight-but-known walls.
