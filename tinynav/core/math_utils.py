@@ -4,6 +4,7 @@ from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
+import fufpy
 from tinynav.core.func import lru_cache_numpy
 
 @njit(cache=True)
@@ -237,49 +238,21 @@ def estimate_pose(kpts_prev, kpts_curr, depth, K, idx_valid=None):
     inlier_idx_original = idx_valid[inliers]
     return True, T, inliers_2d, inliers_3d, inlier_idx_original
 
-# Disjoint Set (Union-Find) implementation with path compression and union by rank
-@njit(cache=True)
+# Union–find via fufpy (https://github.com/LuisScoccola/fufpy)
 def uf_init(n):
-    parent = np.empty(n, np.int64)
-    rank = np.zeros(n, np.int64)
-    for i in range(n):
-        parent[i] = i
-    return parent, rank
+    return fufpy.dynamic_partition_create(int(n))
 
-@njit(cache=True)
-def uf_find(i, parent):
-    root = i
-    while parent[root] != root:
-        root = parent[root]
-    while parent[i] != i:
-        p = parent[i]
-        parent[i] = root
-        i = p
-    return root
 
-@njit(cache=True)
-def uf_union(a, b, parent, rank):
-    ra = uf_find(a, parent)
-    rb = uf_find(b, parent)
-    if ra == rb:
-        return ra
-    if rank[ra] < rank[rb]:
-        parent[ra] = rb
-        return rb
-    elif rank[ra] > rank[rb]:
-        parent[rb] = ra
-        return ra
-    else:
-        parent[rb] = ra
-        rank[ra] += 1
-        return ra
+def uf_union(a, b, uf, _rank=None):
+    return fufpy.dynamic_partition_union(uf, int(a), int(b))
 
-def uf_all_sets_list(parent):
-    root_to_members = {}
-    for i in range(len(parent)):
-        r = parent[i]
-        root_to_members.setdefault(r, []).append(i)
-    return list(root_to_members.values())
+
+def uf_all_sets_list(uf, min_component_size=1):
+    out = []
+    for part in fufpy.dynamic_partition_parts(uf):
+        if part.size >= int(min_component_size):
+            out.append(np.sort(part).tolist())
+    return out
 
 
 

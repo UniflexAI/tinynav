@@ -338,7 +338,7 @@ class PerceptionNode(Node):
 
             with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
-            parent, rank = uf_init(len(self.keyframe_queue[-_N:]) * _M)
+                uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
             
@@ -408,12 +408,12 @@ class PerceptionNode(Node):
                             if match_idx != -1:
                                 idx_prev = i * _M + k
                                 idx_curr = j * _M + match_idx
-                                uf_union(idx_prev, idx_curr, parent, rank)
+                                uf_union(idx_prev, idx_curr, uf)
                                 count += 1
                         self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                tracks = [track for track in uf_all_sets_list(parent) if len(track) >= 2]
+                tracks = uf_all_sets_list(uf, min_component_size=2)
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -450,7 +450,7 @@ class PerceptionNode(Node):
                         )
                         smart_factor.add(stereo_meas, X(pose_idx), calib)
                     graph.add(smart_factor)
-            
+
         with Timer(name="[Solver]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             params = gtsam.LevenbergMarquardtParams()
             # set iteration limit
