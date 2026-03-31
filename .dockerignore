@@ -5,7 +5,6 @@
 # model artifacts (keep source files under tinynav/models)
 tinynav/models/*.plan
 tinynav/models/*.engine
-tinynav/models/*.onnx
 
 # data
 rosbag*
