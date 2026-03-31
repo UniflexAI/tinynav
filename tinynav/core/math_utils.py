@@ -276,12 +276,46 @@ def uf_union(a, b, parent, rank):
         rank[ra] += 1
         return ra
 
-def uf_all_sets_list(parent):
-    root_to_members = {}
-    for i in range(len(parent)):
-        r = parent[i]
-        root_to_members.setdefault(r, []).append(i)
-    return list(root_to_members.values())
+
+@njit(cache=True)
+def uf_fill_roots(parent, out_roots):
+    """Write canonical root for each element; path-compresses parent in place."""
+    n = len(parent)
+    for i in range(n):
+        out_roots[i] = uf_find(i, parent)
+
+
+def uf_all_sets_list(parent, min_component_size=1, out_roots=None):
+    """
+    Connected components as lists of member indices. Mutates parent (path compression).
+
+    Uses argsort + run boundaries instead of defaultdict+lists to cut per-frame Python
+    object churn (many singletons + GC spikes in tight loops).
+
+    min_component_size: drop components with fewer members (e.g. 2 for landmark tracks).
+    out_roots: optional (n,) int64 buffer; reuse from caller to avoid allocating roots each call.
+    """
+    n = len(parent)
+    if n == 0:
+        return []
+    if out_roots is not None and out_roots.shape[0] >= n:
+        roots = out_roots[:n]
+    else:
+        roots = np.empty(n, dtype=np.int64)
+    uf_fill_roots(parent, roots)
+
+    order = np.argsort(roots, kind="mergesort")
+    sorted_r = roots[order]
+    diff = np.r_[True, sorted_r[1:] != sorted_r[:-1]]
+    starts = np.flatnonzero(diff)
+    out = []
+    ms = int(min_component_size)
+    for k in range(len(starts)):
+        a = int(starts[k])
+        b = int(starts[k + 1]) if k + 1 < len(starts) else n
+        if b - a >= ms:
+            out.append(order[a:b].tolist())
+    return out
 
 
 
