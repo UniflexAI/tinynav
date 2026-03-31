@@ -251,12 +251,16 @@ class PerceptionNode(Node):
         if current_timestamp - self.last_processed_timestamp < self.min_process_period:
             return
         self.last_processed_timestamp = current_timestamp
+        loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            asyncio.run(self.process(left_msg, right_msg))
+            processed = asyncio.run(self.process(left_msg, right_msg))
+        if processed:
+            loop_ms = (time.perf_counter() - loop_start) * 1000.0
+            self.stats_pub.publish(Float32MultiArray(data=[float(loop_ms)]))
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
-            return
+            return False
         self.process_cnt += 1
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
@@ -276,7 +280,7 @@ class PerceptionNode(Node):
                     latest_imu_timestamp=current_timestamp
                 )
             )
-            return
+            return True
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
@@ -582,6 +586,7 @@ class PerceptionNode(Node):
             else:
                 self.keyframe_queue.pop()
 
+        return True
 
 
 def main(args=None):

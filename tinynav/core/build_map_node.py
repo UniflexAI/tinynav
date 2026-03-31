@@ -12,13 +12,14 @@ from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from sensor_msgs.msg import Image, CameraInfo
-from message_filters import TimeSynchronizer, Subscriber
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
 import os
 import argparse
+import sys
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
@@ -433,7 +434,7 @@ class BuildMapNode(Node):
         # Add stop signal subscription and save finished publisher
         self.mapping_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.mapping_stop_callback, 10)
         self.mapping_save_finished_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000)
+        self.ts = ApproximateTimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000, 0.02)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
@@ -456,6 +457,8 @@ class BuildMapNode(Node):
         self._save_completed = False
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
+        self.tf_static_sub = Subscriber(self, TFMessage, "/tf_static")
+        self.tf_static_sub.registerCallback(self.tf_callback)
         self.T_rgb_to_infra1 = None
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
@@ -530,6 +533,11 @@ class BuildMapNode(Node):
     def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
         with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
+            keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
+            keyframe_depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
+            if keyframe_image_timestamp != keyframe_odom_timestamp or keyframe_image_timestamp != keyframe_depth_timestamp:
+                self.get_logger().error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
+
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
@@ -776,6 +784,25 @@ class BuildMapNode(Node):
             # Ignore errors during destruction as resources may already be freed
             pass
 
+class ImageTransportsNode(Node):
+    def __init__(self):
+        super().__init__('image_transports_node')
+        # Simple compressed → raw image transport for color images.
+        self.image_sub = self.create_subscription(
+            CompressedImage,
+            '/camera/camera/color/image_rect_raw/compressed',
+            self.image_callback,
+            10,
+        )
+        self.image_pub = self.create_publisher(Image, '/camera/camera/color/image_raw', 10)
+        self.bridge = CvBridge()
+
+    def image_callback(self, msg: CompressedImage):
+        image = self.bridge.compressed_imgmsg_to_cv2(msg)
+        image_msg = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
+        image_msg.header.stamp = msg.header.stamp
+        image_msg.header.frame_id = msg.header.frame_id
+        self.image_pub.publish(image_msg)
 
 def main(args=None):
     logging.basicConfig(
@@ -796,8 +823,10 @@ def main(args=None):
     exec_ = SingleThreadedExecutor()
     player_node = BagPlayer(parsed_args.bag_file)
     map_node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
+    image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)
     exec_.add_node(map_node)
+    exec_.add_node(image_transports_node)
     while rclpy.ok() and player_node.play_next():
         exec_.spin_once(timeout_sec=0.001)
     map_node.save_mapping()

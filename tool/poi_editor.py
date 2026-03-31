@@ -349,9 +349,19 @@ class RelocalizationPose(Node):
             wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]),
         )
 
+    def current_pose_in_map_callback(self, msg: Odometry):
+        odom, _ = msg2np(msg)
+        xyzw = matrix_to_quat(odom[:3, :3])
+        position = odom[:3, 3]
+        self.viser_server.scene.add_transform_controls(
+            "/current_pose_in_map_gizmo",
+            position=position,
+            wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]),
+        )
+
 
 def main(
-    tinynav_db_path: Path,
+    tinynav_map_path: Path,
 ) -> None:
     server = viser.ViserServer()
 
@@ -370,8 +380,8 @@ def main(
     poi_points = {}
     poi_id_counter = 0
 
-    if os.path.exists(f"{tinynav_db_path}/pois.json"):
-        with open(f"{tinynav_db_path}/pois.json", "r") as f:
+    if os.path.exists(f"{tinynav_map_path}/pois.json"):
+        with open(f"{tinynav_map_path}/pois.json", "r") as f:
             poi_points = json.load(f)
             poi_points = {int(k): v for k, v in poi_points.items()}
             for k, v in poi_points.items():
@@ -614,8 +624,8 @@ def main(
             )
 
     # Load splat or point cloud files
-    splat_path = Path(f"{tinynav_db_path}/splat.ply")
-    pointcloud_path = Path(f"{tinynav_db_path}/pointcloud.ply")
+    splat_path = Path(f"{tinynav_map_path}/splat.ply")
+    pointcloud_path = Path(f"{tinynav_map_path}/pointcloud.ply")
 
     if splat_path.exists():
         # Load as Gaussian splat

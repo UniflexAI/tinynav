@@ -40,7 +40,7 @@ help:
 	@echo "  make dinov2       # Build DINOv2"
 	@echo "  make superpoint   # Build SuperPoint"
 	@echo "  make lightglue    # Build LightGlue"
-	@echo "  make retinify     # Build Retinify"
+	@echo "  make retinify     # Build Retinify (dynamic, RealSense+Looper)"
 	@echo "  make clean        # Remove *_$(ARCH).plan"
 
 $(DINO_ENGINE): $(DINO_ONNX)
