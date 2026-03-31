@@ -5,7 +5,7 @@ from codetiming import Timer
 import platform
 
 import asyncio
-from func import alru_cache_numpy
+from tinynav.core.func import alru_cache_numpy
 
 from cuda import cudart
 import ctypes
@@ -14,6 +14,7 @@ import logging
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
+    np.dtype(np.float16): ctypes.c_uint16,
     np.dtype(np.int8):   ctypes.c_int8,
     np.dtype(np.uint8):  ctypes.c_uint8,
     np.dtype(np.int32):  ctypes.c_int32,
@@ -32,6 +33,20 @@ class TRTBase:
             self.graph_exec = self.capture_graph()
         logging.info(f"load {engine_path} done!")
 
+    def _get_static_shape(self, name):
+        """Return a concrete shape for a tensor, resolving dynamic dims via the profile if needed."""
+        shape = tuple(self.context.get_tensor_shape(name))
+        if -1 not in shape:
+            return shape
+
+        # Resolve from optimization profile (profile 0) when available.
+        try:
+            _, _, max_shape = self.engine.get_tensor_profile_shape(name, 0)
+            return tuple(int(d) for d in max_shape)
+        except Exception:
+            # Fallback: replace dynamic dims with 1 to avoid crashes.
+            return tuple(d if d != -1 else 1 for d in shape)
+
     def allocate_buffers(self):
         inputs = []
         outputs = []
@@ -40,7 +55,7 @@ class TRTBase:
 
         for i in range(self.engine.num_io_tensors):
             name = self.engine.get_tensor_name(i)
-            shape = self.context.get_tensor_shape(name)
+            shape = self._get_static_shape(name)
             dtype = np.dtype(trt.nptype(self.engine.get_tensor_dtype(name)))
             ctype_dtype = numpy_to_ctypes[dtype]
             is_input = self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
@@ -70,6 +85,13 @@ class TRTBase:
 
 
     def capture_graph(self):
+        # Ensure dynamic input shapes are specified before first execution.
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                shape = self._get_static_shape(name)
+                self.context.set_input_shape(name, shape)
+
         cudart.cudaStreamBeginCapture(self.stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
 
         for i in range(self.engine.num_io_tensors):
@@ -107,8 +129,7 @@ class TRTBase:
 
 
 class SuperPointTRT(TRTBase):
-    def __init__(self, height_width = "240x424"):
-        engine_path=f"/tinynav/tinynav/models/superpoint_fp16_dynamic_{height_width}_{platform.machine()}.plan"
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_fp16_dynamic_{platform.machine()}.plan"):
         super().__init__(engine_path)
         # model input [1,1,H,W]
         self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
@@ -118,9 +139,10 @@ class SuperPointTRT(TRTBase):
     #
     @alru_cache_numpy(maxsize=32)
     async def infer(self, input_image:np.ndarray, threshold = np.array([[0.0005]], dtype=np.float32)):
-        # resize to input_size
-        scale = self.input_shape[0] / input_image.shape[0]
-        image = cv2.resize(input_image, (self.input_shape[1], self.input_shape[0]))
+        # Resize to engine input size (may change aspect ratio for non-matching resolutions).
+        h_in, w_in = input_image.shape[0], input_image.shape[1]
+        h_net, w_net = self.input_shape[0], self.input_shape[1]
+        image = cv2.resize(input_image, (w_net, h_net))
         image = image[None, None, :, :]
 
         np.copyto(self.inputs[0]["host"], image)
@@ -128,7 +150,17 @@ class SuperPointTRT(TRTBase):
 
         results = await self.run_graph()
 
-        results["kpts"][0] = (results["kpts"][0] + 0.5) / scale - 0.5
+        # Scale keypoints from network coords (h_net, w_net) back to input image coords (h_in, w_in).
+        # Use per-axis scale so Looper (640x544) and other resolutions match; img_shape is (width, height).
+        scale_x = w_in / w_net
+        scale_y = h_in / h_net
+        k = results["kpts"][0]
+        if k.shape[0] == 2:
+            k[0] = (k[0] + 0.5) * scale_x - 0.5
+            k[1] = (k[1] + 0.5) * scale_y - 0.5
+        else:
+            k[:, 0] = (k[:, 0] + 0.5) * scale_x - 0.5
+            k[:, 1] = (k[:, 1] + 0.5) * scale_y - 0.5
         results["mask"] = results["mask"][:, :, None]
         return results
 
@@ -177,57 +209,155 @@ class Dinov2TRT(TRTBase):
 
 
 class StereoEngineTRT(TRTBase):
-    def __init__(self, height_width = "480x848"):
-        engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_dynamic_{height_width}_{platform.machine()}.plan"
+    def _get_static_shape(self, name):
+        """Ensure disp/depth outputs get a valid max shape for buffer allocation.
+
+        Some TensorRT versions report dynamic outputs like disp/depth with empty
+        or scalar shapes. Instead of asking for their profile shapes directly,
+        we derive the max (H, W) from the \"left\" input profile, since in this
+        network disp/depth share the same spatial resolution as the inputs.
+        """
+        if name in ("disp", "depth"):
+            try:
+                _, _, max_in_shape = self.engine.get_tensor_profile_shape("left", 0)
+                # Inputs are (N, C, H, W); outputs are (1, 1, H, W).
+                return (1, 1, int(max_in_shape[2]), int(max_in_shape[3]))
+            except Exception:
+                # Fallback to base behavior if profile info is unavailable.
+                pass
+        return super()._get_static_shape(name)
+
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_dynamic_{platform.machine()}.plan"):
         super().__init__(engine_path)
+        # Current shapes/byte sizes are set per infer() call, based on the
+        # actually received image size (H, W), not the engine's max profile.
+        self._current_input_shapes = (1, 1, 1, 1)
+        self._current_input_nbytes = 0
+
+    def capture_graph(self):
+        for i in range(self.engine.num_io_tensors):
+            name = self.engine.get_tensor_name(i)
+            self.context.set_tensor_address(name, self.bindings[i])
+        return None
+
+    async def run_graph(self):
+        input_shapes = self._current_input_shapes
+        if "aarch64" not in platform.machine():
+            cudart.cudaMemcpyAsync(self.inputs[0]["device"], self.inputs[0]["host"].ctypes.data,
+                                   self._current_input_nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+            cudart.cudaMemcpyAsync(self.inputs[1]["device"], self.inputs[1]["host"].ctypes.data,
+                                   self._current_input_nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+            for inp in self.inputs[2:]:
+                cudart.cudaMemcpyAsync(inp["device"], inp["host"].ctypes.data,
+                                       inp["nbytes"], cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+        self.context.set_optimization_profile_async(0, self.stream)
+        self.context.set_input_shape("left", input_shapes)
+        self.context.set_input_shape("right", input_shapes)
+        self.context.execute_async_v3(stream_handle=self.stream)
+        h_net, w_net = input_shapes[2], input_shapes[3]
+        if "aarch64" not in platform.machine():
+            # Copy back only the active region for disp/depth, based on the
+            # current logical image size (h_net, w_net). Other outputs keep
+            # their full allocated size.
+            for out in self.outputs:
+                if out["name"] in ("disp", "depth"):
+                    nbytes = input_shapes[2] * input_shapes[3] * np.float32().itemsize
+                else:
+                    nbytes = out["nbytes"]
+                cudart.cudaMemcpyAsync(
+                    out["host"].ctypes.data,
+                    out["device"],
+                    nbytes,
+                    cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost,
+                    self.stream,
+                )
+        cudart.cudaStreamSynchronize(self.stream)
+        results = {}
+        for out in self.outputs:
+            arr = out["host"]
+            name = out["name"]
+            if name in ("disp", "depth"):
+                # Interpret disp/depth as a flat buffer whose leading
+                # h_net * w_net elements form the current image.
+                flat = np.asarray(arr).reshape(-1)
+                needed = h_net * w_net
+                results[name] = flat[:needed].reshape(h_net, w_net).copy()
+            else:
+                results[name] = np.array(arr).copy() if arr.ndim == 0 else arr.copy()
+        return results
 
     async def infer(self, left_img, right_img, baseline, focal_length):
-        left_tensor = left_img[None, None, :, :]
-        right_tensor = right_img[None, None, :, :]
+        h_in, w_in = left_img.shape[0], left_img.shape[1]
 
-        np.copyto(self.inputs[0]["host"], left_tensor)
-        np.copyto(self.inputs[1]["host"], right_tensor)
+        self._current_input_shapes = (1, 1, h_in, w_in)
+        self._current_input_nbytes = h_in * w_in * np.uint8().itemsize
+
+        left_tensor = left_img.astype(np.uint8).ravel()
+        right_tensor = right_img.astype(np.uint8).ravel()
+        # Copy only the active region (h_in * w_in bytes) into the max-sized host buffers.
+        np.copyto(self.inputs[0]["host"].reshape(-1)[: left_tensor.size], left_tensor)
+        np.copyto(self.inputs[1]["host"].reshape(-1)[: right_tensor.size], right_tensor)
         np.copyto(self.inputs[2]["host"], baseline)
         np.copyto(self.inputs[3]["host"], focal_length)
 
         results = await self.run_graph()
-        return results['disp'][0, 0, :, :], results['depth'][0, 0, :, :]
+        disp = results["disp"]
+        depth = results["depth"]
+        if disp.shape != (h_in, w_in) or depth.shape != (h_in, w_in):
+            raise RuntimeError(
+                f"StereoEngine output shape mismatch: got disp {disp.shape}, depth {depth.shape}, expected ({h_in}, {w_in})"
+            )
+        return disp.astype(np.float32), depth.astype(np.float32)
+
 
 if __name__ == "__main__":
+    # Synthetic sanity test for both RealSense and Looper resolutions.
     dinov2 = Dinov2TRT()
     superpoint = SuperPointTRT()
     light_glue = LightGlueTRT()
     stereo_engine = StereoEngineTRT()
 
-    # Create dummy zero inputs
-    image_shape = np.array([848, 480], dtype=np.int64)
-    width, height = image_shape
+    # Each entry: (name, width, height)
+    resolutions = [
+        ("realsense", 848, 480),
+        ("looper", 544, 640),
+    ]
+
     match_threshold = np.array([0.1], dtype=np.float32)
     threshold = np.array([0.015], dtype=np.float32)
 
-    dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
-    dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+    for tag, width, height in resolutions:
+        print(f"\n=== Testing stereo pipeline for {tag} resolution: {height}x{width} ===")
+        image_shape = np.array([width, height], dtype=np.int64)
 
-    with Timer(text="[dinov2] Elapsed time: {milliseconds:.0f} ms"):
-        embedding = asyncio.run(dinov2.infer(dummy_left))
+        dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+        dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
 
-    with Timer(text="[superpoint] Elapsed time: {milliseconds:.0f} ms"):
-        left_extract_result = asyncio.run(superpoint.infer(dummy_left))
-        right_extract_result = asyncio.run(superpoint.infer(dummy_right))
+        with Timer(text=f"[dinov2:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            _ = asyncio.run(dinov2.infer(dummy_left))
 
-    with Timer(text="[lightglue] Elapsed time: {milliseconds:.0f} ms"):
-        match_result = asyncio.run(light_glue.infer(
-            left_extract_result["kpts"],
-            right_extract_result["kpts"],
-            left_extract_result["descps"],
-            right_extract_result["descps"],
-            left_extract_result["mask"],
-            right_extract_result["mask"],
-            image_shape,
-            image_shape,
-            match_threshold))
+        with Timer(text=f"[superpoint:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            left_extract_result = asyncio.run(superpoint.infer(dummy_left))
+            right_extract_result = asyncio.run(superpoint.infer(dummy_right))
 
-    with Timer(text="[stereo] Elapsed time: {milliseconds:.0f} ms"):
-        baseline = np.array([[0.05]])
-        focal_length = np.array([[323.0]])
-        disp, depth = asyncio.run(stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length))
+        with Timer(text=f"[lightglue:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            _ = asyncio.run(
+                light_glue.infer(
+                    left_extract_result["kpts"],
+                    right_extract_result["kpts"],
+                    left_extract_result["descps"],
+                    right_extract_result["descps"],
+                    left_extract_result["mask"],
+                    right_extract_result["mask"],
+                    image_shape,
+                    image_shape,
+                    match_threshold,
+                )
+            )
+
+        with Timer(text=f"[stereo:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
+            baseline = np.array([[0.05]], dtype=np.float32)
+            focal_length = np.array([[323.0]], dtype=np.float32)
+            _disp, _depth = asyncio.run(
+                stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length)
+            )

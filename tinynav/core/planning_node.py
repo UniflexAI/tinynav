@@ -483,10 +483,7 @@ class PlanningNode(Node):
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
-            T, velocity = msg2np(odom_msg)
-            velocity_in_camera = T[:3, :3].T @ velocity
-            sign = np.sign(velocity_in_camera[2])
-            alpha = 0.9
+            T,_ = msg2np(odom_msg)
             if self.last_T is None:
                 self.last_T = T.copy()
                 self.smoothed_velocity = sign * np.linalg.norm(velocity_in_camera)
@@ -589,6 +586,10 @@ class PlanningNode(Node):
                     #    x,y,z,qx,qy,qz,qw = trajectories[i][0]
                     if scores[i] > 5.0:
                         x,y,z,qx,qy,qz,qw = trajectories[i][0]
+                        if self.poi_changed:
+                            self.get_logger().info(f"poi changed, using first point, wait {(depth_msg.header.stamp.sec - self.poi_change_timestamp_sec)} seconds")
+                        if self.target_pose is None:
+                            self.get_logger().info("target pose is None, using first point")
 
                     pose = PoseStamped()
                     pose.header = depth_msg.header

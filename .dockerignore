@@ -1,0 +1,36 @@
+# git
+.git
+.git-lfs
+.gitignore
+.dockerignore
+.github/
+
+# model artifacts (keep source files under tinynav/models)
+tinynav/models/*.plan
+tinynav/models/*.engine
+
+# data
+rosbag*
+data/
+datasets/
+
+# python
+.venv/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# local files / logs
+.DS_Store
+*.log
+
+# build
+build/
+dist/
+install/
+log/
+.buildx-cache*/
