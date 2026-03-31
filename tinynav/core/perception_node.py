@@ -147,8 +147,6 @@ class PerceptionNode(Node):
         self.imu_measurements = deque(maxlen=1000)
 
         self.keyframe_queue = []
-        # Reused for uf_all_sets_list to avoid per-frame np.empty on the hot path.
-        self._uf_track_roots_buf = np.empty(_N * _M, dtype=np.int64)
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
@@ -340,7 +338,7 @@ class PerceptionNode(Node):
 
             with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
-            parent, rank = uf_init(len(self.keyframe_queue[-_N:]) * _M)
+                uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
             
@@ -410,16 +408,12 @@ class PerceptionNode(Node):
                             if match_idx != -1:
                                 idx_prev = i * _M + k
                                 idx_curr = j * _M + match_idx
-                                uf_union(idx_prev, idx_curr, parent, rank)
+                                uf_union(idx_prev, idx_curr, uf)
                                 count += 1
                         self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                tracks = uf_all_sets_list(
-                    parent,
-                    min_component_size=2,
-                    out_roots=self._uf_track_roots_buf,
-                )
+                tracks = uf_all_sets_list(uf, min_component_size=2)
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):

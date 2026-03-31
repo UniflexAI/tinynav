@@ -1009,6 +1009,19 @@ http = [
 ]
 
 [[package]]
+name = "fufpy"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numba" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5f/26/d90fcf23c5cd5108403bf0f45c9b48df2b1574d7e44cc53fb2c132e3eb1e/fufpy-0.1.1.tar.gz", hash = "sha256:c05d336b3f2484170b08d83971d901d6a38d3f5e351f55ecff3061dd3bab99d3", size = 4631, upload-time = "2025-02-28T19:35:03.955Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/27/2f50a21216f50ebc84a77e286002e54bd1c515a79404d44810de4f95ac03/fufpy-0.1.1-py3-none-any.whl", hash = "sha256:e256b5426860b30b7ad592f7377abd1e63a999cf9642e4a80761bc6aebe1ecd5", size = 5116, upload-time = "2025-02-28T19:35:02.165Z" },
+]
+
+[[package]]
 name = "gdown"
 version = "5.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3996,6 +4009,7 @@ dependencies = [
     { name = "cuda-python", version = "12.2.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64'" },
     { name = "cuda-python", version = "12.6.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'aarch64'" },
     { name = "einops" },
+    { name = "fufpy" },
     { name = "huggingface-hub" },
     { name = "jupyterlab" },
     { name = "matplotlib" },
@@ -4040,6 +4054,7 @@ requires-dist = [
     { name = "cuda-python", marker = "platform_machine == 'aarch64'", specifier = "==12.6.0" },
     { name = "cuda-python", marker = "platform_machine == 'x86_64'", specifier = "==12.2.0" },
     { name = "einops" },
+    { name = "fufpy", specifier = ">=0.1.1" },
     { name = "huggingface-hub" },
     { name = "jupyterlab" },
     { name = "lerobot", extras = ["lekiwi"], marker = "extra == 'lekiwi'", specifier = "==0.3.3" },
