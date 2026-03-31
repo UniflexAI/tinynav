@@ -31,7 +31,8 @@ class Ros2UnitreeManagerNode(Node):
         self._robot_status = RobotStatus.STANDUP
 
         # Subscribe to ROS velocity commands and forward them to Unitree.
-        self.cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self.CmdVelMessageHandler, 10)
+        self.cmd_vel_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
+        self.cmd_vel_subscriber.Init(self.TwistMessageHandler, 10)
         self.last_cmd_vel_time = None
 
         self.action_subscriber = ChannelSubscriber("rt/service/command", String_)
