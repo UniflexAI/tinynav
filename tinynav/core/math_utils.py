@@ -294,15 +294,13 @@ def uf_all_sets_list(parent, min_component_size=1, out_roots=None):
     uf_fill_roots(parent, roots)
 
     order = np.argsort(roots, kind="mergesort")
-    sorted_r = roots[order]
-    diff = np.r_[True, sorted_r[1:] != sorted_r[:-1]]
-    starts = np.flatnonzero(diff)
+    sr = roots[order]
+    starts = np.flatnonzero(np.r_[True, sr[1:] != sr[:-1]])
     out = []
-    ms = int(min_component_size)
     for k in range(len(starts)):
-        a = int(starts[k])
-        b = int(starts[k + 1]) if k + 1 < len(starts) else n
-        if b - a >= ms:
+        a = starts[k]
+        b = starts[k + 1] if k + 1 < len(starts) else n
+        if b - a >= min_component_size:
             out.append(order[a:b].tolist())
     return out
 
