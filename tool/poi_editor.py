@@ -10,7 +10,12 @@ import nav_msgs
 import numpy as np
 import numpy.typing as npt
 import tyro
-from plyfile import PlyData
+try:
+    from plyfile import PlyData
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "Missing Python dependency 'plyfile'. Install project dependencies before running poi_editor.py, for example: `uv sync` (from the repo root) or `uv add plyfile` if the dependency declaration is missing in your local checkout."
+    ) from exc
 import  viser.transforms as vtf
 import viser
 from viser import transforms as tf
