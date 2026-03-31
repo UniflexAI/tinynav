@@ -162,7 +162,7 @@ class FusedESDFConfig:
     # - clearance_margin_m: hard obstacle ESDF margin in cost map
     stair_sensitivity: float = 0.55
     wall_strictness: float = 0.55
-    clearance_margin_m: float = 0.10
+    clearance_margin_m: float = 0.2
     default_clear_distance: float = 100.0
 
 
@@ -1080,7 +1080,7 @@ class PlanningNode(Node):
                 # A*/DWA follows it rather than hugging tight-but-known walls.
                 astar_cost = apply_global_path_bonus(
                     astar_cost, self.global_path_xy, self.origin, self.resolution,
-                    bonus=2.0, dilation_cells=2,
+                    bonus=0.5, dilation_cells=2,
                 )
                 self.publish_cost_heatmap(astar_cost, depth_msg.header)
 
