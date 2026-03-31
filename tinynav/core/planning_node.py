@@ -157,6 +157,8 @@ class FusedESDFConfig:
     robot_z_top: float = 0.1
     occ_threshold: float = 0.1
     stair_allow_height: float = 0.3
+    wall_min_hits: int = 2
+    wall_min_hits_near_stair: int = 3
     default_clear_distance: float = 100.0
 
 
@@ -199,7 +201,9 @@ def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolut
     obstacle = np.zeros((h, w), dtype=bool)
     stair_like = np.zeros((h, w), dtype=bool)
     if np.any(z_mask):
-        band_obstacle = np.any(occupancy_grid[:, :, z_mask] > float(config.occ_threshold), axis=2)
+        band_occ = occupancy_grid[:, :, z_mask] > float(config.occ_threshold)
+        band_hit_count = np.sum(band_occ, axis=2)
+        band_obstacle = band_hit_count >= int(config.wall_min_hits)
         stair_like = finite & (local_height_diff <= float(config.stair_allow_height))
         obstacle = band_obstacle & (~stair_like)
 
@@ -216,6 +220,11 @@ def build_fused_esdf_from_height(height_map_rel, occupancy_grid, origin, resolut
             low_lying = finite & (filled < float(config.robot_z_top + 0.5))
             boundary_rescue = band_obstacle & stair_like_dilated & (~stair_like) & low_lying
             obstacle = obstacle & (~boundary_rescue)
+            # Near stairs, require stronger occupancy evidence before calling it a wall.
+            near_stair_weak_wall = stair_like_dilated & (
+                band_hit_count < int(config.wall_min_hits_near_stair)
+            )
+            obstacle = obstacle & (~near_stair_weak_wall)
 
     fused_esdf = _build_esdf_from_obstacle(obstacle, resolution, config.default_clear_distance)
     unknown_mask = ~finite
@@ -352,8 +361,7 @@ def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
     # Pure ESDF mode: keep hard obstacle narrow, but add a stronger clearance barrier
     # so A* naturally prefers center-of-free-space instead of edge-hugging.
     # hard_esdf lowered to 0.05 so narrow passages (<0.15m clearance) are passable;
-    # unknown_penalty raised to 20.0 so observed-but-tight paths beat unseen regions.
-    hard_esdf = 0.15
+    hard_esdf = 0.10
     obstacle = fused_esdf < hard_esdf
 
     d = np.clip(fused_esdf, hard_esdf, 2.0)
@@ -370,7 +378,7 @@ def build_astar_cost_map_from_fused_esdf(fused_esdf, unknown_mask, resolution):
     # unknown cells near known obstacles (low ESDF) are more likely dangerous → high penalty.
     # unknown cells far from obstacles (high ESDF) are likely open space → lower penalty.
     # Clamps: min=3.0 (always slightly penalised), max=20.0 (tight blind spots).
-    unknown_penalty = np.where(unknown_mask, 20.0, 0.0)
+    unknown_penalty = np.where(unknown_mask, 3.0, 0.0)
 
     # Do not inflate obstacles geometrically here; let ESDF barrier shape the route.
     cost = 1.0 + 10.0 * barrier + unknown_penalty
@@ -973,7 +981,7 @@ class PlanningNode(Node):
                 # A*/DWA follows it rather than hugging tight-but-known walls.
                 astar_cost = apply_global_path_bonus(
                     astar_cost, self.global_path_xy, self.origin, self.resolution,
-                    bonus=12.0, dilation_cells=2,
+                    bonus=2.0, dilation_cells=2,
                 )
                 self.publish_cost_heatmap(astar_cost, depth_msg.header)
 
