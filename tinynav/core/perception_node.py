@@ -174,6 +174,9 @@ class PerceptionNode(Node):
         self.found_track_time_pub = self.create_publisher(
             Float64, "/slam/perception/found_track_time_sec", 10
         )
+        self.stats_pub = self.create_publisher(
+            Float64, "/slam/perception/loop_time_ms", 10
+        )
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -256,7 +259,7 @@ class PerceptionNode(Node):
             processed = asyncio.run(self.process(left_msg, right_msg))
         if processed:
             loop_ms = (time.perf_counter() - loop_start) * 1000.0
-            self.stats_pub.publish(Float32MultiArray(data=[float(loop_ms)]))
+            self.stats_pub.publish(Float64(data=float(loop_ms)))
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:

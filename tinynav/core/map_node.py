@@ -1125,7 +1125,7 @@ class MapNode(Node):
                 distance_xy = np.linalg.norm(
                     paths_in_map[i][:2] - start_point[:2]
                 )
-                if distance_xy > 0.5:
+                if distance_xy > 1.5:
                     target_position = paths_in_map[i]
                     break
         else:
