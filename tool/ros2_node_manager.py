@@ -172,7 +172,7 @@ class Ros2NodeManager(Node):
 
         topics = [
             '/tf',
-            '/cmd_vel_stamped',
+            '/cmd_vel',
             '/mapping/global_plan',
             '/mapping/poi',
             '/mapping/poi_change',
@@ -203,7 +203,8 @@ class Ros2NodeManager(Node):
             # '/camera_02/camera/imu',
             '/control/target_pose',
             '/planning/occupied_voxels_with_esdf',
-            '/mapping/current_pose_in_map'
+            '/mapping/current_pose_in_map',
+            '/planning/fused_esdf'
         ]
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648'] + topics
         self.processes['bag_record'] = self._spawn(cmd_bag)
