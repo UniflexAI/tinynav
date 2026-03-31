@@ -277,29 +277,20 @@ def uf_union(a, b, parent, rank):
 
 @njit(cache=True)
 def uf_fill_roots(parent, out_roots):
-    """Write canonical root for each element; path-compresses parent in place."""
     n = len(parent)
     for i in range(n):
         out_roots[i] = uf_find(i, parent)
 
 
 def uf_all_sets_list(parent, min_component_size=1, out_roots=None):
-    """
-    Connected components as lists of member indices. Mutates parent (path compression).
-
-    Uses argsort + run boundaries instead of defaultdict+lists to cut per-frame Python
-    object churn (many singletons + GC spikes in tight loops).
-
-    min_component_size: drop components with fewer members (e.g. 2 for landmark tracks).
-    out_roots: optional (n,) int64 buffer; reuse from caller to avoid allocating roots each call.
-    """
     n = len(parent)
     if n == 0:
         return []
-    if out_roots is not None and out_roots.shape[0] >= n:
-        roots = out_roots[:n]
-    else:
-        roots = np.empty(n, dtype=np.int64)
+    roots = (
+        out_roots[:n]
+        if out_roots is not None and out_roots.shape[0] >= n
+        else np.empty(n, dtype=np.int64)
+    )
     uf_fill_roots(parent, roots)
 
     order = np.argsort(roots, kind="mergesort")
