@@ -153,16 +153,16 @@ def max_pool_height_map(height_map, kernel_size=1):
 
 @dataclass
 class FusedESDFConfig:
-    robot_z_bottom: float = -0.3
+    robot_z_bottom: float = -0.2
     robot_z_top: float = 0.1
     occ_threshold: float = 0.1
     # Simplified knobs:
     # - stair_sensitivity: larger -> easier to classify/keep stairs passable
     # - wall_strictness: larger -> stronger wall blocking
     # - clearance_margin_m: hard obstacle ESDF margin in cost map
-    stair_sensitivity: float = 0.55
+    stair_sensitivity: float = 0.7
     wall_strictness: float = 0.55
-    clearance_margin_m: float = 0.2
+    clearance_margin_m: float = 0.3
     default_clear_distance: float = 100.0
 
 
