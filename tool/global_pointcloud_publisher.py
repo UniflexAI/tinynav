@@ -364,12 +364,8 @@ class GlobalPointCloudPublisher(Node):
             self.merged_cloud_cache = cloud.astype(np.float32, copy=False)
             self.merged_color_cache = colors.astype(np.uint32, copy=False)
             return
-        self.merged_cloud_cache = np.concatenate(
-            (self.merged_cloud_cache, cloud.astype(np.float32, copy=False)), axis=0
-        )
-        self.merged_color_cache = np.concatenate(
-            (self.merged_color_cache, colors.astype(np.uint32, copy=False)), axis=0
-        )
+        self.merged_cloud_cache = np.concatenate((self.merged_cloud_cache, cloud.astype(np.float32, copy=False)), axis=0)
+        self.merged_color_cache = np.concatenate((self.merged_color_cache, colors.astype(np.uint32, copy=False)), axis=0)
 
     def get_sample_grid(self, depth_shape):
         h, w = depth_shape
