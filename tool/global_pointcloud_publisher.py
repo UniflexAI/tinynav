@@ -21,7 +21,7 @@ from tf2_ros import TransformBroadcaster
 from tinynav.core.math_utils import pose_msg2np, tf2np
 
 
-def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
+def transform_points(points, T):
     if points.size == 0:
         return points.reshape(0, 3)
     rotation = T[:3, :3]
@@ -29,16 +29,14 @@ def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
     return points @ rotation.T + translation
 
 
-def crop_mask(points: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
+def crop_mask(points, center, radius):
     if points.size == 0:
         return np.zeros((0,), dtype=bool)
     dist2 = np.sum((points - center[None, :]) ** 2, axis=1)
     return dist2 <= radius * radius
 
 
-def voxel_downsample(
-    points: np.ndarray, colors: np.ndarray, voxel_size: float
-) -> tuple[np.ndarray, np.ndarray]:
+def voxel_downsample(points, colors, voxel_size):
     if points.size == 0 or voxel_size <= 0.0:
         return points.reshape(-1, 3), colors.reshape(-1)
     coords = np.floor(points / voxel_size).astype(np.int32)
@@ -197,27 +195,25 @@ def depth_to_color_cloud(
 
 
 class GlobalPointCloudPublisher(Node):
-    def __init__(self, args: argparse.Namespace):
+    def __init__(self, args):
         super().__init__("global_pointcloud_publisher")
         self.args = args
         self.bridge = CvBridge()
-        self.K: np.ndarray | None = None
-        self.color_K: np.ndarray | None = None
-        self.T_i_depth: np.ndarray | None = None
-        self.T_depth_color: np.ndarray | None = None
-        self.depth_frame_id: str | None = None
-        self.color_frame_id: str | None = None
-        self.tf_edges: dict[str, dict[str, np.ndarray]] = {}
-        self.global_cloud_buffer: deque[tuple[np.ndarray, np.ndarray, np.ndarray]] = (
-            deque()
-        )
+        self.K = None
+        self.color_K = None
+        self.T_i_depth = None
+        self.T_depth_color = None
+        self.depth_frame_id = None
+        self.color_frame_id = None
+        self.tf_edges = {}
+        self.global_cloud_buffer = deque()
         self.path_msg = Path()
         self.merged_cloud_cache = np.empty((0, 3), dtype=np.float32)
         self.merged_color_cache = np.empty((0,), dtype=np.uint32)
-        self.sample_grid_key: tuple[int, int, int] | None = None
+        self.sample_grid_key = None
         self.sample_u_grid = np.empty((0, 0), dtype=np.float32)
         self.sample_v_grid = np.empty((0, 0), dtype=np.float32)
-        self.last_keyframe_pose: np.ndarray | None = None
+        self.last_keyframe_pose = None
         self._missing_input_counter = 0
         self._published_once = False
         self._saw_depth = False
