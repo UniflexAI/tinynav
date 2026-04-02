@@ -402,24 +402,9 @@ class GlobalPointCloudPublisher(Node):
         header = Header()
         header.stamp = stamp
         header.frame_id = frame_id
-        dtype = np.dtype(
-            [
-                ("x", np.float32),
-                ("y", np.float32),
-                ("z", np.float32),
-                ("rgb", np.float32),
-            ]
-        )
+        dtype = np.dtype([("x", np.float32), ("y", np.float32), ("z", np.float32), ("rgb", np.float32)])
         structured = np.zeros(points.shape[0], dtype=dtype)
-        structured["x"], structured["y"], structured["z"] = (
-            (
-                points[:, 0],
-                points[:, 1],
-                points[:, 2],
-            )
-            if points.size
-            else (np.empty((0,), dtype=np.float32),) * 3
-        )
+        structured["x"], structured["y"], structured["z"] = (points[:, 0], points[:, 1], points[:, 2]) if points.size else (np.empty((0,), dtype=np.float32),) * 3
         structured["rgb"] = colors.view(np.float32)
         fields = [
             PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
