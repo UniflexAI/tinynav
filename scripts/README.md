@@ -11,7 +11,8 @@ This document provides an overview of the key scripts in the `scripts/` director
 | `run_rosbag_examples.sh`      | Runs a demo pipeline: launches core nodes, plays a sample rosbag, and opens RViz for visualization. |
 | `run_rosbag_build_map.sh`     | Builds a map from a specified rosbag file, launching all required nodes and RViz.            |
 | `run_realsense_sensor.sh`     | Starts the RealSense camera ROS 2 driver on your host system.                                |
-| `run_map_record.sh`           | Launches RealSense in tmux, waits 3s, then records mapping rosbag data into XDG data dir.   |
+| `run_rosbag_record.sh`        | Records the mapping rosbag topics into the XDG data directory.                               |
+| `run_map_record.sh`           | Launches RealSense in tmux, waits 3s, then calls the rosbag record helper.                   |
 
 TinyNav supports several key modes to fit different robotics workflows:
 
@@ -29,7 +30,7 @@ TinyNav supports several key modes to fit different robotics workflows:
        ```bash
        bash scripts/run_map_record.sh
        ```
-     - This script starts the RealSense driver in tmux, waits 3 seconds, then records the camera and IMU data into a rosbag.
+     - This script starts the RealSense driver in tmux, waits 3 seconds, then calls `run_rosbag_record.sh` to record the camera and IMU data into a rosbag.
      - Recorded bags are saved under `${XDG_DATA_HOME:-$HOME/.local/share}/tinynav/rosbags/` for later mapping.
    - **Step 2: Build the map from the recorded data**
      - Use the recorded rosbag to build a map:
