@@ -529,9 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(args=None):
     parser = build_parser()
-    parsed_args, ros_args = parser.parse_known_args(
-        sys.argv[1:] if args is None else args
-    )
+    parsed_args, ros_args = parser.parse_known_args(sys.argv[1:] if args is None else args)
     rclpy.init(args=ros_args)
     node = GlobalPointCloudPublisher(parsed_args)
     try:
