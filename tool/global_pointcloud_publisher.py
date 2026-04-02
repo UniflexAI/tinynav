@@ -313,7 +313,7 @@ class GlobalPointCloudPublisher(Node):
         if self.K is None:
             self.K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
             self.get_logger().info(
-                f"Received depth camera intrinsics from {self.DEPTH_CAMERA_INFO_TOPIC} with frame {msg.header.frame_id}."
+                f"Received depth camera intrinsics from {DEPTH_CAMERA_INFO_TOPIC} with frame {msg.header.frame_id}."
             )
         self.try_update_frame_transforms()
 
@@ -322,7 +322,7 @@ class GlobalPointCloudPublisher(Node):
         if self.color_K is None:
             self.color_K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
             self.get_logger().info(
-                f"Received color camera intrinsics from {self.COLOR_CAMERA_INFO_TOPIC} with frame {msg.header.frame_id}."
+                f"Received color camera intrinsics from {COLOR_CAMERA_INFO_TOPIC} with frame {msg.header.frame_id}."
             )
         self.try_update_frame_transforms()
 
@@ -330,7 +330,7 @@ class GlobalPointCloudPublisher(Node):
         if not self._saw_depth:
             self._saw_depth = True
             self.get_logger().info(
-                f"Received first depth frame on {self.DEPTH_TOPIC}."
+                f"Received first depth frame on {DEPTH_TOPIC}."
             )
 
     def pose_log_callback(self, msg: PoseStamped) -> None:
@@ -353,9 +353,9 @@ class GlobalPointCloudPublisher(Node):
             return
         missing = []
         if self.K is None:
-            missing.append(self.DEPTH_CAMERA_INFO_TOPIC)
+            missing.append(DEPTH_CAMERA_INFO_TOPIC)
         if self.args.image_mode == "color" and self.color_K is None:
-            missing.append(self.COLOR_CAMERA_INFO_TOPIC)
+            missing.append(COLOR_CAMERA_INFO_TOPIC)
         if self.T_i_depth is None:
             missing.append(
                 f"{POSE_CHILD_FRAME}->{self.depth_frame_id or 'depth'} TF"
@@ -598,7 +598,7 @@ class GlobalPointCloudPublisher(Node):
         if self.args.image_mode == "grayscale":
             image = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="mono8")
         else:
-            if self.COLOR_IMAGE_COMPRESSED:
+            if COLOR_IMAGE_COMPRESSED:
                 image = self.bridge.compressed_imgmsg_to_cv2(
                     image_msg, desired_encoding="rgb8"
                 )
