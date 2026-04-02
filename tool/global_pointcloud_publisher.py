@@ -1,7 +1,6 @@
 import argparse
 import sys
 from collections import deque
-from pathlib import Path
 
 import message_filters
 import numpy as np
@@ -226,9 +225,7 @@ class GlobalPointCloudPublisher(Node):
         self._sync_count = 0
         self._projection_debug_counter = 0
         self.image_topic = "/camera/camera/infra1/image_rect_raw" if args.image_mode == "grayscale" else "/camera/camera/color/image_rect_raw/compressed"
-        self.sensor_qos = QoSProfile(
-            depth=50, reliability=ReliabilityPolicy.BEST_EFFORT
-        )
+        self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.BEST_EFFORT)
 
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.color_camera_info_sub = None
@@ -242,26 +239,16 @@ class GlobalPointCloudPublisher(Node):
 
         self.depth_log_sub = self.create_subscription(Image, "/camera/camera/depth/image_rect_raw", self.depth_log_callback, self.sensor_qos)
         self.pose_log_sub = self.create_subscription(PoseStamped, args.pose_topic, self.pose_log_callback, 10)
-        image_msg_type = (
-            CompressedImage
-            if args.image_mode == "color" and True
-            else Image
-        )
+        image_msg_type = CompressedImage if args.image_mode == "color" else Image
         self.image_log_sub = self.create_subscription(image_msg_type, self.image_topic, self.image_log_callback, self.sensor_qos)
 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, args.pose_topic)
         self.image_sub = message_filters.Subscriber(self, image_msg_type, self.image_topic, qos_profile=self.sensor_qos)
-        self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.depth_sub, self.pose_sub, self.image_sub],
-            queue_size=20,
-            slop=0.08,
-        )
+        self.sync = message_filters.ApproximateTimeSynchronizer([self.depth_sub, self.pose_sub, self.image_sub], queue_size=20, slop=0.08)
         self.sync.registerCallback(self.sync_callback)
 
-        self.get_logger().info(
-            f"Publishing global cloud on /global_pointcloud from /camera/camera/depth/image_rect_raw + {args.pose_topic} + {self.image_topic} ({args.image_mode})"
-        )
+        self.get_logger().info(f"Publishing global cloud on /global_pointcloud from /camera/camera/depth/image_rect_raw + {args.pose_topic} + {self.image_topic} ({args.image_mode})")
 
     def camera_info_callback(self, msg: CameraInfo):
         self.depth_frame_id = msg.header.frame_id or self.depth_frame_id
