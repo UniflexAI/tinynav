@@ -546,12 +546,7 @@ class GlobalPointCloudPublisher(Node):
         if self.args.image_mode == "grayscale":
             image = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="mono8")
         else:
-            if True:
-                image = self.bridge.compressed_imgmsg_to_cv2(
-                    image_msg, desired_encoding="rgb8"
-                )
-            else:
-                image = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="rgb8")
+            image = self.bridge.compressed_imgmsg_to_cv2(image_msg, desired_encoding="rgb8")
         if depth is None or image is None:
             return
         depth = np.asarray(depth)
@@ -580,31 +575,9 @@ class GlobalPointCloudPublisher(Node):
         self.publish_path(pose_msg)
 
         if self.args.image_mode == "grayscale":
-            cloud_camera, cloud_colors, projection_stats, projection_samples = (
-                depth_to_grayscale_cloud(
-                    depth,
-                    image,
-                    self.K,
-                    sample_u_grid,
-                    sample_v_grid,
-                    2,
-                    2.0,
-                )
-            )
+            cloud_camera, cloud_colors, projection_stats, projection_samples = depth_to_grayscale_cloud(depth, image, self.K, sample_u_grid, sample_v_grid, 2, 2.0)
         else:
-            cloud_camera, cloud_colors, projection_stats, projection_samples = (
-                depth_to_color_cloud(
-                    depth,
-                    image,
-                    self.K,
-                    self.color_K,
-                    self.T_depth_color,
-                    sample_u_grid,
-                    sample_v_grid,
-                    2,
-                    2.0,
-                )
-            )
+            cloud_camera, cloud_colors, projection_stats, projection_samples = depth_to_color_cloud(depth, image, self.K, self.color_K, self.T_depth_color, sample_u_grid, sample_v_grid, 2, 2.0)
         self._projection_debug_counter += 1
         if cloud_camera.size == 0:
             if self._projection_debug_counter % 20 == 1:
