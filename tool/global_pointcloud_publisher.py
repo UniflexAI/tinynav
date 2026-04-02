@@ -295,16 +295,10 @@ class GlobalPointCloudPublisher(Node):
         self.get_logger().info(f"Waiting for inputs before publishing {self.args.image_mode} cloud: {', '.join(missing)}")
 
     def store_transform(self, parent_frame: str, child_frame: str, T: np.ndarray):
-        self.tf_edges.setdefault(parent_frame, {})[child_frame] = T.astype(
-            np.float32, copy=False
-        )
-        self.tf_edges.setdefault(child_frame, {})[parent_frame] = np.linalg.inv(
-            T
-        ).astype(np.float32, copy=False)
+        self.tf_edges.setdefault(parent_frame, {})[child_frame] = T.astype(np.float32, copy=False)
+        self.tf_edges.setdefault(child_frame, {})[parent_frame] = np.linalg.inv(T).astype(np.float32, copy=False)
 
-    def lookup_transform(
-        self, source_frame: str, target_frame: str
-    ) -> np.ndarray | None:
+    def lookup_transform(self, source_frame, target_frame):
         if source_frame == target_frame:
             return np.eye(4, dtype=np.float32)
         if source_frame not in self.tf_edges or target_frame not in self.tf_edges:
@@ -356,7 +350,7 @@ class GlobalPointCloudPublisher(Node):
             self.store_transform(frame_id, child_frame_id, T)
         self.try_update_frame_transforms()
 
-    def prune_buffer(self, current_position: np.ndarray):
+    def prune_buffer(self, current_position):
         kept = deque()
         removed = False
         for sensor_position, cloud, colors in self.global_cloud_buffer:
@@ -380,7 +374,7 @@ class GlobalPointCloudPublisher(Node):
             [colors for _, _, colors in self.global_cloud_buffer]
         ).astype(np.uint32, copy=False)
 
-    def append_to_merged_cache(self, cloud: np.ndarray, colors: np.ndarray):
+    def append_to_merged_cache(self, cloud, colors):
         if cloud.size == 0:
             return
         if self.merged_cloud_cache.size == 0:
@@ -394,9 +388,7 @@ class GlobalPointCloudPublisher(Node):
             (self.merged_color_cache, colors.astype(np.uint32, copy=False)), axis=0
         )
 
-    def get_sample_grid(
-        self, depth_shape: tuple[int, int]
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def get_sample_grid(self, depth_shape):
         h, w = depth_shape
         grid_key = (h, w, 2)
         if self.sample_grid_key != grid_key:
@@ -406,7 +398,7 @@ class GlobalPointCloudPublisher(Node):
             self.sample_grid_key = grid_key
         return self.sample_u_grid, self.sample_v_grid
 
-    def publish_cloud(self, points: np.ndarray, colors: np.ndarray, stamp, frame_id: str = "world"):
+    def publish_cloud(self, points, colors, stamp, frame_id="world"):
         header = Header()
         header.stamp = stamp
         header.frame_id = frame_id
@@ -437,7 +429,7 @@ class GlobalPointCloudPublisher(Node):
         ]
         self.cloud_pub.publish(pc2.create_cloud(header, fields, structured))
 
-    def publish_pose_tf(self, T_world_imu: np.ndarray, stamp, parent_frame: str):
+    def publish_pose_tf(self, T_world_imu, stamp, parent_frame):
         rotation = R.from_matrix(T_world_imu[:3, :3]).as_quat()
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
@@ -452,7 +444,7 @@ class GlobalPointCloudPublisher(Node):
         tf_msg.transform.rotation.w = float(rotation[3])
         self.tf_broadcaster.sendTransform(tf_msg)
 
-    def publish_path(self, pose_msg: PoseStamped):
+    def publish_path(self, pose_msg):
         path_pose = PoseStamped()
         path_pose.header = pose_msg.header
         path_pose.pose = pose_msg.pose
@@ -462,7 +454,7 @@ class GlobalPointCloudPublisher(Node):
             self.path_msg.poses = self.path_msg.poses[-0 :]
         self.path_pub.publish(self.path_msg)
 
-    def should_add_keyframe(self, T_world_camera: np.ndarray) -> bool:
+    def should_add_keyframe(self, T_world_camera):
         if self.last_keyframe_pose is None:
             return True
         translation = np.linalg.norm(
