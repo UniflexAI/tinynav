@@ -4,7 +4,7 @@ This repo hosts **TinyNav**, a ROS 2 Humble–based stereo SLAM + mapping + plan
 ## Project Snapshot
 - Core ROS 2 nodes: `perception_node.py` (stereo odom + depth + TensorRT feature/stereo models), `planning_node.py` (occupancy grid, ESDF, trajectory library scoring), `control_node.py`/`path_follow_node.py` (teleop + trajectory following), `driver_node.py` (KITTI playback), `map_node.py` (loop closure, pose graph, map merge, DINO features).
 - Performance levers: Numba JIT in planners/mappers, C++ bindings in `tinynav/cpp` (`tinynav_cpp_bind` via scikit-build), TensorRT engines in `tinynav/models`.
-- Typical ROS topics: `/camera/camera/infra1|infra2/image_rect_raw`, `/camera/camera/accel|gyro/sample`, `/slam/odometry`, `/slam/depth`|`/slam/disparity_vis`, `/slam/keyframe_*`, `/planning/trajectory_path`, `/planning/height_map`, `/cmd_vel`.
+- Typical ROS topics: `/camera/camera/infra1|infra2/image_rect_raw`, `/camera/camera/accel|gyro/sample`, `/slam/odometry`, `/depth/local_cloud`|`/slam/disparity_vis`, `/slam/keyframe_*`, `/planning/trajectory_path`, `/planning/height_map`, `/cmd_vel`.
 
 ## Repo Map
 - `tinynav/core/`: main ROS 2 nodes, math utils, TRT model wrappers.
