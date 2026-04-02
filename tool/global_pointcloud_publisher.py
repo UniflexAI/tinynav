@@ -457,17 +457,10 @@ class GlobalPointCloudPublisher(Node):
     def should_add_keyframe(self, T_world_camera):
         if self.last_keyframe_pose is None:
             return True
-        translation = np.linalg.norm(
-            T_world_camera[:3, 3] - self.last_keyframe_pose[:3, 3]
-        )
+        translation = np.linalg.norm(T_world_camera[:3, 3] - self.last_keyframe_pose[:3, 3])
         relative_rotation = self.last_keyframe_pose[:3, :3].T @ T_world_camera[:3, :3]
-        rotation_angle = np.arccos(
-            np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0)
-        )
-        return (
-            translation >= 0.03
-            or rotation_angle >= np.deg2rad(1.0)
-        )
+        rotation_angle = np.arccos(np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0))
+        return translation >= 0.03 or rotation_angle >= np.deg2rad(1.0)
 
     def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
         self._sync_count += 1
@@ -480,9 +473,7 @@ class GlobalPointCloudPublisher(Node):
         if self.K is None or self.T_i_depth is None:
             self.log_missing_inputs()
             return
-        if self.args.image_mode == "color" and (
-            self.color_K is None or self.T_depth_color is None
-        ):
+        if self.args.image_mode == "color" and (self.color_K is None or self.T_depth_color is None):
             self.log_missing_inputs()
             return
 
@@ -501,10 +492,7 @@ class GlobalPointCloudPublisher(Node):
         image = np.asarray(image, dtype=np.uint8)
         if self.args.image_mode == "grayscale" and image.shape[:2] != depth.shape[:2]:
             if self._projection_debug_counter % 20 == 0:
-                self.get_logger().info(
-                    f"Skipping grayscale projection because image and depth shapes differ: "
-                    f"depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}"
-                )
+                self.get_logger().info(f"Skipping grayscale projection because image and depth shapes differ: depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}")
             self._projection_debug_counter += 1
             return
         sample_u_grid, sample_v_grid = self.get_sample_grid(depth.shape)
