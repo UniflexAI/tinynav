@@ -227,8 +227,8 @@ class GlobalPointCloudPublisher(Node):
         self.tf_sub = self.create_subscription(TFMessage, "/tf", self.tf_callback, 10)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, 10)
         self.tf_broadcaster = TransformBroadcaster(self)
-        self.cloud_pub = self.create_publisher(PointCloud2, "/global_pointcloud", 10)
-        self.path_pub = self.create_publisher(Path, "/global_pointcloud_path", 10)
+        self.cloud_pub = self.create_publisher(PointCloud2, "/slam/global_cloud", 10)
+        self.path_pub = self.create_publisher(Path, "/slam/global_cloud_path", 10)
 
         self.depth_log_sub = self.create_subscription(Image, "/camera/camera/depth/image_rect_raw", self.depth_log_callback, self.sensor_qos)
         self.pose_log_sub = self.create_subscription(PoseStamped, args.pose_topic, self.pose_log_callback, 10)
@@ -241,7 +241,7 @@ class GlobalPointCloudPublisher(Node):
         self.sync = message_filters.ApproximateTimeSynchronizer([self.depth_sub, self.pose_sub, self.image_sub], queue_size=20, slop=0.08)
         self.sync.registerCallback(self.sync_callback)
 
-        self.get_logger().info(f"Publishing global cloud on /global_pointcloud from /camera/camera/depth/image_rect_raw + {args.pose_topic} + {self.image_topic} ({args.image_mode})")
+        self.get_logger().info(f"Publishing global cloud on /slam/global_cloud from /camera/camera/depth/image_rect_raw + {args.pose_topic} + {self.image_topic} ({args.image_mode})")
 
     def camera_info_callback(self, msg: CameraInfo):
         self.depth_frame_id = msg.header.frame_id or self.depth_frame_id
