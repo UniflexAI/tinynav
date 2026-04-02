@@ -147,7 +147,7 @@ Visualization Manager:
           Max Intensity: 4096
           Min Color: 0; 0; 0
           Min Intensity: 0
-          Name: DepthCloud
+          Name: Local Cloud
           Occlusion Compensation:
             Occlusion Time-Out: 30
             Value: false
