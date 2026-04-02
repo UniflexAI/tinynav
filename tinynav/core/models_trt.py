@@ -3,6 +3,7 @@ import numpy as np
 import cv2
 from codetiming import Timer
 import platform
+
 import asyncio
 from tinynav.core.func import alru_cache_numpy
 
@@ -128,7 +129,8 @@ class TRTBase:
 
 
 class SuperPointTRT(TRTBase):
-    def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_fp16_dynamic_{platform.machine()}.plan"):
+    def __init__(self, height_width = "240x424"):
+        engine_path=f"/tinynav/tinynav/models/superpoint_fp16_dynamic_{height_width}_{platform.machine()}.plan"
         super().__init__(engine_path)
         # model input [1,1,H,W]
         self.input_shape = self.inputs[0]["shape"][2:4] # [H,W]
@@ -208,25 +210,8 @@ class Dinov2TRT(TRTBase):
 
 
 class StereoEngineTRT(TRTBase):
-    def _get_static_shape(self, name):
-        """Ensure disp/depth outputs get a valid max shape for buffer allocation.
-
-        Some TensorRT versions report dynamic outputs like disp/depth with empty
-        or scalar shapes. Instead of asking for their profile shapes directly,
-        we derive the max (H, W) from the \"left\" input profile, since in this
-        network disp/depth share the same spatial resolution as the inputs.
-        """
-        if name in ("disp", "depth"):
-            try:
-                _, _, max_in_shape = self.engine.get_tensor_profile_shape("left", 0)
-                # Inputs are (N, C, H, W); outputs are (1, 1, H, W).
-                return (1, 1, int(max_in_shape[2]), int(max_in_shape[3]))
-            except Exception:
-                # Fallback to base behavior if profile info is unavailable.
-                pass
-        return super()._get_static_shape(name)
-
-    def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_dynamic_{platform.machine()}.plan"):
+    def __init__(self, height_width = "480x848"):
+        engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_dynamic_{height_width}_{platform.machine()}.plan"
         super().__init__(engine_path)
         # Current shapes/byte sizes are set per infer() call, based on the
         # actually received image size (H, W), not the engine's max profile.

@@ -1,0 +1,172 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Planning Path1
+        - /Target Pose1
+      Splitter Ratio: 0.5
+    Tree Height: 720
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+    Splitter Ratio: 0.5886790156364441
+  - Class: rviz_common/Views
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Time
+    Name: Time
+    SyncMode: 0
+    SyncSource: Planning Path
+
+Visualization Manager:
+  Class: ""
+  Enabled: true
+  Name: root
+
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: world
+    Frame Rate: 30
+
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Alpha: 0.5
+      Cell Size: 1
+      Color: 160; 160; 164
+      Line Style:
+        Value: Lines
+        Line Width: 0.03
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Frame Timeout: 15
+      Show Arrows: false
+      Show Axes: true
+      Show Names: false
+      Marker Scale: 1
+      Update Interval: 0
+      Frames:
+        All Enabled: true
+
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Occupied Voxels
+      Enabled: false
+      Topic:
+        Value: /planning/occupied_voxels
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Filter size: 10
+        Depth: 5
+      Color Transformer: Intensity
+      Channel Name: z
+      Axis: Z
+      Use rainbow: false
+      Invert Rainbow: false
+      Min Intensity: -0.2
+      Max Intensity: 1.2
+      Min Color: 116; 0; 0
+      Max Color: 0; 255; 0
+      Size (m): 0.07
+      Style: Boxes
+      Use Fixed Frame: true
+      Selectable: true
+
+    - Class: rviz_default_plugins/Path
+      Name: Planning Path
+      Enabled: true
+      Topic:
+        Value: /planning/trajectory_path
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Filter size: 10
+        Depth: 5
+      Color: 25; 255; 0
+      Alpha: 1
+      Buffer Length: 1
+      Line Style: Billboards
+      Line Width: 0.15
+      Pose Style: None
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+
+    - Class: rviz_default_plugins/Odometry
+      Name: Target Pose
+      Enabled: true
+      Topic:
+        Value: /control/target_pose
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Filter size: 10
+        Depth: 5
+      Keep: 1
+      Shape:
+        Value: Arrow
+        Color: 255; 25; 0
+        Alpha: 1
+        Shaft Length: 0.5
+        Shaft Radius: 0.05
+        Head Length: 0.2
+        Head Radius: 0.1
+      Covariance:
+        Value: false
+
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Pitch: 0.85
+      Yaw: 0.8
+      Near Clip Distance: 0.01
+      Value: Orbit (rviz)
+
+Window Geometry:
+  Height: 900
+  Width: 1600
+  X: 80
+  Y: 40
+  Displays:
+    collapsed: false
+  Selection:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Time:
+    collapsed: false
