@@ -267,7 +267,7 @@ class GlobalPointCloudPublisher(Node):
             f"Publishing global cloud on /global_pointcloud from /camera/camera/depth/image_rect_raw + {args.pose_topic} + {self.image_topic} ({args.image_mode})"
         )
 
-    def camera_info_callback(self, msg: CameraInfo) -> None:
+    def camera_info_callback(self, msg: CameraInfo):
         self.depth_frame_id = msg.header.frame_id or self.depth_frame_id
         if self.K is None:
             self.K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
@@ -276,7 +276,7 @@ class GlobalPointCloudPublisher(Node):
             )
         self.try_update_frame_transforms()
 
-    def color_camera_info_callback(self, msg: CameraInfo) -> None:
+    def color_camera_info_callback(self, msg: CameraInfo):
         self.color_frame_id = msg.header.frame_id or self.color_frame_id
         if self.color_K is None:
             self.color_K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
@@ -285,28 +285,28 @@ class GlobalPointCloudPublisher(Node):
             )
         self.try_update_frame_transforms()
 
-    def depth_log_callback(self, msg: Image) -> None:
+    def depth_log_callback(self, msg: Image):
         if not self._saw_depth:
             self._saw_depth = True
             self.get_logger().info(
                 "Received first depth frame on /camera/camera/depth/image_rect_raw."
             )
 
-    def pose_log_callback(self, msg: PoseStamped) -> None:
+    def pose_log_callback(self, msg: PoseStamped):
         if not self._saw_pose:
             self._saw_pose = True
             self.get_logger().info(
                 f"Received first pose frame on {self.args.pose_topic}."
             )
 
-    def image_log_callback(self, msg: Image) -> None:
+    def image_log_callback(self, msg: Image):
         if not self._saw_image:
             self._saw_image = True
             self.get_logger().info(
                 f"Received first {self.args.image_mode} image on {self.image_topic}."
             )
 
-    def log_missing_inputs(self) -> None:
+    def log_missing_inputs(self):
         self._missing_input_counter += 1
         if self._missing_input_counter % 30 != 1:
             return
@@ -327,9 +327,7 @@ class GlobalPointCloudPublisher(Node):
             f"Waiting for inputs before publishing {self.args.image_mode} cloud: {', '.join(missing)}"
         )
 
-    def store_transform(
-        self, parent_frame: str, child_frame: str, T: np.ndarray
-    ) -> None:
+    def store_transform(self, parent_frame: str, child_frame: str, T: np.ndarray):
         self.tf_edges.setdefault(parent_frame, {})[child_frame] = T.astype(
             np.float32, copy=False
         )
@@ -359,7 +357,7 @@ class GlobalPointCloudPublisher(Node):
                 queue.append((next_frame, T_source_next))
         return None
 
-    def try_update_frame_transforms(self) -> None:
+    def try_update_frame_transforms(self):
         if self.depth_frame_id is not None:
             T_pose_depth = self.lookup_transform(
                 "imu", self.depth_frame_id
@@ -388,7 +386,7 @@ class GlobalPointCloudPublisher(Node):
                         f"Resolved {self.depth_frame_id} -> {self.color_frame_id} transform."
                     )
 
-    def tf_callback(self, msg: TFMessage) -> None:
+    def tf_callback(self, msg: TFMessage):
         has_static = any(transform.header.frame_id for transform in msg.transforms)
         if any(transform.child_frame_id for transform in msg.transforms):
             if not self._saw_tf:
@@ -403,7 +401,7 @@ class GlobalPointCloudPublisher(Node):
             self.store_transform(frame_id, child_frame_id, T)
         self.try_update_frame_transforms()
 
-    def prune_buffer(self, current_position: np.ndarray) -> None:
+    def prune_buffer(self, current_position: np.ndarray):
         kept = deque()
         removed = False
         for sensor_position, cloud, colors in self.global_cloud_buffer:
@@ -418,7 +416,7 @@ class GlobalPointCloudPublisher(Node):
         if removed:
             self.rebuild_merged_cache()
 
-    def rebuild_merged_cache(self) -> None:
+    def rebuild_merged_cache(self):
         if not self.global_cloud_buffer:
             self.merged_cloud_cache = np.empty((0, 3), dtype=np.float32)
             self.merged_color_cache = np.empty((0,), dtype=np.uint32)
@@ -430,7 +428,7 @@ class GlobalPointCloudPublisher(Node):
             [colors for _, _, colors in self.global_cloud_buffer]
         ).astype(np.uint32, copy=False)
 
-    def append_to_merged_cache(self, cloud: np.ndarray, colors: np.ndarray) -> None:
+    def append_to_merged_cache(self, cloud: np.ndarray, colors: np.ndarray):
         if cloud.size == 0:
             return
         if self.merged_cloud_cache.size == 0:
@@ -456,9 +454,7 @@ class GlobalPointCloudPublisher(Node):
             self.sample_grid_key = grid_key
         return self.sample_u_grid, self.sample_v_grid
 
-    def publish_cloud(
-        self, points: np.ndarray, colors: np.ndarray, stamp, frame_id: str = "world"
-    ) -> None:
+    def publish_cloud(self, points: np.ndarray, colors: np.ndarray, stamp, frame_id: str = "world"):
         header = Header()
         header.stamp = stamp
         header.frame_id = frame_id
@@ -489,9 +485,7 @@ class GlobalPointCloudPublisher(Node):
         ]
         self.cloud_pub.publish(pc2.create_cloud(header, fields, structured))
 
-    def publish_pose_tf(
-        self, T_world_imu: np.ndarray, stamp, parent_frame: str
-    ) -> None:
+    def publish_pose_tf(self, T_world_imu: np.ndarray, stamp, parent_frame: str):
         rotation = R.from_matrix(T_world_imu[:3, :3]).as_quat()
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
@@ -506,7 +500,7 @@ class GlobalPointCloudPublisher(Node):
         tf_msg.transform.rotation.w = float(rotation[3])
         self.tf_broadcaster.sendTransform(tf_msg)
 
-    def publish_path(self, pose_msg: PoseStamped) -> None:
+    def publish_path(self, pose_msg: PoseStamped):
         path_pose = PoseStamped()
         path_pose.header = pose_msg.header
         path_pose.pose = pose_msg.pose
@@ -531,9 +525,7 @@ class GlobalPointCloudPublisher(Node):
             or rotation_angle >= np.deg2rad(1.0)
         )
 
-    def sync_callback(
-        self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image
-    ) -> None:
+    def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
         self._sync_count += 1
         if self._sync_count == 1:
             self.get_logger().info(
@@ -695,7 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(args=None) -> None:
+def main(args=None):
     parser = build_parser()
     parsed_args, ros_args = parser.parse_known_args(
         sys.argv[1:] if args is None else args
