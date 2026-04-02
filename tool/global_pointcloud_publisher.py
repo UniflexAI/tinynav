@@ -8,7 +8,7 @@ import numpy as np
 import rclpy
 import sensor_msgs_py.point_cloud2 as pc2
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -18,15 +18,7 @@ from std_msgs.msg import Header
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
-
-def tf2np(tf_msg: TransformStamped) -> tuple[str, str, np.ndarray]:
-    T = np.eye(4, dtype=np.float32)
-    position = tf_msg.transform.translation
-    rot = tf_msg.transform.rotation
-    quat = [rot.x, rot.y, rot.z, rot.w]
-    T[:3, :3] = R.from_quat(quat).as_matrix().astype(np.float32)
-    T[:3, 3] = np.array([position.x, position.y, position.z], dtype=np.float32)
-    return tf_msg.header.frame_id, tf_msg.child_frame_id, T
+from tinynav.core.math_utils import tf2np
 
 
 def pose_msg_to_np(msg: PoseStamped) -> np.ndarray:
@@ -76,15 +68,7 @@ def voxel_downsample(
     return points[unique_idx], colors[unique_idx]
 
 
-def depth_to_grayscale_cloud(
-    depth: np.ndarray,
-    gray_image: np.ndarray,
-    K: np.ndarray,
-    u_grid: np.ndarray,
-    v_grid: np.ndarray,
-    pixel_step: int,
-    max_depth: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, int], list[tuple[float, ...]]]:
+def depth_to_grayscale_cloud(depth, gray_image, K, u_grid, v_grid, pixel_step, max_depth):
     sampled_depth = depth[::pixel_step, ::pixel_step]
     sampled_gray = gray_image[::pixel_step, ::pixel_step]
     fx, fy = K[0, 0], K[1, 1]
@@ -133,16 +117,8 @@ def depth_to_grayscale_cloud(
 
 
 def depth_to_color_cloud(
-    depth: np.ndarray,
-    color_image: np.ndarray,
-    depth_K: np.ndarray,
-    color_K: np.ndarray,
-    T_depth_color: np.ndarray,
-    u_grid: np.ndarray,
-    v_grid: np.ndarray,
-    pixel_step: int,
-    max_depth: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, int], list[tuple[float, ...]]]:
+    depth, color_image, depth_K, color_K, T_depth_color, u_grid, v_grid, pixel_step, max_depth
+):
     sampled_depth = depth[::pixel_step, ::pixel_step]
     fx, fy = depth_K[0, 0], depth_K[1, 1]
     cx, cy = depth_K[0, 2], depth_K[1, 2]
@@ -269,11 +245,7 @@ class GlobalPointCloudPublisher(Node):
         self._logged_color_tf = False
         self._sync_count = 0
         self._projection_debug_counter = 0
-        self.image_topic = (
-            args.gray_image_topic
-            if args.image_mode == "grayscale"
-            else args.color_image_topic
-        )
+        self.image_topic = "/camera/camera/infra1/image_rect_raw" if args.image_mode == "grayscale" else args.color_image_topic
         self.sensor_qos = QoSProfile(
             depth=50, reliability=ReliabilityPolicy.BEST_EFFORT
         )
@@ -765,9 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pose-topic", default="/insight/vio_pose")
     parser.add_argument("--image-mode", choices=("grayscale", "color"), default="color")
-    parser.add_argument(
-        "--gray-image-topic", default="/camera/camera/infra1/image_rect_raw"
-    )
+    # grayscale image topic is fixed to /camera/camera/infra1/image_rect_raw
     parser.add_argument(
         "--color-image-topic",
         default="/camera/camera/color/image_rect_raw/compressed",
