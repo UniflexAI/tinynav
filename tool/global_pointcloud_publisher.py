@@ -215,15 +215,8 @@ class GlobalPointCloudPublisher(Node):
         self.last_keyframe_pose = None
         self._missing_input_counter = 0
         self._published_once = False
-        self._saw_depth = False
-        self._saw_pose = False
-        self._saw_image = False
-        self._saw_tf = False
-        self._saw_tf_static = False
         self._logged_depth_tf = False
         self._logged_color_tf = False
-        self._sync_count = 0
-        self._projection_debug_counter = 0
         self.image_topic = "/camera/camera/infra1/image_rect_raw" if args.image_mode == "grayscale" else "/camera/camera/color/image_rect_raw/compressed"
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.BEST_EFFORT)
 
@@ -265,19 +258,13 @@ class GlobalPointCloudPublisher(Node):
         self.try_update_frame_transforms()
 
     def depth_log_callback(self, msg: Image):
-        if not self._saw_depth:
-            self._saw_depth = True
-            self.get_logger().info("Received first depth frame on /camera/camera/depth/image_rect_raw.")
+        self.get_logger().info("Received first depth frame on /camera/camera/depth/image_rect_raw.", once=True)
 
     def pose_log_callback(self, msg: PoseStamped):
-        if not self._saw_pose:
-            self._saw_pose = True
-            self.get_logger().info(f"Received first pose frame on {self.args.pose_topic}.")
+        self.get_logger().info(f"Received first pose frame on {self.args.pose_topic}.", once=True)
 
     def image_log_callback(self, msg: Image):
-        if not self._saw_image:
-            self._saw_image = True
-            self.get_logger().info(f"Received first {self.args.image_mode} image on {self.image_topic}.")
+        self.get_logger().info(f"Received first {self.args.image_mode} image on {self.image_topic}.", once=True)
 
     def log_missing_inputs(self):
         self._missing_input_counter += 1
@@ -336,14 +323,10 @@ class GlobalPointCloudPublisher(Node):
                     self.get_logger().info(f"Resolved {self.depth_frame_id} -> {self.color_frame_id} transform.")
 
     def tf_callback(self, msg: TFMessage):
-        has_static = any(transform.header.frame_id for transform in msg.transforms)
         if any(transform.child_frame_id for transform in msg.transforms):
-            if not self._saw_tf:
-                self._saw_tf = True
-                self.get_logger().info("Received first TF message.")
-        if has_static and not self._saw_tf_static:
-            self._saw_tf_static = True
-            self.get_logger().info("Received first TF/TF_STATIC message.")
+            self.get_logger().info("Received first TF message.", once=True)
+        if any(transform.header.frame_id for transform in msg.transforms):
+            self.get_logger().info("Received first TF/TF_STATIC message.", once=True)
 
         for transform in msg.transforms:
             frame_id, child_frame_id, T = tf2np(transform)
@@ -446,13 +429,7 @@ class GlobalPointCloudPublisher(Node):
         return translation >= 0.03 or rotation_angle >= np.deg2rad(1.0)
 
     def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
-        self._sync_count += 1
-        if self._sync_count == 1:
-            self.get_logger().info(
-                f"Received first synchronized triplet: depth={depth_msg.header.stamp.sec}.{depth_msg.header.stamp.nanosec:09d}, "
-                f"pose={pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d}, "
-                f"image={image_msg.header.stamp.sec}.{image_msg.header.stamp.nanosec:09d}"
-            )
+        self.get_logger().info(f"Received first synchronized triplet: depth={depth_msg.header.stamp.sec}.{depth_msg.header.stamp.nanosec:09d}, pose={pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d}, image={image_msg.header.stamp.sec}.{image_msg.header.stamp.nanosec:09d}", once=True)
         if self.K is None or self.T_i_depth is None:
             self.log_missing_inputs()
             return
@@ -474,9 +451,7 @@ class GlobalPointCloudPublisher(Node):
             depth = depth.astype(np.float32)
         image = np.asarray(image, dtype=np.uint8)
         if self.args.image_mode == "grayscale" and image.shape[:2] != depth.shape[:2]:
-            if self._projection_debug_counter % 20 == 0:
-                self.get_logger().info(f"Skipping grayscale projection because image and depth shapes differ: depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}")
-            self._projection_debug_counter += 1
+            self.get_logger().info(f"Skipping grayscale projection because image and depth shapes differ: depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}", throttle_duration_sec=1.0)
             return
         sample_u_grid, sample_v_grid = self.get_sample_grid(depth.shape)
 
@@ -493,18 +468,9 @@ class GlobalPointCloudPublisher(Node):
             cloud_camera, cloud_colors, projection_stats, projection_samples = depth_to_grayscale_cloud(depth, image, self.K, sample_u_grid, sample_v_grid, 2, 2.0)
         else:
             cloud_camera, cloud_colors, projection_stats, projection_samples = depth_to_color_cloud(depth, image, self.K, self.color_K, self.T_depth_color, sample_u_grid, sample_v_grid, 2, 2.0)
-        self._projection_debug_counter += 1
         if cloud_camera.size == 0:
-            if self._projection_debug_counter % 20 == 1:
-                self.get_logger().info(
-                    f"No valid {self.args.image_mode} depth points for current synchronized frame. "
-                    f"Projection stats: {projection_stats}, "
-                    f"depth_encoding={depth_msg.encoding}, "
-                    f"depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}, "
-                    f"depth_K={np.round(self.K, 2).tolist()}, "
-                    f"imu_to_depth_t={np.round(self.T_i_depth[:3, 3], 4).tolist()}"
-                )
-        elif self._projection_debug_counter % 20 == 1:
+            self.get_logger().info(f"No valid {self.args.image_mode} depth points for current synchronized frame. Projection stats: {projection_stats}, depth_encoding={depth_msg.encoding}, depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}, depth_K={np.round(self.K, 2).tolist()}, imu_to_depth_t={np.round(self.T_i_depth[:3, 3], 4).tolist()}", throttle_duration_sec=1.0)
+        else:
             if self.args.image_mode == "grayscale":
                 sample_text = "; ".join(
                     [
@@ -519,7 +485,7 @@ class GlobalPointCloudPublisher(Node):
                         for u, v, z, r, g, b, x, y in projection_samples
                     ]
                 )
-            self.get_logger().info(f"{self.args.image_mode.capitalize()} sample points: {sample_text}")
+            self.get_logger().info(f"{self.args.image_mode.capitalize()} sample points: {sample_text}", throttle_duration_sec=1.0)
         cloud_world = transform_points(cloud_camera, T_world_camera)
         keep_mask = crop_mask(cloud_world, current_position, 100.0)
         cloud_world = cloud_world[keep_mask]
@@ -559,7 +525,7 @@ class GlobalPointCloudPublisher(Node):
         )
         if not self._published_once:
             self._published_once = True
-            self.get_logger().info(f"Published first {self.args.image_mode} global cloud with {merged_cloud.shape[0]} points in frame {pose_msg.header.frame_id or 'world'}.")
+            self.get_logger().info(f"Published first {self.args.image_mode} global cloud with {merged_cloud.shape[0]} points in frame {pose_msg.header.frame_id or 'world'}.", once=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
