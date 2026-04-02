@@ -503,9 +503,7 @@ class GlobalPointCloudPublisher(Node):
             )
             return
 
-        keep_mask = crop_mask(
-            self.merged_cloud_cache, current_position, 100.0
-        )
+        keep_mask = crop_mask(self.merged_cloud_cache, current_position, 100.0)
         merged_cloud = self.merged_cloud_cache[keep_mask]
         merged_colors = self.merged_color_cache[keep_mask]
 
