@@ -488,12 +488,8 @@ class GlobalPointCloudPublisher(Node):
         cloud_colors = cloud_colors[keep_mask]
 
         if self.should_add_keyframe(T_world_camera):
-            cloud_world, cloud_colors = voxel_downsample(
-                cloud_world, cloud_colors, 0.05
-            )
-            self.global_cloud_buffer.append(
-                (current_position, cloud_world, cloud_colors)
-            )
+            cloud_world, cloud_colors = voxel_downsample(cloud_world, cloud_colors, 0.05)
+            self.global_cloud_buffer.append((current_position, cloud_world, cloud_colors))
             self.append_to_merged_cache(cloud_world, cloud_colors)
             self.last_keyframe_pose = T_world_camera.copy()
             self.prune_buffer(current_position)
