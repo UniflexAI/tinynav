@@ -254,40 +254,30 @@ class GlobalPointCloudPublisher(Node):
         self.depth_frame_id = msg.header.frame_id or self.depth_frame_id
         if self.K is None:
             self.K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
-            self.get_logger().info(
-                f"Received depth camera intrinsics from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}."
-            )
+            self.get_logger().info(f"Received depth camera intrinsics from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.")
         self.try_update_frame_transforms()
 
     def color_camera_info_callback(self, msg: CameraInfo):
         self.color_frame_id = msg.header.frame_id or self.color_frame_id
         if self.color_K is None:
             self.color_K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
-            self.get_logger().info(
-                f"Received color camera intrinsics from /camera/camera/color/camera_info with frame {msg.header.frame_id}."
-            )
+            self.get_logger().info(f"Received color camera intrinsics from /camera/camera/color/camera_info with frame {msg.header.frame_id}.")
         self.try_update_frame_transforms()
 
     def depth_log_callback(self, msg: Image):
         if not self._saw_depth:
             self._saw_depth = True
-            self.get_logger().info(
-                "Received first depth frame on /camera/camera/depth/image_rect_raw."
-            )
+            self.get_logger().info("Received first depth frame on /camera/camera/depth/image_rect_raw.")
 
     def pose_log_callback(self, msg: PoseStamped):
         if not self._saw_pose:
             self._saw_pose = True
-            self.get_logger().info(
-                f"Received first pose frame on {self.args.pose_topic}."
-            )
+            self.get_logger().info(f"Received first pose frame on {self.args.pose_topic}.")
 
     def image_log_callback(self, msg: Image):
         if not self._saw_image:
             self._saw_image = True
-            self.get_logger().info(
-                f"Received first {self.args.image_mode} image on {self.image_topic}."
-            )
+            self.get_logger().info(f"Received first {self.args.image_mode} image on {self.image_topic}.")
 
     def log_missing_inputs(self):
         self._missing_input_counter += 1
@@ -566,9 +556,7 @@ class GlobalPointCloudPublisher(Node):
                         for u, v, z, r, g, b, x, y in projection_samples
                     ]
                 )
-            self.get_logger().info(
-                f"{self.args.image_mode.capitalize()} sample points: {sample_text}"
-            )
+            self.get_logger().info(f"{self.args.image_mode.capitalize()} sample points: {sample_text}")
         cloud_world = transform_points(cloud_camera, T_world_camera)
         keep_mask = crop_mask(cloud_world, current_position, 100.0)
         cloud_world = cloud_world[keep_mask]
@@ -608,9 +596,7 @@ class GlobalPointCloudPublisher(Node):
         )
         if not self._published_once:
             self._published_once = True
-            self.get_logger().info(
-                f"Published first {self.args.image_mode} global cloud with {merged_cloud.shape[0]} points in frame {pose_msg.header.frame_id or 'world'}."
-            )
+            self.get_logger().info(f"Published first {self.args.image_mode} global cloud with {merged_cloud.shape[0]} points in frame {pose_msg.header.frame_id or 'world'}.")
 
 
 def build_parser() -> argparse.ArgumentParser:
