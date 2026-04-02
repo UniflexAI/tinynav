@@ -255,6 +255,7 @@ def uf_all_sets_list(uf, min_component_size=1):
     return out
 
 
+
 def se3_inv(matrix_4x4:np.ndarray):
     rotation = matrix_4x4[:3, :3]
     translation = matrix_4x4[:3, 3]
