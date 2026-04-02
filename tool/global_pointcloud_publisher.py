@@ -435,8 +435,6 @@ class GlobalPointCloudPublisher(Node):
         path_pose.pose = pose_msg.pose
         self.path_msg.header = pose_msg.header
         self.path_msg.poses.append(path_pose)
-        if False:
-            self.path_msg.poses = self.path_msg.poses[-0 :]
         self.path_pub.publish(self.path_msg)
 
     def should_add_keyframe(self, T_world_camera):
