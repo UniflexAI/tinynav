@@ -234,50 +234,28 @@ class GlobalPointCloudPublisher(Node):
             depth=50, reliability=ReliabilityPolicy.BEST_EFFORT
         )
 
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo,
-            "/camera/camera/infra1/camera_info",
-            self.camera_info_callback,
-            self.sensor_qos,
-        )
+        self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.color_camera_info_sub = None
         if args.image_mode == "color":
-            self.color_camera_info_sub = self.create_subscription(
-                CameraInfo,
-                "/camera/camera/color/camera_info",
-                self.color_camera_info_callback,
-                self.sensor_qos,
-            )
+            self.color_camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/color/camera_info", self.color_camera_info_callback, self.sensor_qos)
         self.tf_sub = self.create_subscription(TFMessage, "/tf", self.tf_callback, 10)
-        self.tf_static_sub = self.create_subscription(
-            TFMessage, "/tf_static", self.tf_callback, 10
-        )
+        self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, 10)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.cloud_pub = self.create_publisher(PointCloud2, "/global_pointcloud", 10)
         self.path_pub = self.create_publisher(Path, "/global_pointcloud_path", 10)
 
-        self.depth_log_sub = self.create_subscription(
-            Image, "/camera/camera/depth/image_rect_raw", self.depth_log_callback, self.sensor_qos
-        )
-        self.pose_log_sub = self.create_subscription(
-            PoseStamped, args.pose_topic, self.pose_log_callback, 10
-        )
+        self.depth_log_sub = self.create_subscription(Image, "/camera/camera/depth/image_rect_raw", self.depth_log_callback, self.sensor_qos)
+        self.pose_log_sub = self.create_subscription(PoseStamped, args.pose_topic, self.pose_log_callback, 10)
         image_msg_type = (
             CompressedImage
             if args.image_mode == "color" and True
             else Image
         )
-        self.image_log_sub = self.create_subscription(
-            image_msg_type, self.image_topic, self.image_log_callback, self.sensor_qos
-        )
+        self.image_log_sub = self.create_subscription(image_msg_type, self.image_topic, self.image_log_callback, self.sensor_qos)
 
-        self.depth_sub = message_filters.Subscriber(
-            self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos
-        )
+        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, args.pose_topic)
-        self.image_sub = message_filters.Subscriber(
-            self, image_msg_type, self.image_topic, qos_profile=self.sensor_qos
-        )
+        self.image_sub = message_filters.Subscriber(self, image_msg_type, self.image_topic, qos_profile=self.sensor_qos)
         self.sync = message_filters.ApproximateTimeSynchronizer(
             [self.depth_sub, self.pose_sub, self.image_sub],
             queue_size=20,
