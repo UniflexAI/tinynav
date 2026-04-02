@@ -139,7 +139,7 @@ Visualization Manager:
           Color Transformer: AxisColor
           Color Transport Hint: raw
           Decay Time: 0
-          Depth Map Topic: /depth/local_cloud
+          Depth Map Topic: /slam/local_cloud
           Depth Map Transport Hint: raw
           Enabled: true
           Invert Rainbow: false

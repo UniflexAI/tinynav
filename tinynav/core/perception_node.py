@@ -111,7 +111,7 @@ class PerceptionNode(Node):
         self.ts.registerCallback(self.images_callback)
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
-        self.depth_pub = self.create_publisher(Image, "/depth/local_cloud", 10)
+        self.depth_pub = self.create_publisher(Image, "/slam/local_cloud", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
