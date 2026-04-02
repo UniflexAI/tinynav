@@ -18,23 +18,7 @@ from std_msgs.msg import Header
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
-from tinynav.core.math_utils import tf2np
-
-
-def pose_msg_to_np(msg: PoseStamped) -> np.ndarray:
-    T = np.eye(4, dtype=np.float32)
-    quat = [
-        msg.pose.orientation.x,
-        msg.pose.orientation.y,
-        msg.pose.orientation.z,
-        msg.pose.orientation.w,
-    ]
-    T[:3, :3] = R.from_quat(quat).as_matrix().astype(np.float32)
-    T[:3, 3] = np.array(
-        [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
-        dtype=np.float32,
-    )
-    return T
+from tinynav.core.math_utils import pose_msg2np, tf2np
 
 
 def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
@@ -622,7 +606,7 @@ class GlobalPointCloudPublisher(Node):
         # `/insight/vio_pose` provides T_w_i, where the world frame is z-up.
         # Depth backprojection yields points in the camera optical frame, so we
         # first map them into the IMU/depth rig frame before applying T_w_i.
-        T_w_i = pose_msg_to_np(pose_msg)
+        T_w_i = pose_msg2np(pose_msg)
         T_world_camera = T_w_i @ self.T_i_depth
         current_position = T_w_i[:3, 3].copy()
         self.publish_pose_tf(T_w_i, pose_msg.header.stamp, pose_msg.header.frame_id)
