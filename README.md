@@ -270,6 +270,27 @@ uv sync
 
 This will create a virtual environment and install all required dependencies.
 
+### Optional Dependencies
+
+Depending on your robot platform or map representation, install the corresponding extras:
+
+```bash
+# Unitree GO2 robot support
+uv sync --extra unitree
+
+# LeKiwi robot support
+uv sync --extra lekiwi
+
+# 3D Gaussian Splatting (3DGS) map support
+uv sync --extra 3dgs
+```
+
+You can combine multiple extras in one command:
+
+```bash
+uv sync --extra unitree --extra 3dgs
+```
+
 # Next Steps
 - [ ] **High Optimization NN models**:
       Support real-time perception processing at >= 30fps.
