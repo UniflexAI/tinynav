@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-arm64:
-    runs-on: ARM64
+    runs-on: ubuntu-22.04-arm
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,8 +18,7 @@ jobs:
         run: git lfs checkout
 
       - name: Extract short commit SHA
-        id: vars
-        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+        run: echo "SHORT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -32,17 +31,16 @@ jobs:
 
       - name: Build Docker Image (aarch64)
         run: |
-          mkdir -p /home/nvidia/.buildx-cache/arm64
           docker buildx build \
             --platform linux/arm64 \
             --tag uniflexai/tinynav:${SHORT_SHA}-arm64 \
+            --cache-from type=gha,scope=tinynav-arm64 \
+            --cache-to type=gha,mode=max,scope=tinynav-arm64 \
             --push \
-            --cache-from=type=local,src=/home/nvidia/.buildx-cache/arm64 \
-            --cache-to=type=local,dest=/home/nvidia/.buildx-cache/arm64,mode=max \
             .
 
   build-amd64:
-    runs-on: X64
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -53,8 +51,7 @@ jobs:
         run: git lfs checkout
 
       - name: Extract short commit SHA
-        id: vars
-        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+        run: echo "SHORT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -67,17 +64,16 @@ jobs:
 
       - name: Build Docker Image (amd64)
         run: |
-          mkdir -p /tmp/.buildx-cache/amd64
           docker buildx build \
             --platform linux/amd64 \
             --tag uniflexai/tinynav:${SHORT_SHA}-amd64 \
+            --cache-from type=gha,scope=tinynav-amd64 \
+            --cache-to type=gha,mode=max,scope=tinynav-amd64 \
             --push \
-            --cache-from=type=local,src=/tmp/.buildx-cache/amd64 \
-            --cache-to=type=local,dest=/tmp/.buildx-cache/amd64,mode=max \
             .
 
   build-multiarch:
-    runs-on: ARM64
+    runs-on: ubuntu-22.04
     needs: [build-amd64, build-arm64]
     steps:
       - name: Set up Docker Buildx
@@ -89,16 +85,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract short commit SHA
+        run: echo "SHORT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
+
       - name: Compose multi-arch manifest
-        env:
-          SHORT_SHA: ${{ github.sha }}
         run: |
-          SHORT_SHA=${SHORT_SHA::7}
           docker buildx imagetools create \
             -t uniflexai/tinynav:${SHORT_SHA} \
-            uniflexai/tinynav:${SHORT_SHA}-amd64 \
-            uniflexai/tinynav:${SHORT_SHA}-arm64
-          docker buildx imagetools create \
             -t uniflexai/tinynav:latest \
             uniflexai/tinynav:${SHORT_SHA}-amd64 \
             uniflexai/tinynav:${SHORT_SHA}-arm64
