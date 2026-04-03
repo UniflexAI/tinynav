@@ -18,7 +18,6 @@ jobs:
         run: git lfs checkout
 
       - name: Extract short commit SHA
-        id: vars
         run: echo "SHORT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
@@ -50,7 +49,6 @@ jobs:
         run: git lfs checkout
 
       - name: Extract short commit SHA
-        id: vars
         run: echo "SHORT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
@@ -71,7 +69,7 @@ jobs:
             .
 
   build-multiarch:
-    runs-on: ARM64
+    runs-on: ubuntu-22.04
     needs: [build-amd64, build-arm64]
     steps:
       - name: Set up Docker Buildx
@@ -83,9 +81,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract short commit SHA
+        run: echo "SHORT_SHA=${GITHUB_SHA::8}" >> $GITHUB_ENV
+
       - name: Compose multi-arch manifest
-        env:
-          SHORT_SHA: ${{ github.sha }}
         run: |
           SHORT_SHA=${SHORT_SHA::8}
           docker buildx imagetools create \
