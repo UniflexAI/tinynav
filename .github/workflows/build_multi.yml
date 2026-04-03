@@ -34,8 +34,8 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             --tag uniflexai/tinynav:${SHORT_SHA}-arm64 \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
+            --cache-from type=gha,scope=tinynav-arm64 \
+            --cache-to type=gha,mode=max,scope=tinynav-arm64 \
             --push \
             .
 
@@ -67,8 +67,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --tag uniflexai/tinynav:${SHORT_SHA}-amd64 \
-            --cache-from type=gha \
-            --cache-to type=gha,mode=max \
+            --cache-from type=gha,scope=tinynav-amd64 \
+            --cache-to type=gha,mode=max,scope=tinynav-amd64 \
             --push \
             .
 
