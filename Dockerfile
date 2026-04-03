@@ -162,7 +162,11 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONPATH="/tinynav:/3rdparty/gtsam/build/python:/opt/venv/lib/python3.10/site-packages"
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
-RUN /root/.local/bin/uv sync --python /opt/venv/bin/python
+# lekiwi conflicts with unitree (lerobot vs unitree-sdk2py dependency clash), so only unitree is included by default.
+# To use lekiwi instead, replace --extra unitree with --extra lekiwi.
+RUN /root/.local/bin/uv sync --python /opt/venv/bin/python \
+    --extra unitree \
+    --extra 3dgs
 
 # Write entrypoint.sh (model build prompt only)
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
