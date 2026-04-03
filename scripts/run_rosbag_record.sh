@@ -6,7 +6,7 @@ record_root="${xdg_data_home}/tinynav/rosbags"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 output_dir="${record_root}/map_record_${timestamp}"
 
-mkdir -p "${output_dir}"
+mkdir -p "${record_root}"
 
 ros2 bag record \
     --output "${output_dir}" \
