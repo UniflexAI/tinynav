@@ -51,7 +51,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     for v in range(0, depth_height, step):
         for u in range(0, depth_width, step):
             d = depth_image[v, u]
-            if d <= 0:
+            if (not np.isfinite(d)) or d <= 0:
                 continue
 
             # Project to camera coordinates
@@ -533,4 +533,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
