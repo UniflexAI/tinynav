@@ -39,7 +39,7 @@ jobs:
             .
 
   build-amd64:
-    runs-on: X64
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -87,7 +87,7 @@ jobs:
         env:
           SHORT_SHA: ${{ github.sha }}
         run: |
-          SHORT_SHA=${SHORT_SHA::7}
+          SHORT_SHA=${SHORT_SHA::8}
           docker buildx imagetools create \
             -t uniflexai/tinynav:${SHORT_SHA} \
             uniflexai/tinynav:${SHORT_SHA}-amd64 \
