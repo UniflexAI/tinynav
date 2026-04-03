@@ -1,4 +1,9 @@
 #!/bin/bash
+set -e
+
+echo "[run_rosbag_examples] Prewarming uv environment with uv sync..."
+uv sync
+
 tmux new-session \; \
   split-window -h \; \
   split-window -v \; \

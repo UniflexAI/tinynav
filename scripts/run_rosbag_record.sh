@@ -1,6 +1,16 @@
 #!/bin/bash
+set -euo pipefail
+
+xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+record_root="${xdg_data_home}/tinynav/rosbags"
+timestamp="$(date +%Y%m%d_%H%M%S)"
+output_dir="${record_root}/map_record_${timestamp}"
+
+mkdir -p "${record_root}"
+
 ros2 bag record \
-    --max-cache-size 2147483648\
+    --output "${output_dir}" \
+    --max-cache-size 2147483648 \
     /camera/camera/infra1/camera_info \
     /camera/camera/infra1/image_rect_raw \
     /camera/camera/infra1/metadata \
@@ -15,5 +25,3 @@ ros2 bag record \
     /tf \
     /camera/camera/color/image_rect_raw/compressed \
     /tf_static
-
-
