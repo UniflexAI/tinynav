@@ -34,6 +34,8 @@ jobs:
           docker buildx build \
             --platform linux/arm64 \
             --tag uniflexai/tinynav:${SHORT_SHA}-arm64 \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --push \
             .
 
@@ -65,6 +67,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64 \
             --tag uniflexai/tinynav:${SHORT_SHA}-amd64 \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             --push \
             .
 
@@ -86,12 +90,8 @@ jobs:
 
       - name: Compose multi-arch manifest
         run: |
-          SHORT_SHA=${SHORT_SHA::8}
           docker buildx imagetools create \
             -t uniflexai/tinynav:${SHORT_SHA} \
-            uniflexai/tinynav:${SHORT_SHA}-amd64 \
-            uniflexai/tinynav:${SHORT_SHA}-arm64
-          docker buildx imagetools create \
             -t uniflexai/tinynav:latest \
             uniflexai/tinynav:${SHORT_SHA}-amd64 \
             uniflexai/tinynav:${SHORT_SHA}-arm64
