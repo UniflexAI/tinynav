@@ -334,7 +334,7 @@ class PlanningNode(Node):
 
     def publish_height_map(self, origin, esdf_map, header):
         height_normalized = np.clip(esdf_map / 2.0 * 255, 0, 255).astype(np.uint8)
-        color_image = cv2.applyColorMap(height_uint8, cv2.COLORMAP_JET)
+        color_image = cv2.applyColorMap(height_normalized, cv2.COLORMAP_JET)
         img_msg = self.bridge.cv2_to_imgmsg(color_image, encoding="bgr8")
         img_msg.header = header
         self.height_map_pub.publish(img_msg)
