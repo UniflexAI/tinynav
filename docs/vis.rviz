@@ -12,6 +12,8 @@ Panels:
         - /Planning1/3DGridMap1/Autocompute Value Bounds1
         - /Planning1/TrajScores1
         - /Planning1/PointCloud21
+        - /Planning1/ObstacleMask1
+        - /Planning1/Footprint1
         - /PointCloud21
         - /Path1
       Splitter Ratio: 0.5
@@ -375,6 +377,49 @@ Visualization Manager:
             Value: /planning/occupied_voxels_with_esdf
           Use Fixed Frame: true
           Use rainbow: true
+          Value: true
+        - Alpha: 0.5
+          Class: rviz_default_plugins/Map
+          Color Scheme: map
+          Draw Behind: false
+          Enabled: true
+          Name: ObstacleMask
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /planning/obstacle_mask
+          Update Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /planning/obstacle_mask_updates
+          Use Timestamp: false
+          Value: true
+        - Alpha: 1
+          Channel Name: intensity
+          Class: rviz_default_plugins/PointCloud
+          Color: 255; 255; 0
+          Color Transformer: FlatColor
+          Decay Time: 0
+          Enabled: true
+          Name: Footprint
+          Position Transformer: XYZ
+          Selectable: true
+          Size (Pixels): 3
+          Size (m): 0.05000000074505806
+          Style: Points
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /planning/footprint
+          Use Fixed Frame: true
           Value: true
       Enabled: true
       Name: Planning
