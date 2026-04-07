@@ -1,7 +1,5 @@
 import matplotlib
 matplotlib.use('Agg')
-import os
-import yaml
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -24,7 +22,7 @@ from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 @dataclass
 class RobotConfig:
-    """Robot geometry loaded from YAML. Body frame: +x forward, +y left."""
+    """Robot geometry. Body frame: +x forward, +y left."""
     name: str = 'go2'
     shape: str = 'square'
     length: float = 0.7
@@ -53,23 +51,21 @@ class RobotConfig:
         return float(hl + self.control_x), float(hl - self.control_x), float(hw)
 
 
-def load_robot_config(path: str) -> RobotConfig:
-    with open(path, 'r') as f:
-        raw = yaml.safe_load(f)
-    r = raw.get('robot', {})
-    return RobotConfig(
-        name=r.get('name', 'go2'), shape=r.get('shape', 'square'),
-        length=float(r.get('length', 0.7)), width=float(r.get('width', 0.3)),
-        radius=float(r.get('radius', 0.3)),
-        camera_x=float(r.get('camera', {}).get('x', 0.35)),
-        camera_y=float(r.get('camera', {}).get('y', 0.0)),
-        control_x=float(r.get('control_center', {}).get('x', 0.0)),
-        control_y=float(r.get('control_center', {}).get('y', 0.0)),
-        safety_radius=float(r.get('safety_radius', 0.1)),
-    )
+GO2_CONFIG = RobotConfig(
+    name='go2', shape='square',
+    length=0.7, width=0.3,
+    camera_x=0.35, camera_y=0.0,
+    control_x=0.0, control_y=0.0,
+    safety_radius=0.1,
+)
 
-
-DEFAULT_ROBOT_CONFIG = os.path.join(os.path.dirname(__file__), '..', 'config', 'robot_go2.yaml')
+B2_CONFIG = RobotConfig(
+    name='b2', shape='square',
+    length=1.0, width=0.5,
+    camera_x=0.5, camera_y=0.0,
+    control_x=-0.5, control_y=0.0,
+    safety_radius=0.1,
+)
 
 # === Helper functions ===
 @njit(cache=True)
@@ -339,7 +335,7 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
-        self.robot = load_robot_config(DEFAULT_ROBOT_CONFIG)
+        self.robot = GO2_CONFIG
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
