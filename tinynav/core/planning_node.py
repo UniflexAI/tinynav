@@ -48,7 +48,7 @@ class RobotConfig:
     def footprint_from_control(self):
         """Returns (front_len, rear_len, half_w) relative to control center."""
         hl, hw = self.half_size
-        return float(hl + self.control_x), float(hl - self.control_x), float(hw)
+        return float(hl - self.control_x), float(hl + self.control_x), float(hw)
 
 
 GO2_CONFIG = RobotConfig(
@@ -562,7 +562,7 @@ class PlanningNode(Node):
             magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
             init_v = v_dir * float(magnitude)
             trajectories, params = generate_trajectory_library_3d(
-                init_p = T[:3, 3],
+                init_p = self.camera_to_robot_center(T),
                 init_v = init_v,
                 init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             )
