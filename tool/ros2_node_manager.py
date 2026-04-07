@@ -77,8 +77,10 @@ class Ros2NodeManager(Node):
             '/camera/camera/gyro/sample',
             '/camera/camera/color/image_raw',
             '/camera/camera/color/camera_info',
+            '/camera/camera/color/image_rect_raw/compressed',
             '/camera/camera/imu',
             '/tf',
+            '/tf_static',
             '/cmd_vel',
             '/mapping/global_plan',
             '/mapping/poi',
@@ -221,4 +223,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
