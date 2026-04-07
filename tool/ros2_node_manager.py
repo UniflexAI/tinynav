@@ -37,7 +37,8 @@ class Ros2NodeManager(Node):
     
     def _start(self, mode):
         if mode == 'realsense_sensor':
-            self._start_realsense_sensor()
+            # self._start_realsense_sensor()
+            pass
         elif mode == 'realsense_bag_record':
             self._start_realsense_bag_record()
         elif mode == 'rosbag_build_map':
@@ -59,13 +60,14 @@ class Ros2NodeManager(Node):
         ]
     
     def _start_realsense_sensor(self):
-        self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
+        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
+        pass
     
     def _start_realsense_bag_record(self):
         if os.path.exists(self.bag_path):
             shutil.rmtree(self.bag_path)
         
-        self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
+        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         
         topics = [
             '/camera/camera/infra1/camera_info',
