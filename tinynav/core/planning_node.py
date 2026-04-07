@@ -12,10 +12,7 @@ from scipy.ndimage import distance_transform_edt, binary_dilation
 from dataclasses import dataclass
 from numba import njit
 import message_filters
-import matplotlib.pyplot as plt
 from rclpy.time import Time
-import io
-from PIL import Image as PIL_Image
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2

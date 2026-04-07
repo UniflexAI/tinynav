@@ -7,7 +7,6 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 from std_msgs.msg import Float32
 import time
-import logging
 
 
 class Ros2UnitreeManagerNode(Node):
