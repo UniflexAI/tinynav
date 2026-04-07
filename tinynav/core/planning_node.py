@@ -7,7 +7,8 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 import numpy as np
-from scipy.ndimage import maximum_filter, distance_transform_edt
+from scipy.ndimage import distance_transform_edt, binary_dilation
+from dataclasses import dataclass
 from numba import njit
 import message_filters
 import matplotlib.pyplot as plt
@@ -110,45 +111,38 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     return occupancy_grid
 
 
-@njit(cache=True)
-def occupancy_grid_to_height_map(occupancy_grid, origin, resolution, threshold=0.1, method='max'):
-    X, Y, Z = occupancy_grid.shape
-    height_map = np.full((X, Y), -np.nan, dtype=np.float32)
-    for x in range(X):
-        for y in range(Y):
-            zs = []
-            for z in range(Z):
-                if occupancy_grid[x, y, z] >= threshold:
-                    world_z = origin[2] + (z + 0.5) * resolution
-                    zs.append(world_z)
-            if zs:
-                if method == 'max':
-                    height_map[x, y] = max(zs)
-                elif method == 'min':
-                    height_map[x, y] = min(zs)
-    return height_map
+@dataclass
+class ObstacleConfig:
+    robot_z_bottom: float = -0.2
+    robot_z_top: float = 0.5
+    occ_threshold: float = 0.1
+    min_wall_span_m: float = 0.4
+    dilation_cells: int = 3
 
-def max_pool_height_map(height_map, kernel_size=1):
-    nan_mask = np.isnan(height_map)
-    filled = np.copy(height_map)
-    filled[nan_mask] = -np.inf
-    pooled = maximum_filter(filled, size=kernel_size, mode='nearest')
-    return pooled
 
-def height_map_to_ESDF(height_map, height_threshold, resolution, method='max'):
-    if method == 'max':
-        occupancy = (height_map > height_threshold).astype(np.float32)
-    elif method == 'min':
-        occupancy = (height_map < height_threshold).astype(np.float32)
-    else:
-        raise ValueError(f"Invalid method: {method}. Use 'max' or 'min'.")
-    
-    if np.any(occupancy):
-        esdf = distance_transform_edt(occupancy == 0)
-    else:
-        esdf = np.full_like(occupancy, 100.0, dtype=np.float32)
+def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
+    """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
+    Walls have large z-span; stair risers / ground bumps have small span."""
+    config = config or ObstacleConfig()
+    h, w, z_dim = occupancy_grid.shape
+    z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
+    z_rel = z_world - robot_z
+    z_mask = (z_rel >= config.robot_z_bottom) & (z_rel <= config.robot_z_top)
 
-    return resolution * esdf
+    obstacle = np.zeros((h, w), dtype=bool)
+    if np.any(z_mask):
+        band_occ = occupancy_grid[:, :, z_mask] > config.occ_threshold
+        has_occ = np.any(band_occ, axis=2)
+        n_z = band_occ.shape[2]
+        z_idx = np.arange(n_z, dtype=np.float32)
+        occ_high = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
+        occ_low = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], n_z).min(axis=2)
+        z_span = (occ_high - occ_low) * resolution
+        obstacle = has_occ & (z_span >= config.min_wall_span_m)
+
+    if config.dilation_cells > 0 and np.any(obstacle):
+        obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
+    return obstacle
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
@@ -271,7 +265,7 @@ class PlanningNode(Node):
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
-        self.traj_scores_pub = self.create_publisher(Image, "/planning/score_traj", 10)
+        self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
@@ -292,6 +286,7 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
+        self.obstacle_config = ObstacleConfig()
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
@@ -322,36 +317,24 @@ class PlanningNode(Node):
             self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camerainfo_sub)
 
-    def publish_height_map_traj(self, pooled_map, trajectories, occ_points, top_indices, scores, params, origin, resolution):
-        fig, ax = plt.subplots(figsize=(8, 6))
-        height_normalized = (np.nan_to_num(pooled_map, nan=0.0) + 5) * 30
-        height_uint8 = height_normalized.astype(np.uint8)
-        ax.imshow(height_uint8, cmap='jet', vmin=0, vmax=255, origin='upper', interpolation='nearest')
-        for idx in top_indices:
-            if scores[idx] > -1:
-                traj = trajectories[idx]
-                occ_idx = occ_points[idx]
-                x = (traj[:, 0] - origin[0]) / resolution
-                y = (traj[:, 1] - origin[1]) / resolution
-                ax.plot(y, x, label=f"score:{scores[idx]:.1f}, gyro:{params[idx][1]:.1f}", alpha=0.8)
-                ax.plot(y[occ_idx], x[occ_idx], 'r*', markersize=8, label=None)
-        ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), borderaxespad=0.)
+    def publish_obstacle_mask(self, mask, stamp):
+        msg = OccupancyGrid()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.info.resolution = self.resolution
+        msg.info.width = mask.shape[1]
+        msg.info.height = mask.shape[0]
+        msg.info.origin.position.x = self.origin[0]
+        msg.info.origin.position.y = self.origin[1]
+        msg.info.origin.position.z = self.origin[2] + self.grid_shape[2] * self.resolution / 2
+        msg.info.origin.orientation.w = 1.0
+        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
+        self.obstacle_mask_pub.publish(msg)
 
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
-        buf.seek(0)
-        img = np.array(PIL_Image.open(buf))[:, :, :3]  # Convert to RGB NumPy array
-        buf.close()
-
-        bridge = CvBridge()
-        img_msg = bridge.cv2_to_imgmsg(img, encoding='rgb8')
-        self.traj_scores_pub.publish(img_msg)
-
-    def publish_height_map(self, origin, pooled_map, header):
-        height_normalized = (np.nan_to_num(pooled_map, nan=0.0) + 5) * 30
-        height_uint8 = height_normalized.astype(np.uint8)
-        color_image = cv2.applyColorMap(height_uint8, cv2.COLORMAP_JET)
+    def publish_height_map(self, origin, esdf_map, header):
+        height_normalized = np.clip(esdf_map / 2.0 * 255, 0, 255).astype(np.uint8)
+        color_image = cv2.applyColorMap(height_normalized, cv2.COLORMAP_JET)
         img_msg = self.bridge.cv2_to_imgmsg(color_image, encoding="bgr8")
         img_msg.header = header
         self.height_map_pub.publish(img_msg)
@@ -450,15 +433,18 @@ class PlanningNode(Node):
 
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
-        with Timer(name='heightmap', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            height_map = occupancy_grid_to_height_map(self.occupancy_grid, self.origin, self.resolution)
-            pooled_map = max_pool_height_map(height_map)
-            ESDF_map = height_map_to_ESDF(pooled_map, self.origin[2]+0.4, self.resolution)
+        with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            obstacle_mask = build_obstacle_map(
+                self.occupancy_grid, self.origin, self.resolution,
+                robot_z=T[2, 3], config=self.obstacle_config,
+            )
+            ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
-        with Timer(name='vis heighmap and esdf', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             v_dir = T[:3, :3] @ np.array([0, 0, 1])
@@ -476,9 +462,6 @@ class PlanningNode(Node):
             scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
-
-        #with Timer(name='vis traj scores', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        #    self.publish_height_map_traj(pooled_map, trajectories, occ_points, top_indices, scores, params, self.origin, self.resolution)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             def cost_function(traj, param, score, target_pose):
