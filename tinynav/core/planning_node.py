@@ -1,5 +1,3 @@
-import matplotlib
-matplotlib.use('Agg')
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
