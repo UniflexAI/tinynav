@@ -21,6 +21,22 @@ numpy_to_ctypes = {
     np.dtype(np.bool_):  ctypes.c_bool
 }
 
+
+def disparity_to_depth(disparity: np.ndarray, baseline: float, focal_length: float) -> np.ndarray:
+    disparity = np.asarray(disparity, dtype=np.float32)
+    baseline = float(np.asarray(baseline).reshape(-1)[0])
+    focal_length = float(np.asarray(focal_length).reshape(-1)[0])
+
+    if baseline <= 0.0:
+        raise ValueError(f"baseline must be positive, got {baseline}")
+    if focal_length <= 0.0:
+        raise ValueError(f"focal_length must be positive, got {focal_length}")
+
+    depth = np.zeros_like(disparity, dtype=np.float32)
+    valid = np.isfinite(disparity) & (disparity > 0.0)
+    depth[valid] = (baseline * focal_length) / disparity[valid]
+    return depth
+
 class TRTBase:
     def __init__(self, engine_path):
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
@@ -209,25 +225,28 @@ class Dinov2TRT(TRTBase):
 
 class StereoEngineTRT(TRTBase):
     def _get_static_shape(self, name):
-        """Ensure disp/depth outputs get a valid max shape for buffer allocation.
+        """Ensure the stereo output gets a valid max shape for buffer allocation.
 
-        Some TensorRT versions report dynamic outputs like disp/depth with empty
-        or scalar shapes. Instead of asking for their profile shapes directly,
-        we derive the max (H, W) from the \"left\" input profile, since in this
-        network disp/depth share the same spatial resolution as the inputs.
+        The original Retinify ONNX is disp-only. Some TensorRT versions report
+        dynamic outputs with empty or scalar shapes. Instead of asking for the
+        output profile shape directly, derive max (H, W) from the "left" input
+        profile because the stereo output shares the same spatial resolution.
         """
-        if name in ("disp", "depth"):
+        if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
             try:
                 _, _, max_in_shape = self.engine.get_tensor_profile_shape("left", 0)
-                # Inputs are (N, C, H, W); outputs are (1, 1, H, W).
                 return (1, 1, int(max_in_shape[2]), int(max_in_shape[3]))
             except Exception:
-                # Fallback to base behavior if profile info is unavailable.
                 pass
         return super()._get_static_shape(name)
 
     def __init__(self, engine_path=f"/tinynav/tinynav/models/retinify_0_1_5_dynamic_{platform.machine()}.plan"):
         super().__init__(engine_path)
+        if len(self.inputs) != 2:
+            raise RuntimeError(f"Retinify disp-only engine must have 2 inputs, got {len(self.inputs)}")
+        if len(self.outputs) != 1:
+            raise RuntimeError(f"Retinify disp-only engine must have 1 output, got {len(self.outputs)}")
+        self.output_name = self.outputs[0]["name"]
         # Current shapes/byte sizes are set per infer() call, based on the
         # actually received image size (H, W), not the engine's max profile.
         self._current_input_shapes = (1, 1, 1, 1)
@@ -246,23 +265,14 @@ class StereoEngineTRT(TRTBase):
                                    self._current_input_nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
             cudart.cudaMemcpyAsync(self.inputs[1]["device"], self.inputs[1]["host"].ctypes.data,
                                    self._current_input_nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
-            for inp in self.inputs[2:]:
-                cudart.cudaMemcpyAsync(inp["device"], inp["host"].ctypes.data,
-                                       inp["nbytes"], cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
         self.context.set_optimization_profile_async(0, self.stream)
         self.context.set_input_shape("left", input_shapes)
         self.context.set_input_shape("right", input_shapes)
         self.context.execute_async_v3(stream_handle=self.stream)
         h_net, w_net = input_shapes[2], input_shapes[3]
         if "aarch64" not in platform.machine():
-            # Copy back only the active region for disp/depth, based on the
-            # current logical image size (h_net, w_net). Other outputs keep
-            # their full allocated size.
             for out in self.outputs:
-                if out["name"] in ("disp", "depth"):
-                    nbytes = input_shapes[2] * input_shapes[3] * np.float32().itemsize
-                else:
-                    nbytes = out["nbytes"]
+                nbytes = input_shapes[2] * input_shapes[3] * np.float32().itemsize
                 cudart.cudaMemcpyAsync(
                     out["host"].ctypes.data,
                     out["device"],
@@ -273,16 +283,9 @@ class StereoEngineTRT(TRTBase):
         cudart.cudaStreamSynchronize(self.stream)
         results = {}
         for out in self.outputs:
-            arr = out["host"]
-            name = out["name"]
-            if name in ("disp", "depth"):
-                # Interpret disp/depth as a flat buffer whose leading
-                # h_net * w_net elements form the current image.
-                flat = np.asarray(arr).reshape(-1)
-                needed = h_net * w_net
-                results[name] = flat[:needed].reshape(h_net, w_net).copy()
-            else:
-                results[name] = np.array(arr).copy() if arr.ndim == 0 else arr.copy()
+            flat = np.asarray(out["host"]).reshape(-1)
+            needed = h_net * w_net
+            results[out["name"]] = flat[:needed].reshape(h_net, w_net).copy()
         return results
 
     async def infer(self, left_img, right_img, baseline, focal_length):
@@ -296,17 +299,16 @@ class StereoEngineTRT(TRTBase):
         # Copy only the active region (h_in * w_in bytes) into the max-sized host buffers.
         np.copyto(self.inputs[0]["host"].reshape(-1)[: left_tensor.size], left_tensor)
         np.copyto(self.inputs[1]["host"].reshape(-1)[: right_tensor.size], right_tensor)
-        np.copyto(self.inputs[2]["host"], baseline)
-        np.copyto(self.inputs[3]["host"], focal_length)
 
         results = await self.run_graph()
-        disp = results["disp"]
-        depth = results["depth"]
-        if disp.shape != (h_in, w_in) or depth.shape != (h_in, w_in):
+        disp = results[self.output_name]
+        if disp.shape != (h_in, w_in):
             raise RuntimeError(
-                f"StereoEngine output shape mismatch: got disp {disp.shape}, depth {depth.shape}, expected ({h_in}, {w_in})"
+                f"StereoEngine output shape mismatch: got disp {disp.shape}, expected ({h_in}, {w_in})"
             )
-        return disp.astype(np.float32), depth.astype(np.float32)
+        disp = disp.astype(np.float32)
+        depth = disparity_to_depth(disp, baseline, focal_length)
+        return disp, depth
 
 
 if __name__ == "__main__":
