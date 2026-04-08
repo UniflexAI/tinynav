@@ -9,7 +9,12 @@ import threading
 import random
 
 class Ros2NodeManager(Node):
-    def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
+    def __init__(
+        self,
+        tinynav_db_path: str = '/tinynav/tinynav_db',
+        build_map_log_file: str = None,
+        looper_interface: str = 'enx020000000001',
+    ):
         super().__init__('ros2_node_manager')
         self.state = 'idle'
         self.processes = {}
@@ -17,6 +22,9 @@ class Ros2NodeManager(Node):
         self.bag_path = os.path.join(tinynav_db_path, 'bag')
         self.map_path = os.path.join(tinynav_db_path, 'map')
         self.nav_out_path = os.path.join(tinynav_db_path, 'nav_out')
+        self.build_map_log_file = build_map_log_file
+        self.looper_interface = looper_interface
+        self.looper_interface_up = False
         self.ros_domain_id = str(random.randint(1, 100))
         self.get_logger().info(f'Using randomized ROS_DOMAIN_ID={self.ros_domain_id}')
         
@@ -31,7 +39,7 @@ class Ros2NodeManager(Node):
         cmd = msg.data.strip()
         if cmd == self.state:
             self._stop_all()
-        elif cmd in ['realsense_sensor', 'realsense_bag_record', 'rosbag_build_map', 'navigation']:
+        elif cmd in ['realsense_sensor', 'realsense_bag_record', 'rosbag_build_map', 'navigation', 'looper_sensor']:
             self._stop_all()
             self._start(cmd)
     
@@ -39,6 +47,8 @@ class Ros2NodeManager(Node):
         if mode == 'realsense_sensor':
             # self._start_realsense_sensor()
             pass
+        elif mode == 'looper_sensor':
+            self._start_looper_sensor()
         elif mode == 'realsense_bag_record':
             self._start_realsense_bag_record()
         elif mode == 'rosbag_build_map':
@@ -62,6 +72,15 @@ class Ros2NodeManager(Node):
     def _start_realsense_sensor(self):
         #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         pass
+
+    def _start_looper_sensor(self):
+        cmd = ['ip', 'link', 'set', 'dev', self.looper_interface, 'up']
+        try:
+            subprocess.run(cmd, check=True)
+            self.looper_interface_up = True
+            self.get_logger().info(f"Looper interface started: {self.looper_interface}")
+        except subprocess.CalledProcessError as e:
+            self.get_logger().error(f"Failed to start looper interface {self.looper_interface}: {e}")
     
     def _start_realsense_bag_record(self):
         if os.path.exists(self.bag_path):
@@ -111,6 +130,11 @@ class Ros2NodeManager(Node):
             '--map_save_path', self.map_path,
             '--bag_file', bag_file
         ]
+        if self.build_map_log_file:
+            log_path = self.build_map_log_file
+            if not os.path.isabs(log_path):
+                log_path = os.path.join(self.map_path, log_path)
+            cmd_build.extend(['--log_file', log_path])
         self.processes['build_map'] = self._spawn(cmd_build, extra_env=domain_env)
         
         def wait_and_convert():
@@ -179,6 +203,14 @@ class Ros2NodeManager(Node):
                         proc.kill()
                     except:
                         pass
+        if self.looper_interface_up:
+            try:
+                subprocess.run(['ip', 'link', 'set', 'dev', self.looper_interface, 'down'], check=True)
+                self.get_logger().info(f"Looper interface stopped: {self.looper_interface}")
+            except subprocess.CalledProcessError as e:
+                self.get_logger().error(f"Failed to stop looper interface {self.looper_interface}: {e}")
+            finally:
+                self.looper_interface_up = False
         self.processes.clear()
         if self.state != 'idle':
             self.state = 'idle'
@@ -219,9 +251,25 @@ class Ros2NodeManager(Node):
 def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--tinynav_db_path', type=str, default='/tinynav/tinynav_db')
+    parser.add_argument(
+        '--build_map_log_file',
+        type=str,
+        default=None,
+        help='Enable build_map_node file log. Absolute path or relative to <tinynav_db_path>/map.',
+    )
+    parser.add_argument(
+        '--looper_interface',
+        type=str,
+        default='enx020000000001',
+        help='Network interface used by looper sensor.',
+    )
     parsed_args, unknown_args = parser.parse_known_args(args)
     rclpy.init(args=unknown_args)
-    node = Ros2NodeManager(tinynav_db_path=parsed_args.tinynav_db_path)
+    node = Ros2NodeManager(
+        tinynav_db_path=parsed_args.tinynav_db_path,
+        build_map_log_file=parsed_args.build_map_log_file,
+        looper_interface=parsed_args.looper_interface,
+    )
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

@@ -789,20 +789,26 @@ class ImageTransportsNode(Node):
         self.image_pub.publish(image_msg)
 
 def main(args=None):
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    rclpy.init(args=args)
-
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--bag_file", type=str, default="tinynav_db")
     parser.add_argument("--map_save_path", type=str, default="tinynav_db")
+    parser.add_argument("--log_file", type=str, default=None, help="Path to the log file")
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+    handlers = [logging.StreamHandler(sys.stdout)]
+    if parsed_args.log_file:
+        log_dir = os.path.dirname(parsed_args.log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handlers.append(logging.FileHandler(parsed_args.log_file))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
+    )
+    rclpy.init(args=unknown_args)
 
     exec_ = SingleThreadedExecutor()
     player_node = BagPlayer(parsed_args.bag_file)
