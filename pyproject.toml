@@ -46,7 +46,7 @@ lekiwi =[
     "lerobot[lekiwi]==0.3.3",
 ]
 unitree = [
-    "unitree-sdk2py @ git+https://github.com/unitreerobotics/unitree_sdk2_python.git@404fe44d76f705c002c97e773276f2a8fefb57e4",
+    "unitree-sdk2py @ git+https://github.com/junlinp/unitree_sdk2_python.git@4d2a115556af72382c90761a0476375dc85c3d3f",
 ]
 3dgs = [
     "lightglue @ git+https://github.com/cvg/LightGlue.git@746fac2c042e05d1865315b1413419f1c1e7ba55",
@@ -55,4 +55,3 @@ unitree = [
     "pymeshlab==2022.2.post4",
     "newrawpy<=1.0.0b0",
 ]
-
