@@ -1,21 +1,16 @@
-import matplotlib
-matplotlib.use('Agg')
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
-from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
 from dataclasses import dataclass
 from numba import njit
 import message_filters
-import matplotlib.pyplot as plt
 from rclpy.time import Time
-import io
-from PIL import Image as PIL_Image
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointCloud
+from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
@@ -23,9 +18,52 @@ import cv2
 from math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 
-# half width of go2 is around 0.25 meters.
-# set to 3x of resolution.
-SAFETY_RADIUS=0.3
+@dataclass
+class RobotConfig:
+    """Robot geometry. Body frame: +x forward, +y left."""
+    name: str = 'go2'
+    shape: str = 'square'
+    length: float = 0.7
+    width: float = 0.3
+    radius: float = 0.3
+    camera_x: float = 0.35
+    camera_y: float = 0.0
+    control_x: float = 0.0
+    control_y: float = 0.0
+    safety_radius: float = 0.1
+
+    @property
+    def cam_offset_3d(self):
+        """Offset [left, up, forward] from control center to camera in body frame."""
+        return np.array([self.camera_y - self.control_y, 0.0, self.camera_x - self.control_x], dtype=np.float32)
+
+    @property
+    def half_size(self):
+        if self.shape == 'circle':
+            return (self.radius, self.radius)
+        return (self.length / 2.0, self.width / 2.0)
+
+    def footprint_from_control(self):
+        """Returns (front_len, rear_len, half_w) relative to control center."""
+        hl, hw = self.half_size
+        return float(hl - self.control_x), float(hl + self.control_x), float(hw)
+
+
+GO2_CONFIG = RobotConfig(
+    name='go2', shape='square',
+    length=0.7, width=0.3,
+    camera_x=0.35, camera_y=0.0,
+    control_x=0.0, control_y=0.0,
+    safety_radius=0.1,
+)
+
+B2_CONFIG = RobotConfig(
+    name='b2', shape='square',
+    length=1.0, width=0.5,
+    camera_x=0.5, camera_y=0.0,
+    control_x=-0.5, control_y=0.0,
+    safety_radius=0.1,
+)
 
 # === Helper functions ===
 @njit(cache=True)
@@ -200,7 +238,9 @@ def generate_trajectory_library_3d(
     return trajectories, params
 
 @njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution):
+def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
+                                front_len=0.35, rear_len=0.35, half_w=0.15):
+    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
@@ -208,30 +248,60 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution):
     for t in range(len(trajectories)):
         traj = trajectories[t]
         min_dist_for_traj = float('inf')
-        closest_step_for_traj = -1  # Initialize as -1 to indicate no step found
+        closest_step_for_traj = -1
 
         for i in range(len(traj)):
-            x_world, y_world, _ = traj[i, 0], traj[i, 1], traj[i, 2]
-            x_img = int((x_world - origin[0]) / resolution)
-            y_img = int((y_world - origin[1]) / resolution)
-            if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
-                dist = ESDF_map[x_img, y_img]
-                if dist < min_dist_for_traj:
-                    min_dist_for_traj = dist
-                    closest_step_for_traj = i
-        # Scoring based on the found minimum distance and the step it occurred
-        if min_dist_for_traj < 1e-3: # Consider it a collision
+            x_world, y_world = traj[i, 0], traj[i, 1]
+            qx, qy, qz, qw = traj[i, 3], traj[i, 4], traj[i, 5], traj[i, 6]
+
+            # world XY forward from quaternion (body +Z forward)
+            fwd_x = 2.0 * (qx * qz + qw * qy)
+            fwd_y = 2.0 * (qy * qz - qw * qx)
+            n = (fwd_x * fwd_x + fwd_y * fwd_y) ** 0.5
+            if n > 1e-6:
+                fwd_x /= n
+                fwd_y /= n
+            else:
+                fwd_x, fwd_y = 1.0, 0.0
+            left_x = -fwd_y
+            left_y = fwd_x
+
+            # center + 4 corners, unrolled for numba
+            check_xs = (
+                x_world,
+                x_world + fwd_x * front_len + left_x * half_w,
+                x_world + fwd_x * front_len - left_x * half_w,
+                x_world - fwd_x * rear_len  + left_x * half_w,
+                x_world - fwd_x * rear_len  - left_x * half_w,
+            )
+            check_ys = (
+                y_world,
+                y_world + fwd_y * front_len + left_y * half_w,
+                y_world + fwd_y * front_len - left_y * half_w,
+                y_world - fwd_y * rear_len  + left_y * half_w,
+                y_world - fwd_y * rear_len  - left_y * half_w,
+            )
+
+            for k in range(5):
+                x_img = int((check_xs[k] - origin[0]) / resolution)
+                y_img = int((check_ys[k] - origin[1]) / resolution)
+                if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
+                    dist = ESDF_map[x_img, y_img]
+                    if dist < min_dist_for_traj:
+                        min_dist_for_traj = dist
+                        closest_step_for_traj = i
+
+        if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
         elif min_dist_for_traj != float('inf'):
-            if min_dist_for_traj > SAFETY_RADIUS:
+            if min_dist_for_traj > safety_radius:
                 scores.append(0.0)
             else:
                 max_steps = len(traj)
                 decay_factor = (max_steps - closest_step_for_traj) / max_steps
-                base_score = 1.0 / (min_dist_for_traj+1e-3)
+                base_score = 1.0 / (min_dist_for_traj + 1e-3)
                 scores.append(decay_factor * base_score)
         else:
-            # If no obstacle is near, score is 0, closest_step_for_traj is the last step
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
     return scores, occ_points
@@ -258,14 +328,23 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     updated_origin = old_origin + shift_voxels * resolution
     return rolled, updated_origin
 
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
+        self.robot = GO2_CONFIG
+        self.get_logger().info(
+            f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
+            f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
+            f"ctrl=({self.robot.control_x},{self.robot.control_y}), "
+            f"safety_r={self.robot.safety_radius}m)"
+        )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
+        self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
@@ -275,7 +354,6 @@ class PlanningNode(Node):
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
-
 
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.1
@@ -316,6 +394,36 @@ class PlanningNode(Node):
             self.baseline = -Tx / fx
             self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camerainfo_sub)
+
+    def camera_to_robot_center(self, T):
+        """World control-center position derived from camera pose T_cam->world."""
+        return T[:3, 3] - T[:3, :3] @ self.robot.cam_offset_3d
+
+    def publish_footprint(self, T, stamp):
+        """Publish robot footprint rectangle as a PointCloud for RViz."""
+        forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        left    = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
+        center  = self.camera_to_robot_center(T)
+        fl, rl, hw = self.robot.footprint_from_control()
+        corners = [
+            center + forward * fl + left * hw,
+            center + forward * fl - left * hw,
+            center - forward * rl - left * hw,
+            center - forward * rl + left * hw,
+        ]
+        points = []
+        for i in range(4):
+            a, b = corners[i], corners[(i + 1) % 4]
+            for k in range(21):
+                t = k / 20
+                p = (1.0 - t) * a + t * b
+                points.append(Point32(x=float(p[0]), y=float(p[1]), z=float(p[2])))
+        msg = PointCloud()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.points = points
+        self.footprint_pub.publish(msg)
 
     def publish_obstacle_mask(self, mask, stamp):
         msg = OccupancyGrid()
@@ -445,13 +553,14 @@ class PlanningNode(Node):
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
+            self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             v_dir = T[:3, :3] @ np.array([0, 0, 1])
             magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
             init_v = v_dir * float(magnitude)
             trajectories, params = generate_trajectory_library_3d(
-                init_p = T[:3, 3],
+                init_p = self.camera_to_robot_center(T),
                 init_v = init_v,
                 init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             )
@@ -459,7 +568,8 @@ class PlanningNode(Node):
             self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution)
+            front_len, rear_len, half_w = self.robot.footprint_from_control()
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
