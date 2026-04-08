@@ -2946,17 +2946,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pycuda"
-version = "2026.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "mako" },
-    { name = "platformdirs" },
-    { name = "pytools" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/75/93/36ffd54430924dcb03a88c97519d56589e573d0dcc999c77a4c4d8a90306/pycuda-2026.1.tar.gz", hash = "sha256:759516160628ba06f32ce7e563e3f5b9214691dc9528a03ea99ea1073f4e14ba", size = 1691047, upload-time = "2026-01-15T22:23:07.533Z" }
-
-[[package]]
 name = "pydantic"
 version = "2.11.9"
 source = { registry = "https://pypi.org/simple" }
@@ -4019,7 +4008,6 @@ dependencies = [
     { name = "opencv-python" },
     { name = "plyfile" },
     { name = "pybind11" },
-    { name = "pycuda" },
     { name = "pygame" },
     { name = "reportlab" },
     { name = "scipy" },
@@ -4069,7 +4057,6 @@ requires-dist = [
     { name = "plyfile" },
     { name = "plyfile", marker = "extra == '3dgs'" },
     { name = "pybind11" },
-    { name = "pycuda" },
     { name = "pygame" },
     { name = "pymeshlab", marker = "extra == '3dgs'", specifier = "==2022.2.post4" },
     { name = "reportlab", specifier = ">=4.4.3" },
