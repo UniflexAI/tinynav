@@ -182,6 +182,22 @@ Before you begin, make sure you have the following installed:
 
 ## 🚀 Quick Start
 
+### TinyNav CLI (v1)
+
+```bash
+pip install -e .
+tinynav init
+tinynav example
+tinynav run navigation
+tinynav run mapping
+```
+
+The CLI keeps the first version intentionally small:
+- `tinynav init` checks the host environment, then pulls `uniflexai/tinynav:latest`
+- `tinynav example` runs the bundled rosbag example in Docker
+- `tinynav run navigation` runs the navigation workflow in Docker
+- `tinynav run mapping` runs the mapping workflow in Docker
+
 1. **Check the environment**
    ```bash
    git clone https://github.com/UniflexAI/tinynav.git
