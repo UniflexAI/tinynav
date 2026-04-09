@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>TinyNav Mobile Control</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --ok: #10b981;
+      --warn: #f59e0b;
+      --err: #ef4444;
+      --line: #1f2937;
+      --btn: #2563eb;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .wrap {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 14px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    h1, h2 {
+      margin: 0 0 10px 0;
+      font-weight: 700;
+    }
+    h1 { font-size: 20px; }
+    h2 { font-size: 16px; color: var(--muted); }
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    input, button {
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: #0b1220;
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 14px;
+    }
+    input { flex: 1; min-width: 120px; }
+    button {
+      background: var(--btn);
+      border-color: transparent;
+      font-weight: 600;
+    }
+    button.secondary { background: #374151; }
+    button.warn { background: var(--warn); color: #111; }
+    button.danger { background: var(--err); }
+    button:disabled { opacity: 0.5; }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+      margin-right: 6px;
+    }
+    .viz-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .viz-toolbar label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .viz-toolbar input[type="checkbox"] {
+      min-width: auto;
+      flex: 0 0 auto;
+      margin: 0;
+      padding: 0;
+    }
+    .canvas-wrap {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background:
+        linear-gradient(180deg, rgba(37,99,235,0.08), rgba(0,0,0,0)),
+        #09111f;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: min(72vw, 420px);
+      touch-action: none;
+      cursor: crosshair;
+    }
+    .ok { background: var(--ok); }
+    .err { background: var(--err); }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>TinyNav 手机控制台</h1>
+      <div class="row">
+        <input id="wsUrl" />
+        <button id="connectBtn">连接</button>
+        <button id="disconnectBtn" class="secondary">断开</button>
+      </div>
+      <div class="mono">
+        <span id="connDot" class="status-dot err"></span>
+        <span id="connText">未连接</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>系统状态</h2>
+      <div class="mono" id="stateInfo">state: -</div>
+      <div class="mono" id="odomInfo">odom: -</div>
+      <div class="mono muted">当前页面优先使用 `/planning/occupancy_grid` 显示 ESDF/代价图，若无则退回 `/planning/obstacle_mask`。</div>
+    </div>
+
+    <div class="card">
+      <h2>2D 可视化</h2>
+      <div class="viz-toolbar">
+        <div class="row" style="margin-bottom: 0;">
+          <label><input id="showMapLayer" type="checkbox" checked />地图层</label>
+          <label><input id="showGlobalPath" type="checkbox" checked />全局路径</label>
+          <label><input id="showLocalPath" type="checkbox" checked />局部路径</label>
+        </div>
+        <button id="fitViewBtn" class="secondary">居中</button>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="mapCanvas"></canvas>
+      </div>
+      <div class="mono muted">以机器人为中心显示，橙红色为 ESDF/占据层，蓝色为全局路径，绿色为局部路径，红色为目标点。</div>
+    </div>
+
+    <div class="card">
+      <h2>导航操作</h2>
+      <div class="row">
+        <button id="startNavBtn">启动导航</button>
+        <button id="stopModeBtn" class="warn">停止导航</button>
+        <button id="emergencyBtn" class="danger">急停 cmd_vel</button>
+      </div>
+      <div class="mono muted">启动发送 `navigation`，停止发送 `stop_navigation`。</div>
+      <div class="mono muted">地图点击后会弹窗确认，确认后发送 `/control/target_pose`。</div>
+    </div>
+  </div>
+
+  <script>
+    const wsUrlInput = document.getElementById("wsUrl");
+    const connectBtn = document.getElementById("connectBtn");
+    const disconnectBtn = document.getElementById("disconnectBtn");
+    const connDot = document.getElementById("connDot");
+    const connText = document.getElementById("connText");
+    const stateInfo = document.getElementById("stateInfo");
+    const odomInfo = document.getElementById("odomInfo");
+    const startNavBtn = document.getElementById("startNavBtn");
+    const stopModeBtn = document.getElementById("stopModeBtn");
+    const emergencyBtn = document.getElementById("emergencyBtn");
+    const showMapLayer = document.getElementById("showMapLayer");
+    const showGlobalPath = document.getElementById("showGlobalPath");
+    const showLocalPath = document.getElementById("showLocalPath");
+    const fitViewBtn = document.getElementById("fitViewBtn");
+    const mapCanvas = document.getElementById("mapCanvas");
+    const mapCtx = mapCanvas.getContext("2d");
+
+    const defaultWs = `ws://${window.location.host || "127.0.0.1:8000"}/ws`;
+    wsUrlInput.value = new URLSearchParams(window.location.search).get("ws") || defaultWs;
+
+    let ros = null;
+    let pubCommand = null;
+    let pubCmdVel = null;
+    let pubTargetPose = null;
+    const subs = [];
+    let odomPose = null;
+    let targetPose = null;
+    let globalPath = [];
+    let localPath = [];
+    let occupancyGrid = null;
+    let obstacleGrid = null;
+    let viewCenter = { x: 0.0, y: 0.0 };
+    let pxPerMeter = 42.0;
+    let dragState = null;
+    let suppressMapClick = false;
+
+    function setConn(connected, text) {
+      connDot.className = `status-dot ${connected ? "ok" : "err"}`;
+      connText.textContent = text;
+    }
+
+    function createRosbridgeClient(url) {
+      let ws = null;
+      const topicCallbacks = new Map();
+      let onClose = null;
+      let onError = null;
+
+      function send(obj) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify(obj));
+      }
+
+      function addTopicCallback(topic, cb) {
+        if (!topicCallbacks.has(topic)) {
+          topicCallbacks.set(topic, new Set());
+        }
+        topicCallbacks.get(topic).add(cb);
+      }
+
+      function removeTopicCallback(topic, cb) {
+        const cbs = topicCallbacks.get(topic);
+        if (!cbs) return;
+        cbs.delete(cb);
+        if (cbs.size === 0) {
+          topicCallbacks.delete(topic);
+        }
+      }
+
+      return {
+        setHandlers(closeHandler, errorHandler) {
+          onClose = closeHandler;
+          onError = errorHandler;
+        },
+        connect() {
+          return new Promise((resolve, reject) => {
+            ws = new WebSocket(url);
+            ws.onopen = () => resolve();
+            ws.onerror = (ev) => {
+              if (onError) onError(ev);
+              reject(new Error("websocket connection failed"));
+            };
+            ws.onclose = () => {
+              if (onClose) onClose();
+            };
+            ws.onmessage = (ev) => {
+              let data = null;
+              try {
+                data = JSON.parse(ev.data);
+              } catch (_) {
+                return;
+              }
+              if (data && data.topic && data.msg && topicCallbacks.has(data.topic)) {
+                for (const cb of topicCallbacks.get(data.topic)) {
+                  cb(data.msg);
+                }
+              }
+            };
+          });
+        },
+        publish(topic, messageType, msg) {
+          send({ op: "publish", topic, msg });
+        },
+        subscribe(topic, messageType, cb) {
+          addTopicCallback(topic, cb);
+          send({ op: "subscribe", topic, type: messageType });
+          return () => {
+            removeTopicCallback(topic, cb);
+            send({ op: "unsubscribe", topic });
+          };
+        },
+        close() {
+          if (ws) {
+            try { ws.close(); } catch (_) {}
+          }
+        }
+      };
+    }
+
+    function yawToQuat(yaw) {
+      const h = yaw * 0.5;
+      return { x: 0.0, y: 0.0, z: Math.sin(h), w: Math.cos(h) };
+    }
+
+    function quatToYaw(q) {
+      return Math.atan2(
+        2.0 * (q.w * q.z + q.x * q.y),
+        1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+      );
+    }
+
+    function quatToBodyForwardHeading(q) {
+      const fwdX = 2.0 * (q.x * q.z + q.w * q.y);
+      const fwdY = 2.0 * (q.y * q.z - q.w * q.x);
+      if (Math.hypot(fwdX, fwdY) < 1e-6) {
+        return 0.0;
+      }
+      return Math.atan2(fwdY, fwdX);
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = mapCanvas.getBoundingClientRect();
+      const w = Math.max(1, Math.round(rect.width * dpr));
+      const h = Math.max(1, Math.round(rect.height * dpr));
+      if (mapCanvas.width !== w || mapCanvas.height !== h) {
+        mapCanvas.width = w;
+        mapCanvas.height = h;
+      }
+      mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawMap();
+    }
+
+    function worldToCanvas(x, y) {
+      const w = mapCanvas.clientWidth;
+      const h = mapCanvas.clientHeight;
+      return {
+        x: w * 0.5 + (x - viewCenter.x) * pxPerMeter,
+        y: h * 0.5 - (y - viewCenter.y) * pxPerMeter
+      };
+    }
+
+    function canvasToWorld(x, y) {
+      const w = mapCanvas.clientWidth;
+      const h = mapCanvas.clientHeight;
+      return {
+        x: viewCenter.x + (x - w * 0.5) / pxPerMeter,
+        y: viewCenter.y - (y - h * 0.5) / pxPerMeter
+      };
+    }
+
+    function fitViewToRobot() {
+      if (odomPose) {
+        viewCenter.x = odomPose.x;
+        viewCenter.y = odomPose.y;
+      }
+      drawMap();
+    }
+
+    function startMapDrag(clientX, clientY) {
+      dragState = { x: clientX, y: clientY, moved: false };
+      mapCanvas.style.cursor = "grabbing";
+    }
+
+    function moveMapDrag(clientX, clientY) {
+      if (!dragState) return;
+      const dx = clientX - dragState.x;
+      const dy = clientY - dragState.y;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+        dragState.moved = true;
+      }
+      dragState.x = clientX;
+      dragState.y = clientY;
+      viewCenter.x -= dx / pxPerMeter;
+      viewCenter.y += dy / pxPerMeter;
+      drawMap();
+    }
+
+    function endMapDrag() {
+      if (!dragState) return false;
+      const moved = dragState.moved;
+      dragState = null;
+      mapCanvas.style.cursor = "crosshair";
+      return moved;
+    }
+
+    function drawGrid() {
+      const w = mapCanvas.clientWidth;
+      const h = mapCanvas.clientHeight;
+      mapCtx.clearRect(0, 0, w, h);
+      mapCtx.fillStyle = "#09111f";
+      mapCtx.fillRect(0, 0, w, h);
+
+      const stepPx = pxPerMeter;
+      mapCtx.strokeStyle = "rgba(148, 163, 184, 0.12)";
+      mapCtx.lineWidth = 1;
+
+      const cx = w * 0.5 + (-viewCenter.x * pxPerMeter % stepPx);
+      const cy = h * 0.5 + (viewCenter.y * pxPerMeter % stepPx);
+      for (let x = cx; x < w; x += stepPx) {
+        mapCtx.beginPath();
+        mapCtx.moveTo(x, 0);
+        mapCtx.lineTo(x, h);
+        mapCtx.stroke();
+      }
+      for (let x = cx - stepPx; x > 0; x -= stepPx) {
+        mapCtx.beginPath();
+        mapCtx.moveTo(x, 0);
+        mapCtx.lineTo(x, h);
+        mapCtx.stroke();
+      }
+      for (let y = cy; y < h; y += stepPx) {
+        mapCtx.beginPath();
+        mapCtx.moveTo(0, y);
+        mapCtx.lineTo(w, y);
+        mapCtx.stroke();
+      }
+      for (let y = cy - stepPx; y > 0; y -= stepPx) {
+        mapCtx.beginPath();
+        mapCtx.moveTo(0, y);
+        mapCtx.lineTo(w, y);
+        mapCtx.stroke();
+      }
+    }
+
+    function drawPath(points, color, width) {
+      if (!points || points.length < 2) return;
+      mapCtx.strokeStyle = color;
+      mapCtx.lineWidth = width;
+      mapCtx.beginPath();
+      points.forEach((p, i) => {
+        const c = worldToCanvas(p.x, p.y);
+        if (i === 0) mapCtx.moveTo(c.x, c.y);
+        else mapCtx.lineTo(c.x, c.y);
+      });
+      mapCtx.stroke();
+    }
+
+    function drawArrow(x, y, yaw, color, sizePx) {
+      const p = worldToCanvas(x, y);
+      mapCtx.save();
+      mapCtx.translate(p.x, p.y);
+      mapCtx.rotate(-yaw);
+      mapCtx.fillStyle = color;
+      mapCtx.beginPath();
+      mapCtx.moveTo(sizePx, 0);
+      mapCtx.lineTo(-sizePx * 0.6, sizePx * 0.55);
+      mapCtx.lineTo(-sizePx * 0.25, 0);
+      mapCtx.lineTo(-sizePx * 0.6, -sizePx * 0.55);
+      mapCtx.closePath();
+      mapCtx.fill();
+      mapCtx.restore();
+    }
+
+    function drawOccupancyGrid() {
+      if (!showMapLayer.checked) return;
+      const grid = occupancyGrid || obstacleGrid;
+      if (!grid) return;
+
+      const { width, height, resolution, originX, originY, data, mode } = grid;
+      for (let gy = 0; gy < width; gy++) {
+        for (let gx = 0; gx < height; gx++) {
+          const idx = gx + gy * height;
+          const val = data[idx];
+          if (!Number.isFinite(val) || val <= 0) continue;
+
+          let fill = "rgba(245, 158, 11, 0.30)";
+          if (mode === "occupancy") {
+            if (val >= 100) {
+              fill = "rgba(239, 68, 68, 0.60)";
+            } else {
+              const alpha = Math.min(0.70, Math.max(0.08, val / 140.0));
+              fill = `rgba(245, 158, 11, ${alpha.toFixed(3)})`;
+            }
+          }
+
+          mapCtx.fillStyle = fill;
+          const wx = originX + (gx + 0.5) * resolution;
+          const wy = originY + (gy + 0.5) * resolution;
+          const c = worldToCanvas(wx, wy);
+          const s = Math.max(1.5, resolution * pxPerMeter);
+          mapCtx.fillRect(c.x - s * 0.5, c.y - s * 0.5, s, s);
+        }
+      }
+    }
+
+    function drawMap() {
+      drawGrid();
+      drawOccupancyGrid();
+      if (showGlobalPath.checked) drawPath(globalPath, "#60a5fa", 3);
+      if (showLocalPath.checked) drawPath(localPath, "#22c55e", 3);
+
+      if (targetPose) {
+        drawArrow(targetPose.x, targetPose.y, targetPose.yaw || 0.0, "#ef4444", 11);
+      }
+      if (odomPose) {
+        drawArrow(odomPose.x, odomPose.y, odomPose.yaw, "#f8fafc", 12);
+        const c = worldToCanvas(odomPose.x, odomPose.y);
+        mapCtx.fillStyle = "#38bdf8";
+        mapCtx.beginPath();
+        mapCtx.arc(c.x, c.y, 4, 0, Math.PI * 2);
+        mapCtx.fill();
+      }
+    }
+
+    function publishTargetPose(x, y, yaw) {
+      if (!pubTargetPose) return;
+      const q = yawToQuat(yaw);
+      targetPose = { x, y, yaw };
+      drawMap();
+      pubTargetPose.publish({
+        header: { frame_id: "world" },
+        child_frame_id: "",
+        pose: {
+          pose: {
+            position: { x, y, z: 0.0 },
+            orientation: q
+          },
+          covariance: new Array(36).fill(0.0)
+        },
+        twist: {
+          twist: {
+            linear: { x: 0.0, y: 0.0, z: 0.0 },
+            angular: { x: 0.0, y: 0.0, z: 0.0 }
+          },
+          covariance: new Array(36).fill(0.0)
+        }
+      });
+    }
+
+    function connect() {
+      if (ros) {
+        try { ros.close(); } catch (_) {}
+      }
+      ros = createRosbridgeClient(wsUrlInput.value.trim());
+      setConn(false, "连接中...");
+
+      ros.setHandlers(
+        () => setConn(false, "连接已断开"),
+        () => setConn(false, `连接错误: ${wsUrlInput.value.trim()}`)
+      );
+
+      ros.connect().then(() => {
+        setConn(true, "已连接 rosbridge");
+
+        pubCommand = {
+          publish: (msg) => ros.publish("/service/command", "std_msgs/String", msg)
+        };
+        pubCmdVel = {
+          publish: (msg) => ros.publish("/cmd_vel", "geometry_msgs/Twist", msg)
+        };
+        pubTargetPose = {
+          publish: (msg) => ros.publish("/control/target_pose", "nav_msgs/Odometry", msg)
+        };
+
+        subs.push(
+          ros.subscribe("/service/state", "std_msgs/String", (msg) => {
+            stateInfo.textContent = `state: ${msg.data || "idle"}`;
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/slam/odometry", "nav_msgs/Odometry", (msg) => {
+            const p = msg.pose.pose.position;
+            const q = msg.pose.pose.orientation;
+            const heading = quatToBodyForwardHeading(q);
+            odomPose = { x: p.x, y: p.y, yaw: heading };
+            odomInfo.textContent = `odom: x=${p.x.toFixed(2)} y=${p.y.toFixed(2)} heading=${heading.toFixed(2)}`;
+            if (Math.abs(viewCenter.x) < 1e-6 && Math.abs(viewCenter.y) < 1e-6) {
+              viewCenter.x = p.x;
+              viewCenter.y = p.y;
+            }
+            drawMap();
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/mapping/global_plan", "nav_msgs/Path", (msg) => {
+            globalPath = (msg.poses || []).map((p) => ({
+              x: p.pose.position.x,
+              y: p.pose.position.y
+            }));
+            drawMap();
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/planning/trajectory_path", "nav_msgs/Path", (msg) => {
+            localPath = (msg.poses || []).map((p) => ({
+              x: p.pose.position.x,
+              y: p.pose.position.y
+            }));
+            drawMap();
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/control/target_pose", "nav_msgs/Odometry", (msg) => {
+            if (msg.header && msg.header.frame_id === "none") {
+              targetPose = null;
+              drawMap();
+              return;
+            }
+            const p = msg.pose.pose.position;
+            const q = msg.pose.pose.orientation;
+            targetPose = { x: p.x, y: p.y, yaw: quatToYaw(q) };
+            drawMap();
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/planning/occupancy_grid", "nav_msgs/OccupancyGrid", (msg) => {
+            occupancyGrid = {
+              width: msg.info.width,
+              height: msg.info.height,
+              resolution: msg.info.resolution,
+              originX: msg.info.origin.position.x,
+              originY: msg.info.origin.position.y,
+              data: msg.data || [],
+              mode: "occupancy"
+            };
+            drawMap();
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/planning/obstacle_mask", "nav_msgs/OccupancyGrid", (msg) => {
+            obstacleGrid = {
+              width: msg.info.width,
+              height: msg.info.height,
+              resolution: msg.info.resolution,
+              originX: msg.info.origin.position.x,
+              originY: msg.info.origin.position.y,
+              data: msg.data || [],
+              mode: "obstacle"
+            };
+            drawMap();
+          })
+        );
+      }).catch(() => {
+        setConn(false, `连接失败: ${wsUrlInput.value.trim()}`);
+      });
+    }
+
+    function disconnect() {
+      for (const unsub of subs) {
+        try { unsub(); } catch (_) {}
+      }
+      subs.length = 0;
+      if (ros) {
+        try { ros.close(); } catch (_) {}
+      }
+      ros = null;
+      setConn(false, "未连接");
+    }
+
+    function sendCommand(cmd) {
+      if (!pubCommand) return;
+      pubCommand.publish({ data: cmd });
+    }
+
+    connectBtn.onclick = connect;
+    disconnectBtn.onclick = disconnect;
+    startNavBtn.onclick = () => sendCommand("navigation");
+    stopModeBtn.onclick = () => sendCommand("stop_navigation");
+
+    emergencyBtn.onclick = () => {
+      if (!pubCmdVel) return;
+      const zero = {
+        linear: { x: 0.0, y: 0.0, z: 0.0 },
+        angular: { x: 0.0, y: 0.0, z: 0.0 }
+      };
+      for (let i = 0; i < 3; i++) {
+        setTimeout(() => pubCmdVel.publish(zero), i * 120);
+      }
+    };
+
+    mapCanvas.onpointerdown = (ev) => {
+      startMapDrag(ev.clientX, ev.clientY);
+    };
+
+    mapCanvas.onpointermove = (ev) => {
+      if (!dragState) return;
+      ev.preventDefault();
+      moveMapDrag(ev.clientX, ev.clientY);
+    };
+
+    mapCanvas.onpointerup = () => {
+      suppressMapClick = endMapDrag();
+    };
+
+    mapCanvas.onpointercancel = () => {
+      suppressMapClick = endMapDrag();
+    };
+
+    mapCanvas.onpointerleave = () => {
+      if (dragState) {
+        suppressMapClick = endMapDrag();
+      }
+    };
+
+    mapCanvas.onclick = (ev) => {
+      if (suppressMapClick) {
+        suppressMapClick = false;
+        return;
+      }
+      if (!pubTargetPose) return;
+      const rect = mapCanvas.getBoundingClientRect();
+      const px = ev.clientX - rect.left;
+      const py = ev.clientY - rect.top;
+      const world = canvasToWorld(px, py);
+      const yaw = 0.0;
+      const ok = window.confirm(
+        `发送目标点?\n\nx=${world.x.toFixed(2)} m\ny=${world.y.toFixed(2)} m\nyaw=${yaw.toFixed(2)} rad`
+      );
+      if (!ok) return;
+      publishTargetPose(world.x, world.y, yaw);
+    };
+
+    showMapLayer.onchange = drawMap;
+    showGlobalPath.onchange = drawMap;
+    showLocalPath.onchange = drawMap;
+    fitViewBtn.onclick = fitViewToRobot;
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+  </script>
+</body>
+</html>

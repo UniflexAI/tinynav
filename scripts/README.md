@@ -14,6 +14,7 @@ This document provides an overview of the key scripts in the `scripts/` director
 | `run_sensors_preview.sh`      | Starts the RealSense sensor driver and opens `rqt` after a short delay for live preview.     |
 | `run_rosbag_record.sh`        | Records the mapping rosbag topics into the XDG data directory.                               |
 | `run_map_record.sh`           | Launches RealSense in tmux, waits 3s, then calls the rosbag record helper.                   |
+| `run_mobile_control.sh`       | Starts rosbridge, the ROS2 node manager, and a lightweight mobile web UI for navigation control. |
 
 TinyNav supports several key modes to fit different robotics workflows:
 

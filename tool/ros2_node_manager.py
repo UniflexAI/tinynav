@@ -29,7 +29,9 @@ class Ros2NodeManager(Node):
     
     def _cmd_cb(self, msg):
         cmd = msg.data.strip()
-        if cmd == self.state:
+        if cmd == 'stop_navigation':
+            self._stop_all()
+        elif cmd == self.state:
             self._stop_all()
         elif cmd in ['realsense_sensor', 'realsense_bag_record', 'rosbag_build_map', 'navigation']:
             self._stop_all()

@@ -9,6 +9,7 @@ description = "minimal implementation of navigation"
 requires-python = ">=3.10.12,<3.11"
 authors = [{ name = "Zhenfei Yang", email = "zhenfei.yang@deepmirror.com" }]
 dependencies = [
+    "aiohttp",
     "numpy==1.26.1", # for compatability with ros2's cv_bridge
     "scipy",
     "matplotlib",
