@@ -134,7 +134,7 @@ Visualization Manager:
           Max Intensity: 4096
           Min Color: 0; 0; 0
           Min Intensity: 0
-          Name: DepthCloud
+          Name: Local Cloud
           Occlusion Compensation:
             Occlusion Time-Out: 30
             Value: false
@@ -546,7 +546,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /global_pointcloud
+        Value: /slam/global_cloud
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -576,7 +576,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /global_pointcloud_path
+        Value: /slam/global_cloud_path
       Value: true
   Enabled: true
   Global Options:

@@ -1,7 +1,7 @@
 import numpy as np
 from numba import njit
 from scipy.spatial.transform import Rotation as R
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
 import fufpy
@@ -161,6 +161,15 @@ def msg2np(msg):
     else:
         velocity = np.array([0.0, 0.0, 0.0])
     return T, velocity
+
+def pose_msg2np(msg: PoseStamped):
+    T = np.eye(4)
+    position = msg.pose.position
+    rot = msg.pose.orientation
+    quat = [rot.x, rot.y, rot.z, rot.w]
+    T[:3, :3] = R.from_quat(quat).as_matrix()
+    T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
+    return T
 
 @njit(cache=True)
 def depth_to_cloud(depth, K, step=10, max_dist=1e9):

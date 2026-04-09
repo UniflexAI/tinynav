@@ -1,7 +1,6 @@
 import argparse
 import sys
 from collections import deque
-from pathlib import Path
 
 import message_filters
 import numpy as np
@@ -18,34 +17,10 @@ from std_msgs.msg import Header
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 
-
-def tf2np(tf_msg: TransformStamped) -> tuple[str, str, np.ndarray]:
-    T = np.eye(4, dtype=np.float32)
-    position = tf_msg.transform.translation
-    rot = tf_msg.transform.rotation
-    quat = [rot.x, rot.y, rot.z, rot.w]
-    T[:3, :3] = R.from_quat(quat).as_matrix().astype(np.float32)
-    T[:3, 3] = np.array([position.x, position.y, position.z], dtype=np.float32)
-    return tf_msg.header.frame_id, tf_msg.child_frame_id, T
+from tinynav.core.math_utils import pose_msg2np, tf2np
 
 
-def pose_msg_to_np(msg: PoseStamped) -> np.ndarray:
-    T = np.eye(4, dtype=np.float32)
-    quat = [
-        msg.pose.orientation.x,
-        msg.pose.orientation.y,
-        msg.pose.orientation.z,
-        msg.pose.orientation.w,
-    ]
-    T[:3, :3] = R.from_quat(quat).as_matrix().astype(np.float32)
-    T[:3, 3] = np.array(
-        [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z],
-        dtype=np.float32,
-    )
-    return T
-
-
-def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
+def transform_points(points, T):
     if points.size == 0:
         return points.reshape(0, 3)
     rotation = T[:3, :3]
@@ -53,16 +28,14 @@ def transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
     return points @ rotation.T + translation
 
 
-def crop_mask(points: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
+def crop_mask(points, center, radius):
     if points.size == 0:
         return np.zeros((0,), dtype=bool)
     dist2 = np.sum((points - center[None, :]) ** 2, axis=1)
     return dist2 <= radius * radius
 
 
-def voxel_downsample(
-    points: np.ndarray, colors: np.ndarray, voxel_size: float
-) -> tuple[np.ndarray, np.ndarray]:
+def voxel_downsample(points, colors, voxel_size):
     if points.size == 0 or voxel_size <= 0.0:
         return points.reshape(-1, 3), colors.reshape(-1)
     coords = np.floor(points / voxel_size).astype(np.int32)
@@ -76,15 +49,7 @@ def voxel_downsample(
     return points[unique_idx], colors[unique_idx]
 
 
-def depth_to_grayscale_cloud(
-    depth: np.ndarray,
-    gray_image: np.ndarray,
-    K: np.ndarray,
-    u_grid: np.ndarray,
-    v_grid: np.ndarray,
-    pixel_step: int,
-    max_depth: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, int], list[tuple[float, ...]]]:
+def depth_to_grayscale_cloud(depth, gray_image, K, u_grid, v_grid, pixel_step, max_depth):
     sampled_depth = depth[::pixel_step, ::pixel_step]
     sampled_gray = gray_image[::pixel_step, ::pixel_step]
     fx, fy = K[0, 0], K[1, 1]
@@ -133,16 +98,8 @@ def depth_to_grayscale_cloud(
 
 
 def depth_to_color_cloud(
-    depth: np.ndarray,
-    color_image: np.ndarray,
-    depth_K: np.ndarray,
-    color_K: np.ndarray,
-    T_depth_color: np.ndarray,
-    u_grid: np.ndarray,
-    v_grid: np.ndarray,
-    pixel_step: int,
-    max_depth: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, int], list[tuple[float, ...]]]:
+    depth, color_image, depth_K, color_K, T_depth_color, u_grid, v_grid, pixel_step, max_depth
+):
     sampled_depth = depth[::pixel_step, ::pixel_step]
     fx, fy = depth_K[0, 0], depth_K[1, 1]
     cx, cy = depth_K[0, 2], depth_K[1, 2]
@@ -237,175 +194,98 @@ def depth_to_color_cloud(
 
 
 class GlobalPointCloudPublisher(Node):
-    def __init__(self, args: argparse.Namespace):
+    def __init__(self, args):
         super().__init__("global_pointcloud_publisher")
         self.args = args
         self.bridge = CvBridge()
-        self.K: np.ndarray | None = None
-        self.color_K: np.ndarray | None = None
-        self.T_i_depth: np.ndarray | None = None
-        self.T_depth_color: np.ndarray | None = None
-        self.depth_frame_id: str | None = None
-        self.color_frame_id: str | None = None
-        self.tf_edges: dict[str, dict[str, np.ndarray]] = {}
-        self.global_cloud_buffer: deque[tuple[np.ndarray, np.ndarray, np.ndarray]] = (
-            deque()
-        )
+        self.K = None
+        self.color_K = None
+        self.T_i_depth = None
+        self.T_depth_color = None
+        self.depth_frame_id = None
+        self.color_frame_id = None
+        self.tf_edges = {}
+        self.global_cloud_buffer = deque()
         self.path_msg = Path()
         self.merged_cloud_cache = np.empty((0, 3), dtype=np.float32)
         self.merged_color_cache = np.empty((0,), dtype=np.uint32)
-        self.sample_grid_key: tuple[int, int, int] | None = None
+        self.sample_grid_key = None
         self.sample_u_grid = np.empty((0, 0), dtype=np.float32)
         self.sample_v_grid = np.empty((0, 0), dtype=np.float32)
-        self.last_keyframe_pose: np.ndarray | None = None
+        self.last_keyframe_pose = None
         self._missing_input_counter = 0
         self._published_once = False
-        self._saw_depth = False
-        self._saw_pose = False
-        self._saw_image = False
-        self._saw_tf = False
-        self._saw_tf_static = False
         self._logged_depth_tf = False
         self._logged_color_tf = False
-        self._sync_count = 0
-        self._projection_debug_counter = 0
-        self.image_topic = (
-            args.gray_image_topic
-            if args.image_mode == "grayscale"
-            else args.color_image_topic
-        )
-        self.sensor_qos = QoSProfile(
-            depth=50, reliability=ReliabilityPolicy.BEST_EFFORT
-        )
+        self.image_topic = "/camera/camera/infra1/image_rect_raw" if args.image_mode == "grayscale" else "/camera/camera/color/image_rect_raw/compressed"
+        self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
 
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo,
-            args.camera_info_topic,
-            self.camera_info_callback,
-            self.sensor_qos,
-        )
+        self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.color_camera_info_sub = None
         if args.image_mode == "color":
-            self.color_camera_info_sub = self.create_subscription(
-                CameraInfo,
-                args.color_camera_info_topic,
-                self.color_camera_info_callback,
-                self.sensor_qos,
-            )
+            self.color_camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/color/camera_info", self.color_camera_info_callback, self.sensor_qos)
         self.tf_sub = self.create_subscription(TFMessage, "/tf", self.tf_callback, 10)
-        self.tf_static_sub = self.create_subscription(
-            TFMessage, "/tf_static", self.tf_callback, 10
-        )
+        self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, 10)
         self.tf_broadcaster = TransformBroadcaster(self)
-        self.cloud_pub = self.create_publisher(PointCloud2, args.output_topic, 10)
-        self.path_pub = self.create_publisher(Path, args.path_topic, 10)
+        self.cloud_pub = self.create_publisher(PointCloud2, "/slam/global_cloud", 10)
+        self.path_pub = self.create_publisher(Path, "/slam/global_cloud_path", 10)
 
-        self.depth_log_sub = self.create_subscription(
-            Image, args.depth_topic, self.depth_log_callback, self.sensor_qos
-        )
-        self.pose_log_sub = self.create_subscription(
-            PoseStamped, args.pose_topic, self.pose_log_callback, 10
-        )
-        image_msg_type = (
-            CompressedImage
-            if args.image_mode == "color" and args.color_image_compressed
-            else Image
-        )
-        self.image_log_sub = self.create_subscription(
-            image_msg_type, self.image_topic, self.image_log_callback, self.sensor_qos
-        )
+        self.depth_log_sub = self.create_subscription(Image, "/camera/camera/depth/image_rect_raw", self.depth_log_callback, self.sensor_qos)
+        self.pose_log_sub = self.create_subscription(PoseStamped, args.pose_topic, self.pose_log_callback, 10)
+        image_msg_type = CompressedImage if args.image_mode == "color" else Image
+        self.image_log_sub = self.create_subscription(image_msg_type, self.image_topic, self.image_log_callback, self.sensor_qos)
 
-        self.depth_sub = message_filters.Subscriber(
-            self, Image, args.depth_topic, qos_profile=self.sensor_qos
-        )
+        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, args.pose_topic)
-        self.image_sub = message_filters.Subscriber(
-            self, image_msg_type, self.image_topic, qos_profile=self.sensor_qos
-        )
-        self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.depth_sub, self.pose_sub, self.image_sub],
-            queue_size=20,
-            slop=args.sync_slop,
-        )
+        self.image_sub = message_filters.Subscriber(self, image_msg_type, self.image_topic, qos_profile=self.sensor_qos)
+        self.sync = message_filters.ApproximateTimeSynchronizer([self.depth_sub, self.pose_sub, self.image_sub], queue_size=20, slop=0.08)
         self.sync.registerCallback(self.sync_callback)
 
-        self.get_logger().info(
-            f"Publishing global cloud on {args.output_topic} from {args.depth_topic} + {args.pose_topic} + {self.image_topic} ({args.image_mode})"
-        )
+        self.get_logger().info(f"Publishing global cloud on /slam/global_cloud from /camera/camera/depth/image_rect_raw + {args.pose_topic} + {self.image_topic} ({args.image_mode})")
 
-    def camera_info_callback(self, msg: CameraInfo) -> None:
+    def camera_info_callback(self, msg: CameraInfo):
         self.depth_frame_id = msg.header.frame_id or self.depth_frame_id
         if self.K is None:
             self.K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
-            self.get_logger().info(
-                f"Received depth camera intrinsics from {self.args.camera_info_topic} with frame {msg.header.frame_id}."
-            )
+            self.get_logger().info(f"Received depth camera intrinsics from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.")
         self.try_update_frame_transforms()
 
-    def color_camera_info_callback(self, msg: CameraInfo) -> None:
+    def color_camera_info_callback(self, msg: CameraInfo):
         self.color_frame_id = msg.header.frame_id or self.color_frame_id
         if self.color_K is None:
             self.color_K = np.array(msg.k, dtype=np.float32).reshape(3, 3)
-            self.get_logger().info(
-                f"Received color camera intrinsics from {self.args.color_camera_info_topic} with frame {msg.header.frame_id}."
-            )
+            self.get_logger().info(f"Received color camera intrinsics from /camera/camera/color/camera_info with frame {msg.header.frame_id}.")
         self.try_update_frame_transforms()
 
-    def depth_log_callback(self, msg: Image) -> None:
-        if not self._saw_depth:
-            self._saw_depth = True
-            self.get_logger().info(
-                f"Received first depth frame on {self.args.depth_topic}."
-            )
+    def depth_log_callback(self, msg: Image):
+        self.get_logger().info("Received first depth frame on /camera/camera/depth/image_rect_raw.", once=True)
 
-    def pose_log_callback(self, msg: PoseStamped) -> None:
-        if not self._saw_pose:
-            self._saw_pose = True
-            self.get_logger().info(
-                f"Received first pose frame on {self.args.pose_topic}."
-            )
+    def pose_log_callback(self, msg: PoseStamped):
+        self.get_logger().info(f"Received first pose frame on {self.args.pose_topic}.", once=True)
 
-    def image_log_callback(self, msg: Image) -> None:
-        if not self._saw_image:
-            self._saw_image = True
-            self.get_logger().info(
-                f"Received first {self.args.image_mode} image on {self.image_topic}."
-            )
+    def image_log_callback(self, msg: Image):
+        self.get_logger().info(f"Received first {self.args.image_mode} image on {self.image_topic}.", once=True)
 
-    def log_missing_inputs(self) -> None:
+    def log_missing_inputs(self):
         self._missing_input_counter += 1
         if self._missing_input_counter % 30 != 1:
             return
         missing = []
         if self.K is None:
-            missing.append(self.args.camera_info_topic)
+            missing.append("/camera/camera/infra1/camera_info")
         if self.args.image_mode == "color" and self.color_K is None:
-            missing.append(self.args.color_camera_info_topic)
+            missing.append("/camera/camera/color/camera_info")
         if self.T_i_depth is None:
-            missing.append(
-                f"{self.args.pose_child_frame}->{self.depth_frame_id or 'depth'} TF"
-            )
+            missing.append(f"imu->{self.depth_frame_id or 'depth'} TF")
         if self.args.image_mode == "color" and self.T_depth_color is None:
-            missing.append(
-                f"{self.depth_frame_id or 'depth'}->{self.color_frame_id or 'color'} TF"
-            )
-        self.get_logger().info(
-            f"Waiting for inputs before publishing {self.args.image_mode} cloud: {', '.join(missing)}"
-        )
+            missing.append(f"{self.depth_frame_id or 'depth'}->{self.color_frame_id or 'color'} TF")
+        self.get_logger().info(f"Waiting for inputs before publishing {self.args.image_mode} cloud: {', '.join(missing)}")
 
-    def store_transform(
-        self, parent_frame: str, child_frame: str, T: np.ndarray
-    ) -> None:
-        self.tf_edges.setdefault(parent_frame, {})[child_frame] = T.astype(
-            np.float32, copy=False
-        )
-        self.tf_edges.setdefault(child_frame, {})[parent_frame] = np.linalg.inv(
-            T
-        ).astype(np.float32, copy=False)
+    def store_transform(self, parent_frame: str, child_frame: str, T: np.ndarray):
+        self.tf_edges.setdefault(parent_frame, {})[child_frame] = T.astype(np.float32, copy=False)
+        self.tf_edges.setdefault(child_frame, {})[parent_frame] = np.linalg.inv(T).astype(np.float32, copy=False)
 
-    def lookup_transform(
-        self, source_frame: str, target_frame: str
-    ) -> np.ndarray | None:
+    def lookup_transform(self, source_frame, target_frame):
         if source_frame == target_frame:
             return np.eye(4, dtype=np.float32)
         if source_frame not in self.tf_edges or target_frame not in self.tf_edges:
@@ -425,58 +305,39 @@ class GlobalPointCloudPublisher(Node):
                 queue.append((next_frame, T_source_next))
         return None
 
-    def try_update_frame_transforms(self) -> None:
+    def try_update_frame_transforms(self):
         if self.depth_frame_id is not None:
-            T_pose_depth = self.lookup_transform(
-                self.args.pose_child_frame, self.depth_frame_id
-            )
+            T_pose_depth = self.lookup_transform("imu", self.depth_frame_id)
             if T_pose_depth is not None:
                 self.T_i_depth = T_pose_depth
                 if not self._logged_depth_tf:
                     self._logged_depth_tf = True
-                    self.get_logger().info(
-                        f"Resolved {self.args.pose_child_frame} -> {self.depth_frame_id} transform."
-                    )
+                    self.get_logger().info(f"Resolved imu -> {self.depth_frame_id} transform.")
 
-        if (
-            self.args.image_mode == "color"
-            and self.depth_frame_id
-            and self.color_frame_id
-        ):
-            T_depth_color = self.lookup_transform(
-                self.depth_frame_id, self.color_frame_id
-            )
+        if self.args.image_mode == "color" and self.depth_frame_id and self.color_frame_id:
+            T_depth_color = self.lookup_transform(self.depth_frame_id, self.color_frame_id)
             if T_depth_color is not None:
                 self.T_depth_color = T_depth_color
                 if not self._logged_color_tf:
                     self._logged_color_tf = True
-                    self.get_logger().info(
-                        f"Resolved {self.depth_frame_id} -> {self.color_frame_id} transform."
-                    )
+                    self.get_logger().info(f"Resolved {self.depth_frame_id} -> {self.color_frame_id} transform.")
 
-    def tf_callback(self, msg: TFMessage) -> None:
-        has_static = any(transform.header.frame_id for transform in msg.transforms)
+    def tf_callback(self, msg: TFMessage):
         if any(transform.child_frame_id for transform in msg.transforms):
-            if not self._saw_tf:
-                self._saw_tf = True
-                self.get_logger().info("Received first TF message.")
-        if has_static and not self._saw_tf_static:
-            self._saw_tf_static = True
-            self.get_logger().info("Received first TF/TF_STATIC message.")
+            self.get_logger().info("Received first TF message.", once=True)
+        if any(transform.header.frame_id for transform in msg.transforms):
+            self.get_logger().info("Received first TF/TF_STATIC message.", once=True)
 
         for transform in msg.transforms:
             frame_id, child_frame_id, T = tf2np(transform)
             self.store_transform(frame_id, child_frame_id, T)
         self.try_update_frame_transforms()
 
-    def prune_buffer(self, current_position: np.ndarray) -> None:
+    def prune_buffer(self, current_position):
         kept = deque()
         removed = False
         for sensor_position, cloud, colors in self.global_cloud_buffer:
-            if (
-                np.linalg.norm(sensor_position - current_position)
-                <= self.args.global_radius
-            ):
+            if np.linalg.norm(sensor_position - current_position) <= 100.0:
                 kept.append((sensor_position, cloud, colors))
             else:
                 removed = True
@@ -484,7 +345,7 @@ class GlobalPointCloudPublisher(Node):
         if removed:
             self.rebuild_merged_cache()
 
-    def rebuild_merged_cache(self) -> None:
+    def rebuild_merged_cache(self):
         if not self.global_cloud_buffer:
             self.merged_cloud_cache = np.empty((0, 3), dtype=np.float32)
             self.merged_color_cache = np.empty((0,), dtype=np.uint32)
@@ -496,56 +357,33 @@ class GlobalPointCloudPublisher(Node):
             [colors for _, _, colors in self.global_cloud_buffer]
         ).astype(np.uint32, copy=False)
 
-    def append_to_merged_cache(self, cloud: np.ndarray, colors: np.ndarray) -> None:
+    def append_to_merged_cache(self, cloud, colors):
         if cloud.size == 0:
             return
         if self.merged_cloud_cache.size == 0:
             self.merged_cloud_cache = cloud.astype(np.float32, copy=False)
             self.merged_color_cache = colors.astype(np.uint32, copy=False)
             return
-        self.merged_cloud_cache = np.concatenate(
-            (self.merged_cloud_cache, cloud.astype(np.float32, copy=False)), axis=0
-        )
-        self.merged_color_cache = np.concatenate(
-            (self.merged_color_cache, colors.astype(np.uint32, copy=False)), axis=0
-        )
+        self.merged_cloud_cache = np.concatenate((self.merged_cloud_cache, cloud.astype(np.float32, copy=False)), axis=0)
+        self.merged_color_cache = np.concatenate((self.merged_color_cache, colors.astype(np.uint32, copy=False)), axis=0)
 
-    def get_sample_grid(
-        self, depth_shape: tuple[int, int]
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def get_sample_grid(self, depth_shape):
         h, w = depth_shape
-        grid_key = (h, w, self.args.pixel_step)
+        grid_key = (h, w, 2)
         if self.sample_grid_key != grid_key:
-            u_coords = np.arange(0, w, self.args.pixel_step, dtype=np.float32)
-            v_coords = np.arange(0, h, self.args.pixel_step, dtype=np.float32)
+            u_coords = np.arange(0, w, 2, dtype=np.float32)
+            v_coords = np.arange(0, h, 2, dtype=np.float32)
             self.sample_u_grid, self.sample_v_grid = np.meshgrid(u_coords, v_coords)
             self.sample_grid_key = grid_key
         return self.sample_u_grid, self.sample_v_grid
 
-    def publish_cloud(
-        self, points: np.ndarray, colors: np.ndarray, stamp, frame_id: str = "world"
-    ) -> None:
+    def publish_cloud(self, points, colors, stamp, frame_id="world"):
         header = Header()
         header.stamp = stamp
         header.frame_id = frame_id
-        dtype = np.dtype(
-            [
-                ("x", np.float32),
-                ("y", np.float32),
-                ("z", np.float32),
-                ("rgb", np.float32),
-            ]
-        )
+        dtype = np.dtype([("x", np.float32), ("y", np.float32), ("z", np.float32), ("rgb", np.float32)])
         structured = np.zeros(points.shape[0], dtype=dtype)
-        structured["x"], structured["y"], structured["z"] = (
-            (
-                points[:, 0],
-                points[:, 1],
-                points[:, 2],
-            )
-            if points.size
-            else (np.empty((0,), dtype=np.float32),) * 3
-        )
+        structured["x"], structured["y"], structured["z"] = (points[:, 0], points[:, 1], points[:, 2]) if points.size else (np.empty((0,), dtype=np.float32),) * 3
         structured["rgb"] = colors.view(np.float32)
         fields = [
             PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
@@ -555,14 +393,12 @@ class GlobalPointCloudPublisher(Node):
         ]
         self.cloud_pub.publish(pc2.create_cloud(header, fields, structured))
 
-    def publish_pose_tf(
-        self, T_world_imu: np.ndarray, stamp, parent_frame: str
-    ) -> None:
+    def publish_pose_tf(self, T_world_imu, stamp, parent_frame):
         rotation = R.from_matrix(T_world_imu[:3, :3]).as_quat()
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
         tf_msg.header.frame_id = parent_frame or "world"
-        tf_msg.child_frame_id = self.args.pose_child_frame
+        tf_msg.child_frame_id = "imu"
         tf_msg.transform.translation.x = float(T_world_imu[0, 3])
         tf_msg.transform.translation.y = float(T_world_imu[1, 3])
         tf_msg.transform.translation.z = float(T_world_imu[2, 3])
@@ -572,50 +408,28 @@ class GlobalPointCloudPublisher(Node):
         tf_msg.transform.rotation.w = float(rotation[3])
         self.tf_broadcaster.sendTransform(tf_msg)
 
-    def publish_path(self, pose_msg: PoseStamped) -> None:
+    def publish_path(self, pose_msg):
         path_pose = PoseStamped()
         path_pose.header = pose_msg.header
         path_pose.pose = pose_msg.pose
         self.path_msg.header = pose_msg.header
         self.path_msg.poses.append(path_pose)
-        if (
-            self.args.max_path_length > 0
-            and len(self.path_msg.poses) > self.args.max_path_length
-        ):
-            self.path_msg.poses = self.path_msg.poses[-self.args.max_path_length :]
         self.path_pub.publish(self.path_msg)
 
-    def should_add_keyframe(self, T_world_camera: np.ndarray) -> bool:
+    def should_add_keyframe(self, T_world_camera):
         if self.last_keyframe_pose is None:
             return True
-        translation = np.linalg.norm(
-            T_world_camera[:3, 3] - self.last_keyframe_pose[:3, 3]
-        )
+        translation = np.linalg.norm(T_world_camera[:3, 3] - self.last_keyframe_pose[:3, 3])
         relative_rotation = self.last_keyframe_pose[:3, :3].T @ T_world_camera[:3, :3]
-        rotation_angle = np.arccos(
-            np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0)
-        )
-        return (
-            translation >= self.args.keyframe_translation
-            or rotation_angle >= np.deg2rad(self.args.keyframe_rotation_deg)
-        )
+        rotation_angle = np.arccos(np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0))
+        return translation >= 0.03 or rotation_angle >= np.deg2rad(1.0)
 
-    def sync_callback(
-        self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image
-    ) -> None:
-        self._sync_count += 1
-        if self._sync_count == 1:
-            self.get_logger().info(
-                f"Received first synchronized triplet: depth={depth_msg.header.stamp.sec}.{depth_msg.header.stamp.nanosec:09d}, "
-                f"pose={pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d}, "
-                f"image={image_msg.header.stamp.sec}.{image_msg.header.stamp.nanosec:09d}"
-            )
+    def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
+        self.get_logger().info(f"Received first synchronized triplet: depth={depth_msg.header.stamp.sec}.{depth_msg.header.stamp.nanosec:09d}, pose={pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d}, image={image_msg.header.stamp.sec}.{image_msg.header.stamp.nanosec:09d}", once=True)
         if self.K is None or self.T_i_depth is None:
             self.log_missing_inputs()
             return
-        if self.args.image_mode == "color" and (
-            self.color_K is None or self.T_depth_color is None
-        ):
+        if self.args.image_mode == "color" and (self.color_K is None or self.T_depth_color is None):
             self.log_missing_inputs()
             return
 
@@ -623,12 +437,7 @@ class GlobalPointCloudPublisher(Node):
         if self.args.image_mode == "grayscale":
             image = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="mono8")
         else:
-            if self.args.color_image_compressed:
-                image = self.bridge.compressed_imgmsg_to_cv2(
-                    image_msg, desired_encoding="rgb8"
-                )
-            else:
-                image = self.bridge.imgmsg_to_cv2(image_msg, desired_encoding="rgb8")
+            image = self.bridge.compressed_imgmsg_to_cv2(image_msg, desired_encoding="rgb8")
         if depth is None or image is None:
             return
         depth = np.asarray(depth)
@@ -638,62 +447,26 @@ class GlobalPointCloudPublisher(Node):
             depth = depth.astype(np.float32)
         image = np.asarray(image, dtype=np.uint8)
         if self.args.image_mode == "grayscale" and image.shape[:2] != depth.shape[:2]:
-            if self._projection_debug_counter % 20 == 0:
-                self.get_logger().info(
-                    f"Skipping grayscale projection because image and depth shapes differ: "
-                    f"depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}"
-                )
-            self._projection_debug_counter += 1
+            self.get_logger().info(f"Skipping grayscale projection because image and depth shapes differ: depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}", throttle_duration_sec=1.0)
             return
         sample_u_grid, sample_v_grid = self.get_sample_grid(depth.shape)
 
         # `/insight/vio_pose` provides T_w_i, where the world frame is z-up.
         # Depth backprojection yields points in the camera optical frame, so we
         # first map them into the IMU/depth rig frame before applying T_w_i.
-        T_w_i = pose_msg_to_np(pose_msg)
+        T_w_i = pose_msg2np(pose_msg)
         T_world_camera = T_w_i @ self.T_i_depth
         current_position = T_w_i[:3, 3].copy()
         self.publish_pose_tf(T_w_i, pose_msg.header.stamp, pose_msg.header.frame_id)
         self.publish_path(pose_msg)
 
         if self.args.image_mode == "grayscale":
-            cloud_camera, cloud_colors, projection_stats, projection_samples = (
-                depth_to_grayscale_cloud(
-                    depth,
-                    image,
-                    self.K,
-                    sample_u_grid,
-                    sample_v_grid,
-                    self.args.pixel_step,
-                    self.args.max_depth,
-                )
-            )
+            cloud_camera, cloud_colors, projection_stats, projection_samples = depth_to_grayscale_cloud(depth, image, self.K, sample_u_grid, sample_v_grid, 2, 2.0)
         else:
-            cloud_camera, cloud_colors, projection_stats, projection_samples = (
-                depth_to_color_cloud(
-                    depth,
-                    image,
-                    self.K,
-                    self.color_K,
-                    self.T_depth_color,
-                    sample_u_grid,
-                    sample_v_grid,
-                    self.args.pixel_step,
-                    self.args.max_depth,
-                )
-            )
-        self._projection_debug_counter += 1
+            cloud_camera, cloud_colors, projection_stats, projection_samples = depth_to_color_cloud(depth, image, self.K, self.color_K, self.T_depth_color, sample_u_grid, sample_v_grid, 2, 2.0)
         if cloud_camera.size == 0:
-            if self._projection_debug_counter % 20 == 1:
-                self.get_logger().info(
-                    f"No valid {self.args.image_mode} depth points for current synchronized frame. "
-                    f"Projection stats: {projection_stats}, "
-                    f"depth_encoding={depth_msg.encoding}, "
-                    f"depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}, "
-                    f"depth_K={np.round(self.K, 2).tolist()}, "
-                    f"imu_to_depth_t={np.round(self.T_i_depth[:3, 3], 4).tolist()}"
-                )
-        elif self._projection_debug_counter % 20 == 1:
+            self.get_logger().info(f"No valid {self.args.image_mode} depth points for current synchronized frame. Projection stats: {projection_stats}, depth_encoding={depth_msg.encoding}, depth_shape={tuple(depth.shape)}, image_shape={tuple(image.shape)}, depth_K={np.round(self.K, 2).tolist()}, imu_to_depth_t={np.round(self.T_i_depth[:3, 3], 4).tolist()}", throttle_duration_sec=1.0)
+        else:
             if self.args.image_mode == "grayscale":
                 sample_text = "; ".join(
                     [
@@ -708,21 +481,15 @@ class GlobalPointCloudPublisher(Node):
                         for u, v, z, r, g, b, x, y in projection_samples
                     ]
                 )
-            self.get_logger().info(
-                f"{self.args.image_mode.capitalize()} sample points: {sample_text}"
-            )
+            self.get_logger().info(f"{self.args.image_mode.capitalize()} sample points: {sample_text}", throttle_duration_sec=1.0)
         cloud_world = transform_points(cloud_camera, T_world_camera)
-        keep_mask = crop_mask(cloud_world, current_position, self.args.global_radius)
+        keep_mask = crop_mask(cloud_world, current_position, 100.0)
         cloud_world = cloud_world[keep_mask]
         cloud_colors = cloud_colors[keep_mask]
 
         if self.should_add_keyframe(T_world_camera):
-            cloud_world, cloud_colors = voxel_downsample(
-                cloud_world, cloud_colors, self.args.voxel_size
-            )
-            self.global_cloud_buffer.append(
-                (current_position, cloud_world, cloud_colors)
-            )
+            cloud_world, cloud_colors = voxel_downsample(cloud_world, cloud_colors, 0.05)
+            self.global_cloud_buffer.append((current_position, cloud_world, cloud_colors))
             self.append_to_merged_cache(cloud_world, cloud_colors)
             self.last_keyframe_pose = T_world_camera.copy()
             self.prune_buffer(current_position)
@@ -736,9 +503,7 @@ class GlobalPointCloudPublisher(Node):
             )
             return
 
-        keep_mask = crop_mask(
-            self.merged_cloud_cache, current_position, self.args.global_radius
-        )
+        keep_mask = crop_mask(self.merged_cloud_cache, current_position, 100.0)
         merged_cloud = self.merged_cloud_cache[keep_mask]
         merged_colors = self.merged_color_cache[keep_mask]
 
@@ -750,54 +515,21 @@ class GlobalPointCloudPublisher(Node):
         )
         if not self._published_once:
             self._published_once = True
-            self.get_logger().info(
-                f"Published first {self.args.image_mode} global cloud with {merged_cloud.shape[0]} points in frame {pose_msg.header.frame_id or 'world'}."
-            )
+            self.get_logger().info(f"Published first {self.args.image_mode} global cloud with {merged_cloud.shape[0]} points in frame {pose_msg.header.frame_id or 'world'}.", once=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Project SLAM depth into a global world-frame point cloud."
     )
-    parser.add_argument("--depth-topic", default="/camera/camera/depth/image_rect_raw")
-    parser.add_argument(
-        "--camera-info-topic", default="/camera/camera/infra1/camera_info"
-    )
     parser.add_argument("--pose-topic", default="/insight/vio_pose")
     parser.add_argument("--image-mode", choices=("grayscale", "color"), default="color")
-    parser.add_argument(
-        "--gray-image-topic", default="/camera/camera/infra1/image_rect_raw"
-    )
-    parser.add_argument(
-        "--color-image-topic",
-        default="/camera/camera/color/image_rect_raw/compressed",
-    )
-    parser.add_argument(
-        "--color-camera-info-topic", default="/camera/camera/color/camera_info"
-    )
-    parser.add_argument(
-        "--color-image-raw", dest="color_image_compressed", action="store_false"
-    )
-    parser.set_defaults(color_image_compressed=True)
-    parser.add_argument("--output-topic", default="/global_pointcloud")
-    parser.add_argument("--path-topic", default="/global_pointcloud_path")
-    parser.add_argument("--max-path-length", type=int, default=0)
-    parser.add_argument("--pose-child-frame", default="imu")
-    parser.add_argument("--sync-slop", type=float, default=0.08)
-    parser.add_argument("--pixel-step", type=int, default=2)
-    parser.add_argument("--keyframe-translation", type=float, default=0.03)
-    parser.add_argument("--keyframe-rotation-deg", type=float, default=1.0)
-    parser.add_argument("--max-depth", type=float, default=2)
-    parser.add_argument("--global-radius", type=float, default=100.0)
-    parser.add_argument("--voxel-size", type=float, default=0.05)
     return parser
 
 
-def main(args=None) -> None:
+def main(args=None):
     parser = build_parser()
-    parsed_args, ros_args = parser.parse_known_args(
-        sys.argv[1:] if args is None else args
-    )
+    parsed_args, ros_args = parser.parse_known_args(sys.argv[1:] if args is None else args)
     rclpy.init(args=ros_args)
     node = GlobalPointCloudPublisher(parsed_args)
     try:
