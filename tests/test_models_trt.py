@@ -235,7 +235,10 @@ def test_stereo_engine_trt_with_looper_data():
     assert np.isfinite(disp).any(), "Looper disparity has no finite values"
     assert np.isfinite(depth).any(), "Looper depth has no finite values"
 
-    # Save visualizations for Looper outputs.
+    # Save raw outputs and visualizations for Looper outputs.
+    np.save(os.path.join(looper_dir, "disp.npy"), disp)
+    np.save(os.path.join(looper_dir, "depth.npy"), depth)
+
     disp_vis = disp.copy()
     if np.isfinite(disp_vis).any():
         disp_min = np.nanmin(disp_vis[np.isfinite(disp_vis)])
@@ -304,7 +307,10 @@ def test_stereo_engine_trt_with_realsense_data():
     assert np.isfinite(disp).any(), "RealSense disparity has no finite values"
     assert np.isfinite(depth).any(), "RealSense depth has no finite values"
 
-    # Save visualizations for RealSense outputs.
+    # Save raw outputs and visualizations for RealSense outputs.
+    np.save(os.path.join(rs_dir, "disp.npy"), disp)
+    np.save(os.path.join(rs_dir, "depth.npy"), depth)
+
     disp_vis = disp.copy()
     if np.isfinite(disp_vis).any():
         disp_min = np.nanmin(disp_vis[np.isfinite(disp_vis)])
@@ -345,4 +351,3 @@ if __name__ == "__main__":
     print("StereoEngine TRT with Looper data test passed.")
     test_stereo_engine_trt_with_realsense_data()
     print("StereoEngine TRT with RealSense data test passed.")
-
