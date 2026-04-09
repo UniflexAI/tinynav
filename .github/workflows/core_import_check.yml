@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  perception-node:
+  build:
     runs-on: X64
     steps:
       - name: Checkout code
@@ -36,20 +36,6 @@ jobs:
               python -c "import tinynav.core.perception_node"
             '
 
-  map-node:
-    runs-on: X64
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Perform Git LFS checkout
-        run: git lfs checkout
-
-      - name: Pull CI image
-        run: docker pull uniflexai/tinynav:latest
-
       - name: Check map_node imports
         run: |
           docker run --rm -i \
@@ -64,20 +50,6 @@ jobs:
               python -c "import tinynav.core.map_node"
             '
 
-  build-map-node:
-    runs-on: X64
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Perform Git LFS checkout
-        run: git lfs checkout
-
-      - name: Pull CI image
-        run: docker pull uniflexai/tinynav:latest
-
       - name: Check build_map_node imports
         run: |
           docker run --rm -i \
@@ -91,20 +63,6 @@ jobs:
               python -m py_compile tinynav/core/build_map_node.py
               python -c "import tinynav.core.build_map_node"
             '
-
-  planning-node:
-    runs-on: X64
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Perform Git LFS checkout
-        run: git lfs checkout
-
-      - name: Pull CI image
-        run: docker pull uniflexai/tinynav:latest
 
       - name: Check planning_node imports
         run: |
