@@ -66,9 +66,9 @@ $(SUPERPOINT_ENGINE): $(SUPERPOINT_ONNX)
 # Retinify: one plan, one profile; min/max shapes cover RealSense (480x848) and Looper (640x544).
 $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
-        --minShapes=left:1x1x480x544,right:1x1x480x544 \
-        --optShapes=left:1x1x640x544,right:1x1x640x544 \
-        --maxShapes=left:1x1x640x848,right:1x1x640x848 \
+        --minShapes=left:1x480x544x1,right:1x480x544x1 \
+        --optShapes=left:1x640x544x1,right:1x640x544x1 \
+        --maxShapes=left:1x640x848x1,right:1x640x848x1 \
         --precisionConstraints=obey \
         --layerPrecisions='/cost_volume/Unsqueeze:fp16,/cost_volume/post_process/conv_block3/conv_block3.0/BatchNormalization:fp32,/cost_volume/post_process/norm/norm.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.1/Relu:fp32,/disparity_refinement/upsample2_conv/upsample2_conv.0/BatchNormalization:fp32' \
         --fp16
@@ -76,4 +76,3 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
 
 clean:
 	rm -f *_$(ARCH).plan
-
