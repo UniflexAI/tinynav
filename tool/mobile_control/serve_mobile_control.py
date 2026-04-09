@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import os
 
-from aiohttp import ClientSession, WSMsgType, web
+from aiohttp import ClientConnectorError, ClientSession, WSCloseCode, WSMsgType, web
 
 
 async def index(request: web.Request) -> web.FileResponse:
@@ -27,26 +27,32 @@ async def ws_proxy(request: web.Request) -> web.WebSocketResponse:
     await client_ws.prepare(request)
 
     async with ClientSession() as session:
-        async with session.ws_connect(upstream_url, heartbeat=20.0) as upstream_ws:
-            async def client_to_upstream() -> None:
-                async for msg in client_ws:
-                    if msg.type == WSMsgType.TEXT:
-                        await upstream_ws.send_str(msg.data)
-                    elif msg.type == WSMsgType.BINARY:
-                        await upstream_ws.send_bytes(msg.data)
-                    elif msg.type == WSMsgType.CLOSE:
-                        await upstream_ws.close()
+        try:
+            async with session.ws_connect(upstream_url, heartbeat=20.0) as upstream_ws:
+                async def client_to_upstream() -> None:
+                    async for msg in client_ws:
+                        if msg.type == WSMsgType.TEXT:
+                            await upstream_ws.send_str(msg.data)
+                        elif msg.type == WSMsgType.BINARY:
+                            await upstream_ws.send_bytes(msg.data)
+                        elif msg.type == WSMsgType.CLOSE:
+                            await upstream_ws.close()
 
-            async def upstream_to_client() -> None:
-                async for msg in upstream_ws:
-                    if msg.type == WSMsgType.TEXT:
-                        await client_ws.send_str(msg.data)
-                    elif msg.type == WSMsgType.BINARY:
-                        await client_ws.send_bytes(msg.data)
-                    elif msg.type == WSMsgType.CLOSE:
-                        await client_ws.close()
+                async def upstream_to_client() -> None:
+                    async for msg in upstream_ws:
+                        if msg.type == WSMsgType.TEXT:
+                            await client_ws.send_str(msg.data)
+                        elif msg.type == WSMsgType.BINARY:
+                            await client_ws.send_bytes(msg.data)
+                        elif msg.type == WSMsgType.CLOSE:
+                            await client_ws.close()
 
-            await asyncio.gather(client_to_upstream(), upstream_to_client())
+                await asyncio.gather(client_to_upstream(), upstream_to_client())
+        except ClientConnectorError as exc:
+            await client_ws.close(
+                code=WSCloseCode.INTERNAL_ERROR,
+                message=f"rosbridge unreachable: {exc}".encode()[:123],
+            )
 
     return client_ws
 
