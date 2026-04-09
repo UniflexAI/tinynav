@@ -36,7 +36,6 @@ class CmdVelControlNode(Node):
         
         current_time = self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9
         
-        path_time_diff = current_time - self.last_path_time
         self.last_path_time = current_time
 
         def msg2np(msg):

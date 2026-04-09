@@ -69,6 +69,8 @@ RUN add-apt-repository universe
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
 RUN apt-get update && apt-get install -y ros-humble-desktop \
+    ros-humble-image-transport-plugins \
+    ros-humble-compressed-image-transport \
     python3-colcon-common-extensions \
     && rm -rf /var/lib/apt/lists/*
 
@@ -162,7 +164,9 @@ ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONPATH="/tinynav:/3rdparty/gtsam/build/python:/opt/venv/lib/python3.10/site-packages"
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
-RUN /root/.local/bin/uv sync --python /opt/venv/bin/python
+# lekiwi conflicts with unitree (lerobot vs unitree-sdk2py dependency clash), so only unitree is included by default.
+# To use lekiwi instead, replace --extra unitree with --extra lekiwi.
+RUN /root/.local/bin/uv sync --python /opt/venv/bin/python --extra unitree
 
 # Write entrypoint.sh (model build prompt only)
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
@@ -206,4 +210,3 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
-
