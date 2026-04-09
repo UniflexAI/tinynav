@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  perception-node:
     runs-on: X64
     steps:
       - name: Checkout code
@@ -20,18 +20,102 @@ jobs:
         run: git lfs checkout
 
       - name: Pull CI image
-        run: docker pull uniflexai/tinynav:342ca22d
+        run: docker pull uniflexai/tinynav:latest
 
-      - name: Check core module imports
+      - name: Check perception_node imports
         run: |
           docker run --rm -i \
             --entrypoint "" \
             -v "$GITHUB_WORKSPACE:/tinynav" \
             -w /tinynav \
-            uniflexai/tinynav:342ca22d \
+            uniflexai/tinynav:latest \
             bash -lc '
               set -eo pipefail
               source /opt/ros/humble/setup.bash
-              python -m py_compile tinynav/core/perception_node.py tinynav/core/map_node.py tinynav/core/build_map_node.py tinynav/core/planning_node.py
+              python -m py_compile tinynav/core/perception_node.py
               python -c "import tinynav.core.perception_node"
+            '
+
+  map-node:
+    runs-on: X64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS checkout
+        run: git lfs checkout
+
+      - name: Pull CI image
+        run: docker pull uniflexai/tinynav:latest
+
+      - name: Check map_node imports
+        run: |
+          docker run --rm -i \
+            --entrypoint "" \
+            -v "$GITHUB_WORKSPACE:/tinynav" \
+            -w /tinynav \
+            uniflexai/tinynav:latest \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              python -m py_compile tinynav/core/map_node.py
+              python -c "import tinynav.core.map_node"
+            '
+
+  build-map-node:
+    runs-on: X64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS checkout
+        run: git lfs checkout
+
+      - name: Pull CI image
+        run: docker pull uniflexai/tinynav:latest
+
+      - name: Check build_map_node imports
+        run: |
+          docker run --rm -i \
+            --entrypoint "" \
+            -v "$GITHUB_WORKSPACE:/tinynav" \
+            -w /tinynav \
+            uniflexai/tinynav:latest \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              python -m py_compile tinynav/core/build_map_node.py
+              python -c "import tinynav.core.build_map_node"
+            '
+
+  planning-node:
+    runs-on: X64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS checkout
+        run: git lfs checkout
+
+      - name: Pull CI image
+        run: docker pull uniflexai/tinynav:latest
+
+      - name: Check planning_node imports
+        run: |
+          docker run --rm -i \
+            --entrypoint "" \
+            -v "$GITHUB_WORKSPACE:/tinynav" \
+            -w /tinynav \
+            uniflexai/tinynav:latest \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              python -m py_compile tinynav/core/planning_node.py
+              python -c "import tinynav.core.planning_node"
             '
