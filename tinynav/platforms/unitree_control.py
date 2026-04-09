@@ -6,8 +6,8 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
 from std_msgs.msg import Float32, String
-import threading
 from enum import Enum
+import logging
 import time
 
 logger = logging.getLogger(__name__)
