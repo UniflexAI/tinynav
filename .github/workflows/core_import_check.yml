@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: X64
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -34,7 +34,6 @@ jobs:
               source /opt/ros/humble/setup.bash
               python -m py_compile tinynav/core/perception_node.py
               python -c "import tinynav.core.perception_node"
-              chmod -R 777 /tinynav
             '
 
       - name: Check map_node imports
@@ -49,7 +48,6 @@ jobs:
               source /opt/ros/humble/setup.bash
               python -m py_compile tinynav/core/map_node.py
               python -c "import tinynav.core.map_node"
-              chmod -R 777 /tinynav
             '
 
       - name: Check build_map_node imports
@@ -64,7 +62,6 @@ jobs:
               source /opt/ros/humble/setup.bash
               python -m py_compile tinynav/core/build_map_node.py
               python -c "import tinynav.core.build_map_node"
-              chmod -R 777 /tinynav
             '
 
       - name: Check planning_node imports
@@ -79,5 +76,4 @@ jobs:
               source /opt/ros/humble/setup.bash
               python -m py_compile tinynav/core/planning_node.py
               python -c "import tinynav.core.planning_node"
-              chmod -R 777 /tinynav
             '
