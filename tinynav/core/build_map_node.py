@@ -10,7 +10,7 @@ from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
-from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
+from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from cv_bridge import CvBridge
@@ -21,8 +21,8 @@ import argparse
 import sys
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
-from planning_node import run_raycasting_loopy
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.planning_node import run_raycasting_loopy
 import logging
 import asyncio
 import shelve
