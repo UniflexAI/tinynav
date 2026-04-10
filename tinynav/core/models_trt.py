@@ -235,7 +235,7 @@ class StereoEngineTRT(TRTBase):
         if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
             try:
                 _, _, max_in_shape = self.engine.get_tensor_profile_shape("left", 0)
-                return (1, 1, int(max_in_shape[2]), int(max_in_shape[3]))
+                return tuple(int(d) for d in max_in_shape)
             except Exception:
                 pass
         return super()._get_static_shape(name)
@@ -269,7 +269,7 @@ class StereoEngineTRT(TRTBase):
         self.context.set_input_shape("left", input_shapes)
         self.context.set_input_shape("right", input_shapes)
         self.context.execute_async_v3(stream_handle=self.stream)
-        h_net, w_net = input_shapes[2], input_shapes[3]
+        h_net, w_net = input_shapes[1], input_shapes[2]
         if "aarch64" not in platform.machine():
             for out in self.outputs:
                 nbytes = input_shapes[2] * input_shapes[3] * np.float32().itemsize
@@ -291,7 +291,7 @@ class StereoEngineTRT(TRTBase):
     async def infer(self, left_img, right_img, baseline, focal_length):
         h_in, w_in = left_img.shape[0], left_img.shape[1]
 
-        self._current_input_shapes = (1, 1, h_in, w_in)
+        self._current_input_shapes = (1, h_in, w_in, 1)
         self._current_input_nbytes = h_in * w_in * np.uint8().itemsize
 
         left_tensor = left_img.astype(np.uint8).ravel()
