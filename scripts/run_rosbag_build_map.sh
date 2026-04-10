@@ -1,5 +1,5 @@
 #!/bin/bash
-rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_map_color_benchmark01)
+rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_imu_example)
 map_save_path=/tinynav/output/map_color_benchmark01
 
 tmux new-session \; \
