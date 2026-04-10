@@ -24,9 +24,8 @@
   "workspaceFolder": "/tinynav",
   "remoteUser": "root",
   "features": {},
-  "mounts": [
-    "source=/mnt/nas,target=/mnt/nas,type=bind"
-  ],
+  "mounts": [],
   "postCreateCommand": "echo 'Devcontainer ready.'",
   "postStartCommand": "/usr/local/bin/entrypoint.sh"
 }
+
