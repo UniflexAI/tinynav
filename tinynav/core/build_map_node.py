@@ -388,7 +388,7 @@ class BagPlayer(Node):
 
 class BuildMapNode(Node):
     def __init__(self, map_save_path:str, verbose_timer: bool = True):
-        super().__init__('map_node')
+        super().__init__('build_map_node')
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
