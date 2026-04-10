@@ -3964,7 +3964,7 @@ requires-dist = [
     { name = "scipy" },
     { name = "tabulate" },
     { name = "tyro" },
-    { name = "unitree-sdk2py", marker = "extra == 'unitree'", git = "https://github.com/unitreerobotics/unitree_sdk2_python.git?rev=404fe44d76f705c002c97e773276f2a8fefb57e4" },
+    { name = "unitree-sdk2py", marker = "extra == 'unitree'", git = "https://github.com/junlinp/unitree_sdk2_python.git?rev=4d2a115556af72382c90761a0476375dc85c3d3f" },
     { name = "viser" },
 ]
 provides-extras = ["lekiwi", "unitree", "3dgs"]
@@ -4259,7 +4259,7 @@ wheels = [
 [[package]]
 name = "unitree-sdk2py"
 version = "1.0.1"
-source = { git = "https://github.com/unitreerobotics/unitree_sdk2_python.git?rev=404fe44d76f705c002c97e773276f2a8fefb57e4#404fe44d76f705c002c97e773276f2a8fefb57e4" }
+source = { git = "https://github.com/junlinp/unitree_sdk2_python.git?rev=4d2a115556af72382c90761a0476375dc85c3d3f#4d2a115556af72382c90761a0476375dc85c3d3f" }
 dependencies = [
     { name = "cyclonedds" },
     { name = "numpy" },
