@@ -153,6 +153,10 @@ class Ros2NodeManager(Node):
         
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         
+        self.processes['rosbridge'] = self._spawn([
+            'ros2', 'launch', 'rosbridge_server', 'rosbridge_websocket_launch.xml'
+        ])
+
         topics = [
             '/tf', '/cmd_vel', '/mapping/global_plan', '/mapping/poi',
             '/mapping/poi_change', '/planning/trajectory_path',
