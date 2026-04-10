@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 import numpy as np
 from numba import njit, prange
 
@@ -340,19 +340,70 @@ class BagPlayer(Node):
         self._reader = SequentialReader()
         self._reader.open(self._storage_options, self._converter_options)
 
+        self.start_timestamp_ns = None
+        self.end_timestamp_ns = None
+
+        topic_infos = self._reader.get_all_topics_and_types()
+        if len(topic_infos) == 0:
+            raise ValueError(f"Bag {bag_uri} has no topics")
+
+        self.start_timestamp_ns, self.end_timestamp_ns = self._scan_bag_time_range(
+            bag_uri,
+            storage_id,
+            serialization_format,
+        )
+        if self.end_timestamp_ns <= self.start_timestamp_ns:
+            raise ValueError(f"Invalid bag timestamp range: start={self.start_timestamp_ns}, end={self.end_timestamp_ns}")
+
         # topic -> (publisher, msg_type)
         self._topic_publishers = {}
 
         # Build publishers for all topics in the bag
-        for topic_info in self._reader.get_all_topics_and_types():
+        for topic_info in topic_infos:
             msg_type = get_message(topic_info.type)
             pub = self.create_publisher(msg_type, topic_info.name, 10)
             self._topic_publishers[topic_info.name] = (pub, msg_type)
 
         # /clock publisher (for use_sim_time)
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
+        self._mapping_percent_pub = self.create_publisher(Float32, "/mapping/percent", 10)
 
         self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
+
+    def _scan_bag_time_range(self, bag_uri: str, storage_id: str, serialization_format: str) -> tuple[int, int]:
+        # We have not found a rosbag2_py API that exposes the bag time range directly,
+        # so for now we scan the bag once to get the first and last message timestamps.
+        scan_reader = SequentialReader()
+        scan_reader.open(
+            StorageOptions(uri=bag_uri, storage_id=storage_id),
+            ConverterOptions(
+                input_serialization_format=serialization_format,
+                output_serialization_format=serialization_format,
+            ),
+        )
+
+        first_timestamp_ns = None
+        last_timestamp_ns = None
+        while scan_reader.has_next():
+            _, _, timestamp_ns = scan_reader.read_next()
+            timestamp_ns = int(timestamp_ns)
+            if first_timestamp_ns is None:
+                first_timestamp_ns = timestamp_ns
+            last_timestamp_ns = timestamp_ns
+
+        if first_timestamp_ns is None or last_timestamp_ns is None:
+            raise ValueError(f"Bag {bag_uri} has no messages")
+
+        return first_timestamp_ns, last_timestamp_ns
+
+    def _publish_percent(self, percent: float) -> None:
+        msg = Float32()
+        msg.data = float(percent)
+        self._mapping_percent_pub.publish(msg)
+
+    def _publish_percent_from_timestamp(self, timestamp_ns: int) -> None:
+        percent = 100.0 * (timestamp_ns - self.start_timestamp_ns) / (self.end_timestamp_ns - self.start_timestamp_ns)
+        self._publish_percent(percent)
 
     def play_next(self) -> bool:
         """
@@ -363,6 +414,8 @@ class BagPlayer(Node):
             return False
 
         topic, serialized_msg, timestamp_ns = self._reader.read_next()
+        timestamp_ns = int(timestamp_ns)
+        self._publish_percent_from_timestamp(timestamp_ns)
 
         # Find publisher + msg type for this topic
         pub_and_type = self._topic_publishers.get(topic)
@@ -813,6 +866,7 @@ def main(args=None):
     exec_.add_node(image_transports_node)
     while rclpy.ok() and player_node.play_next():
         exec_.spin_once(timeout_sec=0.001)
+    player_node._publish_percent(100.0)
     map_node.save_mapping()
 
 if __name__ == '__main__':
