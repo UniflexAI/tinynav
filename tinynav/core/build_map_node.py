@@ -342,7 +342,6 @@ class BagPlayer(Node):
 
         self.start_timestamp_ns = None
         self.end_timestamp_ns = None
-        self.current_timestamp_ns = None
 
         topic_infos = self._reader.get_all_topics_and_types()
         if len(topic_infos) == 0:
@@ -353,8 +352,6 @@ class BagPlayer(Node):
             storage_id,
             serialization_format,
         )
-        if self.end_timestamp_ns <= self.start_timestamp_ns:
-            raise ValueError(f"Invalid bag timestamp range: start={self.start_timestamp_ns}, end={self.end_timestamp_ns}")
 
         # topic -> (publisher, msg_type)
         self._topic_publishers = {}
@@ -403,10 +400,7 @@ class BagPlayer(Node):
         self._mapping_percent_pub.publish(msg)
 
     def _publish_percent_from_timestamp(self, timestamp_ns: int) -> None:
-        if self.end_timestamp_ns <= self.start_timestamp_ns:
-            raise ValueError(f"Invalid bag timestamp range: start={self.start_timestamp_ns}, end={self.end_timestamp_ns}")
         percent = 100.0 * (timestamp_ns - self.start_timestamp_ns) / (self.end_timestamp_ns - self.start_timestamp_ns)
-        percent = max(0.0, min(100.0, percent))
         self._publish_percent(percent)
 
     def play_next(self) -> bool:
@@ -418,8 +412,7 @@ class BagPlayer(Node):
             return False
 
         topic, serialized_msg, timestamp_ns = self._reader.read_next()
-        self.current_timestamp_ns = int(timestamp_ns)
-        self._publish_percent_from_timestamp(self.current_timestamp_ns)
+        self._publish_percent_from_timestamp(int(timestamp_ns))
 
         # Find publisher + msg type for this topic
         pub_and_type = self._topic_publishers.get(topic)
