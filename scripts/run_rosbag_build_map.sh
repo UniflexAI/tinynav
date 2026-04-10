@@ -1,6 +1,6 @@
 #!/bin/bash
-rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_imu_example)
-map_save_path=/tinynav/output/map_color_benchmark01
+rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_looper)
+map_save_path=/tinynav/output/map_go2_looper
 
 tmux new-session \; \
   split-window -h \; \
