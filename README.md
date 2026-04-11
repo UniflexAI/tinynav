@@ -246,6 +246,17 @@ TinyNav supports [Dev Containers](https://containers.dev/) for a consistent and 
 
 If you prefer the command line:
 
+#### Recommended: install a newer Node.js/npm with nvm first
+
+Some systems ship with an older npm. We recommend installing a newer Node.js/npm via `nvm` before installing the Dev Containers CLI:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+nvm install --lts
+```
+
+Then install and use the Dev Containers CLI:
+
 ```bash
 # Install the Dev Containers CLI
 npm install -g @devcontainers/cli
