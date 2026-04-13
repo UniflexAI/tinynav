@@ -227,10 +227,10 @@ class StereoEngineTRT(TRTBase):
     def _get_static_shape(self, name):
         """Ensure the stereo output gets a valid max shape for buffer allocation.
 
-        The original Retinify ONNX is disp-only. Some TensorRT versions report
-        dynamic outputs with empty or scalar shapes. Instead of asking for the
-        output profile shape directly, derive max (H, W) from the "left" input
-        profile because the stereo output shares the same spatial resolution.
+        Retinify is disp-only with NHWC tensors (B, H, W, C). Some TensorRT
+        versions report dynamic outputs with empty/scalar shapes. Instead of
+        asking output profile shape directly, derive max output shape from the
+        "left" input profile because output shares the same spatial resolution.
         """
         if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT:
             try:
@@ -247,6 +247,7 @@ class StereoEngineTRT(TRTBase):
         if len(self.outputs) != 1:
             raise RuntimeError(f"Retinify disp-only engine must have 1 output, got {len(self.outputs)}")
         self.output_name = self.outputs[0]["name"]
+        self.input_dtype = self.inputs[0]["host"].dtype
         # Current shapes/byte sizes are set per infer() call, based on the
         # actually received image size (H, W), not the engine's max profile.
         self._current_input_shapes = (1, 1, 1, 1)
@@ -272,7 +273,7 @@ class StereoEngineTRT(TRTBase):
         h_net, w_net = input_shapes[1], input_shapes[2]
         if "aarch64" not in platform.machine():
             for out in self.outputs:
-                nbytes = input_shapes[2] * input_shapes[3] * np.float32().itemsize
+                nbytes = h_net * w_net * np.float32().itemsize
                 cudart.cudaMemcpyAsync(
                     out["host"].ctypes.data,
                     out["device"],
@@ -292,13 +293,14 @@ class StereoEngineTRT(TRTBase):
         h_in, w_in = left_img.shape[0], left_img.shape[1]
 
         self._current_input_shapes = (1, h_in, w_in, 1)
-        self._current_input_nbytes = h_in * w_in * np.uint8().itemsize
+        # Retinify ONNX takes FLOAT inputs in NHWC layout.
+        left_tensor = left_img.astype(self.input_dtype, copy=False)[None, :, :, None]
+        right_tensor = right_img.astype(self.input_dtype, copy=False)[None, :, :, None]
+        self._current_input_nbytes = left_tensor.nbytes
 
-        left_tensor = left_img.astype(np.uint8).ravel()
-        right_tensor = right_img.astype(np.uint8).ravel()
-        # Copy only the active region (h_in * w_in bytes) into the max-sized host buffers.
-        np.copyto(self.inputs[0]["host"].reshape(-1)[: left_tensor.size], left_tensor)
-        np.copyto(self.inputs[1]["host"].reshape(-1)[: right_tensor.size], right_tensor)
+        # Copy only the active region into max-profile host buffers.
+        np.copyto(self.inputs[0]["host"].reshape(-1)[: left_tensor.size], left_tensor.reshape(-1))
+        np.copyto(self.inputs[1]["host"].reshape(-1)[: right_tensor.size], right_tensor.reshape(-1))
 
         results = await self.run_graph()
         disp = results[self.output_name]
