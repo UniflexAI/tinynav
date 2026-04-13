@@ -16,9 +16,14 @@ echo "[mobile-control] start rosbridge on :${ROSBRIDGE_PORT}"
 ros2 launch rosbridge_server rosbridge_websocket_launch.xml port:="${ROSBRIDGE_PORT}" &
 ROSBRIDGE_PID=$!
 
+echo "[mobile-control] start web_video_server on :8080"
+ros2 run web_video_server web_video_server &
+WEB_VIDEO_PID=$!
+
 cleanup() {
   kill "${NODE_MANAGER_PID}" >/dev/null 2>&1 || true
   kill "${ROSBRIDGE_PID}" >/dev/null 2>&1 || true
+  kill "${WEB_VIDEO_PID}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
