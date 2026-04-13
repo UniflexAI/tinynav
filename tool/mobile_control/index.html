@@ -106,6 +106,7 @@
       background:
         linear-gradient(180deg, rgba(37,99,235,0.08), rgba(0,0,0,0)),
         #09111f;
+      position: relative;
     }
     canvas {
       display: block;
@@ -113,6 +114,33 @@
       height: min(72vw, 420px);
       touch-action: none;
       cursor: crosshair;
+    }
+    .pip-video {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 160px;
+      height: 120px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+      pointer-events: none;
+      display: none;
+    }
+    .pip-video.active { display: block; }
+    .pip-video img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .pip-video .pip-label {
+      position: absolute;
+      bottom: 4px;
+      left: 6px;
+      font-size: 10px;
+      color: rgba(255,255,255,0.55);
+      pointer-events: none;
     }
     .ok { background: var(--ok); }
     .err { background: var(--err); }
@@ -148,11 +176,20 @@
           <label><input id="showMapLayer" type="checkbox" checked />地图层</label>
           <label><input id="showGlobalPath" type="checkbox" checked />全局路径</label>
           <label><input id="showLocalPath" type="checkbox" checked />局部路径</label>
+          <label><input id="showCamera" type="checkbox" />摄像头</label>
         </div>
         <button id="fitViewBtn" class="secondary">居中</button>
       </div>
+      <div class="row" id="videoUrlRow" style="display:none; margin-bottom: 8px;">
+        <input id="videoUrl" placeholder="http://robot-ip:8080/stream?topic=...&type=mjpeg" style="font-size:12px;" />
+        <button id="applyVideoBtn" class="secondary" style="white-space:nowrap;">应用</button>
+      </div>
       <div class="canvas-wrap">
         <canvas id="mapCanvas"></canvas>
+        <div class="pip-video" id="pipVideo">
+          <img id="pipImg" alt="camera" />
+          <span class="pip-label">camera</span>
+        </div>
       </div>
       <div class="mono muted">以机器人为中心显示，橙红色为 ESDF/占据层，蓝色为全局路径，绿色为局部路径，红色为目标点。</div>
     </div>
@@ -707,6 +744,39 @@
       if (!ok) return;
       publishTargetPose(world.x, world.y, yaw);
     };
+
+    const showCamera = document.getElementById("showCamera");
+    const videoUrlRow = document.getElementById("videoUrlRow");
+    const videoUrlInput = document.getElementById("videoUrl");
+    const applyVideoBtn = document.getElementById("applyVideoBtn");
+    const pipVideo = document.getElementById("pipVideo");
+    const pipImg = document.getElementById("pipImg");
+
+    const defaultVideoUrl = `http://${window.location.hostname}:8080/stream?topic=/camera/camera/infra1/image_rect_raw&type=mjpeg&quality=60`;
+    videoUrlInput.value = defaultVideoUrl;
+
+    function applyVideoUrl() {
+      const url = videoUrlInput.value.trim();
+      if (url) {
+        pipImg.src = url;
+      } else {
+        pipImg.src = "";
+      }
+    }
+
+    showCamera.onchange = () => {
+      const on = showCamera.checked;
+      videoUrlRow.style.display = on ? "" : "none";
+      pipVideo.classList.toggle("active", on);
+      if (on && !pipImg.src) {
+        applyVideoUrl();
+      }
+      if (!on) {
+        pipImg.src = "";
+      }
+    };
+
+    applyVideoBtn.onclick = applyVideoUrl;
 
     showMapLayer.onchange = drawMap;
     showGlobalPath.onchange = drawMap;
