@@ -10,7 +10,7 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Path
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2, PointField
 from scipy.spatial.transform import Rotation as R
 from std_msgs.msg import Header
@@ -219,13 +219,18 @@ class GlobalPointCloudPublisher(Node):
         self._logged_color_tf = False
         self.image_topic = "/camera/camera/infra1/image_rect_raw" if args.image_mode == "grayscale" else "/camera/camera/color/image_rect_raw/compressed"
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
+        self.tf_static_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.color_camera_info_sub = None
         if args.image_mode == "color":
             self.color_camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/color/camera_info", self.color_camera_info_callback, self.sensor_qos)
-        self.tf_sub = self.create_subscription(TFMessage, "/tf", self.tf_callback, 10)
-        self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, 10)
+        self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.cloud_pub = self.create_publisher(PointCloud2, "/slam/global_cloud", 10)
         self.path_pub = self.create_publisher(Path, "/slam/global_cloud_path", 10)
