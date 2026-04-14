@@ -152,8 +152,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /3rdparty/plotjuggler_ws/src \
     && git clone https://github.com/dvorak0/plotjuggler-ros-plugins.git /3rdparty/plotjuggler_ws/src/plotjuggler_ros \
-    && cd /3rdparty/plotjuggler_ws/src/plotjuggler_ros \
-    && git checkout feat/json-string-parser \
     && cd /3rdparty/plotjuggler_ws \
     && . /opt/ros/humble/setup.sh \
     && colcon build --packages-select plotjuggler_ros --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
