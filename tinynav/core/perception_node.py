@@ -200,7 +200,7 @@ class PerceptionNode(Node):
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
             return {
-            "stats": {"loop_ms": 0.0, "process_cnt": 0},
+            "stats": {"process_cnt": 0},
             "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
         }
         self.process_cnt += 1
@@ -223,7 +223,7 @@ class PerceptionNode(Node):
                 )
             )
             return {
-            "stats": {"loop_ms": 0.0, "process_cnt": 0},
+            "stats": {"process_cnt": 0},
             "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
         }
 
@@ -516,7 +516,6 @@ class PerceptionNode(Node):
 
         return {
             "stats": {
-                "loop_ms": loop_ms,
                 "process_cnt": self.process_cnt,
             },
             "metrics": {
