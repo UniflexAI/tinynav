@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import sys
 import time
@@ -12,7 +13,7 @@ from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
@@ -116,7 +117,7 @@ class PerceptionNode(Node):
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
-        self.stats_pub = self.create_publisher(Float32MultiArray, "/slam/stats", 10)
+        self.stats_pub = self.create_publisher(String, "/slam/stats", 10)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -194,7 +195,10 @@ class PerceptionNode(Node):
             processed = asyncio.run(self.process(left_msg, right_msg))
         if processed:
             loop_ms = (time.perf_counter() - loop_start) * 1000.0
-            self.stats_pub.publish(Float32MultiArray(data=[float(loop_ms)]))
+            self.stats_pub.publish(String(data=json.dumps({
+                "loop_ms": loop_ms,
+                "process_cnt": self.process_cnt,
+            })))
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
