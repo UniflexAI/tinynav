@@ -157,6 +157,13 @@ RUN mkdir -p /3rdparty/plotjuggler_ws/src \
     && colcon build --packages-select plotjuggler_ros --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
 RUN echo "source /3rdparty/plotjuggler_ws/install/local_setup.bash" >> ~/.bashrc
 
+# foxglove streaming
+RUN apt-get update && apt-get install -y \
+    ros-humble-foxglove-bridge \
+    ros-humble-foxglove-msgs \
+    ros-humble-foxglove-compressed-video-transport \
+    && rm -rf /var/lib/apt/lists/*
+
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
