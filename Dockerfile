@@ -144,6 +144,26 @@ RUN git clone https://github.com/dvorak0/gtsam.git -b yzf/add_smart_factor_pytho
     && make -j2
 ENV PYTHONPATH="/3rdparty/gtsam/build/python:${PYTHONPATH}"
 
+# plotjuggler ROS2 String JSON parser patch
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nlohmann-json3-dev \
+    ros-humble-plotjuggler \
+    ros-humble-plotjuggler-ros \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /3rdparty/plotjuggler_ws/src \
+    && git clone https://github.com/dvorak0/plotjuggler-ros-plugins.git /3rdparty/plotjuggler_ws/src/plotjuggler_ros \
+    && cd /3rdparty/plotjuggler_ws \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build --packages-select plotjuggler_ros --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+RUN echo "source /3rdparty/plotjuggler_ws/install/local_setup.bash" >> ~/.bashrc
+
+# foxglove streaming
+RUN apt-get update && apt-get install -y \
+    ros-humble-foxglove-bridge \
+    ros-humble-foxglove-msgs \
+    ros-humble-foxglove-compressed-video-transport \
+    && rm -rf /var/lib/apt/lists/*
+
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
