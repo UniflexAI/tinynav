@@ -133,6 +133,21 @@ RUN apt-get update && \
     apt-get install -y clang-tidy ros-humble-ament-clang-tidy ros-humble-ament-lint \
     && rm -rf /var/lib/apt/lists/*
 
+# plotjuggler ROS2 String JSON parser patch
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nlohmann-json3-dev \
+    ros-humble-plotjuggler \
+    ros-humble-plotjuggler-ros \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /3rdparty/plotjuggler_ws/src \
+    && git clone https://github.com/dvorak0/plotjuggler-ros-plugins.git /3rdparty/plotjuggler_ws/src/plotjuggler_ros \
+    && cd /3rdparty/plotjuggler_ws/src/plotjuggler_ros \
+    && git checkout feat/json-string-parser \
+    && cd /3rdparty/plotjuggler_ws \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build --packages-select plotjuggler_ros --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+RUN echo "source /3rdparty/plotjuggler_ws/install/local_setup.bash" >> ~/.bashrc
+
 # gtsam from source
 RUN apt-get update && apt-get install -y python3-pip \
     && rm -rf /var/lib/apt/lists/*
