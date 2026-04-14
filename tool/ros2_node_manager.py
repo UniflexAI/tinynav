@@ -5,6 +5,7 @@ from std_msgs.msg import String
 import subprocess
 import os
 import shutil
+import socket
 import threading
 
 class Ros2NodeManager(Node):
@@ -152,9 +153,11 @@ class Ros2NodeManager(Node):
         
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         
-        self.processes['rosbridge'] = self._spawn([
-            'ros2', 'launch', 'rosbridge_server', 'rosbridge_websocket_launch.xml'
-        ])
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+            if _s.connect_ex(('127.0.0.1', 9090)) != 0:
+                self.processes['rosbridge'] = self._spawn([
+                    'ros2', 'launch', 'rosbridge_server', 'rosbridge_websocket_launch.xml'
+                ])
 
         topics = [
             '/tf', '/cmd_vel', '/mapping/global_plan', '/mapping/poi',
