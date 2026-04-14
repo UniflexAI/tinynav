@@ -117,7 +117,7 @@ class PerceptionNode(Node):
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
-        self.stats_pub = self.create_publisher(String, "/slam/stats", 10)
+        self.stats_pub = self.create_publisher(String, "/slam/data", 10)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -194,13 +194,15 @@ class PerceptionNode(Node):
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
             processed = asyncio.run(self.process(left_msg, right_msg))
         if processed:
-            stats = processed
-            stats["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
-            self.stats_pub.publish(String(data=json.dumps(stats)))
+            processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
+            self.stats_pub.publish(String(data=json.dumps(processed)))
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
-            return {"loop_ms": 0.0, "process_cnt": 0, "num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+            return {
+            "stats": {"loop_ms": 0.0, "process_cnt": 0},
+            "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+        }
         self.process_cnt += 1
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
@@ -220,7 +222,10 @@ class PerceptionNode(Node):
                     latest_imu_timestamp=current_timestamp
                 )
             )
-            return {"loop_ms": 0.0, "process_cnt": 0, "num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+            return {
+            "stats": {"loop_ms": 0.0, "process_cnt": 0},
+            "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+        }
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
@@ -510,14 +515,18 @@ class PerceptionNode(Node):
                 self.keyframe_queue.pop()
 
         return {
-            "loop_ms": loop_ms,
-            "process_cnt": self.process_cnt,
-            "num_keyframes": len(self.keyframe_queue),
-            "num_tracks": len(tracks),
-            "num_factors": graph.size(),
-            "num_variables": initial_estimate.size(),
-            "initial_error": graph.error(initial_estimate),
-            "final_error": graph.error(result),
+            "stats": {
+                "loop_ms": loop_ms,
+                "process_cnt": self.process_cnt,
+            },
+            "metrics": {
+                "num_keyframes": len(self.keyframe_queue),
+                "num_tracks": len(tracks),
+                "num_factors": graph.size(),
+                "num_variables": initial_estimate.size(),
+                "initial_error": graph.error(initial_estimate),
+                "final_error": graph.error(result),
+            },
         }
 
 
