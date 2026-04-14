@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import sys
 import time
@@ -12,7 +13,7 @@ from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
@@ -116,7 +117,7 @@ class PerceptionNode(Node):
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
-        self.stats_pub = self.create_publisher(Float32MultiArray, "/slam/stats", 10)
+        self.stats_pub = self.create_publisher(String, "/slam/data", 10)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -193,12 +194,15 @@ class PerceptionNode(Node):
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
             processed = asyncio.run(self.process(left_msg, right_msg))
         if processed:
-            loop_ms = (time.perf_counter() - loop_start) * 1000.0
-            self.stats_pub.publish(Float32MultiArray(data=[float(loop_ms)]))
+            processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
+            self.stats_pub.publish(String(data=json.dumps(processed)))
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
-            return False
+            return {
+            "stats": {"process_cnt": 0},
+            "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+        }
         self.process_cnt += 1
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
@@ -218,7 +222,10 @@ class PerceptionNode(Node):
                     latest_imu_timestamp=current_timestamp
                 )
             )
-            return True
+            return {
+            "stats": {"process_cnt": 0},
+            "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+        }
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
@@ -507,7 +514,19 @@ class PerceptionNode(Node):
             else:
                 self.keyframe_queue.pop()
 
-        return True
+        return {
+            "stats": {
+                "process_cnt": self.process_cnt,
+            },
+            "metrics": {
+                "num_keyframes": len(self.keyframe_queue),
+                "num_tracks": len(tracks),
+                "num_factors": graph.size(),
+                "num_variables": initial_estimate.size(),
+                "initial_error": graph.error(initial_estimate),
+                "final_error": graph.error(result),
+            },
+        }
 
 
 def main(args=None):
