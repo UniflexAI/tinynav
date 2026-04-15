@@ -169,13 +169,6 @@ class PerceptionNode(Node):
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
-    def debug(self):
-        pass
-        #q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in self.input_aligner.event_queues[0].events]
-        #q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in self.input_aligner.event_queues[1].events]
-        #print(f'  queued q0={q0} q1={q1}')
-        #print(f"  first_ q0={self.input_aligner.event_queues[0].first_timestamp().nanoseconds/1e9},  q1={self.input_aligner.event_queues[1].first_timestamp().nanoseconds/1e9}")
-
     def info_callback(self, msg):
         if self.K is None:
             self.K = np.array(msg.k).reshape(3, 3)
@@ -232,18 +225,14 @@ class PerceptionNode(Node):
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
         if self.input_aligner_seen_stereo:
-            self.debug()
             self.input_aligner.dispatchMessages()
-            self.debug()
 
     def images_callback(self, left_msg, right_msg):
         stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
         self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
         self.input_aligner_seen_stereo = True
         if self.input_aligner_seen_imu:
-            self.debug()
             self.input_aligner.dispatchMessages()
-            self.debug()
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
@@ -597,7 +586,7 @@ def main(args=None):
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
 
-    executor = rclpy.executors.MultiThreadedExecutor()
+    executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(perception_node)
     executor.spin()
     perception_node.destroy_node()
