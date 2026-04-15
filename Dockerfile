@@ -162,7 +162,6 @@ RUN apt-get update && apt-get install -y \
     ros-humble-foxglove-bridge \
     ros-humble-foxglove-msgs \
     ros-humble-foxglove-compressed-video-transport \
-    python3-pytest \
     && rm -rf /var/lib/apt/lists/*
 
 # Override apt-installed message_filters with UniflexAI/message_filters humble branch
