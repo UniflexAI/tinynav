@@ -211,7 +211,6 @@ class PerceptionNode(Node):
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
     def _aligned_imu_callback(self, imu_msg):
-        imu_timestamp = stamp2second(imu_msg.header.stamp)
         self._process_imu_msg(imu_msg)
 
     def _aligned_stereo_callback(self, stereo_pair_msg):
@@ -230,7 +229,6 @@ class PerceptionNode(Node):
             self.stats_pub.publish(String(data=json.dumps(processed)))
 
     def imu_callback(self, imu_msg):
-        imu_timestamp = stamp2second(imu_msg.header.stamp)
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
         if self.input_aligner_seen_stereo:
@@ -239,7 +237,6 @@ class PerceptionNode(Node):
             self.debug()
 
     def images_callback(self, left_msg, right_msg):
-        image_timestamp = stamp2second(left_msg.header.stamp)
         stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
         self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
         self.input_aligner_seen_stereo = True
