@@ -72,7 +72,6 @@ RUN apt-get update && apt-get install -y ros-humble-desktop \
     ros-humble-image-transport-plugins \
     ros-humble-compressed-image-transport \
     python3-colcon-common-extensions \
-    python3-pytest \
     && rm -rf /var/lib/apt/lists/*
 
 # env
@@ -80,14 +79,6 @@ ENV RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 ENV CYCLONEDDS_URI=/tinynav/scripts/cyclone_dds_localhost.xml
 ENV PATH=$PATH:/usr/src/tensorrt/bin/
-
-# Override apt-installed message_filters with UniflexAI/message_filters humble branch
-RUN mkdir -p /3rdparty/message_filters_ws/src \
-    && git clone --branch humble https://github.com/UniflexAI/message_filters.git /3rdparty/message_filters_ws/src/message_filters \
-    && cd /3rdparty/message_filters_ws \
-    && . /opt/ros/humble/setup.sh \
-    && colcon build --packages-select message_filters --allow-overriding message_filters
-RUN echo "source /3rdparty/message_filters_ws/install/local_setup.bash" >> ~/.bashrc
 
 # install cyclonedds for unitree sdk
 RUN git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x
@@ -171,7 +162,16 @@ RUN apt-get update && apt-get install -y \
     ros-humble-foxglove-bridge \
     ros-humble-foxglove-msgs \
     ros-humble-foxglove-compressed-video-transport \
+    python3-pytest \
     && rm -rf /var/lib/apt/lists/*
+
+# Override apt-installed message_filters with UniflexAI/message_filters humble branch
+RUN mkdir -p /3rdparty/message_filters_ws/src \
+    && git clone --branch humble https://github.com/UniflexAI/message_filters.git /3rdparty/message_filters_ws/src/message_filters \
+    && cd /3rdparty/message_filters_ws \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build --packages-select message_filters --allow-overriding message_filters
+RUN echo "source /3rdparty/message_filters_ws/install/local_setup.bash" >> ~/.bashrc
 
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
