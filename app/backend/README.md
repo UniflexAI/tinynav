@@ -23,7 +23,6 @@ uv add fastapi "uvicorn[standard]" pillow
 ## Running
 
 ```bash
-cd /tinynav
 TINYNAV_DB_PATH=/tinynav/tinynav_db uv run uvicorn app.backend.main:app --host 0.0.0.0 --port 8000
 ```
 
