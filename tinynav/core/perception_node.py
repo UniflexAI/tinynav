@@ -106,7 +106,7 @@ class PerceptionNode(Node):
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
-        qos_profile = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=500)
+        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
 
         # use a single topic to handle the imu data.
         self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.imu_callback, qos_profile)
@@ -121,9 +121,9 @@ class PerceptionNode(Node):
 
         self.input_aligner_imu_filter = SimpleFilter()
         self.input_aligner_stereo_filter = SimpleFilter()
-        self.input_aligner = InputAligner(Duration(seconds=0.055), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
-        self.input_aligner.setInputPeriod(0, Duration(seconds=0.01))
-        self.input_aligner.setInputPeriod(1, Duration(seconds=0.1))
+        self.input_aligner = InputAligner(Duration(seconds=1.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
+        self.input_aligner.setInputPeriod(0, Duration(seconds=0.005))
+        self.input_aligner.setInputPeriod(1, Duration(seconds=0.01))
         self.input_aligner.registerCallback(0, self._aligned_imu_callback)
         self.input_aligner.registerCallback(1, self._aligned_stereo_callback)
         self.input_aligner_seen_imu = False
@@ -169,6 +169,13 @@ class PerceptionNode(Node):
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
+    def debug(self):
+        pass
+        #q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in self.input_aligner.event_queues[0].events]
+        #q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in self.input_aligner.event_queues[1].events]
+        #print(f'  queued q0={q0} q1={q1}')
+        #print(f"  first_ q0={self.input_aligner.event_queues[0].first_timestamp().nanoseconds/1e9},  q1={self.input_aligner.event_queues[1].first_timestamp().nanoseconds/1e9}")
+
     def info_callback(self, msg):
         if self.K is None:
             self.K = np.array(msg.k).reshape(3, 3)
@@ -204,6 +211,7 @@ class PerceptionNode(Node):
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
     def _aligned_imu_callback(self, imu_msg):
+        imu_timestamp = stamp2second(imu_msg.header.stamp)
         self._process_imu_msg(imu_msg)
 
     def _aligned_stereo_callback(self, stereo_pair_msg):
@@ -222,17 +230,23 @@ class PerceptionNode(Node):
             self.stats_pub.publish(String(data=json.dumps(processed)))
 
     def imu_callback(self, imu_msg):
+        imu_timestamp = stamp2second(imu_msg.header.stamp)
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
         if self.input_aligner_seen_stereo:
+            self.debug()
             self.input_aligner.dispatchMessages()
+            self.debug()
 
     def images_callback(self, left_msg, right_msg):
+        image_timestamp = stamp2second(left_msg.header.stamp)
         stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
         self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
         self.input_aligner_seen_stereo = True
         if self.input_aligner_seen_imu:
+            self.debug()
             self.input_aligner.dispatchMessages()
+            self.debug()
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
@@ -586,7 +600,7 @@ def main(args=None):
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
 
-    executor = rclpy.executors.SingleThreadedExecutor()
+    executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(perception_node)
     executor.spin()
     perception_node.destroy_node()
