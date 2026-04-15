@@ -1,6 +1,29 @@
 import csv
 from pathlib import Path
 
+from builtin_interfaces.msg import Time as TimeMsg
+from message_filters import InputAligner, SimpleFilter
+from rclpy.duration import Duration
+from rclpy.time import Time
+
+
+class Header:
+    def __init__(self, stamp=None):
+        self.stamp = stamp if stamp is not None else TimeMsg()
+
+
+class ImuMsg:
+    def __init__(self, stamp=None):
+        self.header = Header(stamp)
+
+
+class StereoMsg:
+    def __init__(self, stamp=None):
+        self.header = Header(stamp)
+
+
+BUFFER_T = 0.055
+
 
 def _load_cases():
     path = Path(__file__).parent / 'data' / 'timestamp_event_sequencer_cases.csv'
@@ -14,10 +37,10 @@ def _load_cases():
             if row[0] == 'CASE' and len(row) > 1 and row[1] == 'seq':
                 continue
             case = row[0].strip()
-            if case and case not in {'CASE'}:
+            if case and case != 'CASE':
                 current = case
                 sections.setdefault(case, []).append(row)
-        return sections
+    return sections
 
 
 def _collect_expected_outputs(rows):
@@ -28,30 +51,70 @@ def _collect_expected_outputs(rows):
     return outputs
 
 
-def test_csv_case_ideal_has_expected_release_order_shape():
+def _build_msg(kind, t_sec):
+    stamp = Time(nanoseconds=int(t_sec * 1e9)).to_msg()
+    if kind == 'imu':
+        return ImuMsg(stamp=stamp)
+    if kind == 'stereo':
+        return StereoMsg(stamp=stamp)
+    raise ValueError(kind)
+
+
+def _run_case(rows):
+    imu_filter = SimpleFilter()
+    stereo_filter = SimpleFilter()
+    aligner = InputAligner(Duration(seconds=BUFFER_T), imu_filter, stereo_filter)
+    aligner.setInputPeriod(0, Duration(seconds=0.01))
+    aligner.setInputPeriod(1, Duration(seconds=0.1))
+
+    actual_outputs = []
+
+    def on_imu(msg):
+        actual_outputs.append(('imu', round(Time.from_msg(msg.header.stamp).nanoseconds / 1e9, 3)))
+
+    def on_stereo(msg):
+        actual_outputs.append(('stereo', round(Time.from_msg(msg.header.stamp).nanoseconds / 1e9, 3)))
+
+    aligner.registerCallback(0, on_imu)
+    aligner.registerCallback(1, on_stereo)
+
+    for row in rows:
+        if len(row) < 4:
+            continue
+        input_type = row[2].strip() if len(row) > 2 else ''
+        input_t = row[3].strip() if len(row) > 3 else ''
+        if input_type and input_t:
+            msg = _build_msg(input_type, float(input_t))
+            if input_type == 'imu':
+                aligner.add(msg, 0)
+            else:
+                aligner.add(msg, 1)
+            aligner.dispatchMessages()
+
+    max_expected_t = max((t for _, t in _collect_expected_outputs(rows)), default=0.0)
+    flush_msg = _build_msg('imu', max_expected_t + 1.0)
+    aligner.add(flush_msg, 0)
+    aligner.dispatchMessages()
+
+    return actual_outputs
+
+
+def test_csv_case_ideal_matches_input_aligner_replay():
     cases = _load_cases()
-    outputs = _collect_expected_outputs(cases['IDEAL'])
-    assert outputs[0] == ('imu', 0.0)
-    assert outputs[1] == ('stereo', 0.0)
-    assert outputs[-1] == ('imu', 0.11)
-    assert len(outputs) == 13
+    expected = _collect_expected_outputs(cases['IDEAL'])
+    actual = _run_case(cases['IDEAL'])
+    assert actual[:len(expected)] == expected
 
 
-def test_csv_case_normal_has_expected_release_order_shape():
+def test_csv_case_normal_matches_input_aligner_replay():
     cases = _load_cases()
-    outputs = _collect_expected_outputs(cases['NORMAL'])
-    assert outputs[0] == ('imu', 0.0)
-    assert outputs[1] == ('stereo', 0.0)
-    assert outputs[-1] == ('imu', 0.14)
-    assert len(outputs) == 16
+    expected = _collect_expected_outputs(cases['NORMAL'])
+    actual = _run_case(cases['NORMAL'])
+    assert actual[:len(expected)] == expected
 
 
-def test_csv_case_imu_delay_has_expected_release_order_shape():
+def test_csv_case_imu_delay_matches_input_aligner_replay():
     cases = _load_cases()
-    outputs = _collect_expected_outputs(cases['IMU_DELAY'])
-    assert outputs[0] == ('imu', 0.0)
-    assert outputs[1] == ('stereo', 0.0)
-    assert ('stereo', 0.1) in outputs
-    assert ('stereo', 0.2) in outputs
-    assert outputs[-1] == ('imu', 0.21)
-    assert len(outputs) == 18
+    expected = _collect_expected_outputs(cases['IMU_DELAY'])
+    actual = _run_case(cases['IMU_DELAY'])
+    assert actual[:len(expected)] == expected
