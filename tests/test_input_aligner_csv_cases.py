@@ -216,12 +216,15 @@ def _run_case(case, debug=False):
         if debug:
             q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[0].events]
             q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[1].events]
-            print(f'  before dispatch q0={q0} q1={q1}')
-        aligner.dispatchMessages()
-        if debug:
-            q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[0].events]
-            q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[1].events]
-            print(f'  after dispatch  q0={q0} q1={q1}')
+            print(f'  queued q0={q0} q1={q1}')
+        if input_type == 'stereo':
+            if debug:
+                print('  dispatch on stereo boundary')
+            aligner.dispatchMessages()
+            if debug:
+                q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[0].events]
+                q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[1].events]
+                print(f'  after dispatch q0={q0} q1={q1}')
 
     max_expected_t = max((t for _, t in case['expected']), default=0.0)
     flush_msg = _build_msg('imu', max_expected_t + 1.0)
