@@ -40,22 +40,14 @@ class LooperBridgeNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
 
-        self.camera_info_sub = self.create_subscription(
-            CameraInfo, args.camera_info_topic, self.camera_info_callback, self.sensor_qos
-        )
-        self.tf_static_sub = self.create_subscription(
-            TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos
-        )
+        self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
+        self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
 
-        self.depth_sub = message_filters.Subscriber(
-            self, Image, args.depth_topic, qos_profile=self.sensor_qos
-        )
-        self.pose_sub = message_filters.Subscriber(self, PoseStamped, args.pose_topic)
-        self.image_sub = message_filters.Subscriber(
-            self, Image, args.image_topic, qos_profile=self.sensor_qos
-        )
+        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
+        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/insight/vio_pose")
+        self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
         self.sync = message_filters.ApproximateTimeSynchronizer(
-            [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20, slop=args.sync_slop
+            [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20, slop=0.08
         )
         self.sync.registerCallback(self.sync_callback)
 
@@ -71,7 +63,7 @@ class LooperBridgeNode(Node):
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
 
         self.get_logger().info(
-            f"Bridging {args.pose_topic} + {args.depth_topic} + {args.image_topic} into TinyNav /slam topics."
+            "Bridging /insight/vio_pose + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
         )
 
     def camera_info_callback(self, msg: CameraInfo):
@@ -80,7 +72,7 @@ class LooperBridgeNode(Node):
             self.depth_frame_id = msg.header.frame_id
         self.try_update_depth_transform()
         self.get_logger().info(
-            f"Received camera info from {self.args.camera_info_topic} with frame {msg.header.frame_id}.",
+            f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.",
             once=True,
         )
 
@@ -134,7 +126,7 @@ class LooperBridgeNode(Node):
             return
         missing = []
         if self.cached_camera_info is None:
-            missing.append(self.args.camera_info_topic)
+            missing.append("/camera/camera/infra1/camera_info")
         if self.T_i_depth is None:
             missing.append(f"imu->{self.depth_frame_id or 'depth'} TF")
         self.get_logger().info(f"Waiting for Looper bridge inputs: {', '.join(missing)}")
@@ -165,8 +157,8 @@ class LooperBridgeNode(Node):
         odom_msg = np2msg(
             T_world_camera,
             stamp,
-            self.args.world_frame,
-            self.args.child_frame,
+            "world",
+            "camera",
             velocity=velocity,
         )
         self.last_pose = T_world_camera.copy()
@@ -185,7 +177,7 @@ class LooperBridgeNode(Node):
     def build_depth_msg(self, depth_m: np.ndarray, stamp) -> Image:
         depth_out = self.bridge.cv2_to_imgmsg(depth_m, encoding="32FC1")
         depth_out.header.stamp = stamp
-        depth_out.header.frame_id = self.args.child_frame
+        depth_out.header.frame_id = "camera"
         return depth_out
 
     def build_disparity_vis(self, depth_m: np.ndarray, stamp) -> Image:
@@ -211,7 +203,7 @@ class LooperBridgeNode(Node):
         disp_color[~valid] = 0
         disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding="bgr8")
         disp_color_msg.header.stamp = stamp
-        disp_color_msg.header.frame_id = self.args.child_frame
+        disp_color_msg.header.frame_id = "camera"
         return disp_color_msg
 
     def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
@@ -230,11 +222,11 @@ class LooperBridgeNode(Node):
 
         image_out = copy.deepcopy(image_msg)
         image_out.header.stamp = stamp
-        image_out.header.frame_id = self.args.child_frame
+        image_out.header.frame_id = "camera"
 
         camera_info_out = copy.deepcopy(self.cached_camera_info)
         camera_info_out.header.stamp = stamp
-        camera_info_out.header.frame_id = self.args.child_frame
+        camera_info_out.header.frame_id = "camera"
 
         self.odom_pub.publish(odom_msg)
         self.depth_pub.publish(depth_out)
@@ -251,13 +243,6 @@ class LooperBridgeNode(Node):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pose-topic", default="/insight/vio_pose")
-    parser.add_argument("--depth-topic", default="/camera/camera/depth/image_rect_raw")
-    parser.add_argument("--image-topic", default="/camera/camera/infra1/image_rect_raw")
-    parser.add_argument("--camera-info-topic", default="/camera/camera/infra1/camera_info")
-    parser.add_argument("--world-frame", default="world")
-    parser.add_argument("--child-frame", default="camera")
-    parser.add_argument("--sync-slop", type=float, default=0.08)
     parser.add_argument("--keyframe-translation", type=float, default=0.03)
     parser.add_argument("--keyframe-rotation-deg", type=float, default=1.0)
     return parser.parse_args()
