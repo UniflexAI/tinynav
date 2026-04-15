@@ -266,12 +266,6 @@ def test_imu_delay_case_matches_input_aligner_replay():
     assert actual[:len(expected)] == expected
 
 
-def test_input_aligner_dispatch_strategy_matches_perception_node_integration():
-    actual = _run_case(NORMAL_CASE)
-    expected = NORMAL_CASE['expected']
-    assert actual[:len(expected)] == expected
-
-
 if __name__ == '__main__':
     for name, case in [('ideal', IDEAL_CASE), ('normal', NORMAL_CASE), ('imu_delay', IMU_DELAY_CASE)]:
         if DEBUG_INPUT_ALIGNER_CASES:
