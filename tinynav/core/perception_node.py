@@ -106,10 +106,10 @@ class PerceptionNode(Node):
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
-        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
+        qos_profile = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=500)
 
         # use a single topic to handle the imu data.
-        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.sync_imu_callback, qos_profile)
+        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.imu_callback, qos_profile)
         self.imu_last_received_timestamp = None
 
 
@@ -221,7 +221,7 @@ class PerceptionNode(Node):
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
 
-    def sync_imu_callback(self, imu_msg):
+    def imu_callback(self, imu_msg):
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
         if self.input_aligner_seen_stereo:
