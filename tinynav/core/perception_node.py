@@ -4,7 +4,7 @@ import logging
 import sys
 import time
 import cv2
-from message_filters import Subscriber, ApproximateTimeSynchronizer
+from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
 import numpy as np
 import rclpy
 from codetiming import Timer
@@ -15,6 +15,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.duration import Duration
 from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
@@ -58,6 +59,13 @@ def depth_to_point(kp, depth, K):
 def stamp2second(stamp):
     nano_s = np.int64(stamp.sec) * 1_000_000_000 + np.int64(stamp.nanosec)
     return nano_s * 1e-9
+
+
+@dataclass
+class StereoPairMsg:
+    header: object
+    left_msg: Image
+    right_msg: Image
 
 
 # keyframe dataclass
@@ -110,6 +118,16 @@ class PerceptionNode(Node):
         self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=10, slop=0.02)
         self.ts.registerCallback(self.images_callback)
+
+        self.input_aligner_imu_filter = SimpleFilter()
+        self.input_aligner_stereo_filter = SimpleFilter()
+        self.input_aligner = InputAligner(Duration(seconds=0.055), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
+        self.input_aligner.setInputPeriod(0, Duration(seconds=0.01))
+        self.input_aligner.setInputPeriod(1, Duration(seconds=0.1))
+        self.input_aligner.registerCallback(0, self._aligned_imu_callback)
+        self.input_aligner.registerCallback(1, self._aligned_stereo_callback)
+        self.input_aligner_seen_imu = False
+        self.input_aligner_seen_stereo = False
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
@@ -146,8 +164,6 @@ class PerceptionNode(Node):
                              [0, 0, 0, 1]])
 
         self.imu_measurements = deque(maxlen=1000)
-        self.imu_msg_queue = deque(maxlen=2000)
-        self.image_msg_queue = deque(maxlen=20)
 
         self.keyframe_queue = []
         self.logger.info("PerceptionNode initialized.")
@@ -187,40 +203,36 @@ class PerceptionNode(Node):
         gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
-    def _drain_imu_msg_queue(self):
-        while len(self.imu_msg_queue) > 0:
-            self._process_imu_msg(self.imu_msg_queue.popleft())
+    def _aligned_imu_callback(self, imu_msg):
+        self._process_imu_msg(imu_msg)
 
-    def _process_ready_image_msgs(self, imu_timestamp: float):
-        while len(self.image_msg_queue) > 0:
-            left_msg, right_msg = self.image_msg_queue[0]
-            image_timestamp = stamp2second(left_msg.header.stamp)
-            if imu_timestamp <= image_timestamp:
-                break
+    def _aligned_stereo_callback(self, stereo_pair_msg):
+        left_msg = stereo_pair_msg.left_msg
+        right_msg = stereo_pair_msg.right_msg
+        image_timestamp = stamp2second(left_msg.header.stamp)
+        if image_timestamp - self.last_processed_timestamp < 0.1333:
+            return
 
-            # IMU timestamp is newer than the oldest image pair, process this pair now.
-            left_msg, right_msg = self.image_msg_queue.popleft()
-            if image_timestamp - self.last_processed_timestamp < 0.1333:
-                continue
-
-            self.last_processed_timestamp = image_timestamp
-            loop_start = time.perf_counter()
-            with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-                processed = asyncio.run(self.process(left_msg, right_msg))
-            if processed:
-                processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
-                self.stats_pub.publish(String(data=json.dumps(processed)))
+        self.last_processed_timestamp = image_timestamp
+        loop_start = time.perf_counter()
+        with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
+            processed = asyncio.run(self.process(left_msg, right_msg))
+        if processed:
+            processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
+            self.stats_pub.publish(String(data=json.dumps(processed)))
 
     def sync_imu_callback(self, imu_msg):
-        self.imu_msg_queue.append(imu_msg)
-        while len(self.imu_msg_queue) > 0:
-            queued_imu_msg = self.imu_msg_queue.popleft()
-            self._process_imu_msg(queued_imu_msg)
-            imu_timestamp = stamp2second(queued_imu_msg.header.stamp)
-            self._process_ready_image_msgs(imu_timestamp)
+        self.input_aligner_imu_filter.signalMessage(imu_msg)
+        self.input_aligner_seen_imu = True
+        if self.input_aligner_seen_stereo:
+            self.input_aligner.dispatchMessages()
 
     def images_callback(self, left_msg, right_msg):
-        self.image_msg_queue.append((left_msg, right_msg))
+        stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
+        self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
+        self.input_aligner_seen_stereo = True
+        if self.input_aligner_seen_imu:
+            self.input_aligner.dispatchMessages()
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
