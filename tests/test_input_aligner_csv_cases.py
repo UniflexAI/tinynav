@@ -24,6 +24,11 @@ class StereoMsg:
 BUFFER_T = 0.055
 DEBUG_INPUT_ALIGNER_CASES = os.environ.get('DEBUG_INPUT_ALIGNER_CASES', '').lower() in {'1', 'true', 'yes', 'on'}
 
+# This matches the current perception-node integration strategy:
+# - add every incoming message immediately
+# - only start dispatching after both streams have been seen once
+# - after that, dispatch after every add
+
 
 IDEAL_CASE = {
     'inputs': [
@@ -258,6 +263,12 @@ def test_normal_case_matches_input_aligner_replay():
 def test_imu_delay_case_matches_input_aligner_replay():
     actual = _run_case(IMU_DELAY_CASE)
     expected = IMU_DELAY_CASE['expected']
+    assert actual[:len(expected)] == expected
+
+
+def test_input_aligner_dispatch_strategy_matches_perception_node_integration():
+    actual = _run_case(NORMAL_CASE)
+    expected = NORMAL_CASE['expected']
     assert actual[:len(expected)] == expected
 
 
