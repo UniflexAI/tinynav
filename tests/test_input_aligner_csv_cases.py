@@ -233,3 +233,10 @@ def test_imu_delay_case_matches_input_aligner_replay():
     actual = _run_case(IMU_DELAY_CASE)
     expected = IMU_DELAY_CASE['expected']
     assert actual[:len(expected)] == expected
+
+
+if __name__ == '__main__':
+    test_ideal_case_matches_input_aligner_replay()
+    test_normal_case_matches_input_aligner_replay()
+    test_imu_delay_case_matches_input_aligner_replay()
+    print('All input aligner timing cases passed.')
