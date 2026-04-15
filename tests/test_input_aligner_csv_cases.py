@@ -1,3 +1,5 @@
+import os
+
 from builtin_interfaces.msg import Time as TimeMsg
 from message_filters import InputAligner, SimpleFilter
 from rclpy.duration import Duration
@@ -20,6 +22,7 @@ class StereoMsg:
 
 
 BUFFER_T = 0.055
+DEBUG_INPUT_ALIGNER_CASES = os.environ.get('DEBUG_INPUT_ALIGNER_CASES', '').lower() in {'1', 'true', 'yes', 'on'}
 
 
 IDEAL_CASE = {
@@ -183,7 +186,7 @@ def _build_msg(kind, t_sec):
     raise ValueError(kind)
 
 
-def _run_case(case, debug=False):
+def _run_case(case, debug=DEBUG_INPUT_ALIGNER_CASES):
     imu_filter = SimpleFilter()
     stereo_filter = SimpleFilter()
     aligner = InputAligner(Duration(seconds=BUFFER_T), imu_filter, stereo_filter)
@@ -256,11 +259,12 @@ def test_imu_delay_case_matches_input_aligner_replay():
 
 if __name__ == '__main__':
     for name, case in [('ideal', IDEAL_CASE), ('normal', NORMAL_CASE), ('imu_delay', IMU_DELAY_CASE)]:
-        print(name)
-        expected = case['expected']
-        print(f'expected: {expected}')
-        actual = _run_case(case, debug=True)
-        print(name)
-        print(f'acual: {actual}')
-        assert actual[:len(expected)] == expected
+        if DEBUG_INPUT_ALIGNER_CASES:
+            print(name)
+            print(f'expected: {case["expected"]}')
+        actual = _run_case(case)
+        if DEBUG_INPUT_ALIGNER_CASES:
+            print(name)
+            print(f'acual: {actual}')
+        assert actual[:len(case['expected'])] == case['expected']
     print('All input aligner timing cases passed.')
