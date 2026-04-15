@@ -146,6 +146,8 @@ class PerceptionNode(Node):
                              [0, 0, 0, 1]])
 
         self.imu_measurements = deque(maxlen=1000)
+        self.imu_msg_queue = deque(maxlen=2000)
+        self.image_msg_queue = deque(maxlen=20)
 
         self.keyframe_queue = []
         self.logger.info("PerceptionNode initialized.")
@@ -161,7 +163,7 @@ class PerceptionNode(Node):
             self.camera_info_msg = msg
             self.destroy_subscription(self.camerainfo_sub)
 
-    def sync_imu_callback(self, imu_msg):
+    def _process_imu_msg(self, imu_msg):
         current_timestamp = stamp2second(imu_msg.header.stamp)
         if len(self.accel_readings) >= 10 and self.T_body_last is None:
             accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
@@ -185,17 +187,40 @@ class PerceptionNode(Node):
         gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
+    def _drain_imu_msg_queue(self):
+        while len(self.imu_msg_queue) > 0:
+            self._process_imu_msg(self.imu_msg_queue.popleft())
+
+    def _process_ready_image_msgs(self, imu_timestamp: float):
+        while len(self.image_msg_queue) > 0:
+            left_msg, right_msg = self.image_msg_queue[0]
+            image_timestamp = stamp2second(left_msg.header.stamp)
+            if imu_timestamp <= image_timestamp:
+                break
+
+            # IMU timestamp is newer than the oldest image pair, process this pair now.
+            left_msg, right_msg = self.image_msg_queue.popleft()
+            if image_timestamp - self.last_processed_timestamp < 0.1333:
+                continue
+
+            self.last_processed_timestamp = image_timestamp
+            loop_start = time.perf_counter()
+            with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
+                processed = asyncio.run(self.process(left_msg, right_msg))
+            if processed:
+                processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
+                self.stats_pub.publish(String(data=json.dumps(processed)))
+
+    def sync_imu_callback(self, imu_msg):
+        self.imu_msg_queue.append(imu_msg)
+        while len(self.imu_msg_queue) > 0:
+            queued_imu_msg = self.imu_msg_queue.popleft()
+            self._process_imu_msg(queued_imu_msg)
+            imu_timestamp = stamp2second(queued_imu_msg.header.stamp)
+            self._process_ready_image_msgs(imu_timestamp)
+
     def images_callback(self, left_msg, right_msg):
-        current_timestamp = stamp2second(left_msg.header.stamp)
-        if current_timestamp - self.last_processed_timestamp < 0.1333:
-            return
-        self.last_processed_timestamp = current_timestamp
-        loop_start = time.perf_counter()
-        with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            processed = asyncio.run(self.process(left_msg, right_msg))
-        if processed:
-            processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
-            self.stats_pub.publish(String(data=json.dumps(processed)))
+        self.image_msg_queue.append((left_msg, right_msg))
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:

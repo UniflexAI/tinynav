@@ -164,6 +164,14 @@ RUN apt-get update && apt-get install -y \
     ros-humble-foxglove-compressed-video-transport \
     && rm -rf /var/lib/apt/lists/*
 
+# Override apt-installed message_filters with UniflexAI/message_filters humble branch
+RUN mkdir -p /3rdparty/message_filters_ws/src \
+    && git clone --branch humble https://github.com/UniflexAI/message_filters.git /3rdparty/message_filters_ws/src/message_filters \
+    && cd /3rdparty/message_filters_ws \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build --packages-select message_filters --allow-overriding message_filters
+RUN echo "source /3rdparty/message_filters_ws/install/local_setup.bash" >> ~/.bashrc
+
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
 
