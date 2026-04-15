@@ -188,7 +188,7 @@ def _run_case(case):
     stereo_filter = SimpleFilter()
     aligner = InputAligner(Duration(seconds=BUFFER_T), imu_filter, stereo_filter)
     aligner.setInputPeriod(0, Duration(seconds=0.01))
-    aligner.setInputPeriod(1, Duration(seconds=0.1))
+    aligner.setInputPeriod(1, Duration(seconds=1.0))
 
     actual_outputs = []
 
