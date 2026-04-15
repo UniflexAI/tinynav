@@ -24,6 +24,11 @@ class StereoMsg:
 BUFFER_T = 0.055
 DEBUG_INPUT_ALIGNER_CASES = os.environ.get('DEBUG_INPUT_ALIGNER_CASES', '').lower() in {'1', 'true', 'yes', 'on'}
 
+# This matches the current perception-node integration strategy:
+# - add every incoming message immediately
+# - only start dispatching after both streams have been seen once
+# - after that, dispatch after every add
+
 
 IDEAL_CASE = {
     'inputs': [
@@ -194,6 +199,8 @@ def _run_case(case, debug=DEBUG_INPUT_ALIGNER_CASES):
     aligner.setInputPeriod(1, Duration(seconds=0.1))
 
     actual_outputs = []
+    seen_imu = False
+    seen_stereo = False
 
     def on_imu(msg):
         stamp = round(Time.from_msg(msg.header.stamp).nanoseconds / 1e9, 3)
@@ -216,13 +223,15 @@ def _run_case(case, debug=DEBUG_INPUT_ALIGNER_CASES):
         if debug:
             print(f'add {input_type} {input_t:.3f} -> queue {queue_index}')
         aligner.add(msg, queue_index)
+        seen_imu = seen_imu or input_type == 'imu'
+        seen_stereo = seen_stereo or input_type == 'stereo'
         if debug:
             q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[0].events]
             q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[1].events]
             print(f'  queued q0={q0} q1={q1}')
-        if input_type == 'stereo':
+        if seen_imu and seen_stereo:
             if debug:
-                print('  dispatch on stereo boundary')
+                print('  dispatch after add (both streams seen)')
             aligner.dispatchMessages()
             if debug:
                 q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[0].events]
