@@ -10,6 +10,7 @@ import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
 from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
+from tinynav.core.timestamp_event_sequencer import TimestampEventSequencer
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
@@ -123,6 +124,7 @@ class PerceptionNode(Node):
         self.last_processed_timestamp = 0.0
 
         self.camera_info_msg = None
+        self.event_sequencer = TimestampEventSequencer(release_delay=0.01)
 
         # Noise model (continuous-time)
         # for Realsense D435i
@@ -162,11 +164,14 @@ class PerceptionNode(Node):
             self.destroy_subscription(self.camerainfo_sub)
 
     def sync_imu_callback(self, imu_msg):
+        ready_events = self.event_sequencer.add_imu(imu_msg)
+        self._process_ready_events(ready_events)
+
+    def _handle_imu_event(self, imu_msg):
         current_timestamp = stamp2second(imu_msg.header.stamp)
         if len(self.accel_readings) >= 10 and self.T_body_last is None:
-            accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
-            gravity_cam = np.mean(accel_data, axis=0)
-            gravity_cam /= np.linalg.norm(gravity_cam)
+            accel_data = np.mean(np.array([(a.x, a.y, a.z) for a in self.accel_readings]), axis=0)
+            gravity_cam = accel_data / np.linalg.norm(accel_data)
             gravity_world = np.array([0.0, 0.0, 1.0])
 
             self.T_body_last = np.eye(4)
@@ -176,7 +181,6 @@ class PerceptionNode(Node):
         elif len(self.accel_readings) < 10:
             self.accel_readings.append(imu_msg.linear_acceleration)
 
-        # if the timestamp jump is too large, it means the IMU is not working properly
         if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
             delta_timestamp = current_timestamp - self.imu_last_received_timestamp
             self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
@@ -186,6 +190,10 @@ class PerceptionNode(Node):
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
     def images_callback(self, left_msg, right_msg):
+        ready_events = self.event_sequencer.add_stereo(left_msg, right_msg)
+        self._process_ready_events(ready_events)
+
+    def _handle_stereo_event(self, left_msg, right_msg):
         current_timestamp = stamp2second(left_msg.header.stamp)
         if current_timestamp - self.last_processed_timestamp < 0.1333:
             return
@@ -196,6 +204,14 @@ class PerceptionNode(Node):
         if processed:
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
+
+    def _process_ready_events(self, ready_events):
+        for event in ready_events:
+            if event.kind == "imu":
+                self._handle_imu_event(event.payload)
+            elif event.kind == "stereo":
+                left_msg, right_msg = event.payload
+                self._handle_stereo_event(left_msg, right_msg)
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
