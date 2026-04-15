@@ -1,6 +1,3 @@
-import csv
-from pathlib import Path
-
 from builtin_interfaces.msg import Time as TimeMsg
 from message_filters import InputAligner, SimpleFilter
 from rclpy.duration import Duration
@@ -25,30 +22,54 @@ class StereoMsg:
 BUFFER_T = 0.055
 
 
-def _load_cases():
-    path = Path(__file__).parent / 'data' / 'timestamp_event_sequencer_cases.csv'
-    sections = {}
-    current = None
-    with path.open() as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if not any(cell.strip() for cell in row):
-                continue
-            if row[0] == 'CASE' and len(row) > 1 and row[1] == 'seq':
-                continue
-            case = row[0].strip()
-            if case and case != 'CASE':
-                current = case
-                sections.setdefault(case, []).append(row)
-    return sections
+IDEAL_CASE = {
+    'inputs': [
+        ('imu', 0.000), ('stereo', 0.000), ('imu', 0.010), ('imu', 0.020), ('imu', 0.030),
+        ('imu', 0.040), ('imu', 0.050), ('imu', 0.060), ('imu', 0.070), ('imu', 0.080),
+        ('imu', 0.090), ('imu', 0.100), ('stereo', 0.100), ('imu', 0.110), ('imu', 0.120),
+        ('imu', 0.130), ('imu', 0.140), ('imu', 0.150), ('imu', 0.160), ('imu', 0.170),
+    ],
+    'expected': [
+        ('imu', 0.000), ('stereo', 0.000), ('imu', 0.010), ('imu', 0.020), ('imu', 0.030),
+        ('imu', 0.040), ('imu', 0.050), ('imu', 0.060), ('imu', 0.070), ('imu', 0.080),
+        ('imu', 0.090), ('imu', 0.100), ('stereo', 0.100), ('imu', 0.110),
+    ],
+}
 
+NORMAL_CASE = {
+    'inputs': [
+        ('imu', 0.000), ('imu', 0.010), ('imu', 0.020), ('stereo', 0.000), ('imu', 0.030),
+        ('imu', 0.040), ('imu', 0.050), ('imu', 0.060), ('imu', 0.070), ('imu', 0.080),
+        ('imu', 0.090), ('imu', 0.100), ('imu', 0.110), ('imu', 0.120), ('stereo', 0.100),
+        ('imu', 0.130), ('imu', 0.140), ('imu', 0.150), ('imu', 0.160), ('imu', 0.170),
+        ('imu', 0.180), ('imu', 0.190), ('imu', 0.200),
+    ],
+    'expected': [
+        ('imu', 0.000), ('stereo', 0.000), ('imu', 0.010), ('imu', 0.020), ('imu', 0.030),
+        ('imu', 0.040), ('imu', 0.050), ('imu', 0.060), ('imu', 0.070), ('imu', 0.080),
+        ('imu', 0.090), ('imu', 0.100), ('stereo', 0.100), ('imu', 0.110), ('imu', 0.120),
+        ('imu', 0.130), ('imu', 0.140),
+    ],
+}
 
-def _collect_expected_outputs(rows):
-    outputs = []
-    for row in rows:
-        if len(row) >= 7 and row[5].strip() and row[6].strip():
-            outputs.append((row[5].strip(), float(row[6].strip())))
-    return outputs
+IMU_DELAY_CASE = {
+    'inputs': [
+        ('imu', 0.000), ('imu', 0.010), ('imu', 0.020), ('stereo', 0.000), ('imu', 0.030),
+        ('imu', 0.040), ('imu', 0.050), ('imu', 0.060), ('imu', 0.070), ('imu', 0.080),
+        ('stereo', 0.100), ('imu', 0.090), ('imu', 0.100), ('imu', 0.110), ('imu', 0.120),
+        ('imu', 0.130), ('imu', 0.140), ('imu', 0.150), ('imu', 0.160), ('imu', 0.170),
+        ('imu', 0.180), ('imu', 0.190), ('imu', 0.200), ('imu', 0.210), ('imu', 0.220),
+        ('stereo', 0.200), ('imu', 0.230), ('imu', 0.240), ('imu', 0.250), ('imu', 0.260),
+        ('imu', 0.270),
+    ],
+    'expected': [
+        ('imu', 0.000), ('stereo', 0.000), ('imu', 0.010), ('imu', 0.020), ('imu', 0.030),
+        ('imu', 0.040), ('imu', 0.050), ('imu', 0.060), ('imu', 0.070), ('imu', 0.080),
+        ('imu', 0.090), ('imu', 0.100), ('stereo', 0.100), ('imu', 0.110), ('imu', 0.120),
+        ('imu', 0.130), ('imu', 0.140), ('imu', 0.150), ('imu', 0.160), ('imu', 0.170),
+        ('imu', 0.180), ('imu', 0.190), ('imu', 0.200), ('stereo', 0.200), ('imu', 0.210),
+    ],
+}
 
 
 def _build_msg(kind, t_sec):
@@ -60,7 +81,7 @@ def _build_msg(kind, t_sec):
     raise ValueError(kind)
 
 
-def _run_case(rows):
+def _run_case(case):
     imu_filter = SimpleFilter()
     stereo_filter = SimpleFilter()
     aligner = InputAligner(Duration(seconds=BUFFER_T), imu_filter, stereo_filter)
@@ -78,20 +99,15 @@ def _run_case(rows):
     aligner.registerCallback(0, on_imu)
     aligner.registerCallback(1, on_stereo)
 
-    for row in rows:
-        if len(row) < 4:
-            continue
-        input_type = row[2].strip() if len(row) > 2 else ''
-        input_t = row[3].strip() if len(row) > 3 else ''
-        if input_type and input_t:
-            msg = _build_msg(input_type, float(input_t))
-            if input_type == 'imu':
-                aligner.add(msg, 0)
-            else:
-                aligner.add(msg, 1)
-            aligner.dispatchMessages()
+    for input_type, input_t in case['inputs']:
+        msg = _build_msg(input_type, input_t)
+        if input_type == 'imu':
+            aligner.add(msg, 0)
+        else:
+            aligner.add(msg, 1)
+        aligner.dispatchMessages()
 
-    max_expected_t = max((t for _, t in _collect_expected_outputs(rows)), default=0.0)
+    max_expected_t = max((t for _, t in case['expected']), default=0.0)
     flush_msg = _build_msg('imu', max_expected_t + 1.0)
     aligner.add(flush_msg, 0)
     aligner.dispatchMessages()
@@ -99,22 +115,19 @@ def _run_case(rows):
     return actual_outputs
 
 
-def test_csv_case_ideal_matches_input_aligner_replay():
-    cases = _load_cases()
-    expected = _collect_expected_outputs(cases['IDEAL'])
-    actual = _run_case(cases['IDEAL'])
+def test_ideal_case_matches_input_aligner_replay():
+    actual = _run_case(IDEAL_CASE)
+    expected = IDEAL_CASE['expected']
     assert actual[:len(expected)] == expected
 
 
-def test_csv_case_normal_matches_input_aligner_replay():
-    cases = _load_cases()
-    expected = _collect_expected_outputs(cases['NORMAL'])
-    actual = _run_case(cases['NORMAL'])
+def test_normal_case_matches_input_aligner_replay():
+    actual = _run_case(NORMAL_CASE)
+    expected = NORMAL_CASE['expected']
     assert actual[:len(expected)] == expected
 
 
-def test_csv_case_imu_delay_matches_input_aligner_replay():
-    cases = _load_cases()
-    expected = _collect_expected_outputs(cases['IMU_DELAY'])
-    actual = _run_case(cases['IMU_DELAY'])
+def test_imu_delay_case_matches_input_aligner_replay():
+    actual = _run_case(IMU_DELAY_CASE)
+    expected = IMU_DELAY_CASE['expected']
     assert actual[:len(expected)] == expected
