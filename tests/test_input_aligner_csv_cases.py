@@ -183,7 +183,7 @@ def _build_msg(kind, t_sec):
     raise ValueError(kind)
 
 
-def _run_case(case):
+def _run_case(case, debug=False):
     imu_filter = SimpleFilter()
     stereo_filter = SimpleFilter()
     aligner = InputAligner(Duration(seconds=BUFFER_T), imu_filter, stereo_filter)
@@ -193,24 +193,40 @@ def _run_case(case):
     actual_outputs = []
 
     def on_imu(msg):
-        actual_outputs.append(('imu', round(Time.from_msg(msg.header.stamp).nanoseconds / 1e9, 3)))
+        stamp = round(Time.from_msg(msg.header.stamp).nanoseconds / 1e9, 3)
+        actual_outputs.append(('imu', stamp))
+        if debug:
+            print(f'callback imu {stamp:.3f}')
 
     def on_stereo(msg):
-        actual_outputs.append(('stereo', round(Time.from_msg(msg.header.stamp).nanoseconds / 1e9, 3)))
+        stamp = round(Time.from_msg(msg.header.stamp).nanoseconds / 1e9, 3)
+        actual_outputs.append(('stereo', stamp))
+        if debug:
+            print(f'callback stereo {stamp:.3f}')
 
     aligner.registerCallback(0, on_imu)
     aligner.registerCallback(1, on_stereo)
 
     for input_type, input_t in case['inputs']:
         msg = _build_msg(input_type, input_t)
-        if input_type == 'imu':
-            aligner.add(msg, 0)
-        else:
-            aligner.add(msg, 1)
+        queue_index = 0 if input_type == 'imu' else 1
+        if debug:
+            print(f'add {input_type} {input_t:.3f} -> queue {queue_index}')
+        aligner.add(msg, queue_index)
+        if debug:
+            q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[0].events]
+            q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[1].events]
+            print(f'  before dispatch q0={q0} q1={q1}')
         aligner.dispatchMessages()
+        if debug:
+            q0 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[0].events]
+            q1 = [round(stamp.nanoseconds / 1e9, 3) for stamp, _ in aligner.event_queues[1].events]
+            print(f'  after dispatch  q0={q0} q1={q1}')
 
     max_expected_t = max((t for _, t in case['expected']), default=0.0)
     flush_msg = _build_msg('imu', max_expected_t + 1.0)
+    if debug:
+        print(f'flush imu {max_expected_t + 1.0:.3f}')
     aligner.add(flush_msg, 0)
     aligner.dispatchMessages()
 
@@ -236,7 +252,12 @@ def test_imu_delay_case_matches_input_aligner_replay():
 
 
 if __name__ == '__main__':
-    test_ideal_case_matches_input_aligner_replay()
-    test_normal_case_matches_input_aligner_replay()
-    test_imu_delay_case_matches_input_aligner_replay()
+    for name, case in [('ideal', IDEAL_CASE), ('normal', NORMAL_CASE), ('imu_delay', IMU_DELAY_CASE)]:
+        print(name)
+        expected = case['expected']
+        print(f'expected: {expected}')
+        actual = _run_case(case, debug=True)
+        print(name)
+        print(f'acual: {actual}')
+        assert actual[:len(expected)] == expected
     print('All input aligner timing cases passed.')
