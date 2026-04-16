@@ -2,7 +2,7 @@
 set -euo pipefail
 
 xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-record_root="${xdg_data_home}/tinynav/rosbags"
+record_root="/tinynav/tinynav_db/rosbags"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 output_dir="${record_root}/map_record_${timestamp}"
 

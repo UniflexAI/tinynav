@@ -379,7 +379,8 @@ class PlanningNode(Node):
 
     def poi_change_callback(self, msg):
         self.poi_changed = True
-        self.poi_change_timestamp_sec = msg.header.stamp.sec
+        # Use local receive time to avoid cross-topic/header clock-domain mismatch.
+        self.poi_change_timestamp_sec = self.get_clock().now().nanoseconds / 1e9
         self.target_pose = None
 
     def target_pose_callback(self, msg):
@@ -515,14 +516,24 @@ class PlanningNode(Node):
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
-            T,_ = msg2np(odom_msg)
+            T, v_odom = msg2np(odom_msg)
             if self.last_T is None:
                 self.last_T = T.copy()
                 self.smoothed_velocity = 0.0
-                self.last_stamp = 0
-                self.smoothed_velocity = 0.0
-            velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
-            self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
+                self.last_stamp = stamp
+
+            speed_odom = float(np.linalg.norm(v_odom))
+            if not np.isfinite(speed_odom):
+                speed_odom = 0.0
+
+            # Prefer velocity from odometry (published by perception). Fall back to pose-diff estimate
+            # only when twist is missing/zero to keep planning responsive across bag variants.
+            if speed_odom <= 1e-6:
+                dt = float(stamp - self.last_stamp)
+                if dt > 1e-6:
+                    speed_odom = float(np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / dt)
+
+            self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * speed_odom
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
@@ -557,7 +568,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             v_dir = T[:3, :3] @ np.array([0, 0, 1])
-            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
+            magnitude = np.clip(self.smoothed_velocity, 0.00, 0.5)
             init_v = v_dir * float(magnitude)
             trajectories, params = generate_trajectory_library_3d(
                 init_p = self.camera_to_robot_center(T),
@@ -584,7 +595,8 @@ class PlanningNode(Node):
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
-            if self.poi_changed and (depth_msg.header.stamp.sec - self.poi_change_timestamp_sec) > 3.0:
+            current_stamp_sec = self.get_clock().now().nanoseconds / 1e9
+            if self.poi_changed and (current_stamp_sec - self.poi_change_timestamp_sec) > 3.0:
                 self.poi_changed = False
 
             # path
@@ -597,7 +609,8 @@ class PlanningNode(Node):
                     if self.poi_changed or self.target_pose is None:
                         x,y,z,qx,qy,qz,qw = trajectories[i][0]
                         if self.poi_changed:
-                            self.get_logger().info(f"poi changed, using first point, wait {(depth_msg.header.stamp.sec - self.poi_change_timestamp_sec)} seconds")
+                            wait_sec = current_stamp_sec - self.poi_change_timestamp_sec
+                            self.get_logger().info(f"poi changed, using first point, wait {wait_sec:.3f} seconds")
                         if self.target_pose is None:
                             self.get_logger().info("target pose is None, using first point")
 

@@ -3,7 +3,7 @@ import os
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 import numpy as np
 import sys
 import json
@@ -143,13 +143,21 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
     return []
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
+    def __init__(
+        self,
+        tinynav_db_path: str,
+        tinynav_map_path: str,
+        verbose_timer: bool = True,
+        freeze_relocalization_after_first_success: bool = False,
+    ):
         """Initialization
 
         Args:
             tinynav_db_path (str): Directory to store output data.
             tinynav_map_path (str): Directory to load the pre-built map.
             verbose_timer (bool): Whether to use verbose timer output.
+            freeze_relocalization_after_first_success (bool): If True, run relocalization only until
+                the first success, then skip further relocalization (saves compute).
         """
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
@@ -172,6 +180,7 @@ class MapNode(Node):
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
         self.localization_data_saved_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
+        self.poi_nav_cmd_sub = self.create_subscription(String, '/mapping/poi_nav_cmd', self.poi_nav_cmd_callback, 10)
         self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 10)
         self.ts.registerCallback(self.keyframe_callback)
 
@@ -191,6 +200,10 @@ class MapNode(Node):
 
         self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
+
+        self.freeze_relocalization_after_first_success = freeze_relocalization_after_first_success
+        self._relocalization_locked = False
+        self._locked_pose_in_world = np.eye(4)
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -218,10 +231,15 @@ class MapNode(Node):
             self.pois = {}
         self.poi_index = min(0, len(self.pois) - 1)
         pois_dict = {}
+        self.poi_external_to_internal = {}
         keys = sorted([int (key) for key in self.pois.keys()])
         for index, key in enumerate(keys):
             pois_dict[index] = np.array(self.pois[str(key)]["position"])
+            self.poi_external_to_internal[key] = index
         self.pois = pois_dict
+        self.poi_nav_enabled = False
+        self.poi_auto_advance_enabled = True
+        self.poi_auto_advance_distance_threshold = 0.25
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -245,6 +263,69 @@ class MapNode(Node):
 
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+
+    def _publish_poi_stop_signal(self):
+        dummy_pose = np.eye(4)
+        stamp_msg = self.get_clock().now().to_msg()
+        # Reuse existing poi_change mechanism so planning_node clears target_pose.
+        self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
+        empty_path = Path()
+        empty_path.header.stamp = stamp_msg
+        empty_path.header.frame_id = "map"
+        self.global_plan_pub.publish(empty_path)
+
+    def poi_nav_cmd_callback(self, msg: String):
+        cmd = (msg.data or "").strip().lower()
+        if cmd == "start":
+            if len(self.pois) == 0:
+                self.get_logger().warning("POI navigation start requested, but no POIs loaded")
+                self.poi_nav_enabled = False
+                return
+            if self.poi_index < 0 or self.poi_index >= len(self.pois):
+                self.poi_index = 0
+            self.poi_nav_enabled = True
+            self.poi_auto_advance_enabled = True
+            self.get_logger().info(f"POI navigation enabled, current index={self.poi_index}")
+            if self.last_keyframe_timestamp is not None and self.last_keyframe_timestamp in self.pose_graph_used_pose:
+                try:
+                    self.try_publish_nav_path(self.last_keyframe_timestamp)
+                except Exception as exc:
+                    self.get_logger().warning(f"Failed to publish nav path immediately on start: {exc}")
+            return
+        if cmd == "stop":
+            self.poi_nav_enabled = False
+            self.poi_auto_advance_enabled = True
+            self._publish_poi_stop_signal()
+            self.get_logger().info("POI navigation disabled")
+            return
+        if cmd.startswith("goto:"):
+            index_text = cmd.split(":", 1)[1].strip()
+            if not index_text:
+                self.get_logger().warning("Invalid poi nav cmd: missing index in goto")
+                return
+            try:
+                index = int(index_text)
+            except ValueError:
+                self.get_logger().warning(f"Invalid poi nav cmd index: {index_text}")
+                return
+
+            # IMPORTANT: Prefer external POI id (from pois.json key) to avoid
+            # ambiguity when external ids overlap with internal 0..N-1 indices.
+            if index in self.poi_external_to_internal:
+                resolved_index = self.poi_external_to_internal[index]
+            elif 0 <= index < len(self.pois):
+                resolved_index = index
+            else:
+                self.get_logger().warning(
+                    f"POI index invalid: {index}, total={len(self.pois)}, external_keys={sorted(self.poi_external_to_internal.keys())}"
+                )
+                return
+            self.poi_index = resolved_index
+            self.poi_nav_enabled = True
+            self.poi_auto_advance_enabled = False
+            self.get_logger().info(f"POI navigation goto index: input={index}, resolved={resolved_index}")
+            return
+        self.get_logger().warning(f"Unknown poi nav cmd: {msg.data}")
 
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
@@ -450,6 +531,9 @@ class MapNode(Node):
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
+        if self.freeze_relocalization_after_first_success and self._relocalization_locked:
+            return True, self._locked_pose_in_world
+
         features = asyncio.run(self.super_point_extractor.infer(image))
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
@@ -459,6 +543,9 @@ class MapNode(Node):
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
+            if self.freeze_relocalization_after_first_success:
+                self._relocalization_locked = True
+                self._locked_pose_in_world = pose_in_world.copy()
             return True, pose_in_world
         else:
             self.failed_relocalizations.append(timestamp)
@@ -521,6 +608,9 @@ class MapNode(Node):
 
     def try_publish_nav_path(self, timestamp: int):
         self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
+        if not self.poi_nav_enabled:
+            self.get_logger().debug("POI navigation disabled, skip publishing nav path")
+            return
         if self.T_from_map_to_odom is None:
             self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
             return
@@ -544,20 +634,23 @@ class MapNode(Node):
 
         pose_in_map_position = pose_in_map[:3, 3]
 
-        while self.poi_index < len(self.pois):
-            poi = self.pois[self.poi_index]
-            diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
-            if diff_position_norm < 1.5:
-                self.poi_index += 1
-                dummy_pose = np.eye(4)
+        if self.poi_auto_advance_enabled:
+            while self.poi_index < len(self.pois):
+                poi = self.pois[self.poi_index]
+                diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
+                if diff_position_norm < self.poi_auto_advance_distance_threshold:
+                    self.get_logger().info(
+                        f"Auto advance POI index {self.poi_index} -> {self.poi_index + 1}, "
+                        f"distance={diff_position_norm:.3f}, threshold={self.poi_auto_advance_distance_threshold:.3f}"
+                    )
+                    self.poi_index += 1
+                    dummy_pose = np.eye(4)
 
-                stamp_msg = self.get_clock().now().to_msg()
-                stamp_msg.sec = int(timestamp / 1e9)
-                stamp_msg.nanosec = int(timestamp % 1e9)
-                self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
-                continue
-            else:
-                break
+                    stamp_msg = self.get_clock().now().to_msg()
+                    self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
+                    continue
+                else:
+                    break
 
         if self.poi_index >= len(self.pois):
             self.get_logger().info("All POIs have been visited, skip publishing nav path")
@@ -668,10 +761,17 @@ def main(args=None):
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument(
+        "--freeze_relocalization_after_first_success",
+        action="store_true",
+        default=False,
+        help="After the first successful relocalization, skip further relocalization",
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
-                   verbose_timer=parsed_args.verbose_timer)
+                   verbose_timer=parsed_args.verbose_timer,
+                   freeze_relocalization_after_first_success=parsed_args.freeze_relocalization_after_first_success)
 
     rclpy.spin(node)
     node.destroy_node()

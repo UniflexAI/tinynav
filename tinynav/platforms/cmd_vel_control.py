@@ -58,9 +58,9 @@ class CmdVelControlNode(Node):
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
+        vx = np.clip(linear_velocity_vec[0], -0.1, 0.3)
         vy = 0.0
-        vyaw = np.clip(angular_velocity_vec[2], -0.5, 0.5)
+        vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
         cmd = Twist()
         cmd.linear.x = vx
         cmd.linear.y = vy

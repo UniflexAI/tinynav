@@ -160,12 +160,14 @@
     <div class="card">
       <h2>导航操作</h2>
       <div class="row">
-        <button id="startNavBtn">启动导航</button>
-        <button id="stopModeBtn" class="warn">停止导航</button>
-        <button id="emergencyBtn" class="danger">急停 cmd_vel</button>
+        <button id="startNavBtn">启动</button>
+        <button id="startPoiNavBtn">导航</button>
+        <button id="stopModeBtn" class="warn">停止</button>
+        <button id="stopAllBtn" class="danger">全部停止</button>
+        <button id="editPoiBtn" class="secondary">编辑 poi</button>
       </div>
-      <div class="mono muted">启动发送 `navigation`，停止发送 `stop_navigation`。</div>
-      <div class="mono muted">地图点击后会弹窗确认，确认后发送 `/control/target_pose`。</div>
+      <div class="mono muted">启动发送 `navigation`；导航发送 `/mapping/poi_nav_cmd: start`；停止发送 `/mapping/poi_nav_cmd: stop`。</div>
+      <div class="mono muted">点击 POI 点会发送 `goto:N`；点击空白地图会发送 `/control/target_pose`。</div>
     </div>
   </div>
 
@@ -178,8 +180,10 @@
     const stateInfo = document.getElementById("stateInfo");
     const odomInfo = document.getElementById("odomInfo");
     const startNavBtn = document.getElementById("startNavBtn");
+    const startPoiNavBtn = document.getElementById("startPoiNavBtn");
     const stopModeBtn = document.getElementById("stopModeBtn");
-    const emergencyBtn = document.getElementById("emergencyBtn");
+    const stopAllBtn = document.getElementById("stopAllBtn");
+    const editPoiBtn = document.getElementById("editPoiBtn");
     const showMapLayer = document.getElementById("showMapLayer");
     const showGlobalPath = document.getElementById("showGlobalPath");
     const showLocalPath = document.getElementById("showLocalPath");
@@ -192,8 +196,8 @@
 
     let ros = null;
     let pubCommand = null;
-    let pubCmdVel = null;
     let pubTargetPose = null;
+    let pubPoiNavCmd = null;
     const subs = [];
     let odomPose = null;
     let targetPose = null;
@@ -205,6 +209,14 @@
     let pxPerMeter = 42.0;
     let dragState = null;
     let suppressMapClick = false;
+    let poiPoints = [];
+    let managerState = "idle";
+    let actionState = "未操作";
+    let tfWorldFromMap2D = null;
+
+    function updateStateInfo() {
+      stateInfo.textContent = `state: 服务=${managerState} | 操作=${actionState}`;
+    }
 
     function setConn(connected, text) {
       connDot.className = `status-dot ${connected ? "ok" : "err"}`;
@@ -427,6 +439,20 @@
       mapCtx.stroke();
     }
 
+    function normalizeFrame(frameId) {
+      return String(frameId || "").replace(/^\/+/, "");
+    }
+
+    function transformMapPointToWorld(x, y) {
+      if (!tfWorldFromMap2D) return { x, y };
+      const c = Math.cos(tfWorldFromMap2D.yaw);
+      const s = Math.sin(tfWorldFromMap2D.yaw);
+      return {
+        x: tfWorldFromMap2D.tx + c * x - s * y,
+        y: tfWorldFromMap2D.ty + s * x + c * y,
+      };
+    }
+
     function drawArrow(x, y, yaw, color, sizePx) {
       const p = worldToCanvas(x, y);
       mapCtx.save();
@@ -480,6 +506,7 @@
       drawOccupancyGrid();
       if (showGlobalPath.checked) drawPath(globalPath, "#60a5fa", 3);
       if (showLocalPath.checked) drawPath(localPath, "#22c55e", 3);
+      drawPois();
 
       if (targetPose) {
         drawArrow(targetPose.x, targetPose.y, targetPose.yaw || 0.0, "#ef4444", 11);
@@ -492,6 +519,38 @@
         mapCtx.arc(c.x, c.y, 4, 0, Math.PI * 2);
         mapCtx.fill();
       }
+    }
+
+    function drawPois() {
+      if (!poiPoints || poiPoints.length === 0) return;
+      for (const poi of poiPoints) {
+        const c = worldToCanvas(poi.x, poi.y);
+        mapCtx.fillStyle = "#fbbf24";
+        mapCtx.beginPath();
+        mapCtx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+        mapCtx.fill();
+        mapCtx.strokeStyle = "#111827";
+        mapCtx.lineWidth = 2;
+        mapCtx.stroke();
+        mapCtx.fillStyle = "#fde68a";
+        mapCtx.font = "12px sans-serif";
+        mapCtx.fillText(String(poi.index), c.x + 7, c.y - 7);
+      }
+    }
+
+    async function loadPois() {
+      try {
+        const res = await fetch("/api/pois", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        poiPoints = Array.isArray(data.pois) ? data.pois : [];
+        drawMap();
+      } catch (_) {}
+    }
+
+    function publishPoiNavCmd(cmd) {
+      if (!pubPoiNavCmd) return;
+      pubPoiNavCmd.publish({ data: cmd });
     }
 
     function publishTargetPose(x, y, yaw) {
@@ -537,16 +596,19 @@
         pubCommand = {
           publish: (msg) => ros.publish("/service/command", "std_msgs/String", msg)
         };
-        pubCmdVel = {
-          publish: (msg) => ros.publish("/cmd_vel", "geometry_msgs/Twist", msg)
-        };
         pubTargetPose = {
           publish: (msg) => ros.publish("/control/target_pose", "nav_msgs/Odometry", msg)
         };
+        pubPoiNavCmd = {
+          publish: (msg) => ros.publish("/mapping/poi_nav_cmd", "std_msgs/String", msg)
+        };
+
+        loadPois();
 
         subs.push(
           ros.subscribe("/service/state", "std_msgs/String", (msg) => {
-            stateInfo.textContent = `state: ${msg.data || "idle"}`;
+            managerState = msg.data || "idle";
+            updateStateInfo();
           })
         );
 
@@ -567,11 +629,40 @@
 
         subs.push(
           ros.subscribe("/mapping/global_plan", "nav_msgs/Path", (msg) => {
-            globalPath = (msg.poses || []).map((p) => ({
-              x: p.pose.position.x,
-              y: p.pose.position.y
-            }));
+            const frameId = normalizeFrame(msg.header && msg.header.frame_id);
+            globalPath = (msg.poses || []).map((p) => {
+              const x = p.pose.position.x;
+              const y = p.pose.position.y;
+              if (frameId === "map") {
+                return transformMapPointToWorld(x, y);
+              }
+              return { x, y };
+            });
             drawMap();
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/tf", "tf2_msgs/TFMessage", (msg) => {
+            const transforms = msg.transforms || [];
+            for (const t of transforms) {
+              const parent = normalizeFrame(t.header && t.header.frame_id);
+              const child = normalizeFrame(t.child_frame_id);
+              if (parent === "world" && child === "map") {
+                const tr = t.transform && t.transform.translation;
+                const q = t.transform && t.transform.rotation;
+                if (!tr || !q) continue;
+                tfWorldFromMap2D = {
+                  tx: Number(tr.x) || 0.0,
+                  ty: Number(tr.y) || 0.0,
+                  yaw: quatToYaw(q),
+                };
+                if (globalPath.length > 0) {
+                  drawMap();
+                }
+                break;
+              }
+            }
           })
         );
 
@@ -642,7 +733,10 @@
         try { ros.close(); } catch (_) {}
       }
       ros = null;
+      managerState = "idle";
+      actionState = "未操作";
       setConn(false, "未连接");
+      updateStateInfo();
     }
 
     function sendCommand(cmd) {
@@ -652,18 +746,31 @@
 
     connectBtn.onclick = connect;
     disconnectBtn.onclick = disconnect;
-    startNavBtn.onclick = () => sendCommand("navigation");
-    stopModeBtn.onclick = () => sendCommand("stop_navigation");
+    startNavBtn.onclick = () => {
+      sendCommand("navigation");
+      actionState = "启动";
+      updateStateInfo();
+    };
+    startPoiNavBtn.onclick = () => {
+      publishPoiNavCmd("start");
+      actionState = "导航";
+      updateStateInfo();
+    };
+    stopModeBtn.onclick = () => {
+      publishPoiNavCmd("stop");
+      actionState = "停止";
+      updateStateInfo();
+    };
+    stopAllBtn.onclick = () => {
+      sendCommand("stop_navigation");
+      publishPoiNavCmd("stop");
+      actionState = "全部关闭";
+      updateStateInfo();
+    };
 
-    emergencyBtn.onclick = () => {
-      if (!pubCmdVel) return;
-      const zero = {
-        linear: { x: 0.0, y: 0.0, z: 0.0 },
-        angular: { x: 0.0, y: 0.0, z: 0.0 }
-      };
-      for (let i = 0; i < 3; i++) {
-        setTimeout(() => pubCmdVel.publish(zero), i * 120);
-      }
+    editPoiBtn.onclick = () => {
+      const url = `${window.location.protocol}//${window.location.hostname}:8080`;
+      window.open(url, "_blank", "noopener,noreferrer");
     };
 
     mapCanvas.onpointerdown = (ev) => {
@@ -700,6 +807,27 @@
       const px = ev.clientX - rect.left;
       const py = ev.clientY - rect.top;
       const world = canvasToWorld(px, py);
+      let nearestPoi = null;
+      let minDist = Number.POSITIVE_INFINITY;
+      for (const poi of poiPoints) {
+        const d = Math.hypot(world.x - poi.x, world.y - poi.y);
+        if (d < minDist) {
+          minDist = d;
+          nearestPoi = poi;
+        }
+      }
+
+      if (nearestPoi && minDist < 0.6) {
+        const okPoi = window.confirm(
+          `导航到 POI ${nearestPoi.index} ?\n\nx=${nearestPoi.x.toFixed(2)} m\ny=${nearestPoi.y.toFixed(2)} m`
+        );
+        if (!okPoi) return;
+        publishPoiNavCmd(`goto:${nearestPoi.index}`);
+        actionState = `导航(goto:${nearestPoi.index})`;
+        updateStateInfo();
+        return;
+      }
+
       const yaw = 0.0;
       const ok = window.confirm(
         `发送目标点?\n\nx=${world.x.toFixed(2)} m\ny=${world.y.toFixed(2)} m\nyaw=${yaw.toFixed(2)} rad`
@@ -713,6 +841,7 @@
     showLocalPath.onchange = drawMap;
     fitViewBtn.onclick = fitViewToRobot;
     window.addEventListener("resize", resizeCanvas);
+    updateStateInfo();
     resizeCanvas();
   </script>
 </body>

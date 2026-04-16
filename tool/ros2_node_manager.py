@@ -6,6 +6,7 @@ import subprocess
 import os
 import shutil
 import threading
+from datetime import datetime
 
 class Ros2NodeManager(Node):
     def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
@@ -24,6 +25,7 @@ class Ros2NodeManager(Node):
         
         self.state_timer = self.create_timer(1.0, self._pub_state)
         self.process_monitor_timer = self.create_timer(2.0, self._check_processes)
+        self._child_log_files = []
         self._pub_state()
     
     def _cmd_cb(self, msg):
@@ -134,46 +136,87 @@ class Ros2NodeManager(Node):
         if os.path.exists('nav_bag'):
             shutil.rmtree('nav_bag')
         
+        log_dir = os.path.join(self.tinynav_db_path, 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.get_logger().info(f'Navigation child logs under {log_dir} (session {log_ts})')
+        
         cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
-        self.processes['perception'] = self._spawn(cmd_perception)
+        self.processes['perception'] = self._spawn(
+            cmd_perception, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_perception_node.log'))
         
         cmd_planning = ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py']
-        self.processes['planning'] = self._spawn(cmd_planning)
+        self.processes['planning'] = self._spawn(
+            cmd_planning, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_planning_node.log'))
         
         cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
-        self.processes['control'] = self._spawn(cmd_control)
+        self.processes['control'] = self._spawn(
+            cmd_control, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_cmd_vel_control.log'))
         
         cmd_map = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
             '--tinynav_db_path', self.nav_out_path,
-            '--tinynav_map_path', self.map_path
+            '--tinynav_map_path', self.map_path,
+            '--freeze_relocalization_after_first_success'
         ]
-        self.processes['map'] = self._spawn(cmd_map)
+        self.processes['map'] = self._spawn(
+            cmd_map, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_map_node.log'))
         
-        self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
+        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         
-        self.processes['rosbridge'] = self._spawn([
-            'ros2', 'launch', 'rosbridge_server', 'rosbridge_websocket_launch.xml'
-        ])
+        disable_manager_rosbridge = os.environ.get('DISABLE_MANAGER_ROSBRIDGE', '0') == '1'
+        if disable_manager_rosbridge:
+            self.get_logger().info('Skip rosbridge launch in manager (DISABLE_MANAGER_ROSBRIDGE=1)')
+        else:
+            rosbridge_port = os.environ.get('ROSBRIDGE_PORT', '9090')
+            self.processes['rosbridge'] = self._spawn([
+                'ros2', 'launch', 'rosbridge_server', 'rosbridge_websocket_launch.xml',
+                f'port:={rosbridge_port}',
+            ], log_path=os.path.join(log_dir, f'{log_ts}_ros2_launch_rosbridge_websocket.log'))
 
         topics = [
             '/tf', '/cmd_vel', '/mapping/global_plan', '/mapping/poi',
             '/mapping/poi_change', '/planning/trajectory_path',
             '/planning/occupied_voxels',
             '/slam/odometry',
-            '/mapping/pointcloud_markers'
+            '/camera/camera/infra1/image_rect_raw',
+            '/camera/camera/infra2/image_rect_raw',
+            '/camera/camera/imu',
+            '/camera/camera/infra1/camera_info',
+            '/camera/camera/infra2/camera_info',
+            '/control/target_pose',
+            '/slam/odometry'
         ]
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', 'nav_bag'] + topics
-        self.processes['bag_record'] = self._spawn(cmd_bag)
+        #self.processes['bag_record'] = self._spawn(cmd_bag)
     
-    def _spawn(self, cmd, extra_env=None):
+    def _spawn(self, cmd, extra_env=None, log_path=None):
         env = os.environ.copy()
         env['ROS_DOMAIN_ID'] = self.ros_domain_id
         if extra_env:
             env.update(extra_env)
-        return subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)
+        popen_kw = {'env': env, 'preexec_fn': os.setsid}
+        log_fp = None
+        if log_path:
+            log_fp = open(log_path, 'w', encoding='utf-8', errors='replace', buffering=1)
+            self._child_log_files.append(log_fp)
+            popen_kw['stdout'] = log_fp
+            popen_kw['stderr'] = subprocess.STDOUT
+        try:
+            return subprocess.Popen(cmd, **popen_kw)
+        except Exception:
+            if log_fp:
+                self._child_log_files.remove(log_fp)
+                log_fp.close()
+            raise
     
     def _stop_all(self):
+        for fp in self._child_log_files:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        self._child_log_files.clear()
         for name, proc in list(self.processes.items()):
             if proc and proc.poll() is None:
                 try:

@@ -51,15 +51,20 @@ class Ros2UnitreeManagerNode(Node):
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
-        current_time = time.time()
-        if self.last_twist_time is not None:
-            time_interval = current_time - self.last_twist_time
-            self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
-        self.last_twist_time = current_time
+        # current_time = time.time()
+        # if self.last_twist_time is not None:
+        #     time_interval = current_time - self.last_twist_time
+        #     self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
+        # self.last_twist_time = current_time
         
-        if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
-            self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
-            self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
+        vx = float(msg.linear.x)
+        vy = float(msg.linear.y)
+        vyaw = float(msg.angular.z)
+
+        eps = 1e-3        
+        if  (abs(vx) > eps or abs(vy) > eps or abs(vyaw) > eps):
+            self.logger.debug(f"Moving with velocity: {vx}, {vy}, {vyaw}")
+            self.sport_client.Move(vx, vy, vyaw)
         else:
             self.sport_client.StopMove()
         time.sleep(0.02)

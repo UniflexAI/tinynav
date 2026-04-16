@@ -186,6 +186,28 @@ class RelocalizationPose(Node):
     def __init__(self, viser_server: viser.ViserServer):
         super().__init__('relocalization_pose')
         self.viser_server = viser_server
+        self.relocalization_pose_handle = None
+        self.global_plan_handle = None
+        self.planning_path_handle = None
+        self.odom_gizmo_handle = None
+        self.target_pose_gizmo_handle = None
+        self.current_pose_in_map_handle = None
+        self.realtime_data_checkbox = self.viser_server.gui.add_checkbox("realtime data", initial_value=True)
+
+        @self.realtime_data_checkbox.on_update
+        def _(_) -> None:
+            show = self.realtime_data_checkbox.value
+            for handle in [
+                self.relocalization_pose_handle,
+                self.global_plan_handle,
+                self.planning_path_handle,
+                self.odom_gizmo_handle,
+                self.target_pose_gizmo_handle,
+                self.current_pose_in_map_handle,
+            ]:
+                if handle is not None:
+                    handle.visible = show
+
         self.relocalization_pose_sub = self.create_subscription(Odometry, '/map/relocalization', self.relocalization_pose_callback, 10)
         self.global_plan_sub = self.create_subscription(nav_msgs.msg.Path, '/mapping/global_plan', self.global_plan_callback, 10)
         self.planning_path_sub = self.create_subscription(nav_msgs.msg.Path, '/planning/trajectory_path', self.planning_path_callback, 10)
@@ -196,8 +218,10 @@ class RelocalizationPose(Node):
         )
 
     def relocalization_pose_callback(self, msg: Odometry):
+        if not self.realtime_data_checkbox.value:
+            return
         position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
-        self.viser_server.scene.add_icosphere(
+        self.relocalization_pose_handle = self.viser_server.scene.add_icosphere(
             "/relocalization_pose",
             color=(255, 0, 0),
             position=position,
@@ -205,6 +229,8 @@ class RelocalizationPose(Node):
         )
 
     def global_plan_callback(self, msg: Path):
+        if not self.realtime_data_checkbox.value:
+            return
         points = []
         for pose in msg.poses:
             position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
@@ -220,7 +246,7 @@ class RelocalizationPose(Node):
         colors = np.zeros((N, 2, 3))
         colors[:, 0, :] = (0, 255, 0)
         colors[:, 1, :] = (0, 255, 0)
-        self.viser_server.scene.add_line_segments(
+        self.global_plan_handle = self.viser_server.scene.add_line_segments(
             "/global_plan",
             points=np.array(line_segments),
             colors=colors,
@@ -228,6 +254,8 @@ class RelocalizationPose(Node):
         )
 
     def planning_path_callback(self, msg: Path):
+        if not self.realtime_data_checkbox.value:
+            return
         points = []
         for pose in msg.poses:
             position = np.array([pose.pose.position.x, pose.pose.position.y, pose.pose.position.z])
@@ -243,7 +271,7 @@ class RelocalizationPose(Node):
         colors = np.zeros((N, 2, 3))
         colors[:, 0, :] = (0, 0, 255)
         colors[:, 1, :] = (0, 0, 255)
-        self.viser_server.scene.add_line_segments(
+        self.planning_path_handle = self.viser_server.scene.add_line_segments(
             "/planning_path",
             points=np.array(line_segments),
             colors=colors,
@@ -251,22 +279,32 @@ class RelocalizationPose(Node):
         )
 
     def odometry_callback(self, msg:Odometry):
+        if not self.realtime_data_checkbox.value:
+            return
         odom, _ = msg2np(msg)
         xyzw = matrix_to_quat(odom[:3, :3])
         position = odom[:3, 3]
-        gizmo = self.viser_server.scene.add_transform_controls("/odom_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
+        self.odom_gizmo_handle = self.viser_server.scene.add_transform_controls(
+            "/odom_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2])
+        )
 
     def target_pose_callback(self, msg:Odometry):
+        if not self.realtime_data_checkbox.value:
+            return
         odom, _ = msg2np(msg)
         xyzw = matrix_to_quat(odom[:3, :3])
         position = odom[:3, 3]
-        gizmo = self.viser_server.scene.add_transform_controls("/target_pose_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]))
+        self.target_pose_gizmo_handle = self.viser_server.scene.add_transform_controls(
+            "/target_pose_gizmo", position=position, wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2])
+        )
 
     def current_pose_in_map_callback(self, msg: Odometry):
+        if not self.realtime_data_checkbox.value:
+            return
         odom, _ = msg2np(msg)
         xyzw = matrix_to_quat(odom[:3, :3])
         position = odom[:3, 3]
-        self.viser_server.scene.add_transform_controls(
+        self.current_pose_in_map_handle = self.viser_server.scene.add_transform_controls(
             "/current_pose_in_map_gizmo",
             position=position,
             wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]),
