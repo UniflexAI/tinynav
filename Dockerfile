@@ -236,5 +236,13 @@ EOF
 
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Flutter — install stable via git (arch-agnostic: works on x86_64 and aarch64)
+RUN git clone https://github.com/flutter/flutter.git -b stable --depth 1 /opt/flutter \
+    && git config --global --add safe.directory /opt/flutter
+ENV PATH="/opt/flutter/bin:$PATH"
+RUN flutter config --enable-web \
+    && flutter precache --web \
+    && cd /tinynav/app/frontend && flutter pub get
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]

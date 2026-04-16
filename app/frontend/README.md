@@ -2,51 +2,73 @@
 
 Flutter Web / Android app for controlling the TinyNav visual navigation module.
 
-## Prerequisites
+## Quick start (Docker — recommended)
 
-Install Flutter: https://docs.flutter.dev/get-started/install
-
-Verify the installation:
+Flutter is pre-installed in the TinyNav Docker image. Inside the container:
 
 ```bash
+# Build the web app (first time or after source changes)
+cd /tinynav/app/frontend
+flutter build web
+
+# Serve it
+cd build/web
+python3 -m http.server 8080
+```
+
+Then open `http://<device-ip>:8080` in a browser on the same network.
+
+---
+
+## Development setup (without Docker)
+
+### Prerequisites
+
+Install Flutter via git (works on x86_64 and ARM64):
+
+```bash
+git clone https://github.com/flutter/flutter.git -b stable --depth 1 ~/flutter
+export PATH="$PATH:$HOME/flutter/bin"
+git config --global --add safe.directory ~/flutter
+flutter config --enable-web
 flutter doctor
 ```
 
-You should see Flutter and Chrome (web) marked as OK. Android is not required for web testing.
-
-## First-time setup
-
-Run this once inside the `app/frontend/` directory to generate platform files:
+### Install dependencies
 
 ```bash
-flutter create . --project-name tinynav_app
+cd app/frontend
 flutter pub get
 ```
 
-## Run in browser (recommended for development)
-
-Make sure the TinyNav backend is running on the device (see `app/backend/README.md`), then:
+### Build and serve
 
 ```bash
-flutter run -d chrome
+flutter build web
+cd build/web && python3 -m http.server 8080
 ```
 
-A Chrome window will open. Enter the device IP address (e.g. `192.168.1.100`) and press **Connect**.
+---
 
-## Run on a physical Android device
+## Testing with mock backend (no hardware required)
 
-1. Enable **Developer options** and **USB debugging** on the phone.
-2. Connect the phone via USB.
-3. Verify the device is detected:
-   ```bash
-   flutter devices
-   ```
-4. Run:
-   ```bash
-   flutter run
-   ```
+Run the mock server on the host — no ROS2 needed:
 
-> **Note:** The first build takes a few minutes. Subsequent builds are much faster.
+```bash
+cd /tinynav   # or ~/workspace/.../tinynav
+uv run --with fastapi --with uvicorn app/backend/mock_server.py
+```
+
+Or with pip:
+
+```bash
+pip install fastapi uvicorn
+python3 app/backend/mock_server.py
+```
+
+The mock server listens on port `8000` and simulates all API endpoints and WebSocket streams (device status, pose, map image, POIs, navigation). Enter `localhost` as the device IP in the app.
+
+---
 
 ## App structure
 
@@ -67,11 +89,14 @@ lib/
 
 ## How it connects to the backend
 
-- **REST**: `http://<device-ip>:8000` — commands and one-shot queries
-- **WebSocket**: `ws://<device-ip>:8000/ws/status` — device status pushed every 1 s
-- **WebSocket**: `ws://<device-ip>:8000/ws/pose` — robot pose pushed on every odometry message
+| Protocol | Endpoint | Purpose |
+|---|---|---|
+| HTTP REST | `http://<ip>:8000` | Commands and one-shot queries |
+| WebSocket | `ws://<ip>:8000/ws/status` | Device status pushed every 1 s |
+| WebSocket | `ws://<ip>:8000/ws/pose` | Robot pose on every odometry message |
+| WebSocket | `ws://<ip>:8000/ws/map-update` | Notification when map file changes |
 
-CORS is already enabled on the backend, so browser access works without extra configuration.
+CORS is enabled on the backend — browser access works without extra configuration.
 
 ## Typical workflow
 
