@@ -18,6 +18,7 @@
     "--device-cgroup-rule=c 81:* rwm",
     "--device-cgroup-rule=c 234:* rwm",
     "--shm-size=16gb",
+    "-v", "${localEnv:XDG_DATA_HOME:-${localEnv:HOME}/.local/share}/tinynav:/root/.local/share/tinynav",
     "-v", "${localWorkspaceFolder}:/tinynav"
   ],
 
