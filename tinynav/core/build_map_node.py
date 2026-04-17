@@ -461,6 +461,7 @@ class BuildMapNode(Node):
         self.tf_static_sub = Subscriber(self, TFMessage, "/tf_static")
         self.tf_static_sub.registerCallback(self.tf_callback)
         self.tf_messages: Dict[int, Dict[str, np.ndarray]] = {}
+        self.tf_capture_completed = False
         self.T_rgb_to_infra1 = None
         self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
@@ -469,16 +470,21 @@ class BuildMapNode(Node):
         self.edges = set()
 
     def tf_callback(self, msg:TFMessage):
+        if self.tf_capture_completed:
+            return
+
         T_infra1_to_link = None
         T_infra1_optical_to_infra1 = None
         T_rgb_to_link = None
         T_rgb_optical_to_rgb = None
+        tf_updated = False
         for t in msg.transforms:
             frame_id, child_frame_id, T = tf2np(t)
             timestamp_ns = int(t.header.stamp.sec * 1e9) + int(t.header.stamp.nanosec)
             if timestamp_ns not in self.tf_messages:
                 self.tf_messages[timestamp_ns] = {}
             self.tf_messages[timestamp_ns][f"{frame_id}->{child_frame_id}"] = T
+            tf_updated = True
             if frame_id == "camera_link" and child_frame_id == "camera_infra1_frame":
                 T_infra1_to_link = T
             if frame_id == "camera_infra1_frame" and child_frame_id == "camera_infra1_optical_frame":
@@ -494,6 +500,16 @@ class BuildMapNode(Node):
 
         if T_infra1_optical_to_infra1 is not None and T_rgb_optical_to_rgb is not None and T_infra1_to_link is not None and T_rgb_to_link is not None:
             self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
+        if tf_updated and self.T_rgb_to_infra1 is not None:
+            np.save(f"{self.map_save_path}/tf_messages.npy", self.tf_messages, allow_pickle=True)
+            self.tf_capture_completed = True
+            if self.tf_sub is not None:
+                self.destroy_subscription(self.tf_sub.sub)
+                self.tf_sub = None
+            if self.tf_static_sub is not None:
+                self.destroy_subscription(self.tf_static_sub.sub)
+                self.tf_static_sub = None
+            self.get_logger().info("Saved tf_messages.npy and unsubscribed from /tf and /tf_static")
 
     def rgb_camera_info_callback(self, msg:CameraInfo):
         if self.rgb_camera_K is None:
@@ -667,7 +683,6 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
-        np.save(f"{self.map_save_path}/tf_messages.npy", self.tf_messages, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
         np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
 
