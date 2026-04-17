@@ -14,6 +14,7 @@ from typing import Dict, Tuple
 import cv2
 import numpy as np
 import shelve
+from tqdm import tqdm
 
 
 def convert_nerf_format(
@@ -82,7 +83,7 @@ def export_rgb_images(
     images_dir.mkdir(parents=True, exist_ok=True)
     image_size = None
     with shelve.open(str(map_dir / "rgb_images")) as rgb_db:
-        for timestamp in timestamps:
+        for timestamp in tqdm(timestamps, desc="Exporting RGB images", unit="img"):
             key = str(timestamp)
             if key not in rgb_db:
                 raise KeyError(f"Missing rgb image for timestamp {timestamp} in {map_dir / 'rgb_images'}")
