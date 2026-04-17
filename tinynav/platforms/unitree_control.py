@@ -6,12 +6,10 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
 from std_msgs.msg import Float32, String
+import threading
 from enum import Enum
-import logging
 import time
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+import logging
 
 
 class RobotStatus(Enum):
@@ -26,14 +24,23 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client = SportClientB2()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        self.sport_client.SwitchGait(1)
+        #  锁定为“持续运动模式”
+        self.sport_client.SwitchMoveMode(True)
+        # 启用连续步态（非常关键）
+        self.sport_client.ContinuousGait(True)
+        # 关闭自动恢复（防止切 gait）
+        self.sport_client.AutoRecoverySet(False)
+        self.locked_gait = 3  # 3 = climbing
+        self.sport_client.SwitchGait(self.locked_gait)
         # 启动时执行一次站立
         self.sport_client.StandUp()
         self.sport_client.BalanceStand()
         self._robot_status = RobotStatus.STANDUP
 
-        self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
-        self.twist_subscriber.Init(self.TwistMessageHandler, 10)
+        # Subscribe to ROS velocity commands and forward them to Unitree.
+        self.cmd_vel_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
+        self.cmd_vel_subscriber.Init(self.TwistMessageHandler, 10)
+        self.last_cmd_vel_time = None
 
         self.action_subscriber = ChannelSubscriber("rt/service/command", String_)
         self.action_subscriber.Init(self.ActionMessageHandler, 10)
@@ -44,43 +51,50 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
         self.battery = 0.0
-        self.last_twist_time = None
+        self.logger = self.get_logger()
+        self.logger.info("unitree is connected")
 
         self.logger = logging.getLogger(__name__)
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
-        # current_time = time.time()
-        # if self.last_twist_time is not None:
-        #     time_interval = current_time - self.last_twist_time
-        #     self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
-        # self.last_twist_time = current_time
-        
+        current_time = time.time()
+        if self.last_cmd_vel_time is not None:
+            time_interval = current_time - self.last_cmd_vel_time
+            self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
+        self.last_cmd_vel_time = current_time
+
         vx = float(msg.linear.x)
         vy = float(msg.linear.y)
-        vyaw = float(msg.angular.z)
+        wz = float(msg.angular.z)
 
-        eps = 1e-3        
-        if  (abs(vx) > eps or abs(vy) > eps or abs(vyaw) > eps):
-            self.logger.debug(f"Moving with velocity: {vx}, {vy}, {vyaw}")
-            self.sport_client.Move(vx, vy, vyaw)
+        # Use an epsilon so tiny numeric noise doesn't cause constant Move calls.
+        eps = 1e-3
+        if abs(vx) > eps or abs(vy) > eps or abs(wz) > eps:
+            self.logger.debug(f"Moving with velocity: {vx}, {vy}, {wz}")
+            self.sport_client.SwitchGait(self.locked_gait)
+            self.sport_client.Move(vx, vy, wz)
         else:
-            self.sport_client.StopMove()
+            self.sport_client.Move(1e-4, 0.0, 0.0)
         time.sleep(0.02)
 
     def ActionMessageHandler(self, msg: String_):
         if msg.data.split(" ")[0] == "play":
             action_key = msg.data.split(" ")[1]
             if action_key == "sit":
-                self.logger.info("Sitting")
+                self.logger.debug("Sitting")
                 self.sport_client.StandDown()
                 self._robot_status = RobotStatus.SITTING
             elif action_key == "stand":
-                self.logger.info("Standing")
+                self.logger.debug("Standing")
                 self.sport_client.StandUp()
                 self.sport_client.BalanceStand()
                 self._robot_status = RobotStatus.STANDUP
+
+                self.sport_client.SwitchMoveMode(True)
+                self.sport_client.ContinuousGait(True)
+                self.sport_client.SwitchGait(self.locked_gait)
     
     def _publish_robot_status(self):
         msg = String()
