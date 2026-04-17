@@ -1,7 +1,10 @@
 import argparse
 import json
 import logging
+import pickle
 import sys
+import os
+from datetime import datetime
 import time
 import cv2
 from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
@@ -73,6 +76,7 @@ class StereoPairMsg:
 class Keyframe:
     timestamp: float
     image: np.ndarray
+    right_img: np.ndarray
     disparity: np.ndarray
     depth: np.ndarray
     pose: np.ndarray
@@ -80,6 +84,7 @@ class Keyframe:
     bias: gtsam.imuBias.ConstantBias
     preintegrated_imu: gtsam.PreintegratedCombinedMeasurements
     latest_imu_timestamp: float
+    K: np.ndarray = None
 
 class PerceptionNode(Node):
     def __init__(self, verbose_timer: bool = True):
@@ -121,7 +126,7 @@ class PerceptionNode(Node):
 
         self.input_aligner_imu_filter = SimpleFilter()
         self.input_aligner_stereo_filter = SimpleFilter()
-        self.input_aligner = InputAligner(Duration(seconds=1.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
+        self.input_aligner = InputAligner(Duration(seconds=100.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
         self.input_aligner.setInputPeriod(0, Duration(seconds=0.005))
         self.input_aligner.setInputPeriod(1, Duration(seconds=0.01))
         self.input_aligner.registerCallback(0, self._aligned_imu_callback)
@@ -144,8 +149,8 @@ class PerceptionNode(Node):
 
         # Noise model (continuous-time)
         # for Realsense D435i
-        accel_noise_density = 0.25     # [m/s^2/√Hz]
-        gyro_noise_density = 0.00005 # [rad/s/√Hz]
+        accel_noise_density = 1.25     # [m/s^2/√Hz]
+        gyro_noise_density = 0.05 # [rad/s/√Hz]
         bias_acc_rw_sigma = 0.001
         bias_gyro_rw_sigma = 0.0001
         self.pre_integration_params = gtsam.PreintegrationCombinedParams.MakeSharedU()
@@ -168,6 +173,9 @@ class PerceptionNode(Node):
         self.keyframe_queue = []
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
+        self.debug_folder = f"debug/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(self.debug_folder, exist_ok=True)
+
 
     def info_callback(self, msg):
         if self.K is None:
@@ -210,7 +218,7 @@ class PerceptionNode(Node):
         left_msg = stereo_pair_msg.left_msg
         right_msg = stereo_pair_msg.right_msg
         image_timestamp = stamp2second(left_msg.header.stamp)
-        if image_timestamp - self.last_processed_timestamp < 0.1333:
+        if image_timestamp - self.last_processed_timestamp < 0.0633:
             return
 
         self.last_processed_timestamp = image_timestamp
@@ -250,13 +258,15 @@ class PerceptionNode(Node):
                 Keyframe(
                     timestamp=current_timestamp,
                     image=left_img,
+                    right_img=right_img,
                     disparity=disparity,
                     depth=depth,
                     pose=self.T_body_last,
                     velocity=np.zeros(3),
                     bias=gtsam.imuBias.ConstantBias(),
                     preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
-                    latest_imu_timestamp=current_timestamp
+                    latest_imu_timestamp=current_timestamp,
+                    K=self.K,
                 )
             )
             return {
@@ -324,13 +334,15 @@ class PerceptionNode(Node):
             Keyframe(
                 timestamp=current_timestamp,
                 image=left_img,
+                right_img=right_img,
                 disparity=disparity,
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
                 velocity=self.keyframe_queue[-1].velocity,
                 bias=gtsam.imuBias.ConstantBias(),
                 preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
-                latest_imu_timestamp=current_timestamp
+                latest_imu_timestamp=current_timestamp,
+                K=self.K,
             )
         )
         if len(self.keyframe_queue) > _N:
@@ -385,6 +397,14 @@ class PerceptionNode(Node):
                 uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
+
+            # serialized self.keyframe_queue using pickle, to debug/{process_cnt}_keyframe_queue.pkl, and log the size of the serialized data
+            # create debug folder, using current datetime
+            pickle_keyframe_queue = pickle.dumps(self.keyframe_queue)
+            self.logger.debug(f"Serialized keyframe queue size: {len(pickle_keyframe_queue)} bytes")
+
+            #with open(f"{self.debug_folder}/{self.process_cnt:04d}_keyframe_queue.pkl", "wb") as f:
+            #    f.write(pickle_keyframe_queue)
             
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
             # match by LightGlue, filter by geometric consistency (pose estimation), 
@@ -460,6 +480,12 @@ class PerceptionNode(Node):
                 tracks = uf_all_sets_list(uf, min_component_size=2)
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
+            #match_img = np.zeros((left_img.shape[0] * 2, left_img.shape[1] * 2, 3), dtype=np.uint8)
+            #match_img[:left_img.shape[0], :left_img.shape[1]] = cv2.cvtColor(kf_prev.image, cv2.COLOR_GRAY2BGR)
+            #match_img[left_img.shape[0]:, left_img.shape[1]:] = cv2.cvtColor(kf_curr.image, cv2.COLOR_GRAY2BGR)
+            #match_img[:left_img.shape[0], left_img.shape[1]:] = cv2.cvtColor(kf_curr.right_image, cv2.COLOR_GRAY2BGR)
+            #match_img[left_img.shape[0]:, :left_img.shape[1]] = cv2.cvtColor(kf_prev.right_image, cv2.COLOR_GRAY2BGR)
+
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 for landmark in tracks[::1]:
                     # Build a smart factor per track (no explicit landmark variable)
@@ -502,6 +528,7 @@ class PerceptionNode(Node):
             params.setVerbosityLM("DEBUG")
             lm = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimate, params)
             result = lm.optimize()
+            #result = initial_estimate
 
             self.logger.info(f"ISAM optimization done with {graph.size()} factors and {initial_estimate.size()} variables.")
             self.logger.info(f"Initial error: {graph.error(initial_estimate):.4f}, Final error: {graph.error(result):.4f}")

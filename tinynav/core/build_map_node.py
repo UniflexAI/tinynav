@@ -117,9 +117,12 @@ def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, m
     constant_pose_index_dict = { min_timestamp : True }
 
     relative_pose_constraint = [
-        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([30.0, 30.0, 30.0]))
+        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([1000.0, 1000.0, 1000.0]), np.array([3000.0, 3000.0, 3000.0]))
         for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
+
     optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
+    print("count of relative pose constraint: ", len(relative_pose_constraint))
+    print("count of optimized camera poses: ", len(optimized_camera_poses))
     return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
 
 def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarity_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
@@ -620,10 +623,22 @@ class BuildMapNode(Node):
                             success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                                print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                                self.edges.add((prev_timestamp, curr_timestamp))
+
+                                # compare the loop constraint with the odometry constraint, if the loop constraint is much larger than the odometry constraint, we skip this loop constraint to avoid adding wrong loop constraint.
+                                # by Large, we mean large than the odometryconstraint 10%
+                                odom_T_prev_curr = np.linalg.inv(self.odom[prev_timestamp]) @ self.odom[curr_timestamp]
+                                odom_translation_diff = np.linalg.norm(odom_T_prev_curr[:3, 3] - T_prev_curr[:3, 3])
+                                odom_rotation_diff = np.arccos((np.trace(odom_T_prev_curr[:3, :3].T @ T_prev_curr[:3, :3]) - 1) / 2)
+                                odom_diff = odom_translation_diff + odom_rotation_diff
+                                if odom_diff > 0.00001 * (np.linalg.norm(odom_T_prev_curr[:3, 3])):
+                                    self.get_logger().warn(f"Loop constraint rejected due to large difference with odometry: {odom_diff} > {0.1 * (np.linalg.norm(odom_T_prev_curr[:3, 3]) + np.linalg.norm(T_prev_curr[:3, 3])) / 2}")
+                                    continue
+
+                                #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                                #self.edges.add((prev_timestamp, curr_timestamp))
+                            
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
+                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 2)
                 find_loop_and_pose_graph(keyframe_image_timestamp)
 
         with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
