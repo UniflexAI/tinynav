@@ -267,7 +267,18 @@ class PerceptionNode(Node):
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
-            self.image_shape = (
+            kf_prev = self.keyframe_queue[-1]
+            prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
+            current_left_extract_result = await self.superpoint.infer(left_img)
+
+            match_result = await self.light_glue.infer(
+                prev_left_extract_result["kpts"],
+                current_left_extract_result["kpts"],
+                prev_left_extract_result["descps"],
+                current_left_extract_result["descps"],
+                prev_left_extract_result["mask"],
+                current_left_extract_result["mask"],
+                kf_prev.image.shape,
                 left_img.shape)
 
         # propagate IMU measurements
@@ -292,246 +303,236 @@ class PerceptionNode(Node):
 
         with Timer(name="[PnP]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
         # do simple pose estimation between last keyframe and current frame
-            if self.last_keyframe_features is None:
-                kpts_curr, desc_curr = self.superpoint.detectAndCompute(left_img)
-                self.last_keyframe_features = (kpts_curr, desc_curr)
-                self.last_keyframe_img = left_img
-            with Timer(name="  [LightGlue]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                kpts_prev, desc_prev = self.last_keyframe_features
-                idx_prev, idx_curr = self.light_glue.match(desc_prev, desc_curr := self.superpoint.detectAndCompute(left_img)[1], kpts_prev, kpts_curr := self.superpoint.detectAndCompute(left_img)[0])
-            with Timer(name="  [Index Features]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                kpts_prev = kpts_prev[idx_prev]
-                kpts_curr = kpts_curr[idx_curr]
-            with Timer(name="  [Estimate Pose]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                T_kf_curr, inliers, pnp_diagnostics = estimate_pose(kpts_prev, kpts_curr, self.keyframe_queue[-1].depth, self.K, idx_curr)
-            if pnp_diagnostics is None:
-                self.logger.warning("PnP failed, skipping frame.")
-                return {
-                    "stats": {"process_cnt": self.process_cnt},
-                    "metrics": {
-                        "num_keyframes": len(self.keyframe_queue),
-                        "num_tracks": 0,
-                        "num_factors": 0,
-                        "num_variables": 0,
-                        "initial_error": 0.0,
-                        "final_error": 0.0,
-                        "pnp_success": False,
-                        "pnp_inlier_count": 0,
-                        "pnp_inlier_ratio": 0.0,
-                        "pnp_match_count": 0,
-                    }
-                }
-
-            metrics = {
-                "pnp_success": True,
-                "pnp_inlier_count": pnp_diagnostics["inlier_count"],
-                "pnp_inlier_ratio": pnp_diagnostics["inlier_ratio"],
-                "pnp_match_count": pnp_diagnostics["match_count"],
-            }
-
-            self.logger.debug(f"estimate_pose cache info: {estimate_pose.cache_info()}")
-            if np.linalg.norm(T_kf_curr[:3, 3]) > 10.0:
-                self.logger.warning("Pose estimation failed, skipping frame.")
-                return
-
-        # check if is keyframe
-        if keyframe_check(np.eye(4), T_kf_curr):
-            self.last_keyframe_features = (kpts_curr, desc_curr)
-            self.last_keyframe_img = left_img
-            self.keyframe_queue.append(
-                Keyframe(
-                    timestamp=current_timestamp,
-                    image=left_img,
-                    disparity=disparity,
-                    depth=depth,
-                    pose=self.keyframe_queue[-1].pose @ T_kf_curr,
-                    velocity=self.keyframe_queue[-1].velocity,
-                    bias=gtsam.imuBias.ConstantBias(),
-                    preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
-                    latest_imu_timestamp=current_timestamp
-                )
+            prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
+            current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
+            match_indices = match_result["match_indices"][0]
+            idx_to_origial = range(len(prev_keypoints))
+            valid_mask = match_indices != -1
+            kpt_pre = prev_keypoints[valid_mask]
+            kpt_cur = current_keypoints[match_indices[valid_mask]]
+            idx_valid = np.array(idx_to_origial)[valid_mask]
+            logging.debug(f"match cnt: {len(kpt_pre)}")
+            state, T_kf_curr, _, _, _ = estimate_pose(
+                kpt_pre,
+                kpt_cur,
+                depth,
+                self.K,
+                idx_valid
             )
-            if len(self.keyframe_queue) > _N:
-                self.keyframe_queue.pop(0)
-        if len(self.keyframe_queue) < _N:
-            self.logger.info(f"Not enough keyframes yet. Current: {len(self.keyframe_queue)}, Required: {_N}")
-            return {
-                "stats": {"process_cnt": self.process_cnt},
-                "metrics": {
-                    "num_keyframes": len(self.keyframe_queue),
-                    "num_tracks": 0,
-                    "num_factors": 0,
-                    "num_variables": 0,
-                    "initial_error": 0.0,
-                    "final_error": 0.0,
-                    **metrics,
-                }
-            }
+            self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
+        # for new frame, we first add it as keyframe, if not, we pop it later
+        self.keyframe_queue.append(
+            Keyframe(
+                timestamp=current_timestamp,
+                image=left_img,
+                disparity=disparity,
+                depth=depth,
+                pose=self.keyframe_queue[-1].pose @ T_kf_curr,
+                velocity=self.keyframe_queue[-1].velocity,
+                bias=gtsam.imuBias.ConstantBias(),
+                preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
+                latest_imu_timestamp=current_timestamp
+            )
+        )
+        if len(self.keyframe_queue) > _N:
+            self.keyframe_queue.pop(0)
+        with Timer(name="[ISAM Processing]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
+            with Timer(name="[adding imu]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                # we have new graph each time
+                graph = gtsam.NonlinearFactorGraph()
+                initial_estimate = gtsam.Values()
+                # process previous keyframes' factors
+                for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
+                    # per pose -- bias
+                    initial_estimate.insert(B(i), gtsam.imuBias.ConstantBias())
+                    graph.add(gtsam.PriorFactorConstantBias(B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
 
-        graph = gtsam.NonlinearFactorGraph()
-        initial_values = gtsam.Values()
+                    initial_estimate.insert(V(i), keyframe.velocity)
+                    initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(keyframe.pose))
+                    if i == 0:
+                        ## per pose -- velocity
+                        #graph.add(gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2]))))
 
-        self.logger.debug("Preintegration params:")
-        self.logger.debug(f"Accelerometer Covariance: {self.pre_integration_params.getAccelerometerCovariance()}")
-        self.logger.debug(f"Gyroscope Covariance: {self.pre_integration_params.getGyroscopeCovariance()}")
-        self.logger.debug(f"Integration Covariance: {self.pre_integration_params.getIntegrationCovariance()}")
-        self.logger.debug(f"Bias Acc Covariance: {self.pre_integration_params.getBiasAccCovariance()}")
-        self.logger.debug(f"Bias Omega Covariance: {self.pre_integration_params.getBiasOmegaCovariance()}")
-        self.logger.debug(f"Omega Coriolis: {self.pre_integration_params.getOmegaCoriolis()}")
+                        # per pose -- pose, could only be applied to the first keyframe
+                        graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1]))))
 
-        # 1. add variables, priors, imu factors
-        with Timer(name="[IMU Factor]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-            # Prior noise models
-            pose_noise = gtsam.noiseModel.Diagonal.Sigmas(np.array([0.01, 0.01, 0.01, 0.1, 0.1, 0.1]))
-            velocity_noise = gtsam.noiseModel.Isotropic.Sigma(3, 0.1)
-            bias_noise = gtsam.noiseModel.Isotropic.Sigma(6, 1e-3)
+                    # per pose -- preintegrated IMU factor, only between two keyframes
+                    if i != len(self.keyframe_queue[-_N:]) - 1:
+                        imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
+                        graph.add(imu_factor)
+                    self.logger.debug(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
 
-            # Prior for the first pose, velocity, and bias
-            first_pose = self.keyframe_queue[0].pose
-            first_vel = self.keyframe_queue[0].velocity
-            first_bias = self.keyframe_queue[0].bias
+            #with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            #    self.frame_diff_t = []
+            #    for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
+            #        j = i + 1
+            #        kf_prev_timestamp, kf_prev_image, kf_prev_disparity, kf_prev_depth, kf_prev_P, kf_prev_V, kf_prev_B, kf_prev_factor, _  = astuple(self.keyframe_queue[i])
+            #        kf_curr_timestamp, kf_curr_image, kf_curr_disparity, kf_curr_depth, kf_curr_P, kf_curr_V, kf_curr_B, kf_curr_factor, _  = astuple(self.keyframe_queue[i + 1])
+            #        self.frame_diff_t.append(kf_curr_timestamp - kf_prev_timestamp)
 
-            graph.add(gtsam.PriorFactorPose3(X(0), Matrix4x4ToGtsamPose3(first_pose), pose_noise))
-            graph.add(gtsam.PriorFactorVector(V(0), first_vel, velocity_noise))
-            graph.add(gtsam.PriorFactorConstantBias(B(0), first_bias, bias_noise))
+            #for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
+            #    kf_timestamp, kf_image, kf_disparity, kf_depth, kf_P, kf_V, kf_B, kf_factor, latest_imu_timestamp = astuple(keyframe)
+            #    if i != len(self.keyframe_queue[-_N:]) - 1:
+            #        imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), kf_factor) 
 
-            # Insert initial values
-            for i, kf in enumerate(self.keyframe_queue):
-                initial_values.insert(X(i), Matrix4x4ToGtsamPose3(kf.pose))
-                initial_values.insert(V(i), kf.velocity)
-                initial_values.insert(B(i), kf.bias)
+            #        print("processing imu factor between ", i, " and ", i+1)
+            #        print("error: ", imu_factor.error(initial_estimate))
+            #        print("frame_diff_t: ", self.frame_diff_t[i])
+            #        print("kf_factor: ", kf_factor)
+            #current_i = len(self.keyframe_queue[-_N:])
 
-            imu_bias_rw_sigma = np.array([0.001, 0.001, 0.001, 1e-4, 1e-4, 1e-4])
-            bias_noise_model = gtsam.noiseModel.Diagonal.Sigmas(np.sqrt(kf.latest_imu_timestamp - self.keyframe_queue[i - 1].latest_imu_timestamp) * imu_bias_rw_sigma)
-            for i in range(1, len(self.keyframe_queue)):
-                prev_kf = self.keyframe_queue[i - 1]
-                curr_kf = self.keyframe_queue[i]
+            with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+                extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
+                uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
-                self.logger.debug(f"Preintegrated IMU measurements between keyframes {i-1} and {i}:")
-                self.logger.debug(f"  Delta t: {curr_kf.preintegrated_imu.deltaTij()}")
-                self.logger.debug(f"  Delta P: {curr_kf.preintegrated_imu.deltaPij()}")
-                self.logger.debug(f"  Delta V: {curr_kf.preintegrated_imu.deltaVij()}")
-                self.logger.debug(f"  Delta R: {curr_kf.preintegrated_imu.deltaRij().matrix()}")
+            self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
+            
+            # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
+            # match by LightGlue, filter by geometric consistency (pose estimation), 
+            # and build tracks via Union-Find
+            with Timer(name="[cached result]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+                for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
+                    with Timer(name="[cached result[1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        j = i + 1
+                        kf_prev = self.keyframe_queue[i]
+                        kf_curr = self.keyframe_queue[j]
 
-                imu_factor = gtsam.CombinedImuFactor(
-                    X(i - 1), V(i - 1), X(i), V(i),
-                    B(i - 1), B(i),
-                    curr_kf.preintegrated_imu
-                )
-                graph.add(imu_factor)
-                graph.add(gtsam.BetweenFactorConstantBias(B(i - 1), B(i), gtsam.imuBias.ConstantBias(), bias_noise_model))
+                    self.logger.debug("timestamp prev: ", kf_prev.timestamp)
+                    self.logger.debug("timestamp curr: ", kf_curr.timestamp)
+                    with Timer(name="[cached result[1.1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
+                    with Timer(name="[cached result[1.2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        current_left_extract_result = await self.superpoint.infer(kf_curr.image)
 
-        # 2. feature track across keyframes
-        max_dist = 5.0 # meters
-        feature_tracks = []
-        landmark_positions = []
-        correspondence_info = []
+                    with Timer(name="[cached result[1.3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        match_result = await self.light_glue.infer(
+                            prev_left_extract_result["kpts"],
+                            current_left_extract_result["kpts"],
+                            prev_left_extract_result["descps"],
+                            current_left_extract_result["descps"],
+                            prev_left_extract_result["mask"],
+                            current_left_extract_result["mask"],
+                            kf_prev.image.shape,
+                            kf_curr.image.shape)
+                    with Timer(name="[cached result[2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
+                        current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
+                        match_indices = match_result["match_indices"][0].copy()
+                        idx_to_origial = range(len(prev_keypoints))
 
-        with Timer(name="[Feature Matching]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-            all_kpts = []
-            all_desc = []
-            for kf in self.keyframe_queue:
-                kpts, desc = self.superpoint.detectAndCompute(kf.image)
-                all_kpts.append(kpts)
-                all_desc.append(desc)
-            for i in range(len(self.keyframe_queue)):
-                for j in range(i + 1, len(self.keyframe_queue)):
-                    idx_i, idx_j = self.light_glue.match(all_desc[i], all_desc[j], all_kpts[i], all_kpts[j])
-                    kpts_i = all_kpts[i][idx_i]
-                    kpts_j = all_kpts[j][idx_j]
-                    pts_3d = []
-                    pts_2d = []
-                    valid_idx_i = []
-                    for m, (kp_i, kp_j) in enumerate(zip(kpts_i, kpts_j)):
-                        u, v = int(kp_i[0]), int(kp_i[1])
-                        if 0 <= v < self.keyframe_queue[i].depth.shape[0] and 0 <= u < self.keyframe_queue[i].depth.shape[1]:
-                            Z = self.keyframe_queue[i].depth[v, u]
-                            if Z > 0.1 and Z < max_dist:
-                                pts_3d.append(depth_to_point(kp_i, Z, self.K))
-                                pts_2d.append(kp_j)
-                                valid_idx_i.append(idx_i[m])
-                    if len(pts_3d) == 0:
-                        continue
-                    T_iw = self.keyframe_queue[i].pose
-                    landmarks_i = [T_iw[:3, :3] @ pt + T_iw[:3, 3] for pt in pts_3d]
-                    feature_tracks.append((i, j, valid_idx_i, idx_j[:len(valid_idx_i)], landmarks_i, pts_2d))
-                    correspondence_info.append((i, j, len(pts_3d)))
+                        valid_mask = match_indices != -1
+                        kpt_pre = prev_keypoints[valid_mask]
+                        kpt_cur = current_keypoints[match_indices[valid_mask]]
+                        idx_valid = np.array(idx_to_origial)[valid_mask]
 
-        # 3. robust union-find on landmarks with outlier rejection
-        track_map = {}
-        point_records = []
-        for track_id, (i, j, idx_i_list, idx_j_list, landmarks_i, pts_2d) in enumerate(feature_tracks):
-            for n, (idx_i, idx_j, landmark) in enumerate(zip(idx_i_list, idx_j_list, landmarks_i)):
-                key_i = (i, idx_i)
-                key_j = (j, idx_j)
-                point_records.append((track_id, n, key_i, key_j, landmark))
+                        depth = kf_curr.depth
 
-        uf = uf_init(len(point_records))
-        key_to_indices = {}
-        for idx, (_, _, key_i, key_j, _) in enumerate(point_records):
-            key_to_indices.setdefault(key_i, []).append(idx)
-            key_to_indices.setdefault(key_j, []).append(idx)
-        for indices in key_to_indices.values():
-            for k in range(1, len(indices)):
-                uf_union(uf, indices[0], indices[k])
-        sets = uf_all_sets_list(uf)
-
-        for s in sets:
-            if len(s) < 2:
-                continue
-            pts = np.array([point_records[idx][4] for idx in s])
-            mean = np.mean(pts, axis=0)
-            dists = np.linalg.norm(pts - mean, axis=1)
-            inliers = [s[idx] for idx, d in enumerate(dists) if d < 0.3]
-            if len(inliers) < 2:
-                continue
-            landmark_positions.append(np.mean([point_records[idx][4] for idx in inliers], axis=0))
-            lm_id = len(landmark_positions) - 1
-            for idx in inliers:
-                _, _, key_i, key_j, _ = point_records[idx]
-                track_map[key_i] = lm_id
-                track_map[key_j] = lm_id
-
-        # 4. add projection factors
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        K_cal = gtsam.Cal3_S2(fx, fy, 0.0, cx, cy)
-        meas_noise = gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
-
-        with Timer(name="[Projection Factors]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-            for track_id, (i, j, idx_i_list, idx_j_list, landmarks_i, pts_2d) in enumerate(feature_tracks):
-                kpts_i = all_kpts[i][idx_i_list]
-                kpts_j = all_kpts[j][idx_j_list]
-                for idx_i, idx_j, pt_j in zip(idx_i_list, idx_j_list, pts_2d):
-                    key_i = (i, idx_i)
-                    key_j = (j, idx_j)
-                    if key_i in track_map and key_j in track_map and track_map[key_i] == track_map[key_j]:
-                        lm_id = track_map[key_i]
-                        landmark = landmark_positions[lm_id]
-                        point3 = gtsam.Point3(landmark)
-                        if not initial_values.exists(gtsam.symbol('l', lm_id)):
-                            initial_values.insert(gtsam.symbol('l', lm_id), point3)
-                        factor = gtsam.GenericProjectionFactorCal3_S2(
-                            gtsam.Point2(pt_j[0], pt_j[1]),
-                            meas_noise,
-                            X(j),
-                            gtsam.symbol('l', lm_id),
-                            K_cal,
-                            Matrix4x4ToGtsamPose3(self.T_imu_body_to_camera)
+                        logging.debug(f"match cnt: {len(kpt_pre)}")
+                        state, _, _, _, inliers = estimate_pose(
+                            kpt_pre,
+                            kpt_cur,
+                            depth,
+                            self.K,
+                            idx_valid
                         )
-                        graph.add(factor)
+                        inlier_set = set(inliers)
+                        if len(inlier_set) > 20:
+                            for idx in range(len(match_indices)):
+                                if idx not in inlier_set:
+                                    match_indices[idx] = -1
+                        else:
+                            for idx in range(len(match_indices)):
+                                match_indices[idx] = -1
+                            self.logger.warning(f"match cnt: {len(kpt_pre)} is too small, {len(inlier_set)} inliers.enable velocity constraint")
+                            velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
+                            graph.add(velocity_constraint)
 
-        with Timer(name="[Optimize]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-            optimizer = gtsam.LevenbergMarquardtOptimizer(graph, initial_values)
-            initial_error = graph.error(initial_values)
-            result = optimizer.optimize()
-            final_error = graph.error(result)
+                    with Timer(name="[cached result[3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
+                        count = 0
+                        for k, match_idx in enumerate(match_indices):
+                            if match_idx != -1:
+                                idx_prev = i * _M + k
+                                idx_curr = j * _M + match_idx
+                                uf_union(idx_prev, idx_curr, uf)
+                                count += 1
+                        self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
 
-        self.logger.debug(f"Correspondence info (kf_i, kf_j, num_matches): {correspondence_info}")
-        self.logger.debug(f"Number of landmarks: {len(landmark_positions)}")
-        self.logger.debug(f"Number of factors: {graph.size()}")
-        self.logger.debug(f"Initial error: {initial_error}")
-        self.logger.debug(f"Final error: {final_error}")
+            with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+                tracks = uf_all_sets_list(uf, min_component_size=2)
+                self.logger.debug(f"Found {len(tracks)} tracks after data association.")
+
+            with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+                for landmark in tracks[::1]:
+                    # Build a smart factor per track (no explicit landmark variable)
+                    disparity_valid = True
+                    observations = []
+                    for projection in landmark:
+                        pose_idx = projection // _M
+                        feature_idx = projection % _M
+                        disparity = self.keyframe_queue[pose_idx].disparity
+                        kpt = extract_info[pose_idx]['kpts'][0][feature_idx]
+                        if disparity[int(kpt[1]), int(kpt[0])] < 0.1:
+                            disparity_valid = False
+                            break
+                        observations.append((pose_idx, kpt, disparity))
+
+                    if not disparity_valid or len(observations) < 2:
+                        continue
+
+                    # Smart factors require isotropic pixel noise
+                    noise = gtsam.noiseModel.Isotropic.Sigma(3, 1.0)
+                    params = gtsam.SmartProjectionParams()
+                    smart_factor = gtsam_unstable.SmartStereoProjectionPoseFactor(noise, params)
+
+                    calib = gtsam.Cal3_S2Stereo(
+                        self.K[0, 0], self.K[1, 1], 0, self.K[0, 2], self.K[1, 2], self.baseline
+                    )
+                    for pose_idx, kpt, disparity in observations:
+                        stereo_meas = gtsam.StereoPoint2(
+                            kpt[0],
+                            kpt[0] - disparity[int(kpt[1]), int(kpt[0])],
+                            kpt[1],
+                        )
+                        smart_factor.add(stereo_meas, X(pose_idx), calib)
+                    graph.add(smart_factor)
+
+        with Timer(name="[Solver]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            params = gtsam.LevenbergMarquardtParams()
+            # set iteration limit
+            params.setMaxIterations(3)
+            params.setVerbosityLM("DEBUG")
+            lm = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimate, params)
+            result = lm.optimize()
+
+            self.logger.info(f"ISAM optimization done with {graph.size()} factors and {initial_estimate.size()} variables.")
+            self.logger.info(f"Initial error: {graph.error(initial_estimate):.4f}, Final error: {graph.error(result):.4f}")
+
+            for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
+                T_i = result.atPose3(X(i)).matrix()
+                keyframe.pose = T_i
+                keyframe.velocity = result.atVector(V(i))
+                self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
+                self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
+                #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
+
+        with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            disp_vis = disparity.copy().astype(np.uint8)
+            disp_color = cv2.applyColorMap(disp_vis * 4, cv2.COLORMAP_PLASMA)
+            disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding='bgr8')
+            disp_color_msg.header = left_msg.header
+            self.disparity_pub_vis.publish(disp_color_msg)
+
+        with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            # publish depth image and camera info for depth topic (required by DepthCloud)
+            depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
+            depth_msg.header.stamp = left_msg.header.stamp
+            depth_msg.header.frame_id = "camera"  # Match TF frame
+            self.camera_info_msg.header.stamp = left_msg.header.stamp
+            self.camera_info_msg.header.frame_id = "camera"  # Match TF frame
+            self.slam_camera_info_pub.publish(self.camera_info_msg)
+            self.depth_pub.publish(depth_msg)
+        self.logger.debug(f"superpoint cache info: {self.superpoint.infer.cache_info()}")
+        self.logger.debug(f"lightglue cache info: {self.light_glue.infer.cache_info()}")
         self.logger.debug(f"estimate_pose cache info: {estimate_pose.cache_info()}")
 
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -541,49 +542,30 @@ class PerceptionNode(Node):
             self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
-            # publish camera info
-            self.camera_info_msg.header.stamp = left_msg.header.stamp
-            self.camera_info_msg.header.frame_id = "camera"
-            self.slam_camera_info_pub.publish(self.camera_info_msg)
-            # publish depth
-            depth_msg = self.bridge.cv2_to_imgmsg(depth.astype(np.float32), encoding='32FC1')
-            depth_msg.header.stamp = left_msg.header.stamp
-            depth_msg.header.frame_id = "camera"
-            self.depth_pub.publish(depth_msg)
-            # publish depth_vis 0->255, uint8
-            disparity_vis = (disparity - disparity.min()) / (disparity.max() - disparity.min()) * 255
-            disparity_vis = disparity_vis.astype(np.uint8)
-            disparity_vis = cv2.applyColorMap(disparity_vis, cv2.COLORMAP_JET)
-            disparity_msg = self.bridge.cv2_to_imgmsg(disparity_vis, encoding='bgr8')
-            disparity_msg.header.stamp = left_msg.header.stamp
-            disparity_msg.header.frame_id = "camera"
-            self.disparity_pub_vis.publish(disparity_msg)
 
-            # publish latest keyframe pose, image, depth if available
-            if self.keyframe_queue:
-                kf = self.keyframe_queue[-1]
-                self.keyframe_pose_pub.publish(np2msg(kf.pose, left_msg.header.stamp, "world", "camera", kf.velocity))
-                keyframe_image_msg = self.bridge.cv2_to_imgmsg(kf.image, encoding='mono8')
-                keyframe_image_msg.header.stamp = left_msg.header.stamp
-                keyframe_image_msg.header.frame_id = "camera"
-                self.keyframe_image_pub.publish(keyframe_image_msg)
-                keyframe_depth_msg = self.bridge.cv2_to_imgmsg(kf.depth.astype(np.float32), encoding='32FC1')
-                keyframe_depth_msg.header.stamp = left_msg.header.stamp
-                keyframe_depth_msg.header.frame_id = "camera"
-                self.keyframe_depth_pub.publish(keyframe_depth_msg)
+            last_keyframe = self.keyframe_queue[-2]
+            current_keyframe = self.keyframe_queue[-1]
+            if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
+                self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera", current_keyframe.velocity))
+                self.keyframe_image_pub.publish(left_msg)
+                self.keyframe_depth_pub.publish(depth_msg)
+            else:
+                self.keyframe_queue.pop()
 
         return {
-            "stats": {"process_cnt": self.process_cnt},
+            "stats": {
+                "process_cnt": self.process_cnt,
+            },
             "metrics": {
                 "num_keyframes": len(self.keyframe_queue),
-                "num_tracks": len(feature_tracks),
+                "num_tracks": len(tracks),
                 "num_factors": graph.size(),
-                "num_variables": initial_values.size(),
-                "initial_error": initial_error,
-                "final_error": final_error,
-                **metrics,
-            }
+                "num_variables": initial_estimate.size(),
+                "initial_error": graph.error(initial_estimate),
+                "final_error": graph.error(result),
+            },
         }
+
 
 def main(args=None):
     rclpy.init(args=args)
