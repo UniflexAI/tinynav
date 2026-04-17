@@ -22,6 +22,5 @@ ros2 bag record \
     /camera/camera/imu \
     /camera/camera/color/image_raw \
     /camera/camera/color/camera_info \
-    /tf \
     /camera/camera/color/image_rect_raw/compressed \
     /tf_static
