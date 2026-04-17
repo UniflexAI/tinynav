@@ -29,8 +29,7 @@ import shelve
 from tqdm import tqdm
 import einops
 from tf2_msgs.msg import TFMessage
-from typing import Tuple, Dict
-import json
+from typing import Dict
 
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped,Point
@@ -62,38 +61,6 @@ def z_value_to_color(z, z_min, z_max):
         color.r = 1.0
         color.g = 1.0 - (normalized_z - 0.75) * 4.0
     return color
-
-def convert_nerf_format(output_dir: str, infra1_poses: dict, rgb_intrinscis:np.ndarray, image_size: Tuple[int, int], T_rgb_to_infra1:np.ndarray):
-    camera_model = "PINHOLE"
-    fl_x = rgb_intrinscis[0, 0]
-    fl_y = rgb_intrinscis[1, 1]
-    cx = rgb_intrinscis[0, 2]
-    cy = rgb_intrinscis[1, 2]
-    w = image_size[1]
-    h = image_size[0]
-    frames = []
-    opencv_to_opengl_convention = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-    for timestmap, camera_to_world_pose in infra1_poses.items():
-        camera_to_world_opengl = camera_to_world_pose @ T_rgb_to_infra1 @ opencv_to_opengl_convention
-        frame = {
-            "file_path": f"images/image_{timestmap}.png",
-            "transform_matrix": camera_to_world_opengl.tolist(),
-        }
-        frames.append(frame)
-
-    data = {
-        "camera_model": camera_model,
-        "fl_x": fl_x,
-        "fl_y": fl_y,
-        "cx": cx,
-        "cy": cy,
-        "w": w,
-        "h": h,
-        "frames": frames
-    }
-
-    with open(f"{output_dir}/transforms.json", "w") as f:
-        json.dump(data, f, indent=4)
 
 def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, local_grid:np.ndarray, local_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -493,6 +460,7 @@ class BuildMapNode(Node):
         self.tf_sub.registerCallback(self.tf_callback)
         self.tf_static_sub = Subscriber(self, TFMessage, "/tf_static")
         self.tf_static_sub.registerCallback(self.tf_callback)
+        self.tf_messages: Dict[int, Dict[str, np.ndarray]] = {}
         self.T_rgb_to_infra1 = None
         self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
@@ -507,6 +475,10 @@ class BuildMapNode(Node):
         T_rgb_optical_to_rgb = None
         for t in msg.transforms:
             frame_id, child_frame_id, T = tf2np(t)
+            timestamp_ns = int(t.header.stamp.sec * 1e9) + int(t.header.stamp.nanosec)
+            if timestamp_ns not in self.tf_messages:
+                self.tf_messages[timestamp_ns] = {}
+            self.tf_messages[timestamp_ns][f"{frame_id}->{child_frame_id}"] = T
             if frame_id == "camera_link" and child_frame_id == "camera_infra1_frame":
                 T_infra1_to_link = T
             if frame_id == "camera_infra1_frame" and child_frame_id == "camera_infra1_optical_frame":
@@ -695,6 +667,7 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
+        np.save(f"{self.map_save_path}/tf_messages.npy", self.tf_messages, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
         np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
 
@@ -708,14 +681,6 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
 
-        image_size = None
-        os.makedirs(f"{self.map_save_path}/images", exist_ok=True)
-        for timestamp, infra1_pose in self.pose_graph_used_pose.items():
-            _, _, _, rgb_image, _ = self.db.get_depth_embedding_features_images(timestamp)
-            if image_size is None:
-                image_size = rgb_image.shape[:2]
-            cv2.imwrite(f"{self.map_save_path}/images/image_{timestamp}.png", rgb_image)
-        convert_nerf_format(self.map_save_path, self.pose_graph_used_pose, self.rgb_camera_K, image_size, self.T_rgb_to_infra1)
         self.db.close()
 
         self._save_completed = True
