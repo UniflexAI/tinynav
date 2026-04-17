@@ -44,6 +44,7 @@ class Ros2UnitreeManagerNode(Node):
 
         self.action_subscriber = ChannelSubscriber("rt/service/command", String_)
         self.action_subscriber.Init(self.ActionMessageHandler, 10)
+        self.create_subscription(String, '/unitree/action_command', self._ros2_action_callback, 10)
 
         lowstate_subscriber = ChannelSubscriber("rt/lf/lowstate", LowState_)
         lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
@@ -82,19 +83,25 @@ class Ros2UnitreeManagerNode(Node):
             self.sport_client.Move(1e-4, 0.0, 0.0)
         time.sleep(0.02)
 
+    def _ros2_action_callback(self, msg: String):
+        self._handle_action(msg.data)
+
     def ActionMessageHandler(self, msg: String_):
-        if msg.data.split(" ")[0] == "play":
-            action_key = msg.data.split(" ")[1]
+        self._handle_action(msg.data)
+
+    def _handle_action(self, data: str):
+        parts = data.split(" ")
+        if parts[0] == "play" and len(parts) > 1:
+            action_key = parts[1]
             if action_key == "sit":
-                self.logger.debug("Sitting")
+                self.logger.info("Action: sitting")
                 self.sport_client.StandDown()
                 self._robot_status = RobotStatus.SITTING
             elif action_key == "stand":
-                self.logger.debug("Standing")
+                self.logger.info("Action: standing")
                 self.sport_client.StandUp()
                 self.sport_client.BalanceStand()
                 self._robot_status = RobotStatus.STANDUP
-
                 self.sport_client.SwitchMoveMode(True)
                 self.sport_client.ContinuousGait(True)
                 self.sport_client.SwitchGait(self.locked_gait)

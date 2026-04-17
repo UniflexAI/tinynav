@@ -1,5 +1,6 @@
 import rclpy
 import os
+import time
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -241,8 +242,16 @@ class MapNode(Node):
         self.poi_auto_advance_enabled = True
         self.poi_auto_advance_distance_threshold = 0.5
 
+        # Sit/stand action at each POI arrival
+        self._poi_action_state = None   # None | 'sitting' | 'standing'
+        self._poi_action_index = None   # poi_index being acted on
+        self._poi_action_start = None   # time.monotonic()
+        self.poi_sit_duration = 10.0    # seconds to stay sitting
+        self.poi_stand_settle = 2.0     # seconds after stand before advancing
+
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+        self.action_cmd_pub = self.create_publisher(String, '/unitree/action_command', 10)
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
@@ -634,23 +643,61 @@ class MapNode(Node):
 
         pose_in_map_position = pose_in_map[:3, 3]
 
+        # Sit/stand action state machine — runs for both auto-advance and goto modes.
+        if self._poi_action_state is not None:
+            elapsed = time.monotonic() - self._poi_action_start
+            if self._poi_action_state == 'sitting' and elapsed >= self.poi_sit_duration:
+                self.get_logger().info("POI action: standing up")
+                msg = String(); msg.data = 'play stand'
+                self.action_cmd_pub.publish(msg)
+                self._poi_action_state = 'standing'
+                self._poi_action_start = time.monotonic()
+            elif self._poi_action_state == 'standing' and elapsed >= self.poi_stand_settle:
+                completed_index = self._poi_action_index
+                self._poi_action_state = None
+                self._poi_action_index = None
+                if self.poi_auto_advance_enabled:
+                    self.poi_index = completed_index + 1
+                    self.get_logger().info(f"POI action done, advance to index {self.poi_index}")
+                    stamp_msg = self.get_clock().now().to_msg()
+                    self.poi_change_pub.publish(np2msg(np.eye(4), stamp_msg, "world", "map"))
+                else:
+                    # goto mode: stop navigation after action
+                    self.poi_nav_enabled = False
+                    self._publish_poi_stop_signal()
+                    self.get_logger().info(f"POI goto action done, navigation stopped")
+            return  # hold navigation while action is in progress
+
         if self.poi_auto_advance_enabled:
             while self.poi_index < len(self.pois):
                 poi = self.pois[self.poi_index]
                 diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
                 if diff_position_norm < self.poi_auto_advance_distance_threshold:
                     self.get_logger().info(
-                        f"Auto advance POI index {self.poi_index} -> {self.poi_index + 1}, "
-                        f"distance={diff_position_norm:.3f}, threshold={self.poi_auto_advance_distance_threshold:.3f}"
+                        f"POI {self.poi_index} reached (dist={diff_position_norm:.3f}), starting sit action"
                     )
-                    self.poi_index += 1
-                    dummy_pose = np.eye(4)
-
-                    stamp_msg = self.get_clock().now().to_msg()
-                    self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
-                    continue
+                    msg = String(); msg.data = 'play sit'
+                    self.action_cmd_pub.publish(msg)
+                    self._poi_action_state = 'sitting'
+                    self._poi_action_index = self.poi_index
+                    self._poi_action_start = time.monotonic()
+                    return
                 else:
                     break
+        elif self.poi_index < len(self.pois):
+            # goto mode: check arrival at target POI
+            poi = self.pois[self.poi_index]
+            diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
+            if diff_position_norm < self.poi_auto_advance_distance_threshold:
+                self.get_logger().info(
+                    f"POI goto {self.poi_index} reached (dist={diff_position_norm:.3f}), starting sit action"
+                )
+                msg = String(); msg.data = 'play sit'
+                self.action_cmd_pub.publish(msg)
+                self._poi_action_state = 'sitting'
+                self._poi_action_index = self.poi_index
+                self._poi_action_start = time.monotonic()
+                return
 
         if self.poi_index >= len(self.pois):
             self.get_logger().info("All POIs have been visited, skip publishing nav path")
