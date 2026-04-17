@@ -670,7 +670,7 @@ class MapNode(Node):
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
                         accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                        if accumulated_distance > 2.5:
+                        if accumulated_distance > 4.5:
                             target_position = paths_in_map[i]
                             break
                         start_point = paths_in_map[i]
@@ -746,8 +746,12 @@ class MapNode(Node):
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
-            converted_path = smooth_path_lightweight(converted_path, window=5, passes=10)
-            converted_path = downsample_path_by_distance(converted_path, min_dist=0.08)
+            # Stronger post-process to suppress tiny circles/oscillation artifacts.
+            converted_path = smooth_path_lightweight(converted_path, window=9, passes=20)
+            converted_path = downsample_path_by_distance(converted_path, min_dist=0.14)
+            converted_path = suppress_small_loops(converted_path, loop_radius=0.18, min_separation=6)
+            converted_path = smooth_path_lightweight(converted_path, window=7, passes=3)
+            converted_path = downsample_path_by_distance(converted_path, min_dist=0.12)
             return converted_path
         return None
 
@@ -760,11 +764,50 @@ def downsample_path_by_distance(path: np.ndarray, min_dist: float = 0.08) -> np.
     last = path[0]
     for i in range(1, len(path) - 1):
         p = path[i]
-        if np.linalg.norm(p[:2] - last[:2]) >= min_dist:
-            out.append(p)
-            last = p
+        step = p[:2] - last[:2]
+        if np.linalg.norm(step) < min_dist:
+            continue
+        if len(out) >= 2:
+            prev = out[-1][:2] - out[-2][:2]
+            n_prev = np.linalg.norm(prev)
+            n_step = np.linalg.norm(step)
+            if n_prev > 1e-6 and n_step > 1e-6:
+                cos_turn = float(np.dot(prev, step) / (n_prev * n_step))
+                # Collapse tiny backtracking turns that usually form O-like mini loops.
+                if cos_turn < -0.2 and n_step < (2.0 * min_dist):
+                    out[-1] = p
+                    last = p
+                    continue
+        out.append(p)
+        last = p
     out.append(path[-1])
     return np.asarray(out, dtype=path.dtype)
+
+
+def suppress_small_loops(path: np.ndarray, loop_radius: float = 0.18, min_separation: int = 6) -> np.ndarray:
+    """Remove tiny local loops by collapsing near-return segments."""
+    if path is None or len(path) < (min_separation + 2):
+        return path
+
+    points = np.asarray(path, dtype=np.float32)
+    kept = [points[0]]
+    loop_radius = max(1e-3, float(loop_radius))
+    min_separation = max(3, int(min_separation))
+
+    for p in points[1:]:
+        kept.append(p)
+        changed = True
+        while changed and len(kept) > (min_separation + 1):
+            changed = False
+            tail = kept[-1]
+            start_idx = len(kept) - min_separation - 1
+            for i in range(start_idx):
+                if np.linalg.norm(tail[:2] - kept[i][:2]) <= loop_radius:
+                    kept = kept[: i + 1] + [tail]
+                    changed = True
+                    break
+
+    return np.asarray(kept, dtype=path.dtype)
 
 
 def smooth_path_lightweight(path: np.ndarray, window: int = 5, passes: int = 1) -> np.ndarray:

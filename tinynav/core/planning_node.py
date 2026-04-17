@@ -783,10 +783,10 @@ class PlanningNode(Node):
         self.global_path_xy = None
 
         # Keep planning event-driven (sync depth+odom), but publish cmd at a fixed rate.
-        self.cmd_rate_hz = 20.0
+        self.cmd_rate_hz = 30.0
         self.path_stale_slow_s = 0.3
         self.path_stale_stop_s = 0.6
-        self.max_linear_speed = 0.6  # m/s
+        self.max_linear_speed = 0.8  # m/s
         self.max_reverse_speed = 0.1  # m/s
         self.max_angular_speed = 0.5  # rad/s
         self.max_linear_acc = 2.0   # m/s^2
@@ -813,8 +813,8 @@ class PlanningNode(Node):
         )
         self.recovery_fast_speed = 0.24
         self.recovery_slow_speed = 0.12
-        self.path_smooth_window = 3
-        self.path_smooth_passes = 1
+        self.path_smooth_window = 20
+        self.path_smooth_passes = 3
         self.planner_mode = 'astar'  # 'astar' | 'dwa'
 
         self.latest_cmd = Twist()
@@ -1270,7 +1270,7 @@ class PlanningNode(Node):
                         cmd.angular.z = float(np.clip(1.6 * heading_err, -self.max_angular_speed, self.max_angular_speed))
                         cmd.linear.x = self.recovery_fast_speed if abs(heading_err) < 0.6 else self.recovery_slow_speed
                 else:
-                    lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=1.2)
+                    lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=1.5)
                     norm_f = np.linalg.norm(forward_xy)
                     to_wp = lookahead[:2] - robot_xy
                     norm_t = np.linalg.norm(to_wp)

@@ -65,9 +65,12 @@ class Ros2UnitreeManagerNode(Node):
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_cmd_vel_time = current_time
 
-        vx = float(msg.linear.x)
+        raw_vx = float(msg.linear.x)
+        vx = max(raw_vx, -0.1)
         vy = float(msg.linear.y)
         wz = float(msg.angular.z)
+        if vx != raw_vx:
+            self.logger.debug(f"Clamp vx from {raw_vx:.3f} to {vx:.3f}")
 
         # Use an epsilon so tiny numeric noise doesn't cause constant Move calls.
         eps = 1e-3

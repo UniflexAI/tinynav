@@ -524,7 +524,8 @@
     function drawPois() {
       if (!poiPoints || poiPoints.length === 0) return;
       for (const poi of poiPoints) {
-        const c = worldToCanvas(poi.x, poi.y);
+        const poiWorld = transformMapPointToWorld(poi.x, poi.y);
+        const c = worldToCanvas(poiWorld.x, poiWorld.y);
         mapCtx.fillStyle = "#fbbf24";
         mapCtx.beginPath();
         mapCtx.arc(c.x, c.y, 5, 0, Math.PI * 2);
@@ -810,7 +811,8 @@
       let nearestPoi = null;
       let minDist = Number.POSITIVE_INFINITY;
       for (const poi of poiPoints) {
-        const d = Math.hypot(world.x - poi.x, world.y - poi.y);
+        const poiWorld = transformMapPointToWorld(poi.x, poi.y);
+        const d = Math.hypot(world.x - poiWorld.x, world.y - poiWorld.y);
         if (d < minDist) {
           minDist = d;
           nearestPoi = poi;
