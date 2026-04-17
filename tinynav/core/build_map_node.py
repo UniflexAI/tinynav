@@ -460,8 +460,6 @@ class BuildMapNode(Node):
         self.tf_sub.registerCallback(self.tf_callback)
         self.tf_static_sub = Subscriber(self, TFMessage, "/tf_static")
         self.tf_static_sub.registerCallback(self.tf_callback)
-        self.tf_messages: Dict[int, Dict[str, np.ndarray]] = {}
-        self.tf_capture_completed = False
         self.T_rgb_to_infra1 = None
         self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
@@ -470,21 +468,17 @@ class BuildMapNode(Node):
         self.edges = set()
 
     def tf_callback(self, msg:TFMessage):
-        if self.tf_capture_completed:
-            return
-
         T_infra1_to_link = None
         T_infra1_optical_to_infra1 = None
         T_rgb_to_link = None
         T_rgb_optical_to_rgb = None
-        tf_updated = False
+        tf_messages: Dict[int, Dict[str, np.ndarray]] = {}
         for t in msg.transforms:
             frame_id, child_frame_id, T = tf2np(t)
             timestamp_ns = int(t.header.stamp.sec * 1e9) + int(t.header.stamp.nanosec)
-            if timestamp_ns not in self.tf_messages:
-                self.tf_messages[timestamp_ns] = {}
-            self.tf_messages[timestamp_ns][f"{frame_id}->{child_frame_id}"] = T
-            tf_updated = True
+            if timestamp_ns not in tf_messages:
+                tf_messages[timestamp_ns] = {}
+            tf_messages[timestamp_ns][f"{frame_id}->{child_frame_id}"] = T
             if frame_id == "camera_link" and child_frame_id == "camera_infra1_frame":
                 T_infra1_to_link = T
             if frame_id == "camera_infra1_frame" and child_frame_id == "camera_infra1_optical_frame":
@@ -500,9 +494,8 @@ class BuildMapNode(Node):
 
         if T_infra1_optical_to_infra1 is not None and T_rgb_optical_to_rgb is not None and T_infra1_to_link is not None and T_rgb_to_link is not None:
             self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
-        if tf_updated and self.T_rgb_to_infra1 is not None:
-            np.save(f"{self.map_save_path}/tf_messages.npy", self.tf_messages, allow_pickle=True)
-            self.tf_capture_completed = True
+        if tf_messages and self.T_rgb_to_infra1 is not None:
+            np.save(f"{self.map_save_path}/tf_messages.npy", tf_messages, allow_pickle=True)
             if self.tf_sub is not None:
                 self.destroy_subscription(self.tf_sub.sub)
                 self.tf_sub = None
