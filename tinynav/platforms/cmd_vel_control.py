@@ -6,6 +6,7 @@ from nav_msgs.msg import Odometry
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
+import time
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
@@ -25,18 +26,66 @@ class CmdVelControlNode(Node):
         )
         self.last_path_time = 0.0
         self.pose = None
+        self.path = None
+
+        # === Control loop (ported from planning_node_compare style) ===
+        self.cmd_rate_hz = 20.0
+        self.path_stale_slow_s = 0.3
+        self.path_stale_stop_s = 0.6
+        self.max_linear_acc = 0.4   # m/s^2
+        self.max_angular_acc = 0.8  # rad/s^2
+
+        self.latest_cmd = Twist()
+        self.prev_cmd = Twist()
+        self.last_cmd_pub_time = time.monotonic()
+        self.last_path_update_time = None
+        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
         
     def pose_callback(self, msg):
         self.pose = msg
+
+    def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
+        return float(np.clip(target - current, -max_delta, max_delta) + current)
+
+    def cmd_timer_callback(self):
+        now = time.monotonic()
+        dt = max(1e-3, now - self.last_cmd_pub_time)
+        self.last_cmd_pub_time = now
+
+        # Stale-path protection: slow down, then stop if planner has not refreshed.
+        age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
+        target_cmd = Twist()
+        target_cmd.linear.x = self.latest_cmd.linear.x
+        target_cmd.angular.z = self.latest_cmd.angular.z
+        if age > self.path_stale_stop_s:
+            target_cmd.linear.x = 0.0
+            target_cmd.angular.z = 0.0
+        elif age > self.path_stale_slow_s:
+            target_cmd.linear.x *= 0.3
+            target_cmd.angular.z *= 0.5
+
+        # Acceleration limiting for smoother control.
+        max_dv = self.max_linear_acc * dt
+        max_dw = self.max_angular_acc * dt
+        out = Twist()
+        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
+        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
+        out.linear.y = 0.0
+
+        self.cmd_pub.publish(out)
+        self.prev_cmd = out
         
     def path_callback(self, msg):
-        self.path = msg
-        if self.path is None or self.pose is None:
+        if msg is None or self.pose is None:
             return
-        
+        if len(msg.poses) < 2:
+            return
+        self.path = msg
+
         current_time = self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9
-        
+
         self.last_path_time = current_time
+        self.last_path_update_time = time.monotonic()
 
         def msg2np(msg):
             T = np.eye(4)
@@ -53,20 +102,19 @@ class CmdVelControlNode(Node):
         T_robot_2 = T2 @ self.T_robot_to_camera
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
         p = T_robot_2_to_1[:3, 3]
-        dt = 1.0
+        dt = 0.1  # Planning node trajectory time step (duration=2.0, dt=0.1)
         linear_velocity_vec = p / dt
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
+        vx = np.clip(linear_velocity_vec[0], -0.1, 0.3)
         vy = 0.0
-        vyaw = np.clip(angular_velocity_vec[2], -0.5, 0.5)
-        cmd = Twist()
-        cmd.linear.x = vx
-        cmd.linear.y = vy
-        cmd.angular.z = vyaw
-        self.logger.info(f"vx : {vx:.4f}, vy : {vy:.4f}, az : {vyaw:.4f}")
-        self.cmd_pub.publish(cmd)
+        vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
+        self.latest_cmd.linear.x = float(vx)
+        self.latest_cmd.linear.y = float(vy)
+        self.latest_cmd.angular.z = float(vyaw)
+        age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
+        self.logger.debug(f"cmd vx={vx:.3f} vyaw={vyaw:.3f} path_age={age:.2f}s")
 
     def destroy_node(self):
         self.logger.info("Destroying cmd_vel_control connection.")

@@ -84,7 +84,6 @@ class Ros2NodeManager(Node):
             '/camera/camera/color/camera_info',
             '/camera/camera/color/image_rect_raw/compressed',
             '/camera/camera/imu',
-            '/tf',
             '/tf_static',
             '/cmd_vel',
             '/mapping/global_plan',
@@ -152,7 +151,7 @@ class Ros2NodeManager(Node):
         self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         
         topics = [
-            '/tf', '/cmd_vel', '/mapping/global_plan', '/mapping/poi',
+            '/tf_static', '/cmd_vel', '/mapping/global_plan', '/mapping/poi',
             '/mapping/poi_change', '/planning/trajectory_path',
             '/planning/occupied_voxels',
             '/slam/odometry',
