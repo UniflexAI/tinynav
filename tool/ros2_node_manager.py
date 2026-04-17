@@ -34,15 +34,12 @@ class Ros2NodeManager(Node):
             self._stop_all()
         elif cmd == self.state:
             self._stop_all()
-        elif cmd in ['realsense_sensor', 'realsense_bag_record', 'rosbag_build_map', 'navigation']:
+        elif cmd in ['realsense_bag_record', 'rosbag_build_map', 'navigation']:
             self._stop_all()
             self._start(cmd)
     
     def _start(self, mode):
-        if mode == 'realsense_sensor':
-            # self._start_realsense_sensor()
-            pass
-        elif mode == 'realsense_bag_record':
+        if mode == 'realsense_bag_record':
             self._start_realsense_bag_record()
         elif mode == 'rosbag_build_map':
             self._start_rosbag_build_map()
@@ -51,26 +48,9 @@ class Ros2NodeManager(Node):
         self.state = mode
         self._pub_state()
     
-    def _get_realsense_cmd(self):
-        return [
-            'ros2', 'launch', 'realsense2_camera', 'rs_launch.py',
-            'initial_reset:=true',
-            'depth_module.auto_exposure_limit:=1000',
-            'tf_publish_rate:=1.0',
-            'publish_tf:=true',
-            'rgb_camera.color_profile:=640x360x30',
-            'unite_imu_method:=2'
-        ]
-    
-    def _start_realsense_sensor(self):
-        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
-        pass
-    
     def _start_realsense_bag_record(self):
         if os.path.exists(self.bag_path):
             shutil.rmtree(self.bag_path)
-        
-        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
         
         topics = [
             '/camera/camera/infra1/camera_info',
@@ -141,9 +121,9 @@ class Ros2NodeManager(Node):
         log_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.get_logger().info(f'Navigation child logs under {log_dir} (session {log_ts})')
         
-        cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+        cmd_perception = ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py']
         self.processes['perception'] = self._spawn(
-            cmd_perception, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_perception_node.log'))
+            cmd_perception, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_looper_bridge_node.log'))
         
         cmd_planning = ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py']
         self.processes['planning'] = self._spawn(
@@ -162,8 +142,6 @@ class Ros2NodeManager(Node):
         self.processes['map'] = self._spawn(
             cmd_map, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_map_node.log'))
         
-        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
-        
         disable_manager_rosbridge = os.environ.get('DISABLE_MANAGER_ROSBRIDGE', '0') == '1'
         if disable_manager_rosbridge:
             self.get_logger().info('Skip rosbridge launch in manager (DISABLE_MANAGER_ROSBRIDGE=1)')
@@ -179,13 +157,7 @@ class Ros2NodeManager(Node):
             '/mapping/poi_change', '/planning/trajectory_path',
             '/planning/occupied_voxels',
             '/slam/odometry',
-            '/camera/camera/infra1/image_rect_raw',
-            '/camera/camera/infra2/image_rect_raw',
-            '/camera/camera/imu',
-            '/camera/camera/infra1/camera_info',
-            '/camera/camera/infra2/camera_info',
             '/control/target_pose',
-            '/slam/odometry'
         ]
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', 'nav_bag'] + topics
         #self.processes['bag_record'] = self._spawn(cmd_bag)
