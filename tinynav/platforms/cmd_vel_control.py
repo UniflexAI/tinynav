@@ -19,8 +19,8 @@ class CmdVelControlLooperNode(Node):
         super().__init__("cmd_vel_control_looper")
 
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
-        self.create_subscription(Path, "/planning/trajectory_path", self._path_cb, 10)
-        self.create_subscription(Odometry, "/slam/odometry", self._odom_cb, 10)
+        self.create_subscription(Path, "/planning/trajectory_path", self._path_callback, 10)
+        self.create_subscription(Odometry, "/slam/odometry", self._odom_callback, 10)
 
         self.path_world: list = []
         self.last_path_update_time = None
@@ -38,9 +38,9 @@ class CmdVelControlLooperNode(Node):
         self.latest_cmd = Twist()
         self.prev_cmd   = Twist()
         self.last_cmd_pub_time = time.monotonic()
-        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self._cmd_timer_cb)
+        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self._cmd_timer_callback)
 
-    def _path_cb(self, msg: Path):
+    def _path_callback(self, msg: Path):
         self.path_world = [
             np.array([p.pose.position.x, p.pose.position.y, p.pose.position.z], dtype=np.float32)
             for p in msg.poses
@@ -49,7 +49,7 @@ class CmdVelControlLooperNode(Node):
         if self.latest_T is not None:
             self._update_cmd(self.latest_T)
 
-    def _odom_cb(self, msg: Odometry):
+    def _odom_callback(self, msg: Odometry):
         T, _ = msg2np(msg)
         self.latest_T = T
         self._update_cmd(T)
@@ -82,7 +82,7 @@ class CmdVelControlLooperNode(Node):
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
-    def _cmd_timer_cb(self):
+    def _cmd_timer_callback(self):
         now = time.monotonic()
         dt  = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
