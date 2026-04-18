@@ -69,8 +69,9 @@ class CmdVelControlLooperNode(Node):
             heading_err = signed_angle_between(forward_xy / norm_f, to_target / norm_t)
             cmd.angular.z = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
             heading_scale = max(0.0, float(np.cos(heading_err)))
+            dist_scale    = float(np.clip(norm_t, 0.2, 1.0))
             cmd.linear.x  = float(np.clip(
-                self.max_linear_speed * heading_scale, 0.0, self.max_linear_speed
+                self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed
             ))
             if abs(heading_err) > 1.0:
                 cmd.linear.x *= 0.40
