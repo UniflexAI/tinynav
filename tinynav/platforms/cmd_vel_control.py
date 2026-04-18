@@ -3,7 +3,6 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
