@@ -30,19 +30,16 @@ def signed_angle_between(v_from: np.ndarray, v_to: np.ndarray) -> float:
     return float(np.arctan2(cross, dot))
 
 
-class CmdVelControlNode(Node):
+class CmdVelControlLooperNode(Node):
     def __init__(self):
         super().__init__("cmd_vel_control_looper")
 
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.create_subscription(Path, "/planning/trajectory_path", self._path_cb, 10)
         self.create_subscription(Odometry, "/slam/odometry", self._odom_cb, 10)
-        self.create_subscription(Odometry, "/control/target_pose", self._target_cb, 10)
-        self.create_subscription(Odometry, "/mapping/poi_change", self._poi_change_cb, 10)
 
         self.path_world: list = []
         self.last_path_update_time = None
-        self.target_pose = None
         self.latest_T = None
 
         self.cmd_rate_hz       = 30.0
@@ -54,22 +51,11 @@ class CmdVelControlNode(Node):
         self.max_angular_acc   = 2.5
         self.path_stale_slow_s = 0.3
         self.path_stale_stop_s = 0.6
-        self.recovery_fast_speed = 0.24
-        self.recovery_slow_speed = 0.12
-        self.arrival_dist        = 0.25
 
         self.latest_cmd = Twist()
         self.prev_cmd   = Twist()
         self.last_cmd_pub_time = time.monotonic()
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self._cmd_timer_cb)
-
-    def _target_cb(self, msg: Odometry):
-        self.target_pose = np.array(
-            [msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z]
-        )
-
-    def _poi_change_cb(self, _msg: Odometry):
-        self.target_pose = None
 
     def _path_cb(self, msg: Path):
         self.path_world = [
@@ -87,41 +73,26 @@ class CmdVelControlNode(Node):
 
     def _update_cmd(self, T: np.ndarray):
         cmd = Twist()
-        if self.target_pose is None:
+        if len(self.path_world) < 2:
             self.latest_cmd = cmd
             return
 
         robot_xy   = T[:2, 3]
         forward_xy = (T[:3, :3] @ np.array([0.0, 0.0, 1.0]))[:2]
-        target_dist = float(np.linalg.norm(self.target_pose[:2] - robot_xy))
 
-        if target_dist < self.arrival_dist:
-            pass  # arrived — cmd stays zero
-
-        elif len(self.path_world) < 2:
-            to_target = self.target_pose[:2] - robot_xy
-            norm_f = np.linalg.norm(forward_xy)
-            norm_t = np.linalg.norm(to_target)
-            if norm_f > 1e-6 and norm_t > 1e-6:
-                heading_err = signed_angle_between(forward_xy / norm_f, to_target / norm_t)
-                cmd.angular.z = float(np.clip(1.6 * heading_err, -self.max_angular_speed, self.max_angular_speed))
-                cmd.linear.x = self.recovery_fast_speed if abs(heading_err) < 0.6 else self.recovery_slow_speed
-
-        else:
-            lookahead = pick_lookahead_point(self.path_world, robot_xy, self.lookahead_dist)
-            to_wp  = lookahead[:2] - robot_xy
-            norm_f = np.linalg.norm(forward_xy)
-            norm_t = np.linalg.norm(to_wp)
-            if norm_f > 1e-6 and norm_t > 1e-6:
-                heading_err = signed_angle_between(forward_xy / norm_f, to_wp / norm_t)
-                cmd.angular.z = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
-                heading_scale = max(0.0, float(np.cos(heading_err)))
-                dist_scale    = float(np.clip(target_dist, 0.2, 1.0))
-                cmd.linear.x  = float(np.clip(
-                    self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed
-                ))
-                if abs(heading_err) > 1.0:
-                    cmd.linear.x *= 0.40
+        lookahead = pick_lookahead_point(self.path_world, robot_xy, self.lookahead_dist)
+        to_wp  = lookahead[:2] - robot_xy
+        norm_f = np.linalg.norm(forward_xy)
+        norm_t = np.linalg.norm(to_wp)
+        if norm_f > 1e-6 and norm_t > 1e-6:
+            heading_err = signed_angle_between(forward_xy / norm_f, to_wp / norm_t)
+            cmd.angular.z = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
+            heading_scale = max(0.0, float(np.cos(heading_err)))
+            cmd.linear.x  = float(np.clip(
+                self.max_linear_speed * heading_scale, 0.0, self.max_linear_speed
+            ))
+            if abs(heading_err) > 1.0:
+                cmd.linear.x *= 0.40
 
         cmd.linear.x  = float(np.clip(cmd.linear.x,  -self.max_reverse_speed, self.max_linear_speed))
         cmd.angular.z = float(np.clip(cmd.angular.z, -self.max_angular_speed,  self.max_angular_speed))
@@ -158,7 +129,7 @@ class CmdVelControlNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = CmdVelControlNode()
+    node = CmdVelControlLooperNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
