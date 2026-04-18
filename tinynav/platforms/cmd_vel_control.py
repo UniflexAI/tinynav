@@ -1,134 +1,163 @@
+import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Path
-from nav_msgs.msg import Odometry
-from scipy.spatial.transform import Rotation as R
+from nav_msgs.msg import Path, Odometry
 import numpy as np
-import logging
-import time
 
-# Module-level logger for cases where self.get_logger() is not available
-logger = logging.getLogger(__name__)
+from tinynav.core.math_utils import msg2np
+
+
+def pick_lookahead_point(path_world: list, robot_xy: np.ndarray, lookahead_dist: float = 1.5):
+    if not path_world:
+        return None
+    d_best = float("inf")
+    i_best = 0
+    for i, p in enumerate(path_world):
+        d = np.linalg.norm(p[:2] - robot_xy)
+        if d < d_best:
+            d_best = d
+            i_best = i
+    for i in range(i_best, len(path_world)):
+        if np.linalg.norm(path_world[i][:2] - robot_xy) >= lookahead_dist:
+            return path_world[i]
+    return path_world[-1]
+
+
+def signed_angle_between(v_from: np.ndarray, v_to: np.ndarray) -> float:
+    cross = v_from[0] * v_to[1] - v_from[1] * v_to[0]
+    dot = v_from[0] * v_to[0] + v_from[1] * v_to[1]
+    return float(np.arctan2(cross, dot))
+
 
 class CmdVelControlNode(Node):
     def __init__(self):
-        super().__init__('cmd_vel_control_node')
-        self.logger = self.get_logger()  # Use ROS2 logger
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
-        self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
-        self.T_robot_to_camera = np.array([
-            [0, -1, 0, 0],
-            [0, 0, -1, 0],
-            [1, 0, 0, 0],
-            [0, 0, 0, 1]]
-        )
-        self.last_path_time = 0.0
-        self.pose = None
-        self.path = None
+        super().__init__("cmd_vel_control_looper")
 
-        # === Control loop (ported from planning_node_compare style) ===
-        self.cmd_rate_hz = 20.0
+        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.create_subscription(Path, "/planning/trajectory_path", self._path_cb, 10)
+        self.create_subscription(Odometry, "/slam/odometry", self._odom_cb, 10)
+        self.create_subscription(Odometry, "/control/target_pose", self._target_cb, 10)
+        self.create_subscription(Odometry, "/mapping/poi_change", self._poi_change_cb, 10)
+
+        self.path_world: list = []
+        self.last_path_update_time = None
+        self.target_pose = None
+        self.latest_T = None
+
+        self.cmd_rate_hz       = 30.0
+        self.lookahead_dist    = 1.5
+        self.max_linear_speed  = 0.8
+        self.max_reverse_speed = 0.1
+        self.max_angular_speed = 0.5
+        self.max_linear_acc    = 2.0
+        self.max_angular_acc   = 2.5
         self.path_stale_slow_s = 0.3
         self.path_stale_stop_s = 0.6
-        self.max_linear_acc = 0.4   # m/s^2
-        self.max_angular_acc = 0.8  # rad/s^2
+        self.recovery_fast_speed = 0.24
+        self.recovery_slow_speed = 0.12
+        self.arrival_dist        = 0.25
 
         self.latest_cmd = Twist()
-        self.prev_cmd = Twist()
+        self.prev_cmd   = Twist()
         self.last_cmd_pub_time = time.monotonic()
-        self.last_path_update_time = None
-        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-        
-    def pose_callback(self, msg):
-        self.pose = msg
+        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self._cmd_timer_cb)
+
+    def _target_cb(self, msg: Odometry):
+        self.target_pose = np.array(
+            [msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z]
+        )
+
+    def _poi_change_cb(self, _msg: Odometry):
+        self.target_pose = None
+
+    def _path_cb(self, msg: Path):
+        self.path_world = [
+            np.array([p.pose.position.x, p.pose.position.y, p.pose.position.z], dtype=np.float32)
+            for p in msg.poses
+        ]
+        self.last_path_update_time = time.monotonic()
+        if self.latest_T is not None:
+            self._update_cmd(self.latest_T)
+
+    def _odom_cb(self, msg: Odometry):
+        T, _ = msg2np(msg)
+        self.latest_T = T
+        self._update_cmd(T)
+
+    def _update_cmd(self, T: np.ndarray):
+        cmd = Twist()
+        if self.target_pose is None:
+            self.latest_cmd = cmd
+            return
+
+        robot_xy   = T[:2, 3]
+        forward_xy = (T[:3, :3] @ np.array([0.0, 0.0, 1.0]))[:2]
+        target_dist = float(np.linalg.norm(self.target_pose[:2] - robot_xy))
+
+        if target_dist < self.arrival_dist:
+            pass  # arrived — cmd stays zero
+
+        elif len(self.path_world) < 2:
+            to_target = self.target_pose[:2] - robot_xy
+            norm_f = np.linalg.norm(forward_xy)
+            norm_t = np.linalg.norm(to_target)
+            if norm_f > 1e-6 and norm_t > 1e-6:
+                heading_err = signed_angle_between(forward_xy / norm_f, to_target / norm_t)
+                cmd.angular.z = float(np.clip(1.6 * heading_err, -self.max_angular_speed, self.max_angular_speed))
+                cmd.linear.x = self.recovery_fast_speed if abs(heading_err) < 0.6 else self.recovery_slow_speed
+
+        else:
+            lookahead = pick_lookahead_point(self.path_world, robot_xy, self.lookahead_dist)
+            to_wp  = lookahead[:2] - robot_xy
+            norm_f = np.linalg.norm(forward_xy)
+            norm_t = np.linalg.norm(to_wp)
+            if norm_f > 1e-6 and norm_t > 1e-6:
+                heading_err = signed_angle_between(forward_xy / norm_f, to_wp / norm_t)
+                cmd.angular.z = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
+                heading_scale = max(0.0, float(np.cos(heading_err)))
+                dist_scale    = float(np.clip(target_dist, 0.2, 1.0))
+                cmd.linear.x  = float(np.clip(
+                    self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed
+                ))
+                if abs(heading_err) > 1.0:
+                    cmd.linear.x *= 0.40
+
+        cmd.linear.x  = float(np.clip(cmd.linear.x,  -self.max_reverse_speed, self.max_linear_speed))
+        cmd.angular.z = float(np.clip(cmd.angular.z, -self.max_angular_speed,  self.max_angular_speed))
+        self.latest_cmd = cmd
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
-    def cmd_timer_callback(self):
+    def _cmd_timer_cb(self):
         now = time.monotonic()
-        dt = max(1e-3, now - self.last_cmd_pub_time)
+        dt  = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
 
-        # Stale-path protection: slow down, then stop if planner has not refreshed.
-        age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
-        target_cmd = Twist()
-        target_cmd.linear.x = self.latest_cmd.linear.x
-        target_cmd.angular.z = self.latest_cmd.angular.z
+        age = float("inf") if self.last_path_update_time is None else (now - self.last_path_update_time)
+        target = Twist()
+        target.linear.x  = self.latest_cmd.linear.x
+        target.angular.z = self.latest_cmd.angular.z
         if age > self.path_stale_stop_s:
-            target_cmd.linear.x = 0.0
-            target_cmd.angular.z = 0.0
+            target.linear.x  = 0.0
+            target.angular.z = 0.0
         elif age > self.path_stale_slow_s:
-            target_cmd.linear.x *= 0.3
-            target_cmd.angular.z *= 0.5
+            target.linear.x  *= 0.3
+            target.angular.z *= 0.5
 
-        # Acceleration limiting for smoother control.
-        max_dv = self.max_linear_acc * dt
+        max_dv = self.max_linear_acc  * dt
         max_dw = self.max_angular_acc * dt
         out = Twist()
-        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
-        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
-        out.linear.y = 0.0
+        out.linear.x  = self._clamp_step(target.linear.x,  self.prev_cmd.linear.x,  max_dv)
+        out.angular.z = self._clamp_step(target.angular.z, self.prev_cmd.angular.z, max_dw)
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
-        
-    def path_callback(self, msg):
-        if msg is None or self.pose is None:
-            return
-        if len(msg.poses) < 2:
-            return
-        self.path = msg
 
-        current_time = self.get_clock().now().to_msg().sec + self.get_clock().now().to_msg().nanosec * 1e-9
 
-        self.last_path_time = current_time
-        self.last_path_update_time = time.monotonic()
-
-        def msg2np(msg):
-            T = np.eye(4)
-            position = msg.pose.position
-            rot = msg.pose.orientation
-            quat = [rot.x, rot.y, rot.z, rot.w]
-            T[:3, :3] = R.from_quat(quat).as_matrix()
-            T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
-            return T
-        
-        T1 = msg2np(self.path.poses[0])
-        T2 = msg2np(self.path.poses[1])
-        T_robot_1 = T1 @ self.T_robot_to_camera
-        T_robot_2 = T2 @ self.T_robot_to_camera
-        T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
-        p = T_robot_2_to_1[:3, 3]
-        dt = 0.1  # Planning node trajectory time step (duration=2.0, dt=0.1)
-        linear_velocity_vec = p / dt
-        r = R.from_matrix(T_robot_2_to_1[:3, :3])
-        angular_velocity_vec = r.as_rotvec() / dt
-
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.3)
-        vy = 0.0
-        vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
-        self.latest_cmd.linear.x = float(vx)
-        self.latest_cmd.linear.y = float(vy)
-        self.latest_cmd.angular.z = float(vyaw)
-        age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
-        self.logger.debug(f"cmd vx={vx:.3f} vyaw={vyaw:.3f} path_age={age:.2f}s")
-
-    def destroy_node(self):
-        self.logger.info("Destroying cmd_vel_control connection.")
-        super().destroy_node()
-        
 def main(args=None):
     rclpy.init(args=args)
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    
     node = CmdVelControlNode()
     try:
         rclpy.spin(node)
@@ -138,6 +167,7 @@ def main(args=None):
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-        
-if __name__ == '__main__':
+
+
+if __name__ == "__main__":
     main()
