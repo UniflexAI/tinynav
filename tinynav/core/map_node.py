@@ -246,7 +246,7 @@ class MapNode(Node):
         self._poi_action_state = None   # None | 'sitting' | 'standing'
         self._poi_action_index = None   # poi_index being acted on
         self._poi_action_start = None   # time.monotonic()
-        self.poi_sit_duration = 10.0    # seconds to stay sitting
+        self.poi_sit_duration = 3.0    # seconds to stay sitting
         self.poi_stand_settle = 2.0     # seconds after stand before advancing
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
@@ -671,7 +671,7 @@ class MapNode(Node):
         if self.poi_auto_advance_enabled:
             while self.poi_index < len(self.pois):
                 poi = self.pois[self.poi_index]
-                diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
+                diff_position_norm = np.linalg.norm(poi[:3][:2] - pose_in_map_position[:2])
                 if diff_position_norm < self.poi_auto_advance_distance_threshold:
                     self.get_logger().info(
                         f"POI {self.poi_index} reached (dist={diff_position_norm:.3f}), starting sit action"

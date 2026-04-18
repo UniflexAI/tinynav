@@ -31,7 +31,7 @@ class CmdVelControlNode(Node):
 
         # Pure Pursuit parameters
         self.lookahead_distance = 0.4   # m
-        self.max_linear_speed  = 0.3    # m/s
+        self.max_linear_speed  = 0.8    # m/s
         self.max_angular_speed = 0.8    # rad/s
 
         # 20 Hz publish loop with stale-path protection and acc limiting

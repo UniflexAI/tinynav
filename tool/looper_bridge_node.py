@@ -28,8 +28,10 @@ class LooperBridgeNode(Node):
         self.T_i_depth = None
         self.tf_edges = {}
         self.last_keyframe_pose = None
-        self.last_pose = None
-        self.last_pose_time = None
+        self.last_odom_pose = None
+        self.last_odom_time = None
+        self.recent_odom_stamp_ns = deque(maxlen=512)
+        self.recent_odom_stamp_ns_set = set()
         self._missing_input_counter = 0
 
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
@@ -42,6 +44,9 @@ class LooperBridgeNode(Node):
 
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
+        self.pose_forward_sub = self.create_subscription(
+            PoseStamped, "/insight/vio_pose", self.pose_callback, self.sensor_qos
+        )
 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/insight/vio_pose")
@@ -146,13 +151,17 @@ class LooperBridgeNode(Node):
             or rotation_angle >= np.deg2rad(self.args.keyframe_rotation_deg)
         )
 
+    @staticmethod
+    def stamp_to_ns(stamp) -> int:
+        return stamp.sec * 1_000_000_000 + stamp.nanosec
+
     def build_odom(self, T_world_camera: np.ndarray, stamp) -> Odometry:
         velocity = None
         current_time = stamp.sec + stamp.nanosec * 1e-9
-        if self.last_pose is not None and self.last_pose_time is not None:
-            dt = current_time - self.last_pose_time
+        if self.last_odom_pose is not None and self.last_odom_time is not None:
+            dt = current_time - self.last_odom_time
             if dt > 1e-3:
-                velocity = (T_world_camera[:3, 3] - self.last_pose[:3, 3]) / dt
+                velocity = (T_world_camera[:3, 3] - self.last_odom_pose[:3, 3]) / dt
 
         odom_msg = np2msg(
             T_world_camera,
@@ -161,9 +170,30 @@ class LooperBridgeNode(Node):
             "camera",
             velocity=velocity,
         )
-        self.last_pose = T_world_camera.copy()
-        self.last_pose_time = current_time
+        self.last_odom_pose = T_world_camera.copy()
+        self.last_odom_time = current_time
         return odom_msg
+
+    def publish_odom_if_new(self, T_world_camera: np.ndarray, stamp) -> Odometry | None:
+        stamp_ns = self.stamp_to_ns(stamp)
+        if stamp_ns in self.recent_odom_stamp_ns_set:
+            return None
+        odom_msg = self.build_odom(T_world_camera, stamp)
+        self.odom_pub.publish(odom_msg)
+        if len(self.recent_odom_stamp_ns) == self.recent_odom_stamp_ns.maxlen:
+            oldest_stamp_ns = self.recent_odom_stamp_ns.popleft()
+            self.recent_odom_stamp_ns_set.discard(oldest_stamp_ns)
+        self.recent_odom_stamp_ns.append(stamp_ns)
+        self.recent_odom_stamp_ns_set.add(stamp_ns)
+        return odom_msg
+
+    def pose_callback(self, pose_msg: PoseStamped):
+        if self.T_i_depth is None:
+            self.log_missing_inputs()
+            return
+        T_world_imu = pose_msg2np(pose_msg)
+        T_world_camera = T_world_imu @ self.T_i_depth
+        self.publish_odom_if_new(T_world_camera, pose_msg.header.stamp)
 
     def decode_depth_meters(self, depth_msg: Image) -> np.ndarray:
         depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
@@ -215,7 +245,9 @@ class LooperBridgeNode(Node):
         T_world_camera = T_world_imu @ self.T_i_depth
         stamp = pose_msg.header.stamp
 
-        odom_msg = self.build_odom(T_world_camera, stamp)
+        odom_msg = self.publish_odom_if_new(T_world_camera, stamp)
+        if odom_msg is None:
+            odom_msg = np2msg(T_world_camera, stamp, "world", "camera")
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
         disparity_vis_msg = self.build_disparity_vis(depth_m, stamp)
@@ -228,7 +260,6 @@ class LooperBridgeNode(Node):
         camera_info_out.header.stamp = stamp
         camera_info_out.header.frame_id = "camera"
 
-        self.odom_pub.publish(odom_msg)
         self.depth_pub.publish(depth_out)
         self.disparity_pub_vis.publish(disparity_vis_msg)
         self.slam_camera_info_pub.publish(camera_info_out)
@@ -263,3 +294,4 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
+
