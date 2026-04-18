@@ -8,22 +8,6 @@ import numpy as np
 from tinynav.core.math_utils import msg2np
 
 
-def pick_lookahead_point(path_world: list, robot_xy: np.ndarray, lookahead_dist: float = 1.5):
-    if not path_world:
-        return None
-    d_best = float("inf")
-    i_best = 0
-    for i, p in enumerate(path_world):
-        d = np.linalg.norm(p[:2] - robot_xy)
-        if d < d_best:
-            d_best = d
-            i_best = i
-    for i in range(i_best, len(path_world)):
-        if np.linalg.norm(path_world[i][:2] - robot_xy) >= lookahead_dist:
-            return path_world[i]
-    return path_world[-1]
-
-
 def signed_angle_between(v_from: np.ndarray, v_to: np.ndarray) -> float:
     cross = v_from[0] * v_to[1] - v_from[1] * v_to[0]
     dot = v_from[0] * v_to[0] + v_from[1] * v_to[1]
@@ -43,7 +27,6 @@ class CmdVelControlLooperNode(Node):
         self.latest_T = None
 
         self.cmd_rate_hz       = 30.0
-        self.lookahead_dist    = 1.5
         self.max_linear_speed  = 0.8
         self.max_reverse_speed = 0.1
         self.max_angular_speed = 0.5
@@ -73,19 +56,17 @@ class CmdVelControlLooperNode(Node):
 
     def _update_cmd(self, T: np.ndarray):
         cmd = Twist()
-        if len(self.path_world) < 2:
+        if not self.path_world:
             self.latest_cmd = cmd
             return
 
         robot_xy   = T[:2, 3]
         forward_xy = (T[:3, :3] @ np.array([0.0, 0.0, 1.0]))[:2]
-
-        lookahead = pick_lookahead_point(self.path_world, robot_xy, self.lookahead_dist)
-        to_wp  = lookahead[:2] - robot_xy
+        to_target  = self.path_world[-1][:2] - robot_xy
         norm_f = np.linalg.norm(forward_xy)
-        norm_t = np.linalg.norm(to_wp)
+        norm_t = np.linalg.norm(to_target)
         if norm_f > 1e-6 and norm_t > 1e-6:
-            heading_err = signed_angle_between(forward_xy / norm_f, to_wp / norm_t)
+            heading_err = signed_angle_between(forward_xy / norm_f, to_target / norm_t)
             cmd.angular.z = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
             heading_scale = max(0.0, float(np.cos(heading_err)))
             cmd.linear.x  = float(np.clip(
