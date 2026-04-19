@@ -132,9 +132,12 @@ class BackendNode(Ros2NodeManager):
             else:
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver and perception')
-                self._realsense_proc = subprocess.Popen(['bash', _REALSENSE_SCRIPT])
+                self._realsense_proc = subprocess.Popen(
+                    ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid
+                )
                 self._perception_proc = subprocess.Popen(
-                    ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+                    ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                    preexec_fn=os.setsid,
                 )
         except Exception as e:
             self.get_logger().warn(f'Sensor detection failed: {e}')
@@ -278,6 +281,10 @@ class NodeRunner:
             for proc in (self.node._realsense_proc, self.node._perception_proc):
                 if proc and proc.poll() is None:
                     try:
-                        proc.terminate()
+                        os.killpg(os.getpgid(proc.pid), 15)
+                        proc.wait(timeout=2)
                     except Exception:
-                        pass
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
