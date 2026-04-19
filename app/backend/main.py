@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .state import runner
-from .routers import bag, device, nav
+from .routers import bag, device, nav, sensor
 from .routers import map as map_router
 from .routers import poi
 from . import ws
@@ -38,4 +38,5 @@ app.include_router(bag.router, prefix='/bag')
 app.include_router(map_router.router)
 app.include_router(poi.router)
 app.include_router(nav.router, prefix='/nav')
+app.include_router(sensor.router)
 app.include_router(ws.router)
