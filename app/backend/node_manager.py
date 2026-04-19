@@ -24,6 +24,7 @@ from std_msgs.msg import Float32, String
 from tool.ros2_node_manager import Ros2NodeManager
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
+_VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
 _IMAGE_TOPICS_ALL = [
     '/camera/camera/color/image_raw',
     '/camera/camera/infra1/image_rect_raw',
@@ -135,9 +136,13 @@ class BackendNode(Ros2NodeManager):
                 self._realsense_proc = subprocess.Popen(
                     ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid
                 )
+                _env = os.environ.copy()
+                _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
                 self._perception_proc = subprocess.Popen(
                     ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
                     preexec_fn=os.setsid,
+                    cwd='/tinynav',
+                    env=_env,
                 )
         except Exception as e:
             self.get_logger().warn(f'Sensor detection failed: {e}')
