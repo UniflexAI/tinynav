@@ -144,6 +144,11 @@ class BackendNode(Ros2NodeManager):
                     cwd='/tinynav',
                     env=_env,
                 )
+                self._perception_proc = subprocess.Popen(
+                    ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         except Exception as e:
             self.get_logger().warn(f'Sensor detection failed: {e}')
             self._sensor_mode = 'unknown'
