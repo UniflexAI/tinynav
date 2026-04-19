@@ -28,7 +28,7 @@ _IMAGE_TOPICS_ALL = [
     '/camera/camera/color/image_raw',
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
-    '/camera/camera/depth/image_rect_raw',
+    '/slam/depth',
 ]
 _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
 
@@ -64,6 +64,7 @@ class BackendNode(Ros2NodeManager):
         self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
         self._last_frame_time: dict[str, float] = {}
         self._realsense_proc: subprocess.Popen | None = None
+        self._perception_proc: subprocess.Popen | None = None
         self._detect_and_init_sensor()
 
     # ------------------------------------------------------------------ #
@@ -129,6 +130,11 @@ class BackendNode(Ros2NodeManager):
                 self._sensor_mode = 'realsense'
                 self._realsense_proc = subprocess.Popen(
                     ['bash', _REALSENSE_SCRIPT],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._perception_proc = subprocess.Popen(
+                    ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
@@ -271,8 +277,9 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            if self.node._realsense_proc and self.node._realsense_proc.poll() is None:
-                try:
-                    self.node._realsense_proc.terminate()
-                except Exception:
-                    pass
+            for proc in (self.node._realsense_proc, self.node._perception_proc):
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
