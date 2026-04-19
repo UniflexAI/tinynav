@@ -207,7 +207,13 @@ class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
                     child: Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
                   ),
                   ...topics.map((t) {
-                    final label = t.split('/').last;
+                    const labels = {
+                      '/camera/camera/color/image_raw': 'color',
+                      '/camera/camera/infra1/image_rect_raw': 'left',
+                      '/camera/camera/infra2/image_rect_raw': 'right',
+                      '/camera/camera/depth/image_rect_raw': 'depth',
+                    };
+                    final label = labels[t] ?? t.split('/').last;
                     return DropdownMenuItem<String?>(
                       value: t,
                       child: Text(label, style: const TextStyle(fontSize: 12)),
@@ -240,11 +246,16 @@ class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
                             fit: BoxFit.cover,
                             gaplessPlayback: true,
                           ),
-                          const Align(
-                            alignment: Alignment.topRight,
-                            child: Padding(
-                              padding: EdgeInsets.all(4),
-                              child: Icon(Icons.fullscreen, color: Colors.white70, size: 16),
+                          Align(
+                            alignment: Alignment.bottomRight,
+                            child: Container(
+                              margin: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              padding: const EdgeInsets.all(2),
+                              child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
                             ),
                           ),
                         ],
