@@ -25,8 +25,10 @@ from tool.ros2_node_manager import Ros2NodeManager
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _IMAGE_TOPICS_ALL = [
-    '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/color/image_raw',
+    '/camera/camera/infra1/image_rect_raw',
+    '/camera/camera/infra2/image_rect_raw',
+    '/camera/camera/depth/image_rect_raw',
 ]
 _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
 

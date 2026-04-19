@@ -151,6 +151,15 @@ class _CameraPreviewPip extends ConsumerStatefulWidget {
 class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
   Uint8List? _latestFrame;
 
+  void _showFullscreen(BuildContext context) {
+    final topic = ref.read(selectedPreviewTopicProvider);
+    if (topic == null) return;
+    showDialog(
+      context: context,
+      builder: (_) => _FullscreenPreview(topic: topic),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final topicsAsync = ref.watch(imageTopicsProvider);
@@ -215,29 +224,92 @@ class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
         ),
         // Preview frame
         if (selectedTopic != null)
-          ClipRRect(
-            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
-            child: SizedBox(
-              width: 176,
-              height: 132,
-              child: _latestFrame != null
-                  ? Image.memory(
-                      _latestFrame!,
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                    )
-                  : Container(
-                      color: Colors.black,
-                      child: const Center(
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white54,
+          GestureDetector(
+            onTap: _latestFrame != null ? () => _showFullscreen(context) : null,
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+              child: SizedBox(
+                width: 176,
+                height: 132,
+                child: _latestFrame != null
+                    ? Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.memory(
+                            _latestFrame!,
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                          ),
+                          const Align(
+                            alignment: Alignment.topRight,
+                            child: Padding(
+                              padding: EdgeInsets.all(4),
+                              child: Icon(Icons.fullscreen, color: Colors.white70, size: 16),
+                            ),
+                          ),
+                        ],
+                      )
+                    : Container(
+                        color: Colors.black,
+                        child: const Center(
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white54,
+                          ),
                         ),
                       ),
-                    ),
+              ),
             ),
           ),
       ],
+    );
+  }
+}
+
+// ── Fullscreen preview dialog ─────────────────────────────────────────────────
+
+class _FullscreenPreview extends ConsumerStatefulWidget {
+  final String topic;
+  const _FullscreenPreview({required this.topic});
+
+  @override
+  ConsumerState<_FullscreenPreview> createState() => _FullscreenPreviewState();
+}
+
+class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
+  Uint8List? _frame;
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen<AsyncValue<Uint8List>>(
+      previewStreamProvider(widget.topic),
+      (_, next) {
+        if (next case AsyncData(:final value)) {
+          if (mounted) setState(() => _frame = value);
+        }
+      },
+    );
+
+    return Dialog(
+      backgroundColor: Colors.black,
+      insetPadding: const EdgeInsets.all(12),
+      child: Stack(
+        children: [
+          Center(
+            child: _frame != null
+                ? Image.memory(_frame!, fit: BoxFit.contain, gaplessPlayback: true)
+                : const CircularProgressIndicator(color: Colors.white54),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
