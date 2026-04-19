@@ -128,8 +128,8 @@ class BackendNode(Ros2NodeManager):
                 self._sensor_mode = 'looper'
             else:
                 self._sensor_mode = 'realsense'
-                self._realsense_proc = self._spawn(['bash', _REALSENSE_SCRIPT])
-                self._perception_proc = self._spawn(
+                self._realsense_proc = subprocess.Popen(['bash', _REALSENSE_SCRIPT])
+                self._perception_proc = subprocess.Popen(
                     ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
                 )
         except Exception as e:
