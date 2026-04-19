@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -66,6 +67,53 @@ final mapInfoProvider = FutureProvider.autoDispose<MapInfo?>((ref) async {
     if (e.response?.statusCode == 404 || e.response?.statusCode == 503) return null;
     rethrow;
   }
+});
+
+/// Sensor mode: 'looper' | 'realsense' | 'unknown'
+final sensorModeProvider = FutureProvider.autoDispose<String>((ref) async {
+  final dio = ref.watch(dioProvider);
+  final baseUrl = ref.watch(baseUrlProvider);
+  if (baseUrl == null) return 'unknown';
+  try {
+    final resp = await dio.get('/sensor/mode');
+    return (resp.data['mode'] as String?) ?? 'unknown';
+  } catch (_) {
+    return 'unknown';
+  }
+});
+
+/// Available image topics from the backend.
+final imageTopicsProvider = FutureProvider.autoDispose<List<String>>((ref) async {
+  final dio = ref.watch(dioProvider);
+  final baseUrl = ref.watch(baseUrlProvider);
+  if (baseUrl == null) return [];
+  try {
+    final resp = await dio.get('/sensor/image-topics');
+    return (resp.data['topics'] as List).cast<String>();
+  } catch (_) {
+    return [];
+  }
+});
+
+/// Currently selected preview topic (null = preview closed).
+final selectedPreviewTopicProvider = StateProvider<String?>((ref) => null);
+
+/// Streams raw JPEG bytes from WS /ws/preview?topic=<topic>.
+final previewStreamProvider =
+    StreamProvider.family.autoDispose<Uint8List, String>((ref, topic) {
+  final ip = ref.watch(deviceIpProvider);
+  if (ip == null) return const Stream.empty();
+
+  final encoded = Uri.encodeQueryComponent(topic);
+  final channel =
+      WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/preview?topic=$encoded'));
+  ref.onDispose(() => channel.sink.close());
+
+  return channel.stream.map((data) {
+    if (data is Uint8List) return data;
+    if (data is List<int>) return Uint8List.fromList(data);
+    return Uint8List(0);
+  }).where((b) => b.isNotEmpty);
 });
 
 /// One-shot fetch of POI list from GET /map/pois.

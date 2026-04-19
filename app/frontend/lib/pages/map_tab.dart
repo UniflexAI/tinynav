@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,40 +18,47 @@ class MapTab extends ConsumerWidget {
     final poseAsync = ref.watch(poseStreamProvider);
     final baseUrl = ref.watch(baseUrlProvider);
 
-    return RefreshIndicator(
-      onRefresh: () async {
-        ref.invalidate(mapInfoProvider);
-        ref.invalidate(poisProvider);
-      },
-      child: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          // Map image
-          mapAsync.when(
-            data: (mapInfo) => mapInfo == null
-                ? const _NoMapCard()
-                : _MapView(
-                    mapInfo: mapInfo,
-                    imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
-                    pose: poseAsync.valueOrNull,
-                    pois: poisAsync.valueOrNull ?? [],
+    return Stack(
+      children: [
+        RefreshIndicator(
+          onRefresh: () async {
+            ref.invalidate(mapInfoProvider);
+            ref.invalidate(poisProvider);
+          },
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              mapAsync.when(
+                data: (mapInfo) => mapInfo == null
+                    ? const _NoMapCard()
+                    : _MapView(
+                        mapInfo: mapInfo,
+                        imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
+                        pose: poseAsync.valueOrNull,
+                        pois: poisAsync.valueOrNull ?? [],
+                      ),
+                loading: () => const Card(
+                  child: Padding(padding: EdgeInsets.all(48), child: Center(child: CircularProgressIndicator())),
+                ),
+                error: (e, _) => Card(
+                  color: Colors.red.shade50,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text('$e', style: const TextStyle(color: Colors.red)),
                   ),
-            loading: () => const Card(
-              child: Padding(padding: EdgeInsets.all(48), child: Center(child: CircularProgressIndicator())),
-            ),
-            error: (e, _) => Card(
-              color: Colors.red.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Text('$e', style: const TextStyle(color: Colors.red)),
+                ),
               ),
-            ),
+              const SizedBox(height: 12),
+              _PoiCard(poisAsync: poisAsync, pose: poseAsync.valueOrNull),
+            ],
           ),
-          const SizedBox(height: 12),
-          // POI management
-          _PoiCard(poisAsync: poisAsync, pose: poseAsync.valueOrNull),
-        ],
-      ),
+        ),
+        const Positioned(
+          right: 12,
+          bottom: 16,
+          child: _CameraPreviewPip(),
+        ),
+      ],
     );
   }
 }
@@ -126,6 +135,109 @@ class _NoMapCard extends StatelessWidget {
               style: TextStyle(color: Colors.grey, fontSize: 12)),
         ]),
       ),
+    );
+  }
+}
+
+// ── Camera PiP ───────────────────────────────────────────────────────────────
+
+class _CameraPreviewPip extends ConsumerStatefulWidget {
+  const _CameraPreviewPip();
+
+  @override
+  ConsumerState<_CameraPreviewPip> createState() => _CameraPreviewPipState();
+}
+
+class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
+  Uint8List? _latestFrame;
+
+  @override
+  Widget build(BuildContext context) {
+    final topicsAsync = ref.watch(imageTopicsProvider);
+    final selectedTopic = ref.watch(selectedPreviewTopicProvider);
+    final topics = topicsAsync.valueOrNull ?? [];
+
+    // Listen to preview stream when a topic is selected.
+    if (selectedTopic != null) {
+      ref.listen<AsyncValue<Uint8List>>(
+        previewStreamProvider(selectedTopic),
+        (_, next) {
+          if (next case AsyncData(:final value)) {
+            if (mounted) setState(() => _latestFrame = value);
+          }
+        },
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        // Topic selector row
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.black87,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
+              const SizedBox(width: 4),
+              DropdownButton<String?>(
+                value: selectedTopic,
+                hint: const Text('Camera', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                dropdownColor: Colors.black87,
+                underline: const SizedBox(),
+                isDense: true,
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  ),
+                  ...topics.map((t) {
+                    final label = t.split('/').last;
+                    return DropdownMenuItem<String?>(
+                      value: t,
+                      child: Text(label, style: const TextStyle(fontSize: 12)),
+                    );
+                  }),
+                ],
+                onChanged: (v) {
+                  ref.read(selectedPreviewTopicProvider.notifier).state = v;
+                  if (v == null) setState(() => _latestFrame = null);
+                },
+              ),
+            ],
+          ),
+        ),
+        // Preview frame
+        if (selectedTopic != null)
+          ClipRRect(
+            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+            child: SizedBox(
+              width: 176,
+              height: 132,
+              child: _latestFrame != null
+                  ? Image.memory(
+                      _latestFrame!,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                    )
+                  : Container(
+                      color: Colors.black,
+                      child: const Center(
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white54,
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+      ],
     );
   }
 }
