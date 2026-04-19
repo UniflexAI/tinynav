@@ -120,14 +120,18 @@ class BackendNode(Ros2NodeManager):
     # ------------------------------------------------------------------ #
 
     def _detect_and_init_sensor(self):
+        domain = os.environ.get('ROS_DOMAIN_ID', '0')
+        self.get_logger().info(f'BackendNode ROS_DOMAIN_ID={domain}')
         try:
             result = subprocess.run(
                 ['ros2', 'node', 'list'], capture_output=True, text=True, timeout=3
             )
             if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
+                self.get_logger().info('Sensor mode: looper')
             else:
                 self._sensor_mode = 'realsense'
+                self.get_logger().info('Sensor mode: realsense — launching driver and perception')
                 self._realsense_proc = subprocess.Popen(['bash', _REALSENSE_SCRIPT])
                 self._perception_proc = subprocess.Popen(
                     ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
