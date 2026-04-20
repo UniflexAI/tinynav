@@ -116,6 +116,19 @@ final previewStreamProvider =
   }).where((b) => b.isNotEmpty);
 });
 
+/// Streams PlanningState from WS /ws/planning at ~5 fps.
+final planningStreamProvider = StreamProvider<PlanningState>((ref) {
+  final ip = ref.watch(deviceIpProvider);
+  if (ip == null) return const Stream.empty();
+
+  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/planning'));
+  ref.onDispose(() => channel.sink.close());
+
+  return channel.stream.map(
+    (data) => PlanningState.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+  );
+});
+
 /// One-shot fetch of POI list from GET /map/pois.
 final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
   final dio = ref.watch(dioProvider);

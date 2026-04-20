@@ -16,8 +16,10 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
+import base64
+
 import rclpy
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32, String
 
@@ -50,11 +52,25 @@ class BackendNode(Ros2NodeManager):
         self.state_callbacks: list = []
         self.preview_callbacks: dict[str, list] = {}  # topic -> [callbacks]
 
+        # Planning / localization state (read via get_planning_snapshot)
+        self._odom_pose: dict | None = None
+        self._map_pose: dict | None = None
+        self._localized: bool = False
+        self._esdf_bytes: bytes = b''
+        self._obstacle_bytes: bytes = b''
+        self._trajectory: list = []
+        self._grid_info: dict | None = None
+
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._on_slam_odom, 10)
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
+        self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
+        self.create_subscription(
+            OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
+        )
+        self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
 
         # Publisher for nav target (consumed by map_node in the future)
         self._nav_target_pub = self.create_publisher(String, '/service/nav_target', 10)
@@ -66,6 +82,7 @@ class BackendNode(Ros2NodeManager):
         self._last_frame_time: dict[str, float] = {}
         self._realsense_proc: subprocess.Popen | None = None
         self._perception_proc: subprocess.Popen | None = None
+        self._planning_proc: subprocess.Popen | None = None
         self._detect_and_init_sensor()
 
     # ------------------------------------------------------------------ #
@@ -80,6 +97,7 @@ class BackendNode(Ros2NodeManager):
         pose = self._odom_to_dict(msg, source='slam')
         with self._lock:
             self.current_pose = pose
+            self._odom_pose = pose
         for cb in self.pose_callbacks:
             try:
                 cb(pose)
@@ -90,11 +108,50 @@ class BackendNode(Ros2NodeManager):
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
             self.current_pose = pose
+            self._map_pose = pose
+            self._localized = True
         for cb in self.pose_callbacks:
             try:
                 cb(pose)
             except Exception:
                 pass
+
+    def _on_height_map(self, msg: Image):
+        try:
+            arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+            _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            with self._lock:
+                self._esdf_bytes = buf.tobytes()
+        except Exception:
+            pass
+
+    def _on_obstacle_mask(self, msg: OccupancyGrid):
+        try:
+            # Planning node stores OccupancyGrid in Fortran (column-major) order.
+            arr = np.array(msg.data, dtype=np.int8)
+            grid = arr.reshape(msg.info.width, msg.info.height, order='F').T
+            img = np.where(grid > 50, 255, 0).astype(np.uint8)
+            _, buf = cv2.imencode('.png', img)
+            info = {
+                'origin_x': float(msg.info.origin.position.x),
+                'origin_y': float(msg.info.origin.position.y),
+                'resolution': float(msg.info.resolution),
+                'width': int(msg.info.width),
+                'height': int(msg.info.height),
+            }
+            with self._lock:
+                self._obstacle_bytes = buf.tobytes()
+                self._grid_info = info
+        except Exception:
+            pass
+
+    def _on_trajectory_path(self, msg: Path):
+        pts = [
+            {'x': p.pose.position.x, 'y': p.pose.position.y}
+            for p in msg.poses
+        ]
+        with self._lock:
+            self._trajectory = pts
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -186,6 +243,18 @@ class BackendNode(Ros2NodeManager):
                 cb(frame)
             except Exception:
                 pass
+
+    def get_planning_snapshot(self) -> dict:
+        with self._lock:
+            return {
+                'localized': self._localized,
+                'odom_pose': self._odom_pose,
+                'map_pose': self._map_pose,
+                'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
+                'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
+                'trajectory': list(self._trajectory),
+                'grid_info': self._grid_info,
+            }
 
     def get_sensor_mode(self) -> str:
         return self._sensor_mode
@@ -288,7 +357,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._realsense_proc, self.node._perception_proc):
+            for proc in (self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)
