@@ -4,6 +4,7 @@ WebSocket endpoints:
   WS /ws/pose        — pushes pose whenever a new Odometry arrives
   WS /ws/map-update  — pushes a notification when map files change
   WS /ws/preview     — streams JPEG frames for a given image topic
+  WS /ws/planning    — polls planning snapshot at 5 fps
 """
 from __future__ import annotations
 
@@ -105,6 +106,26 @@ async def ws_map_update(ws: WebSocket):
                     'timestamp': mtime,
                 }))
             await asyncio.sleep(2.0)
+    except WebSocketDisconnect:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# /ws/planning  — polls planning snapshot at 5 fps                            #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/planning')
+async def ws_planning(ws: WebSocket):
+    await ws.accept()
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+    try:
+        while True:
+            payload = json.dumps(node.get_planning_snapshot())
+            await ws.send_text(payload)
+            await asyncio.sleep(0.2)
     except WebSocketDisconnect:
         pass
 

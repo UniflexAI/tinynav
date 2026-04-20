@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 class DeviceStatus {
   final bool online;
   final double? battery;
@@ -72,6 +75,85 @@ class MapInfo {
         width: json['width'] as int,
         height: json['height'] as int,
       );
+}
+
+class TrajPoint {
+  final double x;
+  final double y;
+  const TrajPoint(this.x, this.y);
+}
+
+class GridInfo {
+  final double originX;
+  final double originY;
+  final double resolution;
+  final int width;
+  final int height;
+
+  const GridInfo({
+    required this.originX,
+    required this.originY,
+    required this.resolution,
+    required this.width,
+    required this.height,
+  });
+
+  factory GridInfo.fromJson(Map<String, dynamic> j) => GridInfo(
+        originX: (j['origin_x'] as num).toDouble(),
+        originY: (j['origin_y'] as num).toDouble(),
+        resolution: (j['resolution'] as num).toDouble(),
+        width: j['width'] as int,
+        height: j['height'] as int,
+      );
+}
+
+class PlanningState {
+  final bool localized;
+  final Pose? odomPose;
+  final Pose? mapPose;
+  final Uint8List? esdfImage;
+  final Uint8List? obstacleImage;
+  final List<TrajPoint> trajectory;
+  final GridInfo? gridInfo;
+
+  const PlanningState({
+    required this.localized,
+    this.odomPose,
+    this.mapPose,
+    this.esdfImage,
+    this.obstacleImage,
+    required this.trajectory,
+    this.gridInfo,
+  });
+
+  factory PlanningState.fromJson(Map<String, dynamic> j) {
+    Uint8List? decodeImg(String? b64) {
+      if (b64 == null || b64.isEmpty) return null;
+      return base64Decode(b64);
+    }
+
+    Pose? parsePose(Object? raw) {
+      if (raw == null) return null;
+      return Pose.fromJson(raw as Map<String, dynamic>);
+    }
+
+    final traj = (j['trajectory'] as List? ?? []).map((p) {
+      final m = p as Map<String, dynamic>;
+      return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+    }).toList();
+
+    return PlanningState(
+      localized: j['localized'] as bool? ?? false,
+      odomPose: parsePose(j['odom_pose']),
+      mapPose: parsePose(j['map_pose']),
+      esdfImage: decodeImg(j['esdf_image'] as String?),
+      obstacleImage: decodeImg(j['obstacle_image'] as String?),
+      trajectory: traj,
+      gridInfo: j['grid_info'] != null
+          ? GridInfo.fromJson(j['grid_info'] as Map<String, dynamic>)
+          : null,
+    );
+  }
 }
 
 class Poi {

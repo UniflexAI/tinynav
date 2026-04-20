@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
 import 'map_painter.dart';
+import 'planning_painter.dart';
 
 class MapTab extends ConsumerWidget {
   const MapTab({super.key});
@@ -16,7 +17,9 @@ class MapTab extends ConsumerWidget {
     final mapAsync = ref.watch(mapInfoProvider);
     final poisAsync = ref.watch(poisProvider);
     final poseAsync = ref.watch(poseStreamProvider);
+    final planningAsync = ref.watch(planningStreamProvider);
     final baseUrl = ref.watch(baseUrlProvider);
+    final planning = planningAsync.valueOrNull;
 
     return Stack(
       children: [
@@ -30,12 +33,13 @@ class MapTab extends ConsumerWidget {
             children: [
               mapAsync.when(
                 data: (mapInfo) => mapInfo == null
-                    ? const _NoMapCard()
+                    ? _LocalPlanningView(planning: planning)
                     : _MapView(
                         mapInfo: mapInfo,
                         imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
                         pose: poseAsync.valueOrNull,
                         pois: poisAsync.valueOrNull ?? [],
+                        planning: planning,
                       ),
                 loading: () => const Card(
                   child: Padding(padding: EdgeInsets.all(48), child: Center(child: CircularProgressIndicator())),
@@ -53,6 +57,12 @@ class MapTab extends ConsumerWidget {
             ],
           ),
         ),
+        if (planning != null)
+          Positioned(
+            top: 8,
+            left: 12,
+            child: _LocalizationChip(localized: planning.localized),
+          ),
         const Positioned(
           right: 12,
           bottom: 16,
@@ -70,12 +80,14 @@ class _MapView extends StatelessWidget {
   final String imageUrl;
   final Pose? pose;
   final List<Poi> pois;
+  final PlanningState? planning;
 
   const _MapView({
     required this.mapInfo,
     required this.imageUrl,
     required this.pois,
     this.pose,
+    this.planning,
   });
 
   @override
@@ -85,32 +97,136 @@ class _MapView extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: AspectRatio(
         aspectRatio: aspect > 0 ? aspect : 1.0,
+        child: LayoutBuilder(
+          builder: (ctx, constraints) {
+            final canvasW = constraints.maxWidth;
+            final canvasH = constraints.maxHeight;
+
+            // Compute ESDF overlay rect in canvas coords when localized.
+            Positioned? esdfOverlay;
+            final p = planning;
+            if (p != null &&
+                p.localized &&
+                p.esdfImage != null &&
+                p.mapPose != null &&
+                p.gridInfo != null) {
+              final gi = p.gridInfo!;
+              final mp = p.mapPose!;
+              // canvas pixels per world meter
+              final pxPerMeter = canvasW / (mapInfo.width * mapInfo.resolution);
+              final gridW_m = gi.width * gi.resolution;
+              final gridH_m = gi.height * gi.resolution;
+              // Grid is centered on robot in map frame (approx — grid rolls with odom).
+              final left = (mp.x - gridW_m / 2 - mapInfo.originX) * pxPerMeter;
+              final top = canvasH -
+                  (mp.y - gridH_m / 2 - mapInfo.originY) * pxPerMeter -
+                  gridH_m * pxPerMeter;
+              final width = gridW_m * pxPerMeter;
+              final height = gridH_m * pxPerMeter;
+
+              esdfOverlay = Positioned(
+                left: left,
+                top: top,
+                width: width,
+                height: height,
+                child: Opacity(
+                  opacity: 0.5,
+                  child: Image.memory(
+                    p.esdfImage!,
+                    fit: BoxFit.fill,
+                    gaplessPlayback: true,
+                  ),
+                ),
+              );
+            }
+
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.network(
+                  imageUrl,
+                  fit: BoxFit.fill,
+                  loadingBuilder: (ctx2, child, progress) => progress == null
+                      ? child
+                      : Center(
+                          child: CircularProgressIndicator(
+                            value: progress.expectedTotalBytes != null
+                                ? progress.cumulativeBytesLoaded /
+                                    progress.expectedTotalBytes!
+                                : null,
+                          ),
+                        ),
+                  errorBuilder: (_, e, __) => Center(
+                    child: Text('Image error: $e',
+                        style: const TextStyle(color: Colors.red)),
+                  ),
+                ),
+                if (esdfOverlay != null) esdfOverlay,
+                CustomPaint(
+                  painter: MapOverlayPainter(
+                    mapInfo: mapInfo,
+                    pose: pose,
+                    pois: pois,
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Phase 1 view: odom-centric local planning canvas shown when no global map.
+class _LocalPlanningView extends StatelessWidget {
+  final PlanningState? planning;
+  const _LocalPlanningView({this.planning});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = planning;
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: AspectRatio(
+        aspectRatio: 1.0,
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Image.network(
-              imageUrl,
-              fit: BoxFit.fill,
-              loadingBuilder: (ctx, child, progress) => progress == null
-                  ? child
-                  : Center(
-                      child: CircularProgressIndicator(
-                        value: progress.expectedTotalBytes != null
-                            ? progress.cumulativeBytesLoaded / progress.expectedTotalBytes!
-                            : null,
-                      ),
-                    ),
-              errorBuilder: (_, e, __) => Center(
-                child: Text('Image error: $e', style: const TextStyle(color: Colors.red)),
+            Container(color: const Color(0xFF0D1117)),
+            if (p?.esdfImage != null)
+              Opacity(
+                opacity: 0.85,
+                child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
               ),
-            ),
-            CustomPaint(
-              painter: MapOverlayPainter(
-                mapInfo: mapInfo,
-                pose: pose,
-                pois: pois,
+            if (p?.obstacleImage != null)
+              Opacity(
+                opacity: 0.45,
+                child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
               ),
-            ),
+            if (p != null)
+              CustomPaint(
+                painter: LocalPlanningPainter(
+                  trajectory: p.trajectory,
+                  gridInfo: p.gridInfo,
+                  odomPose: p.odomPose,
+                ),
+              )
+            else
+              const Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.map_outlined, size: 52, color: Colors.white24),
+                    SizedBox(height: 8),
+                    Text('Waiting for planning data…',
+                        style: TextStyle(color: Colors.white38, fontSize: 13)),
+                    SizedBox(height: 4),
+                    Text('Build a map or start navigation to see the map here',
+                        style: TextStyle(color: Colors.white24, fontSize: 11)),
+                  ],
+                ),
+              ),
           ],
         ),
       ),
@@ -118,22 +234,30 @@ class _MapView extends StatelessWidget {
   }
 }
 
-class _NoMapCard extends StatelessWidget {
-  const _NoMapCard();
+class _LocalizationChip extends StatelessWidget {
+  final bool localized;
+  const _LocalizationChip({required this.localized});
 
   @override
   Widget build(BuildContext context) {
-    return const Card(
-      child: Padding(
-        padding: EdgeInsets.symmetric(vertical: 40, horizontal: 16),
-        child: Column(children: [
-          Icon(Icons.map_outlined, size: 52, color: Colors.grey),
-          SizedBox(height: 8),
-          Text('No map available', style: TextStyle(color: Colors.grey, fontSize: 16)),
-          SizedBox(height: 4),
-          Text('Build a map from the Device tab',
-              style: TextStyle(color: Colors.grey, fontSize: 12)),
-        ]),
+    final color = localized ? Colors.greenAccent : Colors.redAccent;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color, width: 1.5),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(localized ? Icons.gps_fixed : Icons.gps_off, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            localized ? 'Localized' : 'Not Localized',
+            style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        ],
       ),
     );
   }
