@@ -191,6 +191,8 @@ class MapNode(Node):
 
         self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
+        
+        self.poi_distance_threshold = 0.25
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -546,8 +548,8 @@ class MapNode(Node):
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
-            diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
-            if diff_position_norm < 1.5:
+            diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
+            if diff_position_norm_xy < self.poi_distance_threshold:
                 self.poi_index += 1
                 dummy_pose = np.eye(4)
 
