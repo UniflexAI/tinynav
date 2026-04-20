@@ -130,7 +130,7 @@ class BackendNode(Ros2NodeManager):
             # Planning node stores OccupancyGrid in Fortran (column-major) order.
             arr = np.array(msg.data, dtype=np.int8)
             grid = arr.reshape(msg.info.width, msg.info.height, order='F').T
-            img = np.where(grid > 50, 255, 0).astype(np.uint8)
+            img = np.flipud(np.where(grid > 50, 255, 0).astype(np.uint8))
             _, buf = cv2.imencode('.png', img)
             info = {
                 'origin_x': float(msg.info.origin.position.x),
