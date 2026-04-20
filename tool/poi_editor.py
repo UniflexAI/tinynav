@@ -276,6 +276,16 @@ class RelocalizationPose(Node):
 def main(
     tinynav_map_path: Path,
 ) -> None:
+    if not tinynav_map_path.exists():
+        host_prefix = "/home/junlinp/uniflex/tinynav/"
+        container_prefix = "/tinynav/"
+        tinynav_map_path_str = str(tinynav_map_path)
+        if tinynav_map_path_str.startswith(host_prefix):
+            remapped = Path(container_prefix) / tinynav_map_path_str[len(host_prefix):]
+            if remapped.exists():
+                print(f"[poi_editor] remap map path: {tinynav_map_path} -> {remapped}")
+                tinynav_map_path = remapped
+
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
@@ -433,29 +443,86 @@ def main(
             print(f"  Missing: {occupancy_meta_path}")
     
     poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
-    rgb_camera_K = np.load(tinynav_map_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
-    rgb_images = shelve.open(f"{tinynav_map_path}/rgb_images")
-    T_rgb_to_infra1 = np.load(tinynav_map_path / "T_rgb_to_infra1.npy", allow_pickle=True)
+    camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
+    infra1_images_path = tinynav_map_path / "infra1_images"
+    try:
+        infra1_images = shelve.open(str(infra1_images_path), flag="r")
+    except Exception:
+        infra1_images = None
+    infra1_timestamp_keys: list[int] = []
+    if infra1_images is not None:
+        for k in infra1_images.keys():
+            if str(k).isdigit():
+                infra1_timestamp_keys.append(int(k))
+        infra1_timestamp_keys.sort()
+        print(f"[poi_editor] infra1_images loaded: {len(infra1_timestamp_keys)} timestamped frames")
+    else:
+        print("[poi_editor] infra1_images not found")
 
-    fx, _, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
+    fx, _, cx, cy = camera_K[0, 0], camera_K[1, 1], camera_K[0, 2], camera_K[1, 2]
+    camera_frustums: dict[int, viser.CameraFrustumHandle] = {}
+
+    def _prepare_display_image(image: np.ndarray) -> np.ndarray:
+        if image.ndim == 2:
+            image = np.repeat(image[:, :, None], 3, axis=2)
+        if image.dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+        return np.ascontiguousarray(image[:, :, :3])
+
+    def _load_infra1_image_for_timestamp(timestamp: int) -> np.ndarray | None:
+        if infra1_images is None:
+            return None
+        key = str(timestamp)
+        if key in infra1_images:
+            return _prepare_display_image(infra1_images[key])
+        if len(infra1_timestamp_keys) == 0:
+            return None
+        nearest_ts = min(infra1_timestamp_keys, key=lambda ts: abs(ts - int(timestamp)))
+        nearest_key = str(nearest_ts)
+        if nearest_key in infra1_images:
+            print(f"[poi_editor] exact infra1 key {timestamp} not found, using nearest {nearest_ts}")
+            return _prepare_display_image(infra1_images[nearest_key])
+        return None
+
+    def _recreate_camera_frustum(timestamp: int, image: np.ndarray | None = None) -> None:
+        camera_pose = poses[timestamp]
+        R = vtf.SO3.from_matrix(camera_pose[:3, :3])
+        t = camera_pose[:3, 3]
+        old_frustum = camera_frustums.get(timestamp)
+        if old_frustum is not None:
+            old_frustum.remove()
+
+        camera_frustum = server.scene.add_camera_frustum(
+            name=f"/cameras/camera_{timestamp}",
+            fov=float(2 * np.arctan((cx / fx))),
+            scale=0.01,
+            aspect=float(cx / cy),
+            image=image,
+            wxyz=R.wxyz,
+            position=t,
+            format="jpeg",
+            jpeg_quality=50,
+            variant="filled",
+        )
+        camera_frustums[timestamp] = camera_frustum
+
+        @camera_frustum.on_click
+        def _(
+            event: viser.SceneNodePointerEvent,
+            timestamp=timestamp,
+            t=t.copy(),
+            wxyz=R.wxyz,
+        ) -> None:
+            clicked_image = _load_infra1_image_for_timestamp(timestamp)
+            if clicked_image is None:
+                print(f"[poi_editor] no infra1 image available for timestamp {timestamp}")
+            _recreate_camera_frustum(timestamp, clicked_image)
+            event.client.camera.position = tuple(float(v) for v in t)
+            event.client.camera.wxyz = tuple(float(v) for v in wxyz)
+
     with server.gui.add_folder("cameras") as _:
-        for timestamp, rgb_pose in poses.items():
-            rgb_pose = rgb_pose @ T_rgb_to_infra1 
-            rgb_image = rgb_images[str(timestamp)]
-            _ = rgb_image.shape[:2]
-            R = vtf.SO3.from_matrix(rgb_pose[:3, :3])
-            t = rgb_pose[:3, 3]
-            camera_frustum = server.scene.add_camera_frustum(
-                name=f"/cameras/camera_{timestamp}",
-                fov=float(2 * np.arctan((cx / fx))),
-                scale=0.01,
-                aspect=float(cx / cy),
-                image=None,
-                wxyz=R.wxyz,
-                position=t,
-                format="jpeg",
-                jpeg_quality=50
-            )
+        for timestamp in poses.keys():
+            _recreate_camera_frustum(timestamp, None)
 
     # Load splat or point cloud files
     splat_path = Path(f"{tinynav_map_path}/splat.ply")
@@ -527,4 +594,3 @@ def main(
 
 if __name__ == "__main__":
     tyro.cli(main)
-
