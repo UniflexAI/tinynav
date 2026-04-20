@@ -6,16 +6,32 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 import sys
 import threading
+import time
+
+import cv2
+import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 import rclpy
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import Image
 from std_msgs.msg import Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
+
+_REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
+_VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
+_IMAGE_TOPICS_ALL = [
+    '/camera/camera/color/image_raw',
+    '/camera/camera/infra1/image_rect_raw',
+    '/camera/camera/infra2/image_rect_raw',
+    '/slam/depth',
+]
+_PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
 
 
 class BackendNode(Ros2NodeManager):
@@ -32,6 +48,7 @@ class BackendNode(Ros2NodeManager):
         # Keep them cheap — just put data on a queue or set an event.
         self.pose_callbacks: list = []
         self.state_callbacks: list = []
+        self.preview_callbacks: dict[str, list] = {}  # topic -> [callbacks]
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._on_slam_odom, 10)
@@ -41,6 +58,15 @@ class BackendNode(Ros2NodeManager):
 
         # Publisher for nav target (consumed by map_node in the future)
         self._nav_target_pub = self.create_publisher(String, '/service/nav_target', 10)
+
+        # Sensor mode detection and image subscriptions
+        self._sensor_mode: str = 'unknown'  # 'looper' | 'realsense' | 'unknown'
+        self._image_subs: dict = {}
+        self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
+        self._last_frame_time: dict[str, float] = {}
+        self._realsense_proc: subprocess.Popen | None = None
+        self._perception_proc: subprocess.Popen | None = None
+        self._detect_and_init_sensor()
 
     # ------------------------------------------------------------------ #
     # ROS callbacks                                                        #
@@ -89,6 +115,82 @@ class BackendNode(Ros2NodeManager):
             'timestamp': msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
             'source': source,
         }
+
+    # ------------------------------------------------------------------ #
+    # Sensor / camera                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _detect_and_init_sensor(self):
+        domain = os.environ.get('ROS_DOMAIN_ID', '0')
+        self.get_logger().info(f'BackendNode ROS_DOMAIN_ID={domain}')
+        try:
+            result = subprocess.run(
+                ['ros2', 'node', 'list'], capture_output=True, text=True, timeout=3
+            )
+            if '/insight_full' in result.stdout.splitlines():
+                self._sensor_mode = 'looper'
+                self.get_logger().info('Sensor mode: looper')
+            else:
+                self._sensor_mode = 'realsense'
+                self.get_logger().info('Sensor mode: realsense — launching driver and perception')
+                self._realsense_proc = subprocess.Popen(
+                    ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid
+                )
+                _env = os.environ.copy()
+                _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+                self._perception_proc = subprocess.Popen(
+                    ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                    preexec_fn=os.setsid,
+                    cwd='/tinynav',
+                    env=_env,
+                )
+        except Exception as e:
+            self.get_logger().warn(f'Sensor detection failed: {e}')
+            self._sensor_mode = 'unknown'
+
+        for topic in _IMAGE_TOPICS_ALL:
+            self._image_subs[topic] = self.create_subscription(
+                Image, topic,
+                lambda msg, t=topic: self._on_image(msg, t),
+                1,
+            )
+            self._last_frame[topic] = b''
+            self._last_frame_time[topic] = 0.0
+            self.preview_callbacks[topic] = []
+
+    def _on_image(self, msg: Image, topic: str):
+        now = time.time()
+        if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
+            return
+        self._last_frame_time[topic] = now
+
+        try:
+            arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+            if arr.shape[2] == 1:
+                arr = arr[:, :, 0]
+            _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 50])
+            frame = buf.tobytes()
+        except Exception:
+            return
+
+        with self._lock:
+            self._last_frame[topic] = frame
+
+        for cb in self.preview_callbacks.get(topic, []):
+            try:
+                cb(frame)
+            except Exception:
+                pass
+
+    def get_sensor_mode(self) -> str:
+        return self._sensor_mode
+
+    def get_image_topics(self) -> list[str]:
+        return _IMAGE_TOPICS_ALL
+
+    def get_preview_frame(self, topic: str) -> bytes:
+        with self._lock:
+            return self._last_frame.get(topic, b'')
 
     # ------------------------------------------------------------------ #
     # Command API (called from FastAPI handlers — thread-safe enough)     #
@@ -181,3 +283,13 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
+            for proc in (self.node._realsense_proc, self.node._perception_proc):
+                if proc and proc.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), 15)
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass

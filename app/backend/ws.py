@@ -3,6 +3,7 @@ WebSocket endpoints:
   WS /ws/status      — pushes device status every ~1 s
   WS /ws/pose        — pushes pose whenever a new Odometry arrives
   WS /ws/map-update  — pushes a notification when map files change
+  WS /ws/preview     — streams JPEG frames for a given image topic
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import json
 import os
 import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from .state import runner
 
@@ -106,3 +107,39 @@ async def ws_map_update(ws: WebSocket):
             await asyncio.sleep(2.0)
     except WebSocketDisconnect:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# /ws/preview  — streams JPEG frames for a given image topic                  #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/preview')
+async def ws_preview(ws: WebSocket, topic: str = Query(...)):
+    await ws.accept()
+
+    node = runner.node
+    if node is None or topic not in node.preview_callbacks:
+        await ws.close(code=1013)
+        return
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+    loop = asyncio.get_event_loop()
+
+    def _on_frame(frame: bytes):
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, frame)
+        except Exception:
+            pass
+
+    node.preview_callbacks[topic].append(_on_frame)
+    try:
+        while True:
+            frame = await queue.get()
+            await ws.send_bytes(frame)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            node.preview_callbacks[topic].remove(_on_frame)
+        except ValueError:
+            pass

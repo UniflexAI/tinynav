@@ -19,39 +19,7 @@ import cv2
 from typing import Dict, List, Tuple
 import shelve
 from tqdm import tqdm
-import json
-
-def convert_nerf_format(output_dir: str, poses: dict, intrinscis:np.ndarray, image_size: Tuple[int, int], T_rgb_to_infra1:np.ndarray):
-    camera_model = "PINHOLE"
-    fl_x = intrinscis[0, 0]
-    fl_y = intrinscis[1, 1]
-    cx = intrinscis[0, 2]
-    cy = intrinscis[1, 2]
-    w = image_size[1]
-    h = image_size[0]
-    frames = []
-    opencv_to_opengl_convention = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-    for timestmap, camera_to_world_pose in poses.items():
-        camera_to_world_opengl = camera_to_world_pose @ T_rgb_to_infra1 @ opencv_to_opengl_convention
-        frame = {
-            "file_path": f"images/image_{timestmap}.png",
-            "transform_matrix": camera_to_world_opengl.tolist(),
-        }
-        frames.append(frame)
-
-    data = {
-        "camera_model": camera_model,
-        "fl_x": fl_x,
-        "fl_y": fl_y,
-        "cx": cx,
-        "cy": cy,
-        "w": w,
-        "h": h,
-        "frames": frames
-    }
-
-    with open(f"{output_dir}/transforms.json", "w") as f:
-        json.dump(data, f, indent=4)
+from convert_to_nerf_format import convert_nerf_format
 
 
 
@@ -369,5 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
