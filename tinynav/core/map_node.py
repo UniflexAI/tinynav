@@ -398,6 +398,7 @@ class MapNode(Node):
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
+            print(f"add odom: {keyframe_odom_timestamp}")
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
             T_prev_curr = se3_inv(last_keyframe_odom_pose) @ odom

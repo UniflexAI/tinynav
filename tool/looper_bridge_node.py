@@ -28,6 +28,7 @@ class LooperBridgeNode(Node):
         self.T_i_depth = None
         self.tf_edges = {}
         self.last_keyframe_pose = None
+        self.last_keyframe_time = None
         self.last_odom_pose = None
         self.last_odom_time = None
         self.recent_odom_stamp_ns = deque(maxlen=512)
@@ -136,9 +137,14 @@ class LooperBridgeNode(Node):
             missing.append(f"imu->{self.depth_frame_id or 'depth'} TF")
         self.get_logger().info(f"Waiting for Looper bridge inputs: {', '.join(missing)}")
 
-    def should_add_keyframe(self, T_world_camera: np.ndarray) -> bool:
+    @staticmethod
+    def stamp_to_sec(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+    def should_add_keyframe(self, T_world_camera: np.ndarray, stamp) -> bool:
         if self.last_keyframe_pose is None:
             return True
+        current_time = self.stamp_to_sec(stamp)
         translation = np.linalg.norm(
             T_world_camera[:3, 3] - self.last_keyframe_pose[:3, 3]
         )
@@ -149,6 +155,10 @@ class LooperBridgeNode(Node):
         return (
             translation >= self.args.keyframe_translation
             or rotation_angle >= np.deg2rad(self.args.keyframe_rotation_deg)
+            or (
+                self.last_keyframe_time is not None
+                and (current_time - self.last_keyframe_time) > 3.0
+            )
         )
 
     @staticmethod
@@ -265,11 +275,12 @@ class LooperBridgeNode(Node):
         self.slam_camera_info_pub.publish(camera_info_out)
         self.camera_info_alias_pub.publish(camera_info_out)
 
-        if self.should_add_keyframe(T_world_camera):
+        if self.should_add_keyframe(T_world_camera, stamp):
             self.keyframe_pose_pub.publish(odom_msg)
             self.keyframe_image_pub.publish(image_out)
             self.keyframe_depth_pub.publish(depth_out)
             self.last_keyframe_pose = T_world_camera.copy()
+            self.last_keyframe_time = self.stamp_to_sec(stamp)
 
 
 def parse_args():

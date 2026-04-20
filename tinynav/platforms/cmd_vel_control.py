@@ -1,8 +1,10 @@
+import argparse
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
+from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import logging
 import time
@@ -26,16 +28,28 @@ def _nearest_tangent(path_world: list, robot_xy: np.ndarray) -> np.ndarray:
 
 
 class CmdVelControlNode(Node):
-    def __init__(self):
+    def __init__(self, enable_front_obstacle_stop: bool = True):
         super().__init__('cmd_vel_control_node')
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
+        self.create_subscription(OccupancyGrid, '/planning/obstacle_mask', self.obstacle_mask_callback, 10)
 
         self.last_path_time = 0.0
         self.pose = None
         self.path_world = []
+        self.obstacle_mask = None
+        self.obstacle_origin_xy = np.zeros(2, dtype=np.float32)
+        self.obstacle_resolution = 0.1
+        self.front_block_distance_m = 1.0
+        self.front_block_step_m = 0.1
+        self.front_block_half_width_m = 0.25
+        self.front_blocked = False
+        self.enable_front_obstacle_stop = bool(enable_front_obstacle_stop)
+        self.logger.info(
+            f"Front obstacle stop enabled: {self.enable_front_obstacle_stop}"
+        )
 
         # === Control loop (ported from planning_node_compare style) ===
         self.cmd_rate_hz = 30.0
@@ -45,6 +59,7 @@ class CmdVelControlNode(Node):
         self.max_linear_acc = 2.0   # m/s^2
         self.max_angular_acc = 2.5  # rad/s^2
         self.max_angular_speed = 0.5
+        self.forward_heading_limit_rad = float(np.deg2rad(20.0))
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -74,6 +89,8 @@ class CmdVelControlNode(Node):
         heading_scale = max(0.0, float(np.cos(heading_err)))
 
         vx = float(np.clip(self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed))
+        if abs(heading_err) > self.forward_heading_limit_rad:
+            vx = 0.0
         if abs(heading_err) > 1.0:
             vx *= 0.40
         vyaw = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
@@ -87,6 +104,50 @@ class CmdVelControlNode(Node):
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
+
+    def obstacle_mask_callback(self, msg: OccupancyGrid):
+        if msg.info.width <= 0 or msg.info.height <= 0:
+            return
+        raw = np.asarray(msg.data, dtype=np.int16)
+        expected = int(msg.info.width * msg.info.height)
+        if raw.size != expected:
+            self.logger.warning(
+                f"Ignore invalid obstacle mask size: got={raw.size}, expected={expected}"
+            )
+            return
+        grid = raw.reshape((msg.info.height, msg.info.width), order='F')
+        self.obstacle_mask = grid > 50
+        self.obstacle_origin_xy = np.array(
+            [msg.info.origin.position.x, msg.info.origin.position.y],
+            dtype=np.float32,
+        )
+        self.obstacle_resolution = float(msg.info.resolution)
+
+    def _is_front_blocked(self, T: np.ndarray) -> bool:
+        if self.obstacle_mask is None:
+            return False
+        robot_xy = T[:2, 3].astype(np.float32)
+        forward_xy = (T[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float32))[:2]
+        n = float(np.linalg.norm(forward_xy))
+        if n < 1e-6:
+            return False
+        forward_xy = forward_xy / n
+        left_xy = np.array([-forward_xy[1], forward_xy[0]], dtype=np.float32)
+        h, w = self.obstacle_mask.shape
+        n_long = max(1, int(np.ceil(self.front_block_distance_m / self.front_block_step_m)))
+        n_lat = max(0, int(np.ceil(self.front_block_half_width_m / self.front_block_step_m)))
+        for i in range(1, n_long + 1):
+            s = float(i) * self.front_block_step_m
+            for j in range(-n_lat, n_lat + 1):
+                off = float(j) * self.front_block_step_m
+                p = robot_xy + forward_xy * s + left_xy * off
+                gx = int((p[0] - self.obstacle_origin_xy[0]) / self.obstacle_resolution)
+                gy = int((p[1] - self.obstacle_origin_xy[1]) / self.obstacle_resolution)
+                if gx < 0 or gx >= h or gy < 0 or gy >= w:
+                    continue
+                if self.obstacle_mask[gx, gy]:
+                    return True
+        return False
 
     def cmd_timer_callback(self):
         now = time.monotonic()
@@ -104,6 +165,15 @@ class CmdVelControlNode(Node):
         elif age > self.path_stale_slow_s:
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
+
+        if self.enable_front_obstacle_stop and self.pose is not None:
+            T, _ = _msg2np(self.pose)
+            self.front_blocked = self._is_front_blocked(T)
+            if self.front_blocked:
+                target_cmd.linear.x = 0.0
+                target_cmd.angular.z = 0.0
+        else:
+            self.front_blocked = False
 
         # Acceleration limiting for smoother control.
         max_dv = self.max_linear_acc * dt
@@ -131,7 +201,14 @@ class CmdVelControlNode(Node):
         super().destroy_node()
 
 def main(args=None):
-    rclpy.init(args=args)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--disable_front_obstacle_stop',
+        action='store_true',
+        help='Disable front obstacle stop gate (enabled by default).',
+    )
+    parsed_args, unknown_args = parser.parse_known_args(args)
+    rclpy.init(args=unknown_args)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -139,7 +216,9 @@ def main(args=None):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    node = CmdVelControlNode()
+    node = CmdVelControlNode(
+        enable_front_obstacle_stop=not parsed_args.disable_front_obstacle_stop
+    )
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

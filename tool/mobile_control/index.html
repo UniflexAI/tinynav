@@ -149,7 +149,11 @@
           <label><input id="showGlobalPath" type="checkbox" checked />全局路径</label>
           <label><input id="showLocalPath" type="checkbox" checked />局部路径</label>
         </div>
-        <button id="fitViewBtn" class="secondary">居中</button>
+        <div class="row" style="margin-bottom: 0;">
+          <button id="zoomOutBtn" class="secondary">缩小</button>
+          <button id="zoomInBtn" class="secondary">放大</button>
+          <button id="fitViewBtn" class="secondary">居中</button>
+        </div>
       </div>
       <div class="canvas-wrap">
         <canvas id="mapCanvas"></canvas>
@@ -187,6 +191,8 @@
     const showMapLayer = document.getElementById("showMapLayer");
     const showGlobalPath = document.getElementById("showGlobalPath");
     const showLocalPath = document.getElementById("showLocalPath");
+    const zoomOutBtn = document.getElementById("zoomOutBtn");
+    const zoomInBtn = document.getElementById("zoomInBtn");
     const fitViewBtn = document.getElementById("fitViewBtn");
     const mapCanvas = document.getElementById("mapCanvas");
     const mapCtx = mapCanvas.getContext("2d");
@@ -207,7 +213,11 @@
     let obstacleGrid = null;
     let viewCenter = { x: 0.0, y: 0.0 };
     let pxPerMeter = 42.0;
+    const minPxPerMeter = 10.0;
+    const maxPxPerMeter = 220.0;
     let dragState = null;
+    const activePointers = new Map();
+    let pinchState = null;
     let suppressMapClick = false;
     let poiPoints = [];
     let managerState = "idle";
@@ -358,6 +368,26 @@
         viewCenter.y = odomPose.y;
       }
       drawMap();
+    }
+
+    function clampZoom(v) {
+      return Math.max(minPxPerMeter, Math.min(maxPxPerMeter, v));
+    }
+
+    function zoomAtCanvasPoint(canvasX, canvasY, factor) {
+      const before = canvasToWorld(canvasX, canvasY);
+      pxPerMeter = clampZoom(pxPerMeter * factor);
+      const after = canvasToWorld(canvasX, canvasY);
+      viewCenter.x += before.x - after.x;
+      viewCenter.y += before.y - after.y;
+      drawMap();
+    }
+
+    function zoomByFactor(factor) {
+      const rect = mapCanvas.getBoundingClientRect();
+      const cx = rect.width * 0.5;
+      const cy = rect.height * 0.5;
+      zoomAtCanvasPoint(cx, cy, factor);
     }
 
     function startMapDrag(clientX, clientY) {
@@ -775,27 +805,83 @@
     };
 
     mapCanvas.onpointerdown = (ev) => {
-      startMapDrag(ev.clientX, ev.clientY);
+      activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      mapCanvas.setPointerCapture(ev.pointerId);
+      if (activePointers.size === 2) {
+        const pts = Array.from(activePointers.values());
+        const dx = pts[0].x - pts[1].x;
+        const dy = pts[0].y - pts[1].y;
+        pinchState = {
+          distance: Math.hypot(dx, dy),
+          centerX: (pts[0].x + pts[1].x) * 0.5,
+          centerY: (pts[0].y + pts[1].y) * 0.5,
+        };
+        dragState = null;
+        mapCanvas.style.cursor = "crosshair";
+        return;
+      }
+      if (activePointers.size === 1) {
+        startMapDrag(ev.clientX, ev.clientY);
+      }
     };
 
     mapCanvas.onpointermove = (ev) => {
+      if (!activePointers.has(ev.pointerId)) return;
+      activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      if (activePointers.size === 2) {
+        const pts = Array.from(activePointers.values());
+        const dx = pts[0].x - pts[1].x;
+        const dy = pts[0].y - pts[1].y;
+        const distance = Math.hypot(dx, dy);
+        const centerX = (pts[0].x + pts[1].x) * 0.5;
+        const centerY = (pts[0].y + pts[1].y) * 0.5;
+        if (pinchState && pinchState.distance > 2.0 && distance > 2.0) {
+          const factor = distance / pinchState.distance;
+          const rect = mapCanvas.getBoundingClientRect();
+          zoomAtCanvasPoint(centerX - rect.left, centerY - rect.top, factor);
+        }
+        pinchState = { distance, centerX, centerY };
+        suppressMapClick = true;
+        dragState = null;
+        return;
+      }
+      pinchState = null;
       if (!dragState) return;
       ev.preventDefault();
       moveMapDrag(ev.clientX, ev.clientY);
     };
 
-    mapCanvas.onpointerup = () => {
+    mapCanvas.onpointerup = (ev) => {
+      activePointers.delete(ev.pointerId);
+      if (activePointers.size < 2) {
+        pinchState = null;
+      }
       suppressMapClick = endMapDrag();
     };
 
-    mapCanvas.onpointercancel = () => {
+    mapCanvas.onpointercancel = (ev) => {
+      activePointers.delete(ev.pointerId);
+      if (activePointers.size < 2) {
+        pinchState = null;
+      }
       suppressMapClick = endMapDrag();
     };
 
     mapCanvas.onpointerleave = () => {
+      activePointers.clear();
+      pinchState = null;
       if (dragState) {
         suppressMapClick = endMapDrag();
       }
+    };
+
+    mapCanvas.onwheel = (ev) => {
+      ev.preventDefault();
+      const rect = mapCanvas.getBoundingClientRect();
+      const px = ev.clientX - rect.left;
+      const py = ev.clientY - rect.top;
+      const factor = ev.deltaY > 0 ? 0.9 : 1.1;
+      zoomAtCanvasPoint(px, py, factor);
     };
 
     mapCanvas.onclick = (ev) => {
@@ -841,6 +927,8 @@
     showMapLayer.onchange = drawMap;
     showGlobalPath.onchange = drawMap;
     showLocalPath.onchange = drawMap;
+    zoomOutBtn.onclick = () => zoomByFactor(0.9);
+    zoomInBtn.onclick = () => zoomByFactor(1.1);
     fitViewBtn.onclick = fitViewToRobot;
     window.addEventListener("resize", resizeCanvas);
     updateStateInfo();
