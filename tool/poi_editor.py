@@ -346,7 +346,7 @@ def main(
             )
             create_poi_ui(server, poi_list_container,poi_id, poi_points, sphere_handle)
     
-    # Load and visualize occupancy grid
+    # Load and visualize occupancy grid as 2D XY projection (same as build_map_node).
     occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
     occupancy_meta_path = tinynav_map_path / "occupancy_meta.npy"
     
@@ -363,62 +363,113 @@ def main(
         print(f"Origin: ({origin[0]:.3f}, {origin[1]:.3f}, {origin[2]:.3f})")
         print(f"Resolution: {resolution:.3f} m")
         
-        # Convert occupancy grid to point cloud
-        # Values follow build_map_node.generate_occupancy_map:
-        #   0 = Unknown, 1 = Free, 2 = Occupied
-        free_indices = np.argwhere(occupancy_grid == 1)  # Free
-        occupied_indices = np.argwhere(occupancy_grid == 2)  # Occupied
-        
-        # Convert voxel indices to world coordinates
-        origin_np = np.array(origin)
-        free_points = origin_np + free_indices * resolution if len(free_indices) > 0 else np.array([]).reshape(0, 3)
-        occupied_points = origin_np + occupied_indices * resolution if len(occupied_indices) > 0 else np.array([]).reshape(0, 3)
+        # build_map_node projection:
+        # x_y_plane = np.max(grid_type, axis=2), where 0=unknown, 1=free, 2=occupied.
+        x_y_plane = np.max(occupancy_grid, axis=2)
+        unknown_indices = np.argwhere(x_y_plane == 0)
+        free_indices = np.argwhere(x_y_plane == 1)
+        occupied_indices = np.argwhere(x_y_plane == 2)
 
-        # Create colors: Free = green, Occupied = red
+        # Project to one Z plane in world coordinates.
+        z_plane = float(origin[2])
+
+        def _xy_to_world_points(xy_indices: np.ndarray) -> np.ndarray:
+            if len(xy_indices) == 0:
+                return np.array([]).reshape(0, 3)
+            points = np.zeros((len(xy_indices), 3), dtype=np.float32)
+            points[:, 0] = float(origin[0]) + xy_indices[:, 0] * float(resolution)
+            points[:, 1] = float(origin[1]) + xy_indices[:, 1] * float(resolution)
+            points[:, 2] = z_plane
+            return points
+
+        unknown_points = _xy_to_world_points(unknown_indices)
+        free_points = _xy_to_world_points(free_indices)
+        occupied_points = _xy_to_world_points(occupied_indices)
+
+        # 2D map color semantics: occupied=gray tall columns, free=blue, unknown=black.
+        unknown_handle = None
         free_handle = None
         occupied_handle = None
+        if len(unknown_points) > 0:
+            unknown_colors = np.zeros((len(unknown_points), 3), dtype=np.float32)
+            print(f"Adding {len(unknown_points)} unknown 2D cells (black)")
+            unknown_handle = server.scene.add_point_cloud(
+                "/occupancy_2d/unknown",
+                points=unknown_points,
+                colors=unknown_colors,
+                point_size=resolution * 0.8,
+                point_shape="rounded",
+            )
+
         if len(free_points) > 0:
             free_colors = np.zeros((len(free_points), 3), dtype=np.float32)
-            free_colors[:, 1] = 1.0  # Green for free space
-            print(f"Adding {len(free_points)} free space points (green)")
-            
-            # Add free space point cloud
+            free_colors[:, 2] = 1.0
+            print(f"Adding {len(free_points)} free 2D cells (blue)")
             free_handle = server.scene.add_point_cloud(
-                "/occupancy_grid/free",
+                "/occupancy_2d/free",
                 points=free_points,
                 colors=free_colors,
-                point_size=resolution * 0.8,  # Slightly smaller than voxel size
+                point_size=resolution * 0.8,
                 point_shape="rounded",
             )
         
         if len(occupied_points) > 0:
-            occupied_colors = np.zeros((len(occupied_points), 3), dtype=np.float32)
-            occupied_colors[:, 0] = 1.0  # Red for occupied
-            print(f"Adding {len(occupied_points)} occupied points (red)")
-            # Add occupied space point cloud
+            occupied_column_height = 1.8  # meters
+            z_levels = np.arange(
+                z_plane + float(resolution) * 0.5,
+                z_plane + occupied_column_height,
+                float(resolution),
+                dtype=np.float32,
+            )
+            occupied_column_points = np.repeat(occupied_points, len(z_levels), axis=0)
+            occupied_column_points[:, 2] = np.tile(z_levels, len(occupied_points))
+            # Height-based colormap for wall columns.
+            if len(z_levels) > 1:
+                z_norm = (z_levels - z_levels[0]) / (z_levels[-1] - z_levels[0])
+            else:
+                z_norm = np.array([1.0], dtype=np.float32)
+            # Jet-like colormap (blue -> cyan -> yellow -> red).
+            level_r = np.clip(1.5 - np.abs(4.0 * z_norm - 3.0), 0.0, 1.0)
+            level_g = np.clip(1.5 - np.abs(4.0 * z_norm - 2.0), 0.0, 1.0)
+            level_b = np.clip(1.5 - np.abs(4.0 * z_norm - 1.0), 0.0, 1.0)
+            level_colors = np.stack([level_r, level_g, level_b], axis=1).astype(np.float32)
+            occupied_colors = np.tile(level_colors, (len(occupied_points), 1))
+            print(
+                f"Adding {len(occupied_points)} occupied cells as "
+                f"{len(occupied_column_points)} gray column points"
+            )
             occupied_handle = server.scene.add_point_cloud(
-                "/occupancy_grid/occupied",
-                points=occupied_points,
+                "/occupancy_2d/occupied",
+                points=occupied_column_points,
                 colors=occupied_colors,
-                point_size=resolution * 0.8,  # Slightly smaller than voxel size
+                point_size=resolution * 0.8,
                 point_shape="rounded",
             )
         
-        # Add UI controls for occupancy grid
-        if free_handle is not None or occupied_handle is not None:
-            # Default: show occupied, hide free
+        if unknown_handle is not None or free_handle is not None or occupied_handle is not None:
+            # Default visibility for projected 2D occupancy.
+            if unknown_handle is not None:
+                unknown_handle.visible = False
             if free_handle is not None:
-                free_handle.visible = False
+                free_handle.visible = True
             if occupied_handle is not None:
                 occupied_handle.visible = True
 
-            with server.gui.add_folder("Occupancy Grid") as _:
-                show_free = server.gui.add_checkbox("Show Free Space", initial_value=False)
+            point_size_init = float(resolution * 0.8)
+            point_size_max = max(0.1, point_size_init)
+            with server.gui.add_folder("Occupancy 2D Map") as _:
+                show_unknown = server.gui.add_checkbox("Show Unknown", initial_value=False)
+                show_free = server.gui.add_checkbox("Show Free", initial_value=True)
                 show_occupied = server.gui.add_checkbox("Show Occupied", initial_value=True)
                 point_size_slider = server.gui.add_slider(
-                    "Point Size", min=0.001, max=0.1, step=0.001, initial_value=float(resolution * 0.8)
+                    "Point Size", min=0.001, max=point_size_max, step=0.001, initial_value=point_size_init
                 )
                 
+                @show_unknown.on_update
+                def _(_) -> None:
+                    if unknown_handle is not None:
+                        unknown_handle.visible = show_unknown.value
+
                 @show_free.on_update
                 def _(_) -> None:
                     if free_handle is not None:
@@ -431,6 +482,8 @@ def main(
                 
                 @point_size_slider.on_update
                 def _(_) -> None:
+                    if unknown_handle is not None:
+                        unknown_handle.point_size = point_size_slider.value
                     if free_handle is not None:
                         free_handle.point_size = point_size_slider.value
                     if occupied_handle is not None:
@@ -443,86 +496,29 @@ def main(
             print(f"  Missing: {occupancy_meta_path}")
     
     poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
-    camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
-    infra1_images_path = tinynav_map_path / "infra1_images"
-    try:
-        infra1_images = shelve.open(str(infra1_images_path), flag="r")
-    except Exception:
-        infra1_images = None
-    infra1_timestamp_keys: list[int] = []
-    if infra1_images is not None:
-        for k in infra1_images.keys():
-            if str(k).isdigit():
-                infra1_timestamp_keys.append(int(k))
-        infra1_timestamp_keys.sort()
-        print(f"[poi_editor] infra1_images loaded: {len(infra1_timestamp_keys)} timestamped frames")
+    if (tinynav_map_path / "intrinsics.npy").exists():
+        camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
+    elif (tinynav_map_path / "rgb_camera_intrinsics.npy").exists():
+        camera_K = np.load(tinynav_map_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
     else:
-        print("[poi_editor] infra1_images not found")
+        raise FileNotFoundError("Neither intrinsics.npy nor rgb_camera_intrinsics.npy exists.")
 
     fx, _, cx, cy = camera_K[0, 0], camera_K[1, 1], camera_K[0, 2], camera_K[1, 2]
-    camera_frustums: dict[int, viser.CameraFrustumHandle] = {}
-
-    def _prepare_display_image(image: np.ndarray) -> np.ndarray:
-        if image.ndim == 2:
-            image = np.repeat(image[:, :, None], 3, axis=2)
-        if image.dtype != np.uint8:
-            image = np.clip(image, 0, 255).astype(np.uint8)
-        return np.ascontiguousarray(image[:, :, :3])
-
-    def _load_infra1_image_for_timestamp(timestamp: int) -> np.ndarray | None:
-        if infra1_images is None:
-            return None
-        key = str(timestamp)
-        if key in infra1_images:
-            return _prepare_display_image(infra1_images[key])
-        if len(infra1_timestamp_keys) == 0:
-            return None
-        nearest_ts = min(infra1_timestamp_keys, key=lambda ts: abs(ts - int(timestamp)))
-        nearest_key = str(nearest_ts)
-        if nearest_key in infra1_images:
-            print(f"[poi_editor] exact infra1 key {timestamp} not found, using nearest {nearest_ts}")
-            return _prepare_display_image(infra1_images[nearest_key])
-        return None
-
-    def _recreate_camera_frustum(timestamp: int, image: np.ndarray | None = None) -> None:
-        camera_pose = poses[timestamp]
-        R = vtf.SO3.from_matrix(camera_pose[:3, :3])
-        t = camera_pose[:3, 3]
-        old_frustum = camera_frustums.get(timestamp)
-        if old_frustum is not None:
-            old_frustum.remove()
-
-        camera_frustum = server.scene.add_camera_frustum(
-            name=f"/cameras/camera_{timestamp}",
-            fov=float(2 * np.arctan((cx / fx))),
-            scale=0.01,
-            aspect=float(cx / cy),
-            image=image,
-            wxyz=R.wxyz,
-            position=t,
-            format="jpeg",
-            jpeg_quality=50,
-            variant="filled",
-        )
-        camera_frustums[timestamp] = camera_frustum
-
-        @camera_frustum.on_click
-        def _(
-            event: viser.SceneNodePointerEvent,
-            timestamp=timestamp,
-            t=t.copy(),
-            wxyz=R.wxyz,
-        ) -> None:
-            clicked_image = _load_infra1_image_for_timestamp(timestamp)
-            if clicked_image is None:
-                print(f"[poi_editor] no infra1 image available for timestamp {timestamp}")
-            _recreate_camera_frustum(timestamp, clicked_image)
-            event.client.camera.position = tuple(float(v) for v in t)
-            event.client.camera.wxyz = tuple(float(v) for v in wxyz)
-
     with server.gui.add_folder("cameras") as _:
-        for timestamp in poses.keys():
-            _recreate_camera_frustum(timestamp, None)
+        for timestamp, camera_pose in poses.items():
+            R = vtf.SO3.from_matrix(camera_pose[:3, :3])
+            t = camera_pose[:3, 3]
+            _ = server.scene.add_camera_frustum(
+                name=f"/cameras/camera_{timestamp}",
+                fov=float(2 * np.arctan((cx / fx))),
+                scale=0.01,
+                aspect=float(cx / cy),
+                image=None,
+                wxyz=R.wxyz,
+                position=t,
+                format="jpeg",
+                jpeg_quality=50
+            )
 
     # Load splat or point cloud files
     splat_path = Path(f"{tinynav_map_path}/splat.ply")
