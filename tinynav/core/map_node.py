@@ -224,7 +224,7 @@ class MapNode(Node):
             pois_dict[index] = np.array(self.pois[str(key)]["position"])
             self.poi_external_to_internal[key] = index
         self.pois = pois_dict
-        # POI navigation is disabled by default; send "start" to /mapping/poi_nav_cmd to begin.
+        # POI navigation automaticly is (False) disabled by default; send "start" to /mapping/poi_nav_cmd to begin.
         self.poi_nav_enabled = False
         self.poi_auto_advance_enabled = True
 
