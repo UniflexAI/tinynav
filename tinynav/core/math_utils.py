@@ -189,7 +189,8 @@ def depth_to_cloud(depth, K, step=10, max_dist=1e9):
                 x = (u - cx) * z / fx
                 y = (v - cy) * z / fy
                 pts.append((x, y, z))   # tuples are allowed
-
+    if len(pts) == 0:
+        return np.empty((0, 3), dtype=np.float64)
     # convert typed list → ndarray
     return np.array(pts)
 

@@ -34,6 +34,7 @@ class MapTab extends ConsumerWidget {
               mapAsync.when(
                 data: (mapInfo) => mapInfo == null
                     ? _LocalPlanningView(planning: planning)
+                    ? const _NoMapCard()
                     : _MapView(
                         mapInfo: mapInfo,
                         imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
@@ -266,6 +267,192 @@ class _LocalizationChip extends StatelessWidget {
           Text(
             localized ? 'Localized' : 'Not Localized',
             style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Camera PiP ───────────────────────────────────────────────────────────────
+
+class _CameraPreviewPip extends ConsumerStatefulWidget {
+  const _CameraPreviewPip();
+
+  @override
+  ConsumerState<_CameraPreviewPip> createState() => _CameraPreviewPipState();
+}
+
+class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
+  Uint8List? _latestFrame;
+
+  void _showFullscreen(BuildContext context) {
+    final topic = ref.read(selectedPreviewTopicProvider);
+    if (topic == null) return;
+    showDialog(
+      context: context,
+      builder: (_) => _FullscreenPreview(topic: topic),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final topicsAsync = ref.watch(imageTopicsProvider);
+    final selectedTopic = ref.watch(selectedPreviewTopicProvider);
+    final topics = topicsAsync.valueOrNull ?? [];
+
+    // Listen to preview stream when a topic is selected.
+    if (selectedTopic != null) {
+      ref.listen<AsyncValue<Uint8List>>(
+        previewStreamProvider(selectedTopic),
+        (_, next) {
+          if (next case AsyncData(:final value)) {
+            if (mounted) setState(() => _latestFrame = value);
+          }
+        },
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        // Topic selector row
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.black87,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
+              const SizedBox(width: 4),
+              DropdownButton<String?>(
+                value: selectedTopic,
+                hint: const Text('Camera', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                dropdownColor: Colors.black87,
+                underline: const SizedBox(),
+                isDense: true,
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  ),
+                  ...topics.map((t) {
+                    const labels = {
+                      '/camera/camera/color/image_raw': 'color',
+                      '/camera/camera/infra1/image_rect_raw': 'left',
+                      '/camera/camera/infra2/image_rect_raw': 'right',
+                      '/slam/depth': 'depth',
+                    };
+                    final label = labels[t] ?? t.split('/').last;
+                    return DropdownMenuItem<String?>(
+                      value: t,
+                      child: Text(label, style: const TextStyle(fontSize: 12)),
+                    );
+                  }),
+                ],
+                onChanged: (v) {
+                  ref.read(selectedPreviewTopicProvider.notifier).state = v;
+                  if (v == null) setState(() => _latestFrame = null);
+                },
+              ),
+            ],
+          ),
+        ),
+        // Preview frame
+        if (selectedTopic != null)
+          GestureDetector(
+            onTap: _latestFrame != null ? () => _showFullscreen(context) : null,
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+              child: SizedBox(
+                width: 176,
+                height: 132,
+                child: _latestFrame != null
+                    ? Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.memory(
+                            _latestFrame!,
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                          ),
+                          Align(
+                            alignment: Alignment.bottomRight,
+                            child: Container(
+                              margin: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              padding: const EdgeInsets.all(2),
+                              child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
+                            ),
+                          ),
+                        ],
+                      )
+                    : Container(
+                        color: Colors.black,
+                        child: const Center(
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white54,
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ── Fullscreen preview dialog ─────────────────────────────────────────────────
+
+class _FullscreenPreview extends ConsumerStatefulWidget {
+  final String topic;
+  const _FullscreenPreview({required this.topic});
+
+  @override
+  ConsumerState<_FullscreenPreview> createState() => _FullscreenPreviewState();
+}
+
+class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
+  Uint8List? _frame;
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen<AsyncValue<Uint8List>>(
+      previewStreamProvider(widget.topic),
+      (_, next) {
+        if (next case AsyncData(:final value)) {
+          if (mounted) setState(() => _frame = value);
+        }
+      },
+    );
+
+    return Dialog(
+      backgroundColor: Colors.black,
+      insetPadding: const EdgeInsets.all(12),
+      child: Stack(
+        children: [
+          Center(
+            child: _frame != null
+                ? Image.memory(_frame!, fit: BoxFit.contain, gaplessPlayback: true)
+                : const CircularProgressIndicator(color: Colors.white54),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white),
+              onPressed: () => Navigator.pop(context),
+            ),
           ),
         ],
       ),
