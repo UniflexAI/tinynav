@@ -97,7 +97,11 @@ class _MapView extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: AspectRatio(
         aspectRatio: aspect > 0 ? aspect : 1.0,
-        child: LayoutBuilder(
+        child: InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 8.0,
+          boundaryMargin: const EdgeInsets.all(double.infinity),
+          child: LayoutBuilder(
           builder: (ctx, constraints) {
             final canvasW = constraints.maxWidth;
             final canvasH = constraints.maxHeight;
@@ -173,6 +177,7 @@ class _MapView extends StatelessWidget {
             );
           },
         ),
+        ),
       ),
     );
   }
@@ -190,8 +195,12 @@ class _LocalPlanningView extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       child: AspectRatio(
         aspectRatio: 1.0,
-        child: Stack(
-          fit: StackFit.expand,
+        child: InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 8.0,
+          boundaryMargin: const EdgeInsets.all(double.infinity),
+          child: Stack(
+            fit: StackFit.expand,
           children: [
             Container(color: const Color(0xFF0D1117)),
             if (p?.esdfImage != null)
@@ -228,6 +237,7 @@ class _LocalPlanningView extends StatelessWidget {
                 ),
               ),
           ],
+          ),
         ),
       ),
     );
