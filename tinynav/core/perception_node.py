@@ -145,8 +145,8 @@ class PerceptionNode(Node):
 
         # Noise model (continuous-time)
         # for Realsense D435i
-        accel_noise_density = 0.25     # [m/s^2/√Hz]
-        gyro_noise_density = 0.00005 # [rad/s/√Hz]
+        accel_noise_density = 0.50     # [m/s^2/√Hz]
+        gyro_noise_density = 0.50 # [rad/s/√Hz]
         bias_acc_rw_sigma = 0.001
         bias_gyro_rw_sigma = 0.0001
         self.pre_integration_params = gtsam.PreintegrationCombinedParams.MakeSharedU()
