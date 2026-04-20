@@ -66,7 +66,7 @@ class LocalPlanningPainter extends CustomPainter {
     }
 
     // Draw robot arrow at canvas center.
-    _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0, size.width * 0.045);
+    _drawRobotArrow(canvas, Offset(cx, cy), (pose?.yaw ?? 0.0) - math.pi / 2, size.width * 0.045);
   }
 
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw, double r) {
