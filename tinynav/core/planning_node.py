@@ -719,7 +719,6 @@ class PlanningNode(Node):
         )
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
-        self.planning_cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
@@ -782,15 +781,9 @@ class PlanningNode(Node):
         self.target_pose = None
         self.global_path_xy = None
 
-        # Keep planning event-driven (sync depth+odom), but publish cmd at a fixed rate.
-        self.cmd_rate_hz = 30.0
-        self.path_stale_slow_s = 0.3
-        self.path_stale_stop_s = 0.6
         self.max_linear_speed = 0.8  # m/s
         self.max_reverse_speed = 0.1  # m/s
         self.max_angular_speed = 0.5  # rad/s
-        self.max_linear_acc = 2.0   # m/s^2
-        self.max_angular_acc = 2.5   # rad/s^2
         # Keep DWA sampling consistent with cmd speed limits.
         self.dwa_v_samples = np.array(
             [
@@ -817,13 +810,6 @@ class PlanningNode(Node):
         self.path_smooth_passes = 3
         self.planner_mode = 'astar'  # 'astar' | 'dwa'
 
-        self.latest_cmd = Twist()
-        self.prev_cmd = Twist()
-        self.last_cmd_pub_time = time.monotonic()
-        self.last_path_update_time = None
-
-        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-
         # Do not clear target_pose here: planner should keep chasing latest /control/target_pose.
 
     def target_pose_callback(self, msg):
@@ -832,7 +818,7 @@ class PlanningNode(Node):
     def global_plan_callback(self, msg: Path):
         if len(msg.poses) == 0:
             self.global_path_xy = None
-            # map_node stop publishes an empty global plan; clear target so cmd goes to zero.
+            # map_node stop publishes an empty global plan; clear target so local path is empty.
             self.target_pose = None
             return
         self.global_path_xy = np.array(
@@ -996,45 +982,6 @@ class PlanningNode(Node):
         path_msg.poses.append(p1)
 
         self.safety_path_pub.publish(path_msg)
-
-    def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
-        return float(np.clip(target - current, -max_delta, max_delta) + current)
-
-    def _clamp_cmd_limits(self, cmd: Twist) -> Twist:
-        out = Twist()
-        out.linear.x = float(np.clip(cmd.linear.x, -self.max_reverse_speed, self.max_linear_speed))
-        out.angular.z = float(np.clip(cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
-        out.linear.y = 0.0
-        return out
-
-    def cmd_timer_callback(self):
-        now = time.monotonic()
-        dt = max(1e-3, now - self.last_cmd_pub_time)
-        self.last_cmd_pub_time = now
-
-        # Stale-path protection: slow down, then stop if planner has not refreshed.
-        age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
-        target_cmd = Twist()
-        target_cmd.linear.x = self.latest_cmd.linear.x
-        target_cmd.angular.z = self.latest_cmd.angular.z
-        if age > self.path_stale_stop_s:
-            target_cmd.linear.x = 0.0
-            target_cmd.angular.z = 0.0
-        elif age > self.path_stale_slow_s:
-            target_cmd.linear.x *= 0.3
-            target_cmd.angular.z *= 0.5
-        target_cmd = self._clamp_cmd_limits(target_cmd)
-
-        # Acceleration limiting for smoother control.
-        max_dv = self.max_linear_acc * dt
-        max_dw = self.max_angular_acc * dt
-        out = Twist()
-        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
-        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
-        out.linear.y = 0.0
-
-        self.planning_cmd_pub.publish(out)
-        self.prev_cmd = out
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -1238,64 +1185,6 @@ class PlanningNode(Node):
                 pose.pose.orientation.w = 1.0
                 path_msg.poses.append(pose)
             self.path_pub.publish(path_msg)
-
-            cmd = Twist()
-            if self.target_pose is None:
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-            elif effective_target is None:
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.0
-            else:
-                robot_xy = self.camera_to_robot_center(T)[:2]
-                forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-                forward_xy = forward_world[:2]
-                target_dist = np.linalg.norm(effective_target - robot_xy)
-                if target_dist < 0.25:
-                    cmd.linear.x = 0.0
-                    cmd.angular.z = 0.0
-                elif len(local_path_world) < 2:
-                    # Recovery behavior: cautiously probe toward target instead of pure spinning.
-                    # This keeps the robot moving even when footprint filtering truncates the path.
-                    to_target = effective_target - robot_xy
-                    norm_f = np.linalg.norm(forward_xy)
-                    norm_t = np.linalg.norm(to_target)
-                    if norm_f < 1e-6 or norm_t < 1e-6:
-                        cmd.linear.x = 0.0
-                        cmd.angular.z = 0.0
-                    else:
-                        forward_xy = forward_xy / norm_f
-                        to_target = to_target / norm_t
-                        heading_err = signed_angle_between(forward_xy, to_target)
-                        cmd.angular.z = float(np.clip(1.6 * heading_err, -self.max_angular_speed, self.max_angular_speed))
-                        cmd.linear.x = self.recovery_fast_speed if abs(heading_err) < 0.6 else self.recovery_slow_speed
-                else:
-                    lookahead = pick_lookahead_point(local_path_world, robot_xy, lookahead_dist=1.5)
-                    norm_f = np.linalg.norm(forward_xy)
-                    to_wp = lookahead[:2] - robot_xy
-                    norm_t = np.linalg.norm(to_wp)
-
-                    if norm_f < 1e-6 or norm_t < 1e-6:
-                        cmd.linear.x = 0.0
-                        cmd.angular.z = 0.0
-                    else:
-                        forward_xy = forward_xy / norm_f
-                        to_wp = to_wp / norm_t
-                        heading_err = signed_angle_between(forward_xy, to_wp)
-
-                        cmd.angular.z = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
-                        heading_scale = max(0.0, np.cos(heading_err))
-                        dist_scale = np.clip(target_dist / 1.0, 0.2, 1.0)
-                        cmd.linear.x = float(np.clip(self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed))
-                        if abs(heading_err) > 1.0:
-                            cmd.linear.x *= 0.40
-
-            if self.target_pose is not None:
-                forward_world = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-                robot_xy_gate = self.camera_to_robot_center(T)[:2]
-                self.publish_safety_gate_path(robot_xy_gate, forward_world[:2], cmd, depth_msg.header.stamp, T[2, 3])
-            self.latest_cmd = self._clamp_cmd_limits(cmd)
-            self.last_path_update_time = time.monotonic()
 
 
 def main(args=None):

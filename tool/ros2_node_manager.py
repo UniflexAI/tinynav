@@ -129,9 +129,9 @@ class Ros2NodeManager(Node):
         self.processes['planning'] = self._spawn(
             cmd_planning, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_planning_node.log'))
         
-        # cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
-        # self.processes['control'] = self._spawn(
-        #     cmd_control, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_cmd_vel_control.log'))
+        cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
+        self.processes['control'] = self._spawn(
+            cmd_control, log_path=os.path.join(log_dir, f'{log_ts}_uv_run_cmd_vel_control.log'))
         
         cmd_map = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',

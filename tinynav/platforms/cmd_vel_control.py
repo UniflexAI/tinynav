@@ -1,180 +1,144 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Path, Odometry
-from scipy.spatial.transform import Rotation as R
+from nav_msgs.msg import Path
+from nav_msgs.msg import Odometry
 import numpy as np
 import logging
 import time
 
+from tinynav.core.math_utils import msg2np as _msg2np
+
+# Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
+
+
+def _nearest_tangent(path_world: list, robot_xy: np.ndarray) -> np.ndarray:
+    """Direction of the path segment closest to the robot."""
+    d_best = float('inf')
+    i_best = 0
+    for i in range(len(path_world) - 1):
+        d = np.linalg.norm(path_world[i][:2] - robot_xy)
+        if d < d_best:
+            d_best = d
+            i_best = i
+    return path_world[i_best + 1][:2] - path_world[i_best][:2]
 
 
 class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
-        self.logger = self.get_logger()
+        self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
+        self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
 
-        # Camera +z = robot +x (forward); used only for heading extraction
-        self.T_robot_to_camera = np.array([
-            [0, -1, 0, 0],
-            [0,  0,-1, 0],
-            [1,  0, 0, 0],
-            [0,  0, 0, 1]], dtype=np.float32)
-
+        self.last_path_time = 0.0
         self.pose = None
-        self.path = None
-        self.last_path_update_time = None
+        self.path_world = []
 
-        # Pure Pursuit parameters
-        self.lookahead_distance = 0.4   # m
-        self.max_linear_speed  = 0.8    # m/s
-        self.max_angular_speed = 0.8    # rad/s
-
-        # 20 Hz publish loop with stale-path protection and acc limiting
-        self.cmd_rate_hz       = 20.0
+        # === Control loop (ported from planning_node_compare style) ===
+        self.cmd_rate_hz = 30.0
         self.path_stale_slow_s = 0.3
         self.path_stale_stop_s = 0.6
-        self.max_linear_acc    = 0.4    # m/s²
-        self.max_angular_acc   = 0.8    # rad/s²
+        self.max_linear_speed = 0.8
+        self.max_linear_acc = 2.0   # m/s^2
+        self.max_angular_acc = 2.5  # rad/s^2
+        self.max_angular_speed = 0.5
 
         self.latest_cmd = Twist()
-        self.prev_cmd   = Twist()
+        self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
+        self.last_path_update_time = None
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
-    # ── odom callback (50 Hz) ──────────────────────────────────────────────
-    def pose_callback(self, msg: Odometry):
+    def _update_cmd(self):
+        if not self.path_world or self.pose is None:
+            return
+        T, _ = _msg2np(self.pose)
+        robot_xy = T[:2, 3]
+        forward_xy = (T[:3, :3] @ np.array([0.0, 0.0, 1.0]))[:2]
+
+        tangent = _nearest_tangent(self.path_world, robot_xy)
+        norm_f = np.linalg.norm(forward_xy)
+        norm_t = np.linalg.norm(tangent)
+        if norm_f < 1e-6 or norm_t < 1e-6:
+            return
+
+        cross = forward_xy[0] / norm_f * tangent[1] / norm_t - forward_xy[1] / norm_f * tangent[0] / norm_t
+        dot   = forward_xy[0] / norm_f * tangent[0] / norm_t + forward_xy[1] / norm_f * tangent[1] / norm_t
+        heading_err = float(np.arctan2(cross, dot))
+
+        dist_to_end = float(np.linalg.norm(self.path_world[-1][:2] - robot_xy))
+        dist_scale  = float(np.clip(dist_to_end, 0.2, 1.0))
+        heading_scale = max(0.0, float(np.cos(heading_err)))
+
+        vx = float(np.clip(self.max_linear_speed * heading_scale * dist_scale, 0.0, self.max_linear_speed))
+        if abs(heading_err) > 1.0:
+            vx *= 0.40
+        vyaw = float(np.clip(1.8 * heading_err, -self.max_angular_speed, self.max_angular_speed))
+
+        self.latest_cmd.linear.x = vx
+        self.latest_cmd.angular.z = vyaw
+
+    def pose_callback(self, msg):
         self.pose = msg
-        self._update_pure_pursuit()
+        self._update_cmd()
 
-    # ── path callback (planner rate ~5-10 Hz) ─────────────────────────────
-    def path_callback(self, msg: Path):
-        if msg is None or len(msg.poses) < 2:
-            return
-        self.path = msg
-        self.last_path_update_time = time.monotonic()
-        self._update_pure_pursuit()
-
-    # ── Pure Pursuit state update ──────────────────────────────────────────
-    def _update_pure_pursuit(self):
-        if self.path is None or self.pose is None:
-            return
-
-        robot_xy, robot_heading = self._robot_pose_2d()
-
-        # Path waypoint positions in world frame (x, y)
-        waypoints = np.array([
-            [p.pose.position.x, p.pose.position.y]
-            for p in self.path.poses
-        ], dtype=np.float64)
-
-        # Find nearest waypoint, then search for lookahead point ahead of it
-        dists = np.linalg.norm(waypoints - robot_xy, axis=1)
-        nearest_idx = int(np.argmin(dists))
-        lookahead_pt = self._find_lookahead(robot_xy, waypoints, nearest_idx)
-
-        # Heading error (robot frame)
-        dx = lookahead_pt[0] - robot_xy[0]
-        dy = lookahead_pt[1] - robot_xy[1]
-        target_heading = np.arctan2(dy, dx)
-        alpha = target_heading - robot_heading
-        alpha = (alpha + np.pi) % (2 * np.pi) - np.pi   # wrap to [-π, π]
-
-        # Linear speed: reduce when heading error is large
-        abs_alpha = abs(alpha)
-        v = float(self.max_linear_speed * max(0.0, 1.0 - abs_alpha / (np.pi / 2)))
-
-        # Pure Pursuit: ω = 2·v·sin(α) / L  (rotate in place if v≈0)
-        if v > 1e-3:
-            wz = float(np.clip(
-                2.0 * v * np.sin(alpha) / self.lookahead_distance,
-                -self.max_angular_speed, self.max_angular_speed))
-        else:
-            wz = float(np.clip(
-                alpha * 1.5,
-                -self.max_angular_speed, self.max_angular_speed))
-
-        self.latest_cmd.linear.x  = v
-        self.latest_cmd.angular.z = wz
-        self.logger.debug(f"pure_pursuit v={v:.3f} wz={wz:.3f} alpha={np.degrees(alpha):.1f}°")
-
-    def _robot_pose_2d(self):
-        """Return (xy, heading) in world frame from odom (camera pose)."""
-        p = self.pose.pose.pose
-        R_cam = R.from_quat([p.orientation.x, p.orientation.y,
-                              p.orientation.z, p.orientation.w]).as_matrix()
-        # Camera +z = robot forward (+x)
-        fwd = R_cam[:, 2]
-        heading = np.arctan2(fwd[1], fwd[0])
-        return np.array([p.position.x, p.position.y]), heading
-
-    def _find_lookahead(self, robot_xy: np.ndarray,
-                        waypoints: np.ndarray, start_idx: int) -> np.ndarray:
-        L = self.lookahead_distance
-        for i in range(start_idx, len(waypoints) - 1):
-            seg_start = waypoints[i]
-            seg_end   = waypoints[i + 1]
-            d = seg_end - seg_start
-            f = seg_start - robot_xy
-            a = float(d @ d)
-            if a < 1e-9:
-                continue
-            b = 2.0 * float(f @ d)
-            c = float(f @ f) - L * L
-            disc = b * b - 4 * a * c
-            if disc >= 0:
-                t = (-b + np.sqrt(disc)) / (2 * a)
-                if 0.0 <= t <= 1.0:
-                    return seg_start + t * d
-        return waypoints[-1]
-
-    # ── 20 Hz publish loop ─────────────────────────────────────────────────
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
     def cmd_timer_callback(self):
         now = time.monotonic()
-        dt  = max(1e-3, now - self.last_cmd_pub_time)
+        dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
 
-        age = float('inf') if self.last_path_update_time is None \
-              else (now - self.last_path_update_time)
-
-        target = Twist()
-        target.linear.x  = self.latest_cmd.linear.x
-        target.angular.z = self.latest_cmd.angular.z
+        # Stale-path protection: slow down, then stop if planner has not refreshed.
+        age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
+        target_cmd = Twist()
+        target_cmd.linear.x = self.latest_cmd.linear.x
+        target_cmd.angular.z = self.latest_cmd.angular.z
         if age > self.path_stale_stop_s:
-            target.linear.x  = 0.0
-            target.angular.z = 0.0
+            target_cmd.linear.x = 0.0
+            target_cmd.angular.z = 0.0
         elif age > self.path_stale_slow_s:
-            target.linear.x  *= 0.3
-            target.angular.z *= 0.5
+            target_cmd.linear.x *= 0.3
+            target_cmd.angular.z *= 0.5
 
-        max_dv = self.max_linear_acc  * dt
+        # Acceleration limiting for smoother control.
+        max_dv = self.max_linear_acc * dt
         max_dw = self.max_angular_acc * dt
         out = Twist()
-        out.linear.x  = self._clamp_step(target.linear.x,  self.prev_cmd.linear.x,  max_dv)
-        out.angular.z = self._clamp_step(target.angular.z, self.prev_cmd.angular.z, max_dw)
+        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
+        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
+        out.linear.y = 0.0
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
+
+    def path_callback(self, msg):
+        if msg is None or len(msg.poses) < 2:
+            return
+        self.path_world = [
+            np.array([p.pose.position.x, p.pose.position.y, p.pose.position.z], dtype=np.float32)
+            for p in msg.poses
+        ]
+        self.last_path_update_time = time.monotonic()
+        self._update_cmd()
 
     def destroy_node(self):
         self.logger.info("Destroying cmd_vel_control connection.")
         super().destroy_node()
 
-
 def main(args=None):
     rclpy.init(args=args)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
+
     node = CmdVelControlNode()
     try:
         rclpy.spin(node)
@@ -184,7 +148,6 @@ def main(args=None):
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()
