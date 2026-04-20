@@ -3,7 +3,7 @@ import os
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 import numpy as np
 import sys
 import json
