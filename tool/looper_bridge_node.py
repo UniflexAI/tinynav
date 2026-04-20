@@ -131,9 +131,10 @@ class LooperBridgeNode(Node):
             missing.append(f"imu->{self.depth_frame_id or 'depth'} TF")
         self.get_logger().info(f"Waiting for Looper bridge inputs: {', '.join(missing)}")
 
-    def should_add_keyframe(self, T_world_camera: np.ndarray) -> bool:
+    def should_add_keyframe(self, T_world_camera: np.ndarray, stamp) -> bool:
         if self.last_keyframe_pose is None:
             return True
+        current_time = self.stamp_to_sec(stamp)
         translation = np.linalg.norm(
             T_world_camera[:3, 3] - self.last_keyframe_pose[:3, 3]
         )
@@ -144,6 +145,10 @@ class LooperBridgeNode(Node):
         return (
             translation >= self.args.keyframe_translation
             or rotation_angle >= np.deg2rad(self.args.keyframe_rotation_deg)
+            or (
+                self.last_keyframe_time is not None
+                and (current_time - self.last_keyframe_time) > 3.0
+            )
         )
 
     def build_odom(self, T_world_camera: np.ndarray, stamp) -> Odometry:
