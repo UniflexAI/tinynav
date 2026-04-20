@@ -603,7 +603,6 @@ class BuildMapNode(Node):
                             prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
                             success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                             if success and len(inliers) >= 100:
-                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
 
                                 # compare the loop constraint with the odometry constraint, if the loop constraint is much larger than the odometry constraint, we skip this loop constraint to avoid adding wrong loop constraint.
                                 # by Large, we mean large than the odometryconstraint 10%
@@ -615,6 +614,7 @@ class BuildMapNode(Node):
                                     self.get_logger().warn(f"Loop constraint rejected due to large difference with odometry: {odom_diff} > {0.1 * (np.linalg.norm(odom_T_prev_curr[:3, 3]) + np.linalg.norm(T_prev_curr[:3, 3])) / 2}")
                                     continue
 
+                                #self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                                 #self.edges.add((prev_timestamp, curr_timestamp))
                             
