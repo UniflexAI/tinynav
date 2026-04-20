@@ -218,13 +218,19 @@ class MapNode(Node):
             self.pois = {}
         self.poi_index = min(0, len(self.pois) - 1)
         pois_dict = {}
-        keys = sorted([int (key) for key in self.pois.keys()])
+        self.poi_external_to_internal = {}
+        keys = sorted([int(key) for key in self.pois.keys()])
         for index, key in enumerate(keys):
             pois_dict[index] = np.array(self.pois[str(key)]["position"])
+            self.poi_external_to_internal[key] = index
         self.pois = pois_dict
+        # POI navigation is disabled by default; send "start" to /mapping/poi_nav_cmd to begin.
+        self.poi_nav_enabled = False
+        self.poi_auto_advance_enabled = True
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+        self.poi_nav_cmd_sub = self.create_subscription(String, '/mapping/poi_nav_cmd', self.poi_nav_cmd_callback, 10)
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
@@ -245,6 +251,58 @@ class MapNode(Node):
 
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+
+    def _publish_poi_stop_signal(self):
+        stamp_msg = self.get_clock().now().to_msg()
+        self.poi_change_pub.publish(np2msg(np.eye(4), stamp_msg, "world", "map"))
+        empty_path = Path()
+        empty_path.header.stamp = stamp_msg
+        empty_path.header.frame_id = "map"
+        self.global_plan_pub.publish(empty_path)
+
+    def poi_nav_cmd_callback(self, msg: String):
+        cmd = (msg.data or "").strip().lower()
+        if cmd == "start":
+            if len(self.pois) == 0:
+                self.get_logger().warning("POI navigation start requested, but no POIs loaded")
+                return
+            if self.poi_index < 0 or self.poi_index >= len(self.pois):
+                self.poi_index = 0
+            self.poi_nav_enabled = True
+            self.poi_auto_advance_enabled = True
+            self.get_logger().info(f"POI navigation enabled, current index={self.poi_index}")
+            return
+        if cmd == "stop":
+            self.poi_nav_enabled = False
+            self.poi_auto_advance_enabled = True
+            self._publish_poi_stop_signal()
+            self.get_logger().info("POI navigation disabled")
+            return
+        if cmd.startswith("goto:"):
+            index_text = cmd.split(":", 1)[1].strip()
+            if not index_text:
+                self.get_logger().warning("Invalid poi nav cmd: missing index in goto")
+                return
+            try:
+                index = int(index_text)
+            except ValueError:
+                self.get_logger().warning(f"Invalid poi nav cmd index: {index_text}")
+                return
+            if index in self.poi_external_to_internal:
+                resolved_index = self.poi_external_to_internal[index]
+            elif 0 <= index < len(self.pois):
+                resolved_index = index
+            else:
+                self.get_logger().warning(
+                    f"POI index invalid: {index}, total={len(self.pois)}"
+                )
+                return
+            self.poi_index = resolved_index
+            self.poi_nav_enabled = True
+            self.poi_auto_advance_enabled = False
+            self.get_logger().info(f"POI navigation goto index: input={index}, resolved={resolved_index}")
+            return
+        self.get_logger().warning(f"Unknown poi nav cmd: {msg.data}")
 
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
@@ -521,6 +579,9 @@ class MapNode(Node):
 
     def try_publish_nav_path(self, timestamp: int):
         self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
+        if not self.poi_nav_enabled:
+            self.get_logger().debug("POI navigation disabled, skip publishing nav path")
+            return
         if self.T_from_map_to_odom is None:
             self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
             return
