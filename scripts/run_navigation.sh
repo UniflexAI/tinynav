@@ -5,8 +5,10 @@ map_path="PATH/TO/MAP"
 tmux new-session \; \
   split-window -h \; \
   split-window -v \; \
-  select-pane -t 0 \; split-window -v \; \
-  select-pane -t 4 \; split-window -v \; \
+  split-window -v \; \
+  split-window -v \; \
+  split-window -v \; \
+  select-layout tiled \; \
   select-pane -t 0 \; send-keys 'uv run python /tinynav/tinynav/core/perception_node.py' C-m \; \
   select-pane -t 1 \; send-keys 'uv run python /tinynav/tinynav/core/planning_node.py' C-m \; \
   select-pane -t 2 \; send-keys "uv run python /tinynav/tinynav/core/map_node.py --tinynav_map_path $map_path" C-m \; \
