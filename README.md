@@ -6,6 +6,7 @@
 
 **TinyNav** : *A lightweight, hackable system to guide your robots anywhere.*
  Maintained by [Uniflex AI](https://x.com/UniflexAI).
+ Sponsored by [Looper Robotics](https://looper-robotics.com/).
 
 <h3>
 
