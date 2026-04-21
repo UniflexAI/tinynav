@@ -21,7 +21,7 @@ class MapTab extends ConsumerWidget {
     final baseUrl = ref.watch(baseUrlProvider);
     final planning = planningAsync.valueOrNull;
 
-    return Stack(
+    return Column(
       children: [
         RefreshIndicator(
           onRefresh: () async {
@@ -50,30 +50,24 @@ class MapTab extends ConsumerWidget {
                     padding: const EdgeInsets.all(16),
                     child: Text('$e', style: const TextStyle(color: Colors.red)),
                   ),
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => Center(
-              child: Text('$e', style: const TextStyle(color: Colors.red)),
-            ),
+                ),
+              ),
+              if (planning != null)
+                Positioned(
+                  top: 8,
+                  left: 8,
+                  child: _LocalizationChip(localized: planning.localized),
+                ),
+              Positioned(
+                bottom: 12,
+                left: 12,
+                child: _PoiFloatingButton(
+                  poisAsync: poisAsync,
+                  pose: poseAsync.valueOrNull,
+                ),
+              ),
+            ],
           ),
-        ),
-        if (planning != null)
-          Positioned(
-            top: 12,
-            left: 12,
-            child: _LocalizationChip(localized: planning.localized),
-          ),
-        Positioned(
-          bottom: 16,
-          left: 16,
-          child: _PoiFloatingButton(
-            poisAsync: poisAsync,
-            pose: poseAsync.valueOrNull,
-          ),
-        ),
-        const Positioned(
-          right: 12,
-          bottom: 16,
-          child: _CameraPreviewPip(),
         ),
       ],
     );
@@ -655,16 +649,16 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   }
 }
 
-// ── Camera PiP ───────────────────────────────────────────────────────────────
+// ── Camera panel (top 1/3) ────────────────────────────────────────────────────
 
-class _CameraPreviewPip extends ConsumerStatefulWidget {
-  const _CameraPreviewPip();
+class _CameraPanel extends ConsumerStatefulWidget {
+  const _CameraPanel();
 
   @override
-  ConsumerState<_CameraPreviewPip> createState() => _CameraPreviewPipState();
+  ConsumerState<_CameraPanel> createState() => _CameraPanelState();
 }
 
-class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
+class _CameraPanelState extends ConsumerState<_CameraPanel> {
   Uint8List? _latestFrame;
 
   void _showFullscreen(BuildContext context) {
@@ -693,99 +687,105 @@ class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
       );
     }
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.black87,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
-              const SizedBox(width: 4),
-              DropdownButton<String?>(
-                value: selectedTopic,
-                hint: const Text('Camera', style: TextStyle(color: Colors.white54, fontSize: 12)),
-                style: const TextStyle(color: Colors.white, fontSize: 12),
-                dropdownColor: Colors.black87,
-                underline: const SizedBox(),
-                isDense: true,
-                items: [
-                  const DropdownMenuItem<String?>(
-                    value: null,
-                    child: Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
-                  ),
-                  ...topics.map((t) {
-                    const labels = {
-                      '/camera/camera/color/image_raw': 'color',
-                      '/camera/camera/infra1/image_rect_raw': 'left',
-                      '/camera/camera/infra2/image_rect_raw': 'right',
-                      '/slam/depth': 'depth',
-                    };
-                    final label = labels[t] ?? t.split('/').last;
-                    return DropdownMenuItem<String?>(
-                      value: t,
-                      child: Text(label, style: const TextStyle(fontSize: 12)),
-                    );
-                  }),
-                ],
-                onChanged: (v) {
-                  ref.read(selectedPreviewTopicProvider.notifier).state = v;
-                  if (v == null) setState(() => _latestFrame = null);
-                },
+    return Container(
+      color: Colors.black,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // ── Video frame ────────────────────────────────────────────────
+          if (selectedTopic != null && _latestFrame != null)
+            GestureDetector(
+              onTap: () => _showFullscreen(context),
+              child: Image.memory(
+                _latestFrame!,
+                fit: BoxFit.contain,
+                gaplessPlayback: true,
               ),
-            ],
-          ),
-        ),
-        if (selectedTopic != null)
-          GestureDetector(
-            onTap: _latestFrame != null ? () => _showFullscreen(context) : null,
-            child: ClipRRect(
-              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
-              child: SizedBox(
-                width: 176,
-                height: 132,
-                child: _latestFrame != null
-                    ? Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Image.memory(
-                            _latestFrame!,
-                            fit: BoxFit.cover,
-                            gaplessPlayback: true,
-                          ),
-                          Align(
-                            alignment: Alignment.bottomRight,
-                            child: Container(
-                              margin: const EdgeInsets.all(4),
-                              decoration: BoxDecoration(
-                                color: Colors.black54,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              padding: const EdgeInsets.all(2),
-                              child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
-                            ),
-                          ),
-                        ],
-                      )
-                    : Container(
-                        color: Colors.black,
-                        child: const Center(
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white54,
-                          ),
-                        ),
+            )
+          else
+            Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.videocam_off_outlined,
+                      color: Colors.white24, size: 36),
+                  const SizedBox(height: 8),
+                  Text(
+                    selectedTopic == null ? 'Select a camera topic' : 'Waiting for stream…',
+                    style: const TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          // ── Topic selector (top-right) ──────────────────────────────────
+          Positioned(
+            top: 8,
+            right: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
+                  const SizedBox(width: 6),
+                  DropdownButton<String?>(
+                    value: selectedTopic,
+                    hint: const Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                    dropdownColor: Colors.black87,
+                    underline: const SizedBox(),
+                    isDense: true,
+                    items: [
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
                       ),
+                      ...topics.map((t) {
+                        const labels = {
+                          '/camera/camera/color/image_raw': 'color',
+                          '/camera/camera/infra1/image_rect_raw': 'left',
+                          '/camera/camera/infra2/image_rect_raw': 'right',
+                          '/slam/depth': 'depth',
+                        };
+                        final label = labels[t] ?? t.split('/').last;
+                        return DropdownMenuItem<String?>(
+                          value: t,
+                          child: Text(label),
+                        );
+                      }),
+                    ],
+                    onChanged: (v) {
+                      ref.read(selectedPreviewTopicProvider.notifier).state = v;
+                      if (v == null) setState(() => _latestFrame = null);
+                    },
+                  ),
+                ],
               ),
             ),
           ),
-      ],
+          // ── Fullscreen button (bottom-right) ───────────────────────────
+          if (selectedTopic != null && _latestFrame != null)
+            Positioned(
+              bottom: 8,
+              right: 8,
+              child: GestureDetector(
+                onTap: () => _showFullscreen(context),
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
