@@ -77,7 +77,7 @@ echo -e "  ${DIM}$(flutter --version 2>&1 | head -1)${RESET}"
 step "Build Flutter Web"
 cd "$FRONTEND_DIR"
 info "flutter pub get"
-flutter pub get --suppress-analytics -q
+flutter pub get --suppress-analytics
 
 info "flutter build web --release"
 flutter build web --release --suppress-analytics 2>&1 | \
