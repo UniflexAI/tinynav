@@ -120,6 +120,8 @@ class BackendNode(Ros2NodeManager):
     def _on_height_map(self, msg: Image):
         try:
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+            if msg.encoding == 'rgb8':
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 70])
             with self._lock:
                 self._esdf_bytes = buf.tobytes()
@@ -232,6 +234,8 @@ class BackendNode(Ros2NodeManager):
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
             if arr.shape[2] == 1:
                 arr = arr[:, :, 0]
+            elif msg.encoding == 'rgb8':
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 50])
             frame = buf.tobytes()
         except Exception:
