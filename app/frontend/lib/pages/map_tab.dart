@@ -83,7 +83,11 @@ class _MapView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InteractiveViewer(
+    final aspect = mapInfo.width / mapInfo.height;
+    return Center(
+      child: AspectRatio(
+        aspectRatio: aspect > 0 ? aspect : 1.0,
+        child: InteractiveViewer(
       minScale: 0.5,
       maxScale: 8.0,
       boundaryMargin: const EdgeInsets.all(double.infinity),
@@ -160,6 +164,8 @@ class _MapView extends StatelessWidget {
           );
         },
       ),
+        ),
+      ),
     );
   }
 }
@@ -173,14 +179,20 @@ class _LocalPlanningView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = planning;
-    return InteractiveViewer(
-      minScale: 0.5,
-      maxScale: 8.0,
-      boundaryMargin: const EdgeInsets.all(double.infinity),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          Container(color: const Color(0xFF0D1117)),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Container(color: const Color(0xFF0D1117)),
+        Center(
+          child: AspectRatio(
+            aspectRatio: 1.0,
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 8.0,
+              boundaryMargin: const EdgeInsets.all(double.infinity),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
           if (p?.esdfImage != null)
             Opacity(
               opacity: 0.85,
@@ -214,8 +226,12 @@ class _LocalPlanningView extends StatelessWidget {
                 ],
               ),
             ),
-        ],
-      ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
