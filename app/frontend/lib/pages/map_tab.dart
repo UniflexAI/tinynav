@@ -182,13 +182,22 @@ class _MapView extends StatelessWidget {
 
 // ── Local planning view (Phase 1, no global map) ─────────────────────────────
 
-class _LocalPlanningView extends StatelessWidget {
+class _LocalPlanningView extends StatefulWidget {
   final PlanningState? planning;
   const _LocalPlanningView({this.planning});
 
   @override
+  State<_LocalPlanningView> createState() => _LocalPlanningViewState();
+}
+
+class _LocalPlanningViewState extends State<_LocalPlanningView> {
+  bool _showObstacle   = true;
+  bool _showEsdf       = false;
+  bool _showTrajectory = false;
+
+  @override
   Widget build(BuildContext context) {
-    final p = planning;
+    final p = widget.planning;
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -203,44 +212,163 @@ class _LocalPlanningView extends StatelessWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-          if (p?.esdfImage != null)
-            Opacity(
-              opacity: 0.85,
-              child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-            ),
-          if (p?.obstacleImage != null)
-            Opacity(
-              opacity: 0.45,
-              child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-            ),
-          if (p != null)
-            CustomPaint(
-              painter: LocalPlanningPainter(
-                trajectory: p.trajectory,
-                gridInfo: p.gridInfo,
-                odomPose: p.odomPose,
-              ),
-            )
-          else
-            const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.map_outlined, size: 52, color: Colors.white24),
-                  SizedBox(height: 8),
-                  Text('Waiting for planning data…',
-                      style: TextStyle(color: Colors.white38, fontSize: 13)),
-                  SizedBox(height: 4),
-                  Text('Build a map or start navigation to see the map here',
-                      style: TextStyle(color: Colors.white24, fontSize: 11)),
-                ],
-              ),
-            ),
+                  if (_showEsdf && p?.esdfImage != null)
+                    Opacity(
+                      opacity: 0.85,
+                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                    ),
+                  if (_showObstacle && p?.obstacleImage != null)
+                    Opacity(
+                      opacity: 0.45,
+                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                    ),
+                  if (p != null)
+                    CustomPaint(
+                      painter: LocalPlanningPainter(
+                        trajectory: _showTrajectory ? p.trajectory : const [],
+                        gridInfo: p.gridInfo,
+                        odomPose: p.odomPose,
+                      ),
+                    )
+                  else
+                    const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.map_outlined, size: 52, color: Colors.white24),
+                          SizedBox(height: 8),
+                          Text('Waiting for planning data…',
+                              style: TextStyle(color: Colors.white38, fontSize: 13)),
+                          SizedBox(height: 4),
+                          Text('Build a map or start navigation to see the map here',
+                              style: TextStyle(color: Colors.white24, fontSize: 11)),
+                        ],
+                      ),
+                    ),
                 ],
               ),
             ),
           ),
         ),
+        // ── Layer toggle (top-right) ────────────────────────────────────
+        Positioned(
+          top: 8,
+          right: 8,
+          child: _LayerTogglePanel(
+            showObstacle:   _showObstacle,
+            showEsdf:       _showEsdf,
+            showTrajectory: _showTrajectory,
+            onChanged: (obs, esdf, traj) => setState(() {
+              _showObstacle   = obs;
+              _showEsdf       = esdf;
+              _showTrajectory = traj;
+            }),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _LayerTogglePanel extends StatefulWidget {
+  final bool showObstacle;
+  final bool showEsdf;
+  final bool showTrajectory;
+  final void Function(bool obs, bool esdf, bool traj) onChanged;
+
+  const _LayerTogglePanel({
+    required this.showObstacle,
+    required this.showEsdf,
+    required this.showTrajectory,
+    required this.onChanged,
+  });
+
+  @override
+  State<_LayerTogglePanel> createState() => _LayerTogglePanelState();
+}
+
+class _LayerTogglePanelState extends State<_LayerTogglePanel> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        GestureDetector(
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.layers_outlined, color: Colors.white70, size: 14),
+                const SizedBox(width: 4),
+                const Text('Layers', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                const SizedBox(width: 4),
+                Icon(_expanded ? Icons.expand_less : Icons.expand_more,
+                    color: Colors.white54, size: 14),
+              ],
+            ),
+          ),
+        ),
+        if (_expanded) ...[
+          const SizedBox(height: 4),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _LayerRow('Obstacle',   widget.showObstacle,
+                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory)),
+                _LayerRow('ESDF',       widget.showEsdf,
+                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory)),
+                _LayerRow('Trajectory', widget.showTrajectory,
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v)),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _LayerRow extends StatelessWidget {
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+  const _LayerRow(this.label, this.value, this.onChanged);
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 28,
+          height: 28,
+          child: Transform.scale(
+            scale: 0.75,
+            child: Switch(
+              value: value,
+              onChanged: onChanged,
+              activeColor: const Color(0xFFFF6B35),
+            ),
+          ),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
       ],
     );
   }
