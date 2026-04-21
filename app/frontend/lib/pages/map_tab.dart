@@ -50,19 +50,26 @@ class MapTab extends ConsumerWidget {
                     padding: const EdgeInsets.all(16),
                     child: Text('$e', style: const TextStyle(color: Colors.red)),
                   ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              _PoiCard(poisAsync: poisAsync, pose: poseAsync.valueOrNull),
-            ],
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (e, _) => Center(
+              child: Text('$e', style: const TextStyle(color: Colors.red)),
+            ),
           ),
         ),
         if (planning != null)
           Positioned(
-            top: 8,
+            top: 12,
             left: 12,
             child: _LocalizationChip(localized: planning.localized),
           ),
+        Positioned(
+          bottom: 16,
+          left: 16,
+          child: _PoiFloatingButton(
+            poisAsync: poisAsync,
+            pose: poseAsync.valueOrNull,
+          ),
+        ),
         const Positioned(
           right: 12,
           bottom: 16,
@@ -92,98 +99,89 @@ class _MapView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final aspect = mapInfo.width / mapInfo.height;
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: AspectRatio(
-        aspectRatio: aspect > 0 ? aspect : 1.0,
-        child: InteractiveViewer(
-          minScale: 0.5,
-          maxScale: 8.0,
-          boundaryMargin: const EdgeInsets.all(double.infinity),
-          child: LayoutBuilder(
-          builder: (ctx, constraints) {
-            final canvasW = constraints.maxWidth;
-            final canvasH = constraints.maxHeight;
+    return InteractiveViewer(
+      minScale: 0.5,
+      maxScale: 8.0,
+      boundaryMargin: const EdgeInsets.all(double.infinity),
+      child: LayoutBuilder(
+        builder: (ctx, constraints) {
+          final canvasW = constraints.maxWidth;
+          final canvasH = constraints.maxHeight;
 
-            // Compute ESDF overlay rect in canvas coords when localized.
-            Positioned? esdfOverlay;
-            final p = planning;
-            if (p != null &&
-                p.localized &&
-                p.esdfImage != null &&
-                p.mapPose != null &&
-                p.gridInfo != null) {
-              final gi = p.gridInfo!;
-              final mp = p.mapPose!;
-              // canvas pixels per world meter
-              final pxPerMeter = canvasW / (mapInfo.width * mapInfo.resolution);
-              final gridW_m = gi.width * gi.resolution;
-              final gridH_m = gi.height * gi.resolution;
-              // Grid is centered on robot in map frame (approx — grid rolls with odom).
-              final left = (mp.x - gridW_m / 2 - mapInfo.originX) * pxPerMeter;
-              final top = canvasH -
-                  (mp.y - gridH_m / 2 - mapInfo.originY) * pxPerMeter -
-                  gridH_m * pxPerMeter;
-              final width = gridW_m * pxPerMeter;
-              final height = gridH_m * pxPerMeter;
+          Positioned? esdfOverlay;
+          final p = planning;
+          if (p != null &&
+              p.localized &&
+              p.esdfImage != null &&
+              p.mapPose != null &&
+              p.gridInfo != null) {
+            final gi = p.gridInfo!;
+            final mp = p.mapPose!;
+            final pxPerMeter = canvasW / (mapInfo.width * mapInfo.resolution);
+            final gridW_m = gi.width * gi.resolution;
+            final gridH_m = gi.height * gi.resolution;
+            final left = (mp.x - gridW_m / 2 - mapInfo.originX) * pxPerMeter;
+            final top = canvasH -
+                (mp.y - gridH_m / 2 - mapInfo.originY) * pxPerMeter -
+                gridH_m * pxPerMeter;
+            final width = gridW_m * pxPerMeter;
+            final height = gridH_m * pxPerMeter;
 
-              esdfOverlay = Positioned(
-                left: left,
-                top: top,
-                width: width,
-                height: height,
-                child: Opacity(
-                  opacity: 0.5,
-                  child: Image.memory(
-                    p.esdfImage!,
-                    fit: BoxFit.fill,
-                    gaplessPlayback: true,
-                  ),
-                ),
-              );
-            }
-
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.network(
-                  imageUrl,
+            esdfOverlay = Positioned(
+              left: left,
+              top: top,
+              width: width,
+              height: height,
+              child: Opacity(
+                opacity: 0.5,
+                child: Image.memory(
+                  p.esdfImage!,
                   fit: BoxFit.fill,
-                  loadingBuilder: (ctx2, child, progress) => progress == null
-                      ? child
-                      : Center(
-                          child: CircularProgressIndicator(
-                            value: progress.expectedTotalBytes != null
-                                ? progress.cumulativeBytesLoaded /
-                                    progress.expectedTotalBytes!
-                                : null,
-                          ),
-                        ),
-                  errorBuilder: (_, e, __) => Center(
-                    child: Text('Image error: $e',
-                        style: const TextStyle(color: Colors.red)),
-                  ),
+                  gaplessPlayback: true,
                 ),
-                if (esdfOverlay != null) esdfOverlay,
-                CustomPaint(
-                  painter: MapOverlayPainter(
-                    mapInfo: mapInfo,
-                    pose: pose,
-                    pois: pois,
-                  ),
-                ),
-              ],
+              ),
             );
-          },
-        ),
-        ),
+          }
+
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.network(
+                imageUrl,
+                fit: BoxFit.fill,
+                loadingBuilder: (ctx2, child, progress) => progress == null
+                    ? child
+                    : Center(
+                        child: CircularProgressIndicator(
+                          value: progress.expectedTotalBytes != null
+                              ? progress.cumulativeBytesLoaded /
+                                  progress.expectedTotalBytes!
+                              : null,
+                        ),
+                      ),
+                errorBuilder: (_, e, __) => Center(
+                  child: Text('Image error: $e',
+                      style: const TextStyle(color: Colors.red)),
+                ),
+              ),
+              if (esdfOverlay != null) esdfOverlay,
+              CustomPaint(
+                painter: MapOverlayPainter(
+                  mapInfo: mapInfo,
+                  pose: pose,
+                  pois: pois,
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
 }
 
-/// Phase 1 view: odom-centric local planning canvas shown when no global map.
+// ── Local planning view (Phase 1, no global map) ─────────────────────────────
+
 class _LocalPlanningView extends StatelessWidget {
   final PlanningState? planning;
   const _LocalPlanningView({this.planning});
@@ -191,58 +189,54 @@ class _LocalPlanningView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = planning;
-    return Card(
-      clipBehavior: Clip.antiAlias,
-      child: AspectRatio(
-        aspectRatio: 1.0,
-        child: InteractiveViewer(
-          minScale: 0.5,
-          maxScale: 8.0,
-          boundaryMargin: const EdgeInsets.all(double.infinity),
-          child: Stack(
-            fit: StackFit.expand,
-          children: [
-            Container(color: const Color(0xFF0D1117)),
-            if (p?.esdfImage != null)
-              Opacity(
-                opacity: 0.85,
-                child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+    return InteractiveViewer(
+      minScale: 0.5,
+      maxScale: 8.0,
+      boundaryMargin: const EdgeInsets.all(double.infinity),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Container(color: const Color(0xFF0D1117)),
+          if (p?.esdfImage != null)
+            Opacity(
+              opacity: 0.85,
+              child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+            ),
+          if (p?.obstacleImage != null)
+            Opacity(
+              opacity: 0.45,
+              child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+            ),
+          if (p != null)
+            CustomPaint(
+              painter: LocalPlanningPainter(
+                trajectory: p.trajectory,
+                gridInfo: p.gridInfo,
+                odomPose: p.odomPose,
               ),
-            if (p?.obstacleImage != null)
-              Opacity(
-                opacity: 0.45,
-                child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+            )
+          else
+            const Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.map_outlined, size: 52, color: Colors.white24),
+                  SizedBox(height: 8),
+                  Text('Waiting for planning data…',
+                      style: TextStyle(color: Colors.white38, fontSize: 13)),
+                  SizedBox(height: 4),
+                  Text('Build a map or start navigation to see the map here',
+                      style: TextStyle(color: Colors.white24, fontSize: 11)),
+                ],
               ),
-            if (p != null)
-              CustomPaint(
-                painter: LocalPlanningPainter(
-                  trajectory: p.trajectory,
-                  gridInfo: p.gridInfo,
-                  odomPose: p.odomPose,
-                ),
-              )
-            else
-              const Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.map_outlined, size: 52, color: Colors.white24),
-                    SizedBox(height: 8),
-                    Text('Waiting for planning data…',
-                        style: TextStyle(color: Colors.white38, fontSize: 13)),
-                    SizedBox(height: 4),
-                    Text('Build a map or start navigation to see the map here',
-                        style: TextStyle(color: Colors.white24, fontSize: 11)),
-                  ],
-                ),
-              ),
-          ],
-          ),
-        ),
+            ),
+        ],
       ),
     );
   }
 }
+
+// ── Localization chip ─────────────────────────────────────────────────────────
 
 class _LocalizationChip extends StatelessWidget {
   final bool localized;
@@ -250,22 +244,26 @@ class _LocalizationChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = localized ? Colors.greenAccent : Colors.redAccent;
+    final dotColor = localized ? const Color(0xFF69F0AE) : Colors.redAccent;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.black54,
+        color: Colors.black.withOpacity(0.65),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: color, width: 1.5),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(localized ? Icons.gps_fixed : Icons.gps_off, size: 14, color: color),
-          const SizedBox(width: 4),
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
+          ),
+          const SizedBox(width: 6),
           Text(
             localized ? 'Localized' : 'Not Localized',
-            style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+            style: const TextStyle(
+                color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
           ),
         ],
       ),
@@ -273,7 +271,7 @@ class _LocalizationChip extends StatelessWidget {
   }
 }
 
-// ── Camera PiP ───────────────────────────────────────────────────────────────
+// ── POI floating button + bottom sheet ──────────────────────────────────────
 
 class _CameraPreviewPip extends ConsumerStatefulWidget {
   const _CameraPreviewPip();
@@ -464,14 +462,40 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
 class _PoiCard extends ConsumerStatefulWidget {
   final AsyncValue<List<Poi>> poisAsync;
   final Pose? pose;
-
-  const _PoiCard({required this.poisAsync, this.pose});
+  const _PoiFloatingButton({required this.poisAsync, this.pose});
 
   @override
-  ConsumerState<_PoiCard> createState() => _PoiCardState();
+  Widget build(BuildContext context, WidgetRef ref) {
+    final count = poisAsync.valueOrNull?.length ?? 0;
+    return FilledButton.icon(
+      onPressed: () => showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => _PoiSheet(pose: pose),
+      ),
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.black87,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      ),
+      icon: const Icon(Icons.place_outlined, size: 18),
+      label: Text('POIs${count > 0 ? ' ($count)' : ''}'),
+    );
+  }
 }
 
-class _PoiCardState extends ConsumerState<_PoiCard> {
+class _PoiSheet extends ConsumerStatefulWidget {
+  final Pose? pose;
+  const _PoiSheet({this.pose});
+
+  @override
+  ConsumerState<_PoiSheet> createState() => _PoiSheetState();
+}
+
+class _PoiSheetState extends ConsumerState<_PoiSheet> {
   Future<void> _addPoi() async {
     final pose = widget.pose;
     if (pose == null) {
@@ -480,7 +504,6 @@ class _PoiCardState extends ConsumerState<_PoiCard> {
       );
       return;
     }
-
     final ctrl = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
@@ -498,7 +521,6 @@ class _PoiCardState extends ConsumerState<_PoiCard> {
         ],
       ),
     );
-
     if (ok != true || ctrl.text.trim().isEmpty) return;
     try {
       await ref.read(dioProvider).post('/map/pois', data: {
@@ -552,10 +574,25 @@ class _PoiCardState extends ConsumerState<_PoiCard> {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    final poisAsync = ref.watch(poisProvider);
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          16, 12, 16, 24 + MediaQuery.of(context).viewInsets.bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
           Row(children: [
             const Icon(Icons.place_outlined, size: 20),
             const SizedBox(width: 8),
@@ -564,15 +601,15 @@ class _PoiCardState extends ConsumerState<_PoiCard> {
             TextButton.icon(
               onPressed: _addPoi,
               icon: const Icon(Icons.add_location_alt_outlined, size: 18),
-              label: const Text('Add at current pose'),
+              label: const Text('Add here'),
             ),
           ]),
           const Divider(height: 20),
-          widget.poisAsync.when(
+          poisAsync.when(
             data: (pois) => pois.isEmpty
-                ? const Center(
-                    child: Padding(
-                      padding: EdgeInsets.all(16),
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 24),
+                    child: Center(
                       child: Text('No POIs yet', style: TextStyle(color: Colors.grey)),
                     ),
                   )
@@ -596,7 +633,190 @@ class _PoiCardState extends ConsumerState<_PoiCard> {
             loading: () => const Center(child: CircularProgressIndicator()),
             error: (e, _) => Text('$e', style: const TextStyle(color: Colors.red)),
           ),
-        ]),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Camera PiP ───────────────────────────────────────────────────────────────
+
+class _CameraPreviewPip extends ConsumerStatefulWidget {
+  const _CameraPreviewPip();
+
+  @override
+  ConsumerState<_CameraPreviewPip> createState() => _CameraPreviewPipState();
+}
+
+class _CameraPreviewPipState extends ConsumerState<_CameraPreviewPip> {
+  Uint8List? _latestFrame;
+
+  void _showFullscreen(BuildContext context) {
+    final topic = ref.read(selectedPreviewTopicProvider);
+    if (topic == null) return;
+    showDialog(
+      context: context,
+      builder: (_) => _FullscreenPreview(topic: topic),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final topicsAsync = ref.watch(imageTopicsProvider);
+    final selectedTopic = ref.watch(selectedPreviewTopicProvider);
+    final topics = topicsAsync.valueOrNull ?? [];
+
+    if (selectedTopic != null) {
+      ref.listen<AsyncValue<Uint8List>>(
+        previewStreamProvider(selectedTopic),
+        (_, next) {
+          if (next case AsyncData(:final value)) {
+            if (mounted) setState(() => _latestFrame = value);
+          }
+        },
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.black87,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
+              const SizedBox(width: 4),
+              DropdownButton<String?>(
+                value: selectedTopic,
+                hint: const Text('Camera', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                dropdownColor: Colors.black87,
+                underline: const SizedBox(),
+                isDense: true,
+                items: [
+                  const DropdownMenuItem<String?>(
+                    value: null,
+                    child: Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                  ),
+                  ...topics.map((t) {
+                    const labels = {
+                      '/camera/camera/color/image_raw': 'color',
+                      '/camera/camera/infra1/image_rect_raw': 'left',
+                      '/camera/camera/infra2/image_rect_raw': 'right',
+                      '/slam/depth': 'depth',
+                    };
+                    final label = labels[t] ?? t.split('/').last;
+                    return DropdownMenuItem<String?>(
+                      value: t,
+                      child: Text(label, style: const TextStyle(fontSize: 12)),
+                    );
+                  }),
+                ],
+                onChanged: (v) {
+                  ref.read(selectedPreviewTopicProvider.notifier).state = v;
+                  if (v == null) setState(() => _latestFrame = null);
+                },
+              ),
+            ],
+          ),
+        ),
+        if (selectedTopic != null)
+          GestureDetector(
+            onTap: _latestFrame != null ? () => _showFullscreen(context) : null,
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+              child: SizedBox(
+                width: 176,
+                height: 132,
+                child: _latestFrame != null
+                    ? Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.memory(
+                            _latestFrame!,
+                            fit: BoxFit.cover,
+                            gaplessPlayback: true,
+                          ),
+                          Align(
+                            alignment: Alignment.bottomRight,
+                            child: Container(
+                              margin: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              padding: const EdgeInsets.all(2),
+                              child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
+                            ),
+                          ),
+                        ],
+                      )
+                    : Container(
+                        color: Colors.black,
+                        child: const Center(
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white54,
+                          ),
+                        ),
+                      ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ── Fullscreen preview dialog ─────────────────────────────────────────────────
+
+class _FullscreenPreview extends ConsumerStatefulWidget {
+  final String topic;
+  const _FullscreenPreview({required this.topic});
+
+  @override
+  ConsumerState<_FullscreenPreview> createState() => _FullscreenPreviewState();
+}
+
+class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
+  Uint8List? _frame;
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen<AsyncValue<Uint8List>>(
+      previewStreamProvider(widget.topic),
+      (_, next) {
+        if (next case AsyncData(:final value)) {
+          if (mounted) setState(() => _frame = value);
+        }
+      },
+    );
+
+    return Dialog(
+      backgroundColor: Colors.black,
+      insetPadding: const EdgeInsets.all(12),
+      child: Stack(
+        children: [
+          Center(
+            child: _frame != null
+                ? Image.memory(_frame!, fit: BoxFit.contain, gaplessPlayback: true)
+                : const CircularProgressIndicator(color: Colors.white54),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: IconButton(
+              icon: const Icon(Icons.close, color: Colors.white),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+        ],
       ),
     );
   }
