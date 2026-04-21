@@ -65,35 +65,72 @@ class LocalPlanningPainter extends CustomPainter {
       );
     }
 
-    // Draw robot arrow at canvas center.
-    _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0, size.width * 0.045);
+    // Draw robot dog at canvas center.
+    canvas.save();
+    canvas.translate(cx, cy);
+    canvas.rotate(pose?.yaw ?? 0.0);
+    _drawDog(canvas);
+    canvas.restore();
   }
 
-  void _drawRobotArrow(Canvas canvas, Offset center, double yaw, double r) {
-    final cosY = math.cos(yaw);
-    final sinY = math.sin(yaw);
+  void _drawDog(Canvas canvas) {
+    const body  = Color(0xFFFFFFFF);
+    const dark  = Color(0xFFCCCCCC);
+    const light = Color(0xFFEEEEEE);
 
-    // Tip in +yaw direction (ROS convention: yaw=0 → +x; canvas: +x right, +y down).
-    final tip = Offset(center.dx + cosY * r, center.dy - sinY * r);
-    final left = Offset(center.dx - sinY * r * 0.45, center.dy - cosY * r * 0.45);
-    final right = Offset(center.dx + sinY * r * 0.45, center.dy + cosY * r * 0.45);
-    final base = Offset(center.dx - cosY * r * 0.35, center.dy + sinY * r * 0.35);
+    Paint fill(Color c) => Paint()..color = c..style = PaintingStyle.fill;
+    final outline = Paint()
+      ..color = Colors.black45
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
 
-    final path = Path()
-      ..moveTo(tip.dx, tip.dy)
-      ..lineTo(left.dx, left.dy)
-      ..lineTo(base.dx, base.dy)
-      ..lineTo(right.dx, right.dy)
+    // Body
+    final bodyRR = RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-6, -7, 12, 11), const Radius.circular(3));
+    canvas.drawRRect(bodyRR, fill(body));
+    canvas.drawRRect(bodyRR, outline);
+
+    // Neck
+    canvas.drawRect(const Rect.fromLTWH(-3, -12, 6, 5), fill(body));
+
+    // Head (forward = -y)
+    final headRR = RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-5, -18, 10, 7), const Radius.circular(3));
+    canvas.drawRRect(headRR, fill(light));
+    canvas.drawRRect(headRR, outline);
+
+    // Ears
+    canvas.drawRRect(RRect.fromRectAndRadius(
+        const Rect.fromLTWH(-7, -20, 3, 4), const Radius.circular(1)), fill(dark));
+    canvas.drawRRect(RRect.fromRectAndRadius(
+        const Rect.fromLTWH(4, -20, 3, 4), const Radius.circular(1)), fill(dark));
+
+    // Eyes
+    canvas.drawCircle(const Offset(-2, -15), 1.2, fill(Colors.black54));
+    canvas.drawCircle(const Offset( 2, -15), 1.2, fill(Colors.black54));
+
+    // Front legs
+    for (final x in [-10.0, 6.0]) {
+      final r = RRect.fromRectAndRadius(Rect.fromLTWH(x, -6, 4, 9), const Radius.circular(2));
+      canvas.drawRRect(r, fill(dark));
+      canvas.drawRRect(r, outline);
+    }
+
+    // Back legs
+    for (final x in [-10.0, 6.0]) {
+      final r = RRect.fromRectAndRadius(Rect.fromLTWH(x, 2, 4, 9), const Radius.circular(2));
+      canvas.drawRRect(r, fill(dark));
+      canvas.drawRRect(r, outline);
+    }
+
+    // Tail
+    final tail = Path()
+      ..moveTo(-2, 4)
+      ..quadraticBezierTo(5, 6, 4, 12)
+      ..lineTo(2, 12)
+      ..quadraticBezierTo(3, 7, -2, 6)
       ..close();
-
-    canvas.drawPath(path, Paint()..color = Colors.white);
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = Colors.black54
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.0,
-    );
+    canvas.drawPath(tail, fill(dark));
   }
 
   @override
