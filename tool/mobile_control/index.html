@@ -137,6 +137,7 @@
     <div class="card">
       <h2>系统状态</h2>
       <div class="mono" id="stateInfo">state: -</div>
+      <div class="mono" id="relocalizationInfo">relocalization: -</div>
       <div class="mono" id="odomInfo">odom: -</div>
       <div class="mono muted">当前页面优先使用 `/planning/occupancy_grid` 显示 ESDF/代价图，若无则退回 `/planning/obstacle_mask`。</div>
     </div>
@@ -168,10 +169,14 @@
         <button id="startPoiNavBtn">导航</button>
         <button id="stopModeBtn" class="warn">停止</button>
         <button id="stopAllBtn" class="danger">全部停止</button>
-        <button id="editPoiBtn" class="secondary">编辑 poi</button>
+        <button id="sitBtn" class="secondary">蹲下</button>
+        <button id="standBtn" class="secondary">站立</button>
+        <button id="editPoiBtn" class="secondary">编辑 POI: 关</button>
+        <button id="savePoiBtn" class="secondary" disabled>保存 POI</button>
       </div>
       <div class="mono muted">启动发送 `navigation`；导航发送 `/mapping/poi_nav_cmd: start`；停止发送 `/mapping/poi_nav_cmd: stop`。</div>
-      <div class="mono muted">点击 POI 点会发送 `goto:N`；点击空白地图会发送 `/control/target_pose`。</div>
+      <div class="mono muted">普通模式：点击 POI 点发送 `goto:N`；点击空白地图发送 `/control/target_pose`。</div>
+      <div class="mono muted">编辑模式：点击 POI 附近后可把该 POI 移到点击位置（需要已有 world->map TF），再点击“保存 POI”。</div>
     </div>
   </div>
 
@@ -182,12 +187,16 @@
     const connDot = document.getElementById("connDot");
     const connText = document.getElementById("connText");
     const stateInfo = document.getElementById("stateInfo");
+    const relocalizationInfo = document.getElementById("relocalizationInfo");
     const odomInfo = document.getElementById("odomInfo");
     const startNavBtn = document.getElementById("startNavBtn");
     const startPoiNavBtn = document.getElementById("startPoiNavBtn");
     const stopModeBtn = document.getElementById("stopModeBtn");
     const stopAllBtn = document.getElementById("stopAllBtn");
+    const sitBtn = document.getElementById("sitBtn");
+    const standBtn = document.getElementById("standBtn");
     const editPoiBtn = document.getElementById("editPoiBtn");
+    const savePoiBtn = document.getElementById("savePoiBtn");
     const showMapLayer = document.getElementById("showMapLayer");
     const showGlobalPath = document.getElementById("showGlobalPath");
     const showLocalPath = document.getElementById("showLocalPath");
@@ -204,6 +213,7 @@
     let pubCommand = null;
     let pubTargetPose = null;
     let pubPoiNavCmd = null;
+    let pubActionCmd = null;
     const subs = [];
     let odomPose = null;
     let targetPose = null;
@@ -222,10 +232,23 @@
     let poiPoints = [];
     let managerState = "idle";
     let actionState = "未操作";
+    let relocalizationOk = false;
     let tfWorldFromMap2D = null;
+    let poiEditMode = false;
+    let poiDirty = false;
 
     function updateStateInfo() {
       stateInfo.textContent = `state: 服务=${managerState} | 操作=${actionState}`;
+    }
+
+    function updateRelocalizationInfo() {
+      relocalizationInfo.textContent = `relocalization: ${relocalizationOk ? "成功" : "未成功"}`;
+    }
+
+    function updatePoiEditUi() {
+      editPoiBtn.textContent = `编辑 POI: ${poiEditMode ? "开" : "关"}`;
+      savePoiBtn.disabled = !poiDirty;
+      mapCanvas.style.cursor = poiEditMode ? "pointer" : "crosshair";
     }
 
     function setConn(connected, text) {
@@ -483,6 +506,18 @@
       };
     }
 
+    function transformWorldPointToMap(x, y) {
+      if (!tfWorldFromMap2D) return null;
+      const dx = x - tfWorldFromMap2D.tx;
+      const dy = y - tfWorldFromMap2D.ty;
+      const c = Math.cos(tfWorldFromMap2D.yaw);
+      const s = Math.sin(tfWorldFromMap2D.yaw);
+      return {
+        x: c * dx + s * dy,
+        y: -s * dx + c * dy,
+      };
+    }
+
     function drawArrow(x, y, yaw, color, sizePx) {
       const p = worldToCanvas(x, y);
       mapCtx.save();
@@ -566,6 +601,11 @@
         mapCtx.fillStyle = "#fde68a";
         mapCtx.font = "12px sans-serif";
         mapCtx.fillText(String(poi.index), c.x + 7, c.y - 7);
+        if (poiEditMode) {
+          mapCtx.strokeStyle = "#fef08a";
+          mapCtx.lineWidth = 1.5;
+          mapCtx.strokeRect(c.x - 8, c.y - 8, 16, 16);
+        }
       }
     }
 
@@ -577,6 +617,36 @@
         poiPoints = Array.isArray(data.pois) ? data.pois : [];
         drawMap();
       } catch (_) {}
+    }
+
+    async function savePois() {
+      try {
+        const payload = {
+          pois: poiPoints.map((p) => ({
+            index: p.index,
+            name: p.name || `POI_${p.index}`,
+            x: p.x,
+            y: p.y,
+            z: Number.isFinite(p.z) ? p.z : 0.0,
+          })),
+        };
+        const res = await fetch("/api/pois", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const txt = await res.text();
+          window.alert(`保存失败: ${txt}`);
+          return;
+        }
+        poiDirty = false;
+        updatePoiEditUi();
+        actionState = "POI已保存";
+        updateStateInfo();
+      } catch (err) {
+        window.alert(`保存失败: ${err}`);
+      }
     }
 
     function publishPoiNavCmd(cmd) {
@@ -633,6 +703,9 @@
         pubPoiNavCmd = {
           publish: (msg) => ros.publish("/mapping/poi_nav_cmd", "std_msgs/String", msg)
         };
+        pubActionCmd = {
+          publish: (msg) => ros.publish("/unitree/action_command", "std_msgs/String", msg)
+        };
 
         loadPois();
 
@@ -640,6 +713,13 @@
           ros.subscribe("/service/state", "std_msgs/String", (msg) => {
             managerState = msg.data || "idle";
             updateStateInfo();
+          })
+        );
+
+        subs.push(
+          ros.subscribe("/mapping/relocalization_ok", "std_msgs/Bool", (msg) => {
+            relocalizationOk = !!msg.data;
+            updateRelocalizationInfo();
           })
         );
 
@@ -764,15 +844,23 @@
         try { ros.close(); } catch (_) {}
       }
       ros = null;
+      pubActionCmd = null;
       managerState = "idle";
       actionState = "未操作";
+      relocalizationOk = false;
       setConn(false, "未连接");
       updateStateInfo();
+      updateRelocalizationInfo();
     }
 
     function sendCommand(cmd) {
       if (!pubCommand) return;
       pubCommand.publish({ data: cmd });
+    }
+
+    function sendActionCommand(cmd) {
+      if (!pubActionCmd) return;
+      pubActionCmd.publish({ data: cmd });
     }
 
     connectBtn.onclick = connect;
@@ -798,10 +886,26 @@
       actionState = "全部关闭";
       updateStateInfo();
     };
+    sitBtn.onclick = () => {
+      sendActionCommand("play sit");
+      actionState = "蹲下";
+      updateStateInfo();
+    };
+    standBtn.onclick = () => {
+      sendActionCommand("play stand");
+      actionState = "站立";
+      updateStateInfo();
+    };
 
     editPoiBtn.onclick = () => {
-      const url = `${window.location.protocol}//${window.location.hostname}:8080`;
-      window.open(url, "_blank", "noopener,noreferrer");
+      poiEditMode = !poiEditMode;
+      updatePoiEditUi();
+      drawMap();
+    };
+
+    savePoiBtn.onclick = () => {
+      if (!poiDirty) return;
+      savePois();
     };
 
     mapCanvas.onpointerdown = (ev) => {
@@ -905,6 +1009,29 @@
         }
       }
 
+      if (poiEditMode) {
+        if (!nearestPoi || minDist >= 1.0) {
+          return;
+        }
+        const mapPt = transformWorldPointToMap(world.x, world.y);
+        if (!mapPt) {
+          window.alert("尚未拿到 world->map 变换，无法编辑 POI");
+          return;
+        }
+        const okMove = window.confirm(
+          `将 POI ${nearestPoi.index} 移动到当前点击位置？\n\nworld x=${world.x.toFixed(2)} y=${world.y.toFixed(2)}`
+        );
+        if (!okMove) return;
+        nearestPoi.x = mapPt.x;
+        nearestPoi.y = mapPt.y;
+        poiDirty = true;
+        actionState = `POI${nearestPoi.index}待保存`;
+        updateStateInfo();
+        updatePoiEditUi();
+        drawMap();
+        return;
+      }
+
       if (nearestPoi && minDist < 0.6) {
         const okPoi = window.confirm(
           `导航到 POI ${nearestPoi.index} ?\n\nx=${nearestPoi.x.toFixed(2)} m\ny=${nearestPoi.y.toFixed(2)} m`
@@ -932,6 +1059,8 @@
     fitViewBtn.onclick = fitViewToRobot;
     window.addEventListener("resize", resizeCanvas);
     updateStateInfo();
+    updateRelocalizationInfo();
+    updatePoiEditUi();
     resizeCanvas();
   </script>
 </body>

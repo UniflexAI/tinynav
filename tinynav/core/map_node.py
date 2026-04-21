@@ -240,7 +240,7 @@ class MapNode(Node):
         self.pois = pois_dict
         self.poi_nav_enabled = False
         self.poi_auto_advance_enabled = True
-        self.poi_auto_advance_distance_threshold = 0.5
+        self.poi_auto_advance_distance_threshold = 0.25
 
         # Sit/stand action at each POI arrival
         self._poi_action_state = None   # None | 'sitting' | 'standing'
@@ -256,8 +256,10 @@ class MapNode(Node):
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        self.relocalization_status_pub = self.create_publisher(Bool, "/mapping/relocalization_ok", 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
+        self.relocalization_status_timer = self.create_timer(0.5, self.publish_relocalization_status)
 
         self._save_completed = False
 
@@ -272,6 +274,18 @@ class MapNode(Node):
 
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+
+    def publish_map_tf(self):
+        if self.T_from_map_to_odom is None:
+            return
+        self.tf_broadcaster.sendTransform(
+            np2tf(self.T_from_map_to_odom, self.get_clock().now().to_msg(), "world", "map")
+        )
+
+    def publish_relocalization_status(self):
+        msg = Bool()
+        msg.data = self.T_from_map_to_odom is not None
+        self.relocalization_status_pub.publish(msg)
 
     def _publish_poi_stop_signal(self):
         dummy_pose = np.eye(4)
@@ -364,6 +378,7 @@ class MapNode(Node):
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
+            self.publish_map_tf()
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
@@ -672,7 +687,7 @@ class MapNode(Node):
         if self.poi_auto_advance_enabled:
             while self.poi_index < len(self.pois):
                 poi = self.pois[self.poi_index]
-                diff_position_norm = np.linalg.norm(poi[:3][:2] - pose_in_map_position[:2])
+                diff_position_norm = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
                 if diff_position_norm < self.poi_auto_advance_distance_threshold:
                     self.get_logger().info(
                         f"POI {self.poi_index} reached (dist={diff_position_norm:.3f}), starting sit action"
@@ -688,7 +703,7 @@ class MapNode(Node):
         elif self.poi_index < len(self.pois):
             # goto mode: check arrival at target POI
             poi = self.pois[self.poi_index]
-            diff_position_norm = np.linalg.norm(poi[:3] - pose_in_map_position[:3])
+            diff_position_norm = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             if diff_position_norm < self.poi_auto_advance_distance_threshold:
                 self.get_logger().info(
                     f"POI goto {self.poi_index} reached (dist={diff_position_norm:.3f}), starting sit action"

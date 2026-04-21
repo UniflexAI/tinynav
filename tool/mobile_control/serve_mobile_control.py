@@ -91,6 +91,43 @@ async def pois_api(request: web.Request) -> web.Response:
     pois.sort(key=lambda x: x["index"])
     return web.json_response({"pois": pois})
 
+async def save_pois_api(request: web.Request) -> web.Response:
+    pois_json_path = request.app["pois_json_path"]
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": f"invalid json: {exc}"}, status=400)
+
+    items = payload.get("pois")
+    if not isinstance(items, list):
+        return web.json_response({"ok": False, "error": "pois must be a list"}, status=400)
+
+    out = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("index"))
+            x = float(item.get("x"))
+            y = float(item.get("y"))
+            z = float(item.get("z", 0.0))
+        except Exception:
+            continue
+        name = str(item.get("name", f"POI_{idx}"))
+        out[str(idx)] = {
+            "name": name,
+            "position": [x, y, z],
+        }
+
+    try:
+        os.makedirs(os.path.dirname(pois_json_path), exist_ok=True)
+        with open(pois_json_path, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    return web.json_response({"ok": True, "count": len(out)})
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve TinyNav mobile control page")
@@ -116,6 +153,7 @@ def main() -> None:
     app.router.add_get("/", index)
     app.router.add_get("/ws", ws_proxy)
     app.router.add_get("/api/pois", pois_api)
+    app.router.add_post("/api/pois", save_pois_api)
     app.router.add_get("/{path:.*}", static_file)
 
     print(f"[mobile-control] serving {root} on http://{args.host}:{args.port}")
