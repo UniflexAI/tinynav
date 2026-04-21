@@ -34,6 +34,21 @@ class TinyNavApp extends ConsumerWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1565C0)),
         useMaterial3: true,
+        scaffoldBackgroundColor: const Color(0xFFF4F6F8),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(shape: const StadiumBorder()),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(shape: const StadiumBorder()),
+        ),
+        cardTheme: CardTheme(
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: Color(0xFFE0E0E0)),
+          ),
+        ),
       ),
       // Switches automatically when deviceIpProvider changes.
       home: ip == null ? const SetupPage() : const HomePage(),

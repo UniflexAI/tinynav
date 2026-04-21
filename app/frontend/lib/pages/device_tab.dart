@@ -228,12 +228,26 @@ class _StatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Chip(
-      label: Text(label, style: const TextStyle(fontSize: 12)),
-      backgroundColor: positive ? Colors.green.shade100 : Colors.red.shade100,
-      side: BorderSide.none,
-      padding: EdgeInsets.zero,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    final dotColor = positive ? Colors.green.shade600 : Colors.red.shade600;
+    final bgColor = positive ? Colors.green.shade50 : Colors.red.shade50;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
+          ),
+          const SizedBox(width: 5),
+          Text(label, style: TextStyle(fontSize: 12, color: dotColor, fontWeight: FontWeight.w500)),
+        ],
+      ),
     );
   }
 }
