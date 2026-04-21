@@ -67,20 +67,80 @@ class MapOverlayPainter extends CustomPainter {
     if (pose == null) return;
     final c = _imageToCanvas(_worldToImage(pose!.x, pose!.y), size);
 
-    // Blue circle
-    canvas.drawCircle(c, 10, Paint()..color = Colors.blue);
-
-    // White direction arrow (points in +yaw direction)
     canvas.save();
     canvas.translate(c.dx, c.dy);
     canvas.rotate(pose!.yaw);
-    final arrow = Path()
-      ..moveTo(0, -14)
-      ..lineTo(5, 2)
-      ..lineTo(-5, 2)
-      ..close();
-    canvas.drawPath(arrow, Paint()..color = Colors.white);
+    _drawDog(canvas);
     canvas.restore();
+  }
+
+  // Top-down robot dog. Local frame: -y = forward (head), +y = back (tail).
+  void _drawDog(Canvas canvas) {
+    const body  = Color(0xFF1565C0);
+    const dark  = Color(0xFF0D47A1);
+    const light = Color(0xFF42A5F5);
+
+    final fill    = (Color c) => Paint()..color = c..style = PaintingStyle.fill;
+    final outline = Paint()
+      ..color = Colors.white.withOpacity(0.85)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+
+    // ── Body ──────────────────────────────────────────────────────────────
+    final bodyRR = RRect.fromRectAndRadius(
+      const Rect.fromLTWH(-6, -7, 12, 11), const Radius.circular(3));
+    canvas.drawRRect(bodyRR, fill(body));
+    canvas.drawRRect(bodyRR, outline);
+
+    // ── Neck ──────────────────────────────────────────────────────────────
+    canvas.drawRect(const Rect.fromLTWH(-3, -12, 6, 5), fill(body));
+
+    // ── Head ──────────────────────────────────────────────────────────────
+    final headRR = RRect.fromRectAndRadius(
+      const Rect.fromLTWH(-5, -18, 10, 7), const Radius.circular(3));
+    canvas.drawRRect(headRR, fill(light));
+    canvas.drawRRect(headRR, outline);
+
+    // ── Ears ──────────────────────────────────────────────────────────────
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(const Rect.fromLTWH(-7, -20, 3, 4), const Radius.circular(1)),
+      fill(dark));
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(const Rect.fromLTWH(4, -20, 3, 4), const Radius.circular(1)),
+      fill(dark));
+
+    // ── Eyes (two white dots) ──────────────────────────────────────────────
+    canvas.drawCircle(const Offset(-2, -15), 1.2, fill(Colors.white));
+    canvas.drawCircle(const Offset( 2, -15), 1.2, fill(Colors.white));
+
+    // ── Front legs ────────────────────────────────────────────────────────
+    for (final x in [-10.0, 6.0]) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(Rect.fromLTWH(x, -6, 4, 9), const Radius.circular(2)),
+        fill(dark));
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(Rect.fromLTWH(x, -6, 4, 9), const Radius.circular(2)),
+        outline);
+    }
+
+    // ── Back legs ─────────────────────────────────────────────────────────
+    for (final x in [-10.0, 6.0]) {
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(Rect.fromLTWH(x, 2, 4, 9), const Radius.circular(2)),
+        fill(dark));
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(Rect.fromLTWH(x, 2, 4, 9), const Radius.circular(2)),
+        outline);
+    }
+
+    // ── Tail ──────────────────────────────────────────────────────────────
+    final tail = Path()
+      ..moveTo(-2, 4)
+      ..quadraticBezierTo(5, 6, 4, 12)
+      ..lineTo(2, 12)
+      ..quadraticBezierTo(3, 7, -2, 6)
+      ..close();
+    canvas.drawPath(tail, fill(dark));
   }
 
   @override
