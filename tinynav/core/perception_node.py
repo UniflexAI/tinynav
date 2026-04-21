@@ -11,6 +11,7 @@ from codetiming import Timer
 from cv_bridge import CvBridge
 from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Vector3Stamped
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from std_msgs.msg import String
@@ -103,7 +104,7 @@ class PerceptionNode(Node):
 
         self.T_body_last = None
         self.V_last = None
-        self.B_last = None
+        self.B_last = gtsam.imuBias.ConstantBias()
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -130,6 +131,8 @@ class PerceptionNode(Node):
         self.input_aligner_seen_imu = False
         self.input_aligner_seen_stereo = False
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
+        self.bias_acc_pub = self.create_publisher(Vector3Stamped, "/slam/imu_bias_accel", 10)
+        self.bias_gyro_pub = self.create_publisher(Vector3Stamped, "/slam/imu_bias_gyro", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
@@ -222,6 +225,30 @@ class PerceptionNode(Node):
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
 
+    def _publish_bias_topics(self, stamp, bias: gtsam.imuBias.ConstantBias):
+        try:
+            b_acc = np.asarray(bias.accelerometer(), dtype=float).reshape(3)
+            b_gyro = np.asarray(bias.gyroscope(), dtype=float).reshape(3)
+        except Exception:
+            b = np.asarray(bias.vector(), dtype=float).reshape(-1)
+            b_acc = b[:3]
+            b_gyro = b[3:6]
+        accel_msg = Vector3Stamped()
+        accel_msg.header.stamp = stamp
+        accel_msg.header.frame_id = "world"
+        accel_msg.vector.x = float(b_acc[0])
+        accel_msg.vector.y = float(b_acc[1])
+        accel_msg.vector.z = float(b_acc[2])
+        self.bias_acc_pub.publish(accel_msg)
+
+        gyro_msg = Vector3Stamped()
+        gyro_msg.header.stamp = stamp
+        gyro_msg.header.frame_id = "world"
+        gyro_msg.vector.x = float(b_gyro[0])
+        gyro_msg.vector.y = float(b_gyro[1])
+        gyro_msg.vector.z = float(b_gyro[2])
+        self.bias_gyro_pub.publish(gyro_msg)
+
     def imu_callback(self, imu_msg):
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
@@ -255,8 +282,8 @@ class PerceptionNode(Node):
                     depth=depth,
                     pose=self.T_body_last,
                     velocity=np.zeros(3),
-                    bias=gtsam.imuBias.ConstantBias(),
-                    preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
+                    bias=self.B_last,
+                    preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, self.B_last),
                     latest_imu_timestamp=current_timestamp
                 )
             )
@@ -321,6 +348,7 @@ class PerceptionNode(Node):
             )
             self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
         # for new frame, we first add it as keyframe, if not, we pop it later
+        prev_bias = self.keyframe_queue[-1].bias
         self.keyframe_queue.append(
             Keyframe(
                 timestamp=current_timestamp,
@@ -329,8 +357,8 @@ class PerceptionNode(Node):
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
                 velocity=self.keyframe_queue[-1].velocity,
-                bias=gtsam.imuBias.ConstantBias(),
-                preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
+                bias=prev_bias,
+                preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, prev_bias),
                 latest_imu_timestamp=current_timestamp
             )
         )
@@ -344,8 +372,7 @@ class PerceptionNode(Node):
                 # process previous keyframes' factors
                 for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                     # per pose -- bias
-                    initial_estimate.insert(B(i), gtsam.imuBias.ConstantBias())
-                    graph.add(gtsam.PriorFactorConstantBias(B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
+                    initial_estimate.insert(B(i), keyframe.bias)
 
                     initial_estimate.insert(V(i), keyframe.velocity)
                     initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(keyframe.pose))
@@ -355,6 +382,8 @@ class PerceptionNode(Node):
 
                         # per pose -- pose, could only be applied to the first keyframe
                         graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1]))))
+                        # bias prior anchors the window without forcing all biases to zero.
+                        graph.add(gtsam.PriorFactorConstantBias(B(i), keyframe.bias, gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
@@ -511,8 +540,9 @@ class PerceptionNode(Node):
                 T_i = result.atPose3(X(i)).matrix()
                 keyframe.pose = T_i
                 keyframe.velocity = result.atVector(V(i))
+                keyframe.bias = result.atConstantBias(B(i))
                 self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
-                self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
+                self.logger.debug(f"Bias {i} updated:\n{keyframe.bias}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
         with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -538,8 +568,10 @@ class PerceptionNode(Node):
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
+            self.B_last = result.atConstantBias(B(len(self.keyframe_queue) - 1))
             # publish odometry
             self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
+            self._publish_bias_topics(left_msg.header.stamp, self.B_last)
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
 
