@@ -15,6 +15,8 @@ import  viser.transforms as vtf
 import viser
 from viser import transforms as tf
 import json
+import cv2
+from scipy.ndimage import distance_transform_edt
 from rclpy.node import Node
 import rclpy
 import os
@@ -369,6 +371,9 @@ def main(
         unknown_indices = np.argwhere(x_y_plane == 0)
         free_indices = np.argwhere(x_y_plane == 1)
         occupied_indices = np.argwhere(x_y_plane == 2)
+        obstacle_mask = x_y_plane == 2
+        esdf_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * float(resolution)
+        esdf_max_dist = 1.0
 
         # Project to one Z plane in world coordinates.
         z_plane = float(origin[2])
@@ -402,9 +407,11 @@ def main(
             )
 
         if len(free_points) > 0:
-            free_colors = np.zeros((len(free_points), 3), dtype=np.float32)
-            free_colors[:, 2] = 1.0
-            print(f"Adding {len(free_points)} free 2D cells (blue)")
+            free_dist = np.clip(esdf_map[free_indices[:, 0], free_indices[:, 1]], 0.0, esdf_max_dist)
+            v = np.uint8((1.0 - free_dist / esdf_max_dist) * 255.0)
+            free_colors_bgr = cv2.applyColorMap(v.reshape(-1, 1), cv2.COLORMAP_JET).reshape(-1, 3)
+            free_colors = free_colors_bgr[:, ::-1].astype(np.float32) / 255.0
+            print(f"Adding {len(free_points)} free 2D cells (ESDF colormap)")
             free_handle = server.scene.add_point_cloud(
                 "/occupancy_2d/free",
                 points=free_points,
@@ -414,7 +421,7 @@ def main(
             )
         
         if len(occupied_points) > 0:
-            occupied_column_height = 1.8  # meters
+            occupied_column_height = 0.8  # meters
             z_levels = np.arange(
                 z_plane + float(resolution) * 0.5,
                 z_plane + occupied_column_height,
@@ -423,20 +430,14 @@ def main(
             )
             occupied_column_points = np.repeat(occupied_points, len(z_levels), axis=0)
             occupied_column_points[:, 2] = np.tile(z_levels, len(occupied_points))
-            # Height-based colormap for wall columns.
-            if len(z_levels) > 1:
-                z_norm = (z_levels - z_levels[0]) / (z_levels[-1] - z_levels[0])
-            else:
-                z_norm = np.array([1.0], dtype=np.float32)
-            # Jet-like colormap (blue -> cyan -> yellow -> red).
-            level_r = np.clip(1.5 - np.abs(4.0 * z_norm - 3.0), 0.0, 1.0)
-            level_g = np.clip(1.5 - np.abs(4.0 * z_norm - 2.0), 0.0, 1.0)
-            level_b = np.clip(1.5 - np.abs(4.0 * z_norm - 1.0), 0.0, 1.0)
-            level_colors = np.stack([level_r, level_g, level_b], axis=1).astype(np.float32)
-            occupied_colors = np.tile(level_colors, (len(occupied_points), 1))
+            # Occupied color = ESDF zero color in the same JET colormap.
+            wall_zero_bgr = cv2.applyColorMap(np.array([[255]], dtype=np.uint8), cv2.COLORMAP_JET)[0, 0]
+            wall_zero_rgb = wall_zero_bgr[::-1].astype(np.float32) / 255.0
+            wall_light_rgb = np.clip(0.55 * wall_zero_rgb + 0.45 * np.ones(3, dtype=np.float32), 0.0, 1.0)
+            occupied_colors = np.tile(wall_light_rgb[None, :], (len(occupied_column_points), 1))
             print(
                 f"Adding {len(occupied_points)} occupied cells as "
-                f"{len(occupied_column_points)} gray column points"
+                f"{len(occupied_column_points)} ESDF-zero-color column points"
             )
             occupied_handle = server.scene.add_point_cloud(
                 "/occupancy_2d/occupied",
