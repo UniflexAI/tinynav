@@ -67,8 +67,6 @@ class CmdVelControlNode(Node):
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._zero_cmd_latched = False
-        self._last_pub_cmd = Twist()
-        self._has_published_once = False
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _update_cmd(self):
@@ -199,19 +197,7 @@ class CmdVelControlNode(Node):
         else:
             self._zero_cmd_latched = False
 
-        if self._has_published_once:
-            unchanged = (
-                abs(out.linear.x - self._last_pub_cmd.linear.x) <= self.cmd_zero_eps
-                and abs(out.angular.z - self._last_pub_cmd.angular.z) <= self.cmd_zero_eps
-            )
-            if unchanged:
-                self.prev_cmd = out
-                return
-
         self.cmd_pub.publish(out)
-        self._last_pub_cmd.linear.x = out.linear.x
-        self._last_pub_cmd.angular.z = out.angular.z
-        self._has_published_once = True
         self.prev_cmd = out
 
     def path_callback(self, msg):
