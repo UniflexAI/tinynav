@@ -11,7 +11,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Publish POIs to /mapping/cmd_pois")
     parser.add_argument("--map-name", required=True)
     parser.add_argument("--pois", default=None, help="Comma-separated POI ids, for example 2,1,0")
-    parser.add_argument("--maps-dir", default=str(Path.home() / ".local/share/tinynav/maps"))
     return parser.parse_args()
 
 
@@ -56,7 +55,7 @@ def publish(payload: dict[str, object]) -> None:
 def main() -> int:
     args = parse_args()
     try:
-        payload = load_selected_pois(Path(args.maps_dir), args.map_name, args.pois)
+        payload = load_selected_pois(Path("/root/.local/share/tinynav/maps"), args.map_name, args.pois)
         publish(payload)
     except (FileNotFoundError, ValueError, KeyError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
