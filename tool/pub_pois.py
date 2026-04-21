@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import shlex
-import subprocess
 import sys
+import time
 from pathlib import Path
+
+import rclpy
+from std_msgs.msg import String
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,17 +41,17 @@ def load_selected_pois(maps_dir: Path, map_name: str, pois: str | None) -> dict[
 
 
 def publish(payload: dict[str, object]) -> None:
-    payload_json = json.dumps(payload, separators=(",", ":"))
-    ros_msg_yaml = json.dumps({"data": payload_json}, separators=(",", ":"))
-    cmd = [
-        "bash",
-        "-lc",
-        "source /opt/ros/*/setup.bash >/dev/null 2>&1 && "
-        f"ros2 topic pub --once /mapping/cmd_pois std_msgs/msg/String {shlex.quote(ros_msg_yaml)}",
-    ]
-    result = subprocess.run(cmd, check=False, text=True)
-    if result.returncode != 0:
-        raise RuntimeError("Failed to publish POIs to /mapping/cmd_pois")
+    rclpy.init()
+    node = rclpy.create_node("pub_pois")
+    publisher = node.create_publisher(String, "/mapping/cmd_pois", 10)
+    msg = String()
+    msg.data = json.dumps(payload, separators=(",", ":"))
+    end_time = time.time() + 0.5
+    while time.time() < end_time:
+        publisher.publish(msg)
+        rclpy.spin_once(node, timeout_sec=0.05)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 def main() -> int:
