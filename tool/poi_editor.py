@@ -278,16 +278,6 @@ class RelocalizationPose(Node):
 def main(
     tinynav_map_path: Path,
 ) -> None:
-    if not tinynav_map_path.exists():
-        host_prefix = "/home/junlinp/uniflex/tinynav/"
-        container_prefix = "/tinynav/"
-        tinynav_map_path_str = str(tinynav_map_path)
-        if tinynav_map_path_str.startswith(host_prefix):
-            remapped = Path(container_prefix) / tinynav_map_path_str[len(host_prefix):]
-            if remapped.exists():
-                print(f"[poi_editor] remap map path: {tinynav_map_path} -> {remapped}")
-                tinynav_map_path = remapped
-
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
