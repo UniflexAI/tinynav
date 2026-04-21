@@ -67,8 +67,6 @@ class MapOverlayPainter extends CustomPainter {
     if (pose == null) return;
     final c = _imageToCanvas(_worldToImage(pose!.x, pose!.y), size);
 
-    canvas.drawCircle(c, 8, Paint()..color = const Color(0xFF1565C0));
-
     canvas.save();
     canvas.translate(c.dx, c.dy);
     canvas.rotate(pose!.yaw);
