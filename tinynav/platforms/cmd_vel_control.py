@@ -60,11 +60,15 @@ class CmdVelControlNode(Node):
         self.max_angular_acc = 2.5  # rad/s^2
         self.max_angular_speed = 0.5
         self.forward_heading_limit_rad = float(np.deg2rad(20.0))
+        self.cmd_zero_eps = 1e-3
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
+        self._zero_cmd_latched = False
+        self._last_pub_cmd = Twist()
+        self._has_published_once = False
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _update_cmd(self):
@@ -183,7 +187,31 @@ class CmdVelControlNode(Node):
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
 
+        is_zero_cmd = (
+            abs(out.linear.x) <= self.cmd_zero_eps
+            and abs(out.angular.z) <= self.cmd_zero_eps
+        )
+        if is_zero_cmd:
+            if self._zero_cmd_latched:
+                self.prev_cmd = out
+                return
+            self._zero_cmd_latched = True
+        else:
+            self._zero_cmd_latched = False
+
+        if self._has_published_once:
+            unchanged = (
+                abs(out.linear.x - self._last_pub_cmd.linear.x) <= self.cmd_zero_eps
+                and abs(out.angular.z - self._last_pub_cmd.angular.z) <= self.cmd_zero_eps
+            )
+            if unchanged:
+                self.prev_cmd = out
+                return
+
         self.cmd_pub.publish(out)
+        self._last_pub_cmd.linear.x = out.linear.x
+        self._last_pub_cmd.angular.z = out.angular.z
+        self._has_published_once = True
         self.prev_cmd = out
 
     def path_callback(self, msg):

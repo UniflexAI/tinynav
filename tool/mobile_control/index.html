@@ -117,6 +117,46 @@
     .ok { background: var(--ok); }
     .err { background: var(--err); }
     .muted { color: var(--muted); }
+    .joystick-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .joystick-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: #0b1220;
+    }
+    .joystick-title {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .joystick-area {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      border-radius: 12px;
+      border: 1px dashed #334155;
+      background:
+        radial-gradient(circle at center, rgba(59, 130, 246, 0.18), rgba(2, 6, 23, 0.9)),
+        #020617;
+      position: relative;
+      touch-action: none;
+      user-select: none;
+    }
+    .joystick-knob {
+      position: absolute;
+      width: 44px;
+      height: 44px;
+      border-radius: 999px;
+      background: #60a5fa;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -163,6 +203,25 @@
     </div>
 
     <div class="card">
+      <h2>方向控制</h2>
+      <div class="joystick-grid">
+        <div class="joystick-card">
+          <div class="joystick-title">行走摇杆（x/y，最大 0.8 m/s）</div>
+          <div id="leftStickArea" class="joystick-area">
+            <div id="leftStickKnob" class="joystick-knob"></div>
+          </div>
+        </div>
+        <div class="joystick-card">
+          <div class="joystick-title">旋转摇杆（z，最大 0.8 rad/s）</div>
+          <div id="rightStickArea" class="joystick-area">
+            <div id="rightStickKnob" class="joystick-knob"></div>
+          </div>
+        </div>
+      </div>
+      <div class="mono muted">左摇杆：前后/左右平移；右摇杆：左旋/右旋。</div>
+    </div>
+
+    <div class="card">
       <h2>导航操作</h2>
       <div class="row">
         <button id="startNavBtn">启动</button>
@@ -171,12 +230,13 @@
         <button id="stopAllBtn" class="danger">全部停止</button>
         <button id="sitBtn" class="secondary">蹲下</button>
         <button id="standBtn" class="secondary">站立</button>
-        <button id="editPoiBtn" class="secondary">编辑 POI: 关</button>
+        <button id="addPoiBtn" class="secondary">增加 POI</button>
+        <button id="deletePoiBtn" class="secondary">删除 POI: 关</button>
         <button id="savePoiBtn" class="secondary" disabled>保存 POI</button>
       </div>
       <div class="mono muted">启动发送 `navigation`；导航发送 `/mapping/poi_nav_cmd: start`；停止发送 `/mapping/poi_nav_cmd: stop`。</div>
       <div class="mono muted">普通模式：点击 POI 点发送 `goto:N`；点击空白地图发送 `/control/target_pose`。</div>
-      <div class="mono muted">编辑模式：点击 POI 附近后可把该 POI 移到点击位置（需要已有 world->map TF），再点击“保存 POI”。</div>
+      <div class="mono muted">增加 POI：点击地图后确认新增；删除 POI：点击 POI 附近后确认删除；最后点击“保存 POI”写入 pois.json。</div>
     </div>
   </div>
 
@@ -195,7 +255,8 @@
     const stopAllBtn = document.getElementById("stopAllBtn");
     const sitBtn = document.getElementById("sitBtn");
     const standBtn = document.getElementById("standBtn");
-    const editPoiBtn = document.getElementById("editPoiBtn");
+    const addPoiBtn = document.getElementById("addPoiBtn");
+    const deletePoiBtn = document.getElementById("deletePoiBtn");
     const savePoiBtn = document.getElementById("savePoiBtn");
     const showMapLayer = document.getElementById("showMapLayer");
     const showGlobalPath = document.getElementById("showGlobalPath");
@@ -205,6 +266,10 @@
     const fitViewBtn = document.getElementById("fitViewBtn");
     const mapCanvas = document.getElementById("mapCanvas");
     const mapCtx = mapCanvas.getContext("2d");
+    const leftStickArea = document.getElementById("leftStickArea");
+    const leftStickKnob = document.getElementById("leftStickKnob");
+    const rightStickArea = document.getElementById("rightStickArea");
+    const rightStickKnob = document.getElementById("rightStickKnob");
 
     const defaultWs = `ws://${window.location.host || "127.0.0.1:8000"}/ws`;
     wsUrlInput.value = new URLSearchParams(window.location.search).get("ws") || defaultWs;
@@ -214,6 +279,7 @@
     let pubTargetPose = null;
     let pubPoiNavCmd = null;
     let pubActionCmd = null;
+    let pubCmdVel = null;
     const subs = [];
     let odomPose = null;
     let targetPose = null;
@@ -234,8 +300,14 @@
     let actionState = "未操作";
     let relocalizationOk = false;
     let tfWorldFromMap2D = null;
-    let poiEditMode = false;
+    let poiDeleteMode = false;
     let poiDirty = false;
+    const maxLinearSpeed = 0.8;
+    const maxAngularSpeed = 0.8;
+    const cmdVelState = { vx: 0.0, vy: 0.0, wz: 0.0 };
+    let leftStickPointerId = null;
+    let rightStickPointerId = null;
+    let joystickActive = false;
 
     function updateStateInfo() {
       stateInfo.textContent = `state: 服务=${managerState} | 操作=${actionState}`;
@@ -246,14 +318,64 @@
     }
 
     function updatePoiEditUi() {
-      editPoiBtn.textContent = `编辑 POI: ${poiEditMode ? "开" : "关"}`;
+      deletePoiBtn.textContent = `删除 POI: ${poiDeleteMode ? "开" : "关"}`;
       savePoiBtn.disabled = !poiDirty;
-      mapCanvas.style.cursor = poiEditMode ? "pointer" : "crosshair";
+      mapCanvas.style.cursor = poiDeleteMode ? "pointer" : "crosshair";
+    }
+
+    function setPoiMode(mode) {
+      poiDeleteMode = mode === "delete";
+      updatePoiEditUi();
+      drawMap();
     }
 
     function setConn(connected, text) {
       connDot.className = `status-dot ${connected ? "ok" : "err"}`;
       connText.textContent = text;
+    }
+
+    function clamp(v, lo, hi) {
+      return Math.max(lo, Math.min(hi, v));
+    }
+
+    function setKnobPosition(area, knob, nx, ny) {
+      const rect = area.getBoundingClientRect();
+      const radius = Math.max(10, Math.min(rect.width, rect.height) * 0.36);
+      const x = nx * radius;
+      const y = -ny * radius;
+      knob.style.left = `calc(50% + ${x}px)`;
+      knob.style.top = `calc(50% + ${y}px)`;
+    }
+
+    function resetKnob(area, knob) {
+      setKnobPosition(area, knob, 0.0, 0.0);
+    }
+
+    function pointerToNormalized(area, clientX, clientY) {
+      const rect = area.getBoundingClientRect();
+      const cx = rect.left + rect.width * 0.5;
+      const cy = rect.top + rect.height * 0.5;
+      const dx = clientX - cx;
+      const dy = cy - clientY;
+      const radius = Math.max(10, Math.min(rect.width, rect.height) * 0.36);
+      const dist = Math.hypot(dx, dy);
+      const scale = dist > radius ? (radius / dist) : 1.0;
+      return {
+        nx: (dx * scale) / radius,
+        ny: (dy * scale) / radius,
+      };
+    }
+
+    function publishCmdVelNow() {
+      if (!pubCmdVel) return;
+      pubCmdVel.publish({
+        linear: { x: cmdVelState.vx, y: cmdVelState.vy, z: 0.0 },
+        angular: { x: 0.0, y: 0.0, z: cmdVelState.wz },
+      });
+    }
+
+    function updateJoystickActive() {
+      joystickActive = (leftStickPointerId !== null) || (rightStickPointerId !== null);
     }
 
     function createRosbridgeClient(url) {
@@ -518,6 +640,48 @@
       };
     }
 
+    function getNextPoiIndex() {
+      if (!poiPoints || poiPoints.length === 0) return 0;
+      let maxIdx = -1;
+      for (const p of poiPoints) {
+        const idx = Number(p.index);
+        if (Number.isFinite(idx) && idx > maxIdx) {
+          maxIdx = idx;
+        }
+      }
+      return maxIdx + 1;
+    }
+
+    function addPoiAtRobotPose() {
+      if (!odomPose) {
+        window.alert("尚未拿到机器人当前位置（/slam/odometry）");
+        return;
+      }
+      const mapPt = transformWorldPointToMap(odomPose.x, odomPose.y);
+      if (!mapPt) {
+        window.alert("尚未拿到 world->map 变换，无法新增 POI");
+        return;
+      }
+      const newIndex = getNextPoiIndex();
+      const okAdd = window.confirm(
+        `新增 POI ${newIndex} 到机器人当前位置？\n\nworld x=${odomPose.x.toFixed(2)} y=${odomPose.y.toFixed(2)}`
+      );
+      if (!okAdd) return;
+      poiPoints.push({
+        index: newIndex,
+        name: `POI_${newIndex}`,
+        x: mapPt.x,
+        y: mapPt.y,
+        z: 0.0,
+      });
+      poiPoints.sort((a, b) => Number(a.index) - Number(b.index));
+      poiDirty = true;
+      actionState = `新增POI${newIndex}待保存`;
+      updateStateInfo();
+      updatePoiEditUi();
+      drawMap();
+    }
+
     function drawArrow(x, y, yaw, color, sizePx) {
       const p = worldToCanvas(x, y);
       mapCtx.save();
@@ -601,7 +765,7 @@
         mapCtx.fillStyle = "#fde68a";
         mapCtx.font = "12px sans-serif";
         mapCtx.fillText(String(poi.index), c.x + 7, c.y - 7);
-        if (poiEditMode) {
+        if (poiDeleteMode) {
           mapCtx.strokeStyle = "#fef08a";
           mapCtx.lineWidth = 1.5;
           mapCtx.strokeRect(c.x - 8, c.y - 8, 16, 16);
@@ -705,6 +869,9 @@
         };
         pubActionCmd = {
           publish: (msg) => ros.publish("/unitree/action_command", "std_msgs/String", msg)
+        };
+        pubCmdVel = {
+          publish: (msg) => ros.publish("/cmd_vel", "geometry_msgs/Twist", msg)
         };
 
         loadPois();
@@ -845,6 +1012,10 @@
       }
       ros = null;
       pubActionCmd = null;
+      pubCmdVel = null;
+      cmdVelState.vx = 0.0;
+      cmdVelState.vy = 0.0;
+      cmdVelState.wz = 0.0;
       managerState = "idle";
       actionState = "未操作";
       relocalizationOk = false;
@@ -861,6 +1032,55 @@
     function sendActionCommand(cmd) {
       if (!pubActionCmd) return;
       pubActionCmd.publish({ data: cmd });
+    }
+
+    function setupJoysticks() {
+      resetKnob(leftStickArea, leftStickKnob);
+      resetKnob(rightStickArea, rightStickKnob);
+
+      leftStickArea.onpointerdown = (ev) => {
+        leftStickPointerId = ev.pointerId;
+        leftStickArea.setPointerCapture(ev.pointerId);
+        updateJoystickActive();
+      };
+      leftStickArea.onpointermove = (ev) => {
+        if (ev.pointerId !== leftStickPointerId) return;
+        const p = pointerToNormalized(leftStickArea, ev.clientX, ev.clientY);
+        setKnobPosition(leftStickArea, leftStickKnob, p.nx, p.ny);
+        cmdVelState.vx = clamp(p.ny, -1.0, 1.0) * maxLinearSpeed;
+        cmdVelState.vy = clamp(-p.nx, -1.0, 1.0) * maxLinearSpeed;
+      };
+      leftStickArea.onpointerup = (ev) => {
+        if (ev.pointerId !== leftStickPointerId) return;
+        leftStickPointerId = null;
+        updateJoystickActive();
+        cmdVelState.vx = 0.0;
+        cmdVelState.vy = 0.0;
+        resetKnob(leftStickArea, leftStickKnob);
+        publishCmdVelNow();
+      };
+      leftStickArea.onpointercancel = leftStickArea.onpointerup;
+
+      rightStickArea.onpointerdown = (ev) => {
+        rightStickPointerId = ev.pointerId;
+        rightStickArea.setPointerCapture(ev.pointerId);
+        updateJoystickActive();
+      };
+      rightStickArea.onpointermove = (ev) => {
+        if (ev.pointerId !== rightStickPointerId) return;
+        const p = pointerToNormalized(rightStickArea, ev.clientX, ev.clientY);
+        setKnobPosition(rightStickArea, rightStickKnob, p.nx, p.ny);
+        cmdVelState.wz = clamp(-p.nx, -1.0, 1.0) * maxAngularSpeed;
+      };
+      rightStickArea.onpointerup = (ev) => {
+        if (ev.pointerId !== rightStickPointerId) return;
+        rightStickPointerId = null;
+        updateJoystickActive();
+        cmdVelState.wz = 0.0;
+        resetKnob(rightStickArea, rightStickKnob);
+        publishCmdVelNow();
+      };
+      rightStickArea.onpointercancel = rightStickArea.onpointerup;
     }
 
     connectBtn.onclick = connect;
@@ -897,10 +1117,11 @@
       updateStateInfo();
     };
 
-    editPoiBtn.onclick = () => {
-      poiEditMode = !poiEditMode;
-      updatePoiEditUi();
-      drawMap();
+    addPoiBtn.onclick = () => {
+      addPoiAtRobotPose();
+    };
+    deletePoiBtn.onclick = () => {
+      setPoiMode(poiDeleteMode ? "none" : "delete");
     };
 
     savePoiBtn.onclick = () => {
@@ -1009,26 +1230,19 @@
         }
       }
 
-      if (poiEditMode) {
+      if (poiDeleteMode) {
         if (!nearestPoi || minDist >= 1.0) {
           return;
         }
-        const mapPt = transformWorldPointToMap(world.x, world.y);
-        if (!mapPt) {
-          window.alert("尚未拿到 world->map 变换，无法编辑 POI");
-          return;
-        }
-        const okMove = window.confirm(
-          `将 POI ${nearestPoi.index} 移动到当前点击位置？\n\nworld x=${world.x.toFixed(2)} y=${world.y.toFixed(2)}`
+        const okDelete = window.confirm(
+          `确认删除 POI ${nearestPoi.index} ?\n\nx=${nearestPoi.x.toFixed(2)} y=${nearestPoi.y.toFixed(2)}`
         );
-        if (!okMove) return;
-        nearestPoi.x = mapPt.x;
-        nearestPoi.y = mapPt.y;
+        if (!okDelete) return;
+        poiPoints = poiPoints.filter((p) => Number(p.index) !== Number(nearestPoi.index));
         poiDirty = true;
-        actionState = `POI${nearestPoi.index}待保存`;
+        actionState = `删除POI${nearestPoi.index}待保存`;
         updateStateInfo();
-        updatePoiEditUi();
-        drawMap();
+        setPoiMode("none");
         return;
       }
 
@@ -1058,6 +1272,16 @@
     zoomInBtn.onclick = () => zoomByFactor(1.1);
     fitViewBtn.onclick = fitViewToRobot;
     window.addEventListener("resize", resizeCanvas);
+    window.addEventListener("resize", () => {
+      resetKnob(leftStickArea, leftStickKnob);
+      resetKnob(rightStickArea, rightStickKnob);
+    });
+    setupJoysticks();
+    window.setInterval(() => {
+      if (joystickActive) {
+        publishCmdVelNow();
+      }
+    }, 50);
     updateStateInfo();
     updateRelocalizationInfo();
     updatePoiEditUi();
