@@ -46,10 +46,15 @@ def publish(payload: dict[str, object]) -> None:
     publisher = node.create_publisher(String, "/mapping/cmd_pois", 10)
     msg = String()
     msg.data = json.dumps(payload, separators=(",", ":"))
-    end_time = time.time() + 0.5
-    while time.time() < end_time:
-        publisher.publish(msg)
-        rclpy.spin_once(node, timeout_sec=0.05)
+    deadline = time.time() + 5.0
+    while publisher.get_subscription_count() == 0:
+        if time.time() >= deadline:
+            node.destroy_node()
+            rclpy.shutdown()
+            raise RuntimeError("Timed out waiting for /mapping/cmd_pois subscribers")
+        rclpy.spin_once(node, timeout_sec=0.1)
+    publisher.publish(msg)
+    rclpy.spin_once(node, timeout_sec=0.1)
     node.destroy_node()
     rclpy.shutdown()
 
