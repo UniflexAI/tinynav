@@ -72,8 +72,6 @@ class LocalPlanningPainter extends CustomPainter {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
 
-    canvas.drawCircle(center, 8, Paint()..color = Colors.white70);
-
     final tip   = Offset(center.dx + cosY * 14, center.dy - sinY * 14);
     final left  = Offset(center.dx - sinY *  6, center.dy - cosY *  6);
     final right = Offset(center.dx + sinY *  6, center.dy + cosY *  6);
