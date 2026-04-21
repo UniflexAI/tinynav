@@ -11,7 +11,7 @@ from std_msgs.msg import String
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Publish POIs to /mapping/cmd_pois")
-    parser.add_argument("--map-name", required=True)
+    parser.add_argument("--tinynav_map_path", required=True)
     parser.add_argument("--pois", default=None, help="Comma-separated POI ids, for example 2,1,0")
     return parser.parse_args()
 
@@ -23,8 +23,8 @@ def parse_pois_arg(pois: str) -> list[str]:
     return values
 
 
-def load_selected_pois(maps_dir: Path, map_name: str, pois: str | None) -> dict[str, object]:
-    pois_path = maps_dir / map_name / "pois.json"
+def load_selected_pois(tinynav_map_path: Path, pois: str | None) -> dict[str, object]:
+    pois_path = tinynav_map_path / "pois.json"
     if not pois_path.exists():
         raise FileNotFoundError(f"POI file not found: {pois_path}")
     data = json.loads(pois_path.read_text())
@@ -57,12 +57,13 @@ def publish(payload: dict[str, object]) -> None:
 def main() -> int:
     args = parse_args()
     try:
-        payload = load_selected_pois(Path("/root/.local/share/tinynav/maps"), args.map_name, args.pois)
+        tinynav_map_path = Path(args.tinynav_map_path)
+        payload = load_selected_pois(tinynav_map_path, args.pois)
         publish(payload)
     except (FileNotFoundError, ValueError, KeyError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    print(f"Published POIs for map: {args.map_name}")
+    print(f"Published POIs for map: {tinynav_map_path}")
     print(f"POIs: {args.pois or 'all'}")
     return 0
 
