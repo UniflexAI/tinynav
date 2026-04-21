@@ -360,7 +360,6 @@ class NodeRunner:
             except Exception:
                 pass
             for proc in (self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc):
-            for proc in (self.node._realsense_proc, self.node._perception_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)
