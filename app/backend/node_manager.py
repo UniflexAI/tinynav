@@ -491,6 +491,15 @@ class BackendNode(Ros2NodeManager):
         if not os.path.exists(bag_file):
             self.get_logger().warn(f'bag_0.db3 not found in {active}')
             return
+        # Remove existing map path so build_map_node creates a fresh real directory.
+        # If map_path is a symlink, shutil.move would rename the symlink (not the target),
+        # and build_map_node would write through the symlink into the old map directory.
+        import shutil as _shutil
+        if os.path.islink(self.map_path) or os.path.isfile(self.map_path):
+            os.remove(self.map_path)
+        elif os.path.isdir(self.map_path):
+            _shutil.rmtree(self.map_path)
+
         domain_env = {'ROS_DOMAIN_ID': self.ros_domain_id} if self.ros_domain_id is not None else {}
         cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
         self.processes['perception'] = self._spawn(cmd_perception, extra_env=domain_env)
@@ -518,11 +527,6 @@ class BackendNode(Ros2NodeManager):
             ts = datetime.now().strftime('map_%Y_%m_%d_%H_%M_%S')
             dest = os.path.join(maps_dir, ts)
             shutil.move(self.map_path, dest)
-            # Remove existing map path (symlink, file, or dir)
-            if os.path.islink(self.map_path) or os.path.isfile(self.map_path):
-                os.remove(self.map_path)
-            elif os.path.isdir(self.map_path):
-                shutil.rmtree(self.map_path)
             os.symlink(dest, self.map_path)
             self._stop_all()
             self.state = 'idle'
