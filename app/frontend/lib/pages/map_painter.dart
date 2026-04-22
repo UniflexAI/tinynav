@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../core/models.dart';
@@ -67,16 +69,24 @@ class MapOverlayPainter extends CustomPainter {
     if (pose == null) return;
     final c = _imageToCanvas(_worldToImage(pose!.x, pose!.y), size);
 
-    canvas.save();
-    canvas.translate(c.dx, c.dy);
-    canvas.rotate(pose!.yaw);
+    // Map canvas: screen-right = world+X, screen-up = world+Y (Y-flipped).
+    // Use explicit geometry matching planning_painter.dart so yaw=0 → arrow points right.
+    final cosY = math.cos(pose!.yaw);
+    final sinY = math.sin(pose!.yaw);
+    final tip   = Offset(c.dx + cosY * 14, c.dy - sinY * 14);
+    final left  = Offset(c.dx - sinY *  6, c.dy - cosY *  6);
+    final right = Offset(c.dx + sinY *  6, c.dy + cosY *  6);
+    final base  = Offset(c.dx - cosY *  5, c.dy + sinY *  5);
+
     final arrow = Path()
-      ..moveTo(0, -14)
-      ..lineTo(5, 2)
-      ..lineTo(-5, 2)
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(left.dx, left.dy)
+      ..lineTo(base.dx, base.dy)
+      ..lineTo(right.dx, right.dy)
       ..close();
     canvas.drawPath(arrow, Paint()..color = Colors.white);
-    canvas.restore();
+    canvas.drawPath(arrow,
+        Paint()..color = Colors.black45..style = PaintingStyle.stroke..strokeWidth = 1.0);
   }
 
   @override
