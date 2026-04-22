@@ -186,21 +186,12 @@ class _HeroBanner extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           const Text(
-            'TinyNav',
-            style: TextStyle(
-              fontSize: 26,
-              fontWeight: FontWeight.w800,
-              color: Color(0xFF2B3A42),
-              letterSpacing: -0.5,
-            ),
-          ),
-          const SizedBox(height: 4),
-          const Text(
             'Visual Navigation Module',
             style: TextStyle(
-              fontSize: 12,
-              color: Color(0xFF9E9E9E),
-              fontWeight: FontWeight.w400,
+              fontSize: 20,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF2B3A42),
+              letterSpacing: -0.3,
             ),
           ),
         ],
