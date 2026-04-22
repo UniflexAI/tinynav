@@ -169,7 +169,7 @@ final mapFileInfoProvider =
     FutureProvider.autoDispose.family<MapFileInfo, String>((ref, mapName) async {
   final dio = ref.watch(dioProvider);
   if (ref.watch(baseUrlProvider) == null) throw Exception('No device connected');
-  final resp = await dio.get('/map/files/$mapName');
+  final resp = await dio.get('/map/preview/$mapName');
   return MapFileInfo.fromJson(resp.data as Map<String, dynamic>);
 });
 
