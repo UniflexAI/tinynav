@@ -144,8 +144,8 @@ class PerceptionNode(Node):
 
         # Noise model (continuous-time)
         # for Realsense D435i
-        accel_noise_density = 0.25     # [m/s^2/√Hz]
-        gyro_noise_density = 0.00005 # [rad/s/√Hz]
+        accel_noise_density = 1.25     # [m/s^2/√Hz]
+        gyro_noise_density = 0.05 # [rad/s/√Hz]
         bias_acc_rw_sigma = 0.001
         bias_gyro_rw_sigma = 0.0001
         self.pre_integration_params = gtsam.PreintegrationCombinedParams.MakeSharedU()
@@ -210,7 +210,7 @@ class PerceptionNode(Node):
         left_msg = stereo_pair_msg.left_msg
         right_msg = stereo_pair_msg.right_msg
         image_timestamp = stamp2second(left_msg.header.stamp)
-        if image_timestamp - self.last_processed_timestamp < 0.1333:
+        if image_timestamp - self.last_processed_timestamp < 0.0633:
             return
 
         self.last_processed_timestamp = image_timestamp

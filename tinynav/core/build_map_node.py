@@ -11,7 +11,7 @@ from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from sensor_msgs.msg import Image, CameraInfo, CompressedImage
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage, Imu
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from cv_bridge import CvBridge
 import cv2
@@ -20,7 +20,8 @@ import os
 import argparse
 import sys
 
-from tinynav.tinynav_cpp_bind import pose_graph_solve
+import gtsam
+from gtsam.symbol_shorthand import X
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 import logging
@@ -74,20 +75,92 @@ def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, lo
 
     return global_grid, global_origin
 
-def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, max_iteration_num:int = 1024) -> dict:
+def solve_pose_graph(
+    pose_graph_used_pose: dict,
+    odom_constraints: list,
+    loop_constraints: list,
+    max_iteration_num: int = 1024,
+) -> dict:
     """
-    Solve the bundle adjustment problem.
+    Optimize poses with:
+    - odom relative constraints as BetweenFactorPose3 (consecutive poses)
+    - loop closures as BetweenFactorPose3
     """
-    if len(relative_pose_constraint) == 0:
-        return pose_graph_used_pose
-    min_timestamp = min(pose_graph_used_pose.keys())
-    constant_pose_index_dict = { min_timestamp : True }
+    if len(pose_graph_used_pose) == 0:
+        return {}
 
-    relative_pose_constraint = [
-        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([30.0, 30.0, 30.0]))
-        for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
-    optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
-    return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
+    timestamps = sorted(pose_graph_used_pose.keys())
+    idx_of = {t: i for i, t in enumerate(timestamps)}
+
+    graph = gtsam.NonlinearFactorGraph()
+    initial = gtsam.Values()
+
+    def _to_pose3(T: np.ndarray) -> gtsam.Pose3:
+        return gtsam.Pose3(gtsam.Rot3(T[:3, :3]), gtsam.Point3(T[:3, 3]))
+
+    # Initialize all variables from current pose estimates.
+    for t in timestamps:
+        key = X(idx_of[t])
+        pose3 = _to_pose3(pose_graph_used_pose[t])
+        initial.insert(key, pose3)
+
+    # Single anchor to remove gauge freedom.
+    anchor_t = timestamps[0]
+    anchor_noise = gtsam.noiseModel.Diagonal.Sigmas(
+        np.array([1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6], dtype=np.float64)
+    )
+    graph.add(gtsam.PriorFactorPose3(X(idx_of[anchor_t]), _to_pose3(pose_graph_used_pose[anchor_t]), anchor_noise))
+
+    # Odom relative constraints provided by odom observations.
+    odom_between_noise = gtsam.noiseModel.Diagonal.Sigmas(
+        np.array([0.10, 0.10, 0.10, 0.03, 0.03, 0.03], dtype=np.float64)
+    )
+    for curr_timestamp, prev_timestamp, T_prev_curr in odom_constraints:
+        if curr_timestamp not in idx_of or prev_timestamp not in idx_of:
+            continue
+        graph.add(
+            gtsam.BetweenFactorPose3(
+                X(idx_of[prev_timestamp]),
+                X(idx_of[curr_timestamp]),
+                _to_pose3(T_prev_curr),
+                odom_between_noise,
+            )
+        )
+
+    # Loop relative constraints between non-consecutive keyframes.
+    if len(loop_constraints) > 0:
+        loop_base_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            np.array([0.20, 0.20, 0.20, 0.06, 0.06, 0.06], dtype=np.float64)
+        )
+        loop_huber = gtsam.noiseModel.mEstimator.Huber.Create(1.345)
+        loop_robust_noise = gtsam.noiseModel.Robust.Create(loop_huber, loop_base_noise)
+        for curr_timestamp, prev_timestamp, T_prev_curr in loop_constraints:
+            if curr_timestamp not in idx_of or prev_timestamp not in idx_of:
+                continue
+            graph.add(
+                gtsam.BetweenFactorPose3(
+                    X(idx_of[prev_timestamp]),
+                    X(idx_of[curr_timestamp]),
+                    _to_pose3(T_prev_curr),
+                    loop_robust_noise,
+                )
+            )
+
+    # iSAM2 incremental optimizer (single-batch update in this code path).
+    isam2_params = gtsam.ISAM2Params()
+    isam2_params.setRelinearizeThreshold(0.01)
+    optimizer = gtsam.ISAM2(isam2_params)
+    optimizer.update(graph, initial)
+    result = optimizer.calculateEstimate()
+
+    optimized = {}
+    for t in timestamps:
+        pose3 = result.atPose3(X(idx_of[t]))
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = pose3.rotation().matrix()
+        T[:3, 3] = pose3.translation()
+        optimized[t] = T
+    return optimized
 
 def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarity_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
     if len(embeddings) == 0:
@@ -265,11 +338,14 @@ class TinyNavDB():
                 os.remove(f"{map_save_path}/rgb_images.db")
             if os.path.exists(f"{map_save_path}/embeddings.db"):
                 os.remove(f"{map_save_path}/embeddings.db")
+            if os.path.exists(f"{map_save_path}/imus.db"):
+                os.remove(f"{map_save_path}/imus.db")
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
         self.infra1_images = IntKeyShelf(f"{map_save_path}/infra1_images")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
         self.rgb_images = IntKeyShelf(f"{map_save_path}/rgb_images")
+        self.imus = IntKeyShelf(f"{map_save_path}/imus")
 
     def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
@@ -289,12 +365,22 @@ class TinyNavDB():
     def get_embedding(self, key:int):
         return self.embeddings[key]
 
+    def set_imu(self, key: int, accel: np.ndarray, gyro: np.ndarray):
+        self.imus[key] = {
+            "accel": accel,
+            "gyro": gyro,
+        }
+
+    def get_imu(self, key: int):
+        return self.imus[key]
+
     def close(self):
         self.features.close()
         self.embeddings.close()
         self.infra1_images.close()
         self.depths.close()
         self.rgb_images.close()
+        self.imus.close()
 
 class BagPlayer(Node):
     def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
@@ -423,6 +509,7 @@ class BuildMapNode(Node):
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
         self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
+        self.imu_sub = self.create_subscription(Imu, '/camera/camera/imu', self.imu_callback, 500)
 
         self.marker_pub = self.create_publisher(MarkerArray, '/mapping/pointcloud_markers', 10)
         self.local_map_pub = self.create_publisher(PointCloud2, "/mapping/local_map", 10)
@@ -443,7 +530,8 @@ class BuildMapNode(Node):
         self.baseline = None
         self.odom = {}
         self.pose_graph_used_pose = {}
-        self.relative_pose_constraint = []
+        self.odom_constraints = []
+        self.loop_constraints = []
         self.last_keyframe_timestamp = None
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
@@ -454,6 +542,7 @@ class BuildMapNode(Node):
 
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
+        self.saved_imu_count = 0
 
         self.map_save_path = map_save_path
         self._save_completed = False
@@ -519,6 +608,27 @@ class BuildMapNode(Node):
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
 
+    def imu_callback(self, imu_msg: Imu):
+        timestamp_ns = int(imu_msg.header.stamp.sec * 1e9) + int(imu_msg.header.stamp.nanosec)
+        accel = np.array(
+            [
+                imu_msg.linear_acceleration.x,
+                imu_msg.linear_acceleration.y,
+                imu_msg.linear_acceleration.z,
+            ],
+            dtype=np.float64,
+        )
+        gyro = np.array(
+            [
+                imu_msg.angular_velocity.x,
+                imu_msg.angular_velocity.y,
+                imu_msg.angular_velocity.z,
+            ],
+            dtype=np.float64,
+        )
+        self.db.set_imu(timestamp_ns, accel, gyro)
+        self.saved_imu_count += 1
+
     def mapping_stop_callback(self, msg: Bool):
         if msg.data:
             self.get_logger().info("Received benchmark stop signal, starting save process...")
@@ -575,8 +685,10 @@ class BuildMapNode(Node):
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             else:
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
-                T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
-                self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+                T_prev_curr_odom = np.linalg.inv(last_keyframe_odom_pose) @ odom
+                self.odom_constraints.append(
+                    (keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr_odom)
+                )
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
                 self.odom[keyframe_image_timestamp] = odom
 
@@ -598,10 +710,15 @@ class BuildMapNode(Node):
                             prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
                             success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                             if success and len(inliers) >= 100:
-                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                                self.loop_constraints.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
+                        self.pose_graph_used_pose = solve_pose_graph(
+                            self.pose_graph_used_pose,
+                            self.odom_constraints,
+                            self.loop_constraints,
+                            max_iteration_num=5,
+                        )
                 find_loop_and_pose_graph(keyframe_image_timestamp)
 
         with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -666,11 +783,25 @@ class BuildMapNode(Node):
         self.continuous_odom_recorder.save_to_disk()
 
         with Timer(name = "final pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint)
+            self.pose_graph_used_pose = solve_pose_graph(
+                self.pose_graph_used_pose,
+                self.odom_constraints,
+                self.loop_constraints,
+            )
 
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
+        np.save(
+            f"{self.map_save_path}/odom_constraints.npy",
+            np.array(self.odom_constraints, dtype=object),
+            allow_pickle=True,
+        )
+        np.save(
+            f"{self.map_save_path}/loop_constraints.npy",
+            np.array(self.loop_constraints, dtype=object),
+            allow_pickle=True,
+        )
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
@@ -683,6 +814,11 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
         np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
+        self.get_logger().info(f"Saved {self.saved_imu_count} IMU samples to imus shelve")
+        self.get_logger().info(
+            f"Saved {len(self.odom_constraints)} odom constraints and "
+            f"{len(self.loop_constraints)} loop constraints"
+        )
 
         self.db.close()
 
