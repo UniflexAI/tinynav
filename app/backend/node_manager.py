@@ -76,6 +76,9 @@ class BackendNode(Ros2NodeManager):
         # Publisher for nav target (consumed by map_node in the future)
         self._nav_target_pub = self.create_publisher(String, '/service/nav_target', 10)
 
+        # Publisher for robot action commands (sit / stand)
+        self._action_pub = self.create_publisher(String, '/service/command', 10)
+
         # Publisher for teleop velocity commands
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
@@ -352,6 +355,9 @@ class BackendNode(Ros2NodeManager):
     def cmd_nav_cancel(self):
         if self.state == 'navigation':
             self._stop_all()
+
+    def cmd_action(self, action: str):
+        self._action_pub.publish(String(data=f'play {action}'))
 
     def publish_cmd_vel(self, linear_x: float, linear_y: float, angular_z: float):
         msg = Twist()

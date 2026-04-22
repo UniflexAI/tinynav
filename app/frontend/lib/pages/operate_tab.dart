@@ -925,19 +925,33 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
 
 // ── Joystick panel ────────────────────────────────────────────────────────────
 
-class _JoystickPanel extends StatelessWidget {
+class _JoystickPanel extends ConsumerWidget {
   final void Function(double x, double y) onLeft;
   final void Function(double x, double y) onRight;
 
   const _JoystickPanel({required this.onLeft, required this.onRight});
 
+  Future<void> _sendAction(WidgetRef ref, BuildContext context, String command) async {
+    try {
+      await ref.read(dioProvider).post('/action/command', data: {'command': command});
+    } on DioException catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Container(
       color: const Color(0xFFF5F5F5),
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
+          // ── Left joystick (Move) ────────────────────────────────────
           Expanded(
             child: Column(
               children: [
@@ -947,7 +961,26 @@ class _JoystickPanel extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(width: 16),
+          const SizedBox(width: 12),
+          // ── Sit / Stand ─────────────────────────────────────────────
+          Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _ActionButton(
+                icon: Icons.airline_seat_recline_extra_rounded,
+                label: 'Sit',
+                onTap: () => _sendAction(ref, context, 'sit'),
+              ),
+              const SizedBox(height: 12),
+              _ActionButton(
+                icon: Icons.directions_walk_rounded,
+                label: 'Stand',
+                onTap: () => _sendAction(ref, context, 'stand'),
+              ),
+            ],
+          ),
+          const SizedBox(width: 12),
+          // ── Right joystick (Rotate) ─────────────────────────────────
           Expanded(
             child: Column(
               children: [
@@ -958,6 +991,39 @@ class _JoystickPanel extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _ActionButton({required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 56,
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFE0E0E0)),
+          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 1))],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 20, color: const Color(0xFF2B3A42)),
+            const SizedBox(height: 3),
+            Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Color(0xFF2B3A42))),
+          ],
+        ),
       ),
     );
   }
