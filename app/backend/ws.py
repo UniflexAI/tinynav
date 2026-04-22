@@ -32,7 +32,7 @@ async def ws_status(ws: WebSocket):
         while True:
             node = runner.node
             if node is not None:
-                payload = json.dumps(node.get_status())
+                payload = json.dumps({'online': True, **node.get_status()})
             else:
                 payload = json.dumps({'online': False})
             await ws.send_text(payload)
