@@ -71,6 +71,25 @@ def map_image():
     return Response(content=png_bytes, media_type='image/png')
 
 
+@router.post('/set-active/{map_name}')
+def map_set_active(map_name: str):
+    """Symlink tinynav_db/map → maps/{map_name}, replacing any existing map link."""
+    import shutil
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', map_name):
+        raise HTTPException(400, 'Invalid map name')
+    root = os.environ.get('TINYNAV_DB_PATH', '/tinynav/tinynav_db')
+    src = os.path.join(root, 'maps', map_name)
+    if not os.path.isdir(src):
+        raise HTTPException(404, f'Map {map_name!r} not found')
+    link = os.path.join(root, 'map')
+    if os.path.islink(link) or os.path.isfile(link):
+        os.remove(link)
+    elif os.path.isdir(link):
+        shutil.rmtree(link)
+    os.symlink(src, link)
+    return {'ok': True, 'active': map_name}
+
+
 def _resolve_map_path(map_name: str) -> str:
     if not re.match(r'^[a-zA-Z0-9_\-]+$', map_name):
         raise HTTPException(400, 'Invalid map name')
