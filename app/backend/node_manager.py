@@ -219,22 +219,26 @@ class BackendNode(Ros2NodeManager):
             else:
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver and perception')
+                lf = self._make_log('realsense')
                 self._realsense_proc = subprocess.Popen(
-                    ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid
+                    ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid,
+                    stdout=lf, stderr=subprocess.STDOUT,
                 )
+                lf.close()
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+                lf = self._make_log('perception')
                 self._perception_proc = subprocess.Popen(
                     ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
-                    preexec_fn=os.setsid,
-                    cwd='/tinynav',
-                    env=_env,
+                    preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+                    stdout=lf, stderr=subprocess.STDOUT,
                 )
                 self._perception_proc = subprocess.Popen(
                     ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                lf.close()
         except Exception as e:
             self.get_logger().warn(f'Sensor detection failed: {e}')
             self._sensor_mode = 'unknown'
@@ -385,6 +389,16 @@ class BackendNode(Ros2NodeManager):
                 except Exception:
                     pass
 
+    def _make_log(self, name: str):
+        """Open a timestamped log file under tinynav_db/logs/. Safe to close in parent
+        after Popen — the child process inherits its own fd copy at fork time."""
+        from datetime import datetime
+        logs_dir = os.path.join(self.tinynav_db_path, 'logs')
+        os.makedirs(logs_dir, exist_ok=True)
+        ts = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+        path = os.path.join(logs_dir, f'{ts}_{name}.txt')
+        return open(path, 'w')
+
     def _stop_sensor_procs(self):
         for attr in ('_realsense_proc', '_perception_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
@@ -395,17 +409,26 @@ class BackendNode(Ros2NodeManager):
             return
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        lf = self._make_log('realsense')
         self._realsense_proc = subprocess.Popen(
-            ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid
+            ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid,
+            stdout=lf, stderr=subprocess.STDOUT,
         )
+        lf.close()
+        lf = self._make_log('perception')
         self._perception_proc = subprocess.Popen(
             ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
             preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+            stdout=lf, stderr=subprocess.STDOUT,
         )
+        lf.close()
+        lf = self._make_log('planning')
         self._planning_proc = subprocess.Popen(
             ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
             preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+            stdout=lf, stderr=subprocess.STDOUT,
         )
+        lf.close()
         self.get_logger().info('Sensor procs restarted after map build')
 
     # ------------------------------------------------------------------ #
@@ -416,17 +439,23 @@ class BackendNode(Ros2NodeManager):
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         _env['ROS_DOMAIN_ID'] = self.ros_domain_id
+        lf = self._make_log('map_node')
         self._map_node_proc = subprocess.Popen(
             [
                 'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
                 '--tinynav_map_path', self.map_path,
             ],
             preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+            stdout=lf, stderr=subprocess.STDOUT,
         )
+        lf.close()
+        lf = self._make_log('cmd_vel_control')
         self._cmd_vel_proc = subprocess.Popen(
             ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
             preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+            stdout=lf, stderr=subprocess.STDOUT,
         )
+        lf.close()
         with self._lock:
             self._nav_nodes_running = True
         self.get_logger().info('Nav nodes started')
@@ -498,15 +527,28 @@ class BackendNode(Ros2NodeManager):
         elif os.path.isdir(self.map_path):
             _shutil.rmtree(self.map_path)
 
-        domain_env = {'ROS_DOMAIN_ID': self.ros_domain_id} if self.ros_domain_id is not None else {}
-        cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
-        self.processes['perception'] = self._spawn(cmd_perception, extra_env=domain_env)
-        cmd_build = [
-            'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
-            '--map_save_path', self.map_path,
-            '--bag_file', bag_file,
-        ]
-        self.processes['build_map'] = self._spawn(cmd_build, extra_env=domain_env)
+        _env = os.environ.copy()
+        if self.ros_domain_id is not None:
+            _env['ROS_DOMAIN_ID'] = self.ros_domain_id
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        lf = self._make_log('perception')
+        self.processes['perception'] = subprocess.Popen(
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+            stdout=lf, stderr=subprocess.STDOUT,
+        )
+        lf.close()
+        lf = self._make_log('build_map_node')
+        self.processes['build_map'] = subprocess.Popen(
+            [
+                'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
+                '--map_save_path', self.map_path,
+                '--bag_file', bag_file,
+            ],
+            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+            stdout=lf, stderr=subprocess.STDOUT,
+        )
+        lf.close()
 
         def wait_and_convert():
             import shutil
