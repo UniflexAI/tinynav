@@ -38,22 +38,4 @@ async def list_bags():
 
 @router.get('/maps')
 async def list_maps():
-    root = _db_root()
-    if not root.exists():
-        return {'files': []}
-    entries = sorted(
-        (p for p in root.iterdir() if p.is_dir() and (p / 'occupancy_grid.npy').exists()),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return {
-        'files': [
-            {
-                'name': p.name,
-                'size': _path_size(p),
-                'mtime': p.stat().st_mtime,
-                'is_dir': True,
-            }
-            for p in entries
-        ]
-    }
+    return {'files': _list_dir(_db_root() / 'maps')}

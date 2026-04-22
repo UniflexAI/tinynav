@@ -67,7 +67,7 @@ def _resolve_map_path(map_name: str) -> str:
     if not re.match(r'^[a-zA-Z0-9_\-]+$', map_name):
         raise HTTPException(400, 'Invalid map name')
     root = os.environ.get('TINYNAV_DB_PATH', '/tinynav/tinynav_db')
-    path = os.path.join(root, map_name)
+    path = os.path.join(root, 'maps', map_name)
     if not os.path.isdir(path) or not os.path.exists(os.path.join(path, 'occupancy_grid.npy')):
         raise HTTPException(404, f'Map {map_name!r} not found')
     return path
