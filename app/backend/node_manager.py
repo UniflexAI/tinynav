@@ -200,10 +200,12 @@ class BackendNode(Ros2NodeManager):
     @staticmethod
     def _odom_to_dict(msg: Odometry, source: str) -> dict:
         q = msg.pose.pose.orientation
-        yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-        )
+        # SLAM outputs camera-convention poses (body Z = forward).
+        # Project body Z-axis onto world XY to get the true forward heading,
+        # which is robust to pitch oscillations during the walking gait.
+        fwd_x = 2.0 * (q.x * q.z + q.w * q.y)
+        fwd_y = 2.0 * (q.y * q.z - q.w * q.x)
+        yaw = math.atan2(fwd_y, fwd_x) if (abs(fwd_x) > 1e-9 or abs(fwd_y) > 1e-9) else 0.0
         return {
             'x': msg.pose.pose.position.x,
             'y': msg.pose.pose.position.y,
