@@ -27,7 +27,7 @@ flutter:
     - assets/images/
 
   fonts:
-    - family: Roboto
+    - family: RobotoLocal
       fonts:
         - asset: assets/fonts/Roboto/Roboto-Light.ttf
           weight: 300

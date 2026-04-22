@@ -37,6 +37,7 @@ class TinyNavApp extends ConsumerWidget {
           primary: const Color(0xFF45C95A),
         ),
         useMaterial3: true,
+        fontFamily: 'RobotoLocal',
         scaffoldBackgroundColor: const Color(0xFFF2F3F5),
         appBarTheme: const AppBarTheme(
           backgroundColor: Colors.white,
