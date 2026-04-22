@@ -91,14 +91,8 @@ cd "$TINYNAV_ROOT"
 export TINYNAV_DB_PATH="${TINYNAV_DB_PATH:-$TINYNAV_ROOT/tinynav_db}"
 info "TINYNAV_DB_PATH=$TINYNAV_DB_PATH"
 
-# Optional: pass UNITREE_NETWORK_INTERFACE to auto-start unitree_control.
-# Usage:  UNITREE_NETWORK_INTERFACE=enP8p1s0 bash scripts/run_web_app.sh
-if [ -n "${UNITREE_NETWORK_INTERFACE:-}" ]; then
-  export UNITREE_NETWORK_INTERFACE
-  info "UNITREE_NETWORK_INTERFACE=$UNITREE_NETWORK_INTERFACE — unitree_control will start"
-else
-  warn "UNITREE_NETWORK_INTERFACE not set — unitree_control will NOT start"
-fi
+export UNITREE_NETWORK_INTERFACE="${UNITREE_NETWORK_INTERFACE:-enP8p1s0}"
+info "UNITREE_NETWORK_INTERFACE=$UNITREE_NETWORK_INTERFACE"
 
 uv run uvicorn app.backend.main:app \
   --host 0.0.0.0 --port "$BACKEND_PORT" \
