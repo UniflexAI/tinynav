@@ -43,3 +43,21 @@ def nav_status():
         'status': 'navigating' if node.state == 'navigation' else 'idle',
         'rawState': node.state,
     }
+
+
+@router.post('/nodes/enable')
+def nav_nodes_enable():
+    node = _require_node()
+    if node._nav_nodes_running:
+        raise HTTPException(409, 'Nav nodes already running')
+    node.cmd_start_nav_nodes()
+    return {'ok': True}
+
+
+@router.post('/nodes/disable')
+def nav_nodes_disable():
+    node = _require_node()
+    if not node._nav_nodes_running:
+        raise HTTPException(409, 'Nav nodes not running')
+    node.cmd_stop_nav_nodes()
+    return {'ok': True}

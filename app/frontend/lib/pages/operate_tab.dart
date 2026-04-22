@@ -152,6 +152,11 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   pose: poseAsync.valueOrNull,
                 ),
               ),
+              Positioned(
+                bottom: 10,
+                right: 10,
+                child: _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
+              ),
             ],
           ),
         ),
@@ -774,6 +779,66 @@ class _PoiTileState extends ConsumerState<_PoiTile> {
   }
 }
 
+// ── Nav nodes toggle button ───────────────────────────────────────────────────
+
+class _NavNodesButton extends ConsumerStatefulWidget {
+  final AsyncValue<DeviceStatus> statusAsync;
+  const _NavNodesButton({required this.statusAsync});
+
+  @override
+  ConsumerState<_NavNodesButton> createState() => _NavNodesButtonState();
+}
+
+class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
+  bool _loading = false;
+
+  Future<void> _toggle(bool running) async {
+    setState(() => _loading = true);
+    try {
+      await ref.read(dioProvider).post(
+        running ? '/nav/nodes/disable' : '/nav/nodes/enable',
+      );
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.statusAsync.valueOrNull;
+    final running = status?.navNodesRunning ?? false;
+
+    return FilledButton.icon(
+      onPressed: _loading ? null : () => _toggle(running),
+      style: FilledButton.styleFrom(
+        backgroundColor: running
+            ? const Color(0xFF45C95A).withOpacity(0.9)
+            : Colors.black87,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+      icon: _loading
+          ? const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            )
+          : Icon(
+              running ? Icons.sensors_rounded : Icons.sensors_off_rounded,
+              size: 16,
+            ),
+      label: Text(running ? 'Nav ON' : 'Nav'),
+    );
+  }
+}
+
 // ── Camera panel ──────────────────────────────────────────────────────────────
 
 class _CameraPanel extends ConsumerStatefulWidget {
@@ -800,6 +865,17 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     final topicsAsync = ref.watch(imageTopicsProvider);
     final selectedTopic = ref.watch(selectedPreviewTopicProvider);
     final topics = topicsAsync.valueOrNull ?? [];
+
+    // Auto-select color topic on first load
+    ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
+      if (next.valueOrNull != null &&
+          ref.read(selectedPreviewTopicProvider) == null) {
+        const colorTopic = '/camera/camera/color/image_raw';
+        if (next.value!.contains(colorTopic)) {
+          ref.read(selectedPreviewTopicProvider.notifier).state = colorTopic;
+        }
+      }
+    });
 
     if (selectedTopic != null) {
       ref.listen<AsyncValue<Uint8List>>(
