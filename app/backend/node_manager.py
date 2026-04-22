@@ -313,6 +313,13 @@ class BackendNode(Ros2NodeManager):
     # Command API (called from FastAPI handlers — thread-safe enough)     #
     # ------------------------------------------------------------------ #
 
+    def set_active_bag(self, bag_name: str):
+        """Select a bag from rosbags/ by name for map building."""
+        path = os.path.join(self.tinynav_db_path, 'rosbags', bag_name)
+        if os.path.isdir(path):
+            with self._lock:
+                self._last_verified_bag = path
+
     @property
     def active_bag_path(self) -> str | None:
         """Most recently verified bag folder, ready for map building."""
