@@ -73,8 +73,8 @@ def _resolve_map_path(map_name: str) -> str:
     return path
 
 
-@router.get('/files/{map_name}')
-def map_file_info(map_name: str):
+@router.get('/preview/{map_name}')
+def map_preview_info(map_name: str):
     """Metadata + POIs for a named map folder."""
     path = _resolve_map_path(map_name)
     try:
@@ -92,7 +92,7 @@ def map_file_info(map_name: str):
             pois = list(json.load(f).values())
 
     return {
-        'imageUrl': f'/map/files/{map_name}/image',
+        'imageUrl': f'/map/preview/{map_name}/image',
         'origin_x': meta['origin_x'],
         'origin_y': meta['origin_y'],
         'resolution': meta['resolution'],
@@ -102,8 +102,8 @@ def map_file_info(map_name: str):
     }
 
 
-@router.get('/files/{map_name}/image', response_class=Response)
-def map_file_image(map_name: str):
+@router.get('/preview/{map_name}/image', response_class=Response)
+def map_preview_image(map_name: str):
     """Rendered PNG for a named map folder."""
     path = _resolve_map_path(map_name)
     try:
