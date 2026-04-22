@@ -102,7 +102,12 @@ class _MapPreviewPageState extends ConsumerState<MapPreviewPage> {
 
 // ── Map viewer ─────────────────────────────────────────────────────────────────
 
-class _MapViewer extends ConsumerWidget {
+// Gesture detection must be OUTSIDE InteractiveViewer: on Flutter Web the
+// InteractiveViewer's internal scale recognizer consumes child pointer events
+// before child GestureDetectors can fire.  We hold a TransformationController
+// and convert viewport coordinates to image-pixel coordinates manually.
+
+class _MapViewer extends ConsumerStatefulWidget {
   final MapFileInfo info;
   final String baseUrl;
   final String mapName;
@@ -113,22 +118,48 @@ class _MapViewer extends ConsumerWidget {
     required this.mapName,
   });
 
+  @override
+  ConsumerState<_MapViewer> createState() => _MapViewerState();
+}
+
+class _MapViewerState extends ConsumerState<_MapViewer> {
+  final _txCtrl = TransformationController();
+  Offset? _tapDownImagePixel;
+
+  @override
+  void dispose() {
+    _txCtrl.dispose();
+    super.dispose();
+  }
+
   // The PNG is (Nx, Ny) with axis-0 = world-X, axis-1 = world-Y.
   // np.flipud flips axis-0, so: col = Y-index, row = (Nx-1 - X-index).
   Offset _worldToPixel(double wx, double wy) {
-    final px = (wy - info.originY) / info.resolution;                        // col = Y index
-    final py = (info.height - 1) - (wx - info.originX) / info.resolution;   // row = Nx-1-X
+    final px = (wy - widget.info.originY) / widget.info.resolution;
+    final py = (widget.info.height - 1) - (wx - widget.info.originX) / widget.info.resolution;
     return Offset(px, py);
   }
 
   Offset _pixelToWorld(Offset pixel) {
-    final wx = info.originX + (info.height - 1 - pixel.dy) * info.resolution; // X from row
-    final wy = info.originY + pixel.dx * info.resolution;                      // Y from col
+    final wx = widget.info.originX + (widget.info.height - 1 - pixel.dy) * widget.info.resolution;
+    final wy = widget.info.originY + pixel.dx * widget.info.resolution;
     return Offset(wx, wy);
   }
 
-  Future<void> _addPoi(BuildContext context, WidgetRef ref, Offset pixelPos) async {
-    final world = _pixelToWorld(pixelPos);
+  // Convert a position in the outer GestureDetector's local coordinates
+  // (= InteractiveViewer viewport coords) to image-pixel coordinates.
+  // InteractiveViewer applies _txCtrl.value to its child (Center(SizedBox)).
+  // Inverse transform gives us child coords; subtract the Center offset.
+  Offset _viewportToImagePixel(Offset viewportPos, Size viewportSize) {
+    final inv = Matrix4.inverted(_txCtrl.value);
+    final childPoint = MatrixUtils.transformPoint(inv, viewportPos);
+    final cx = (viewportSize.width - widget.info.width) / 2;
+    final cy = (viewportSize.height - widget.info.height) / 2;
+    return childPoint - Offset(cx, cy);
+  }
+
+  Future<void> _addPoi(Offset imagePixel) async {
+    final world = _pixelToWorld(imagePixel);
     final ctrl = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
@@ -159,13 +190,13 @@ class _MapViewer extends ConsumerWidget {
     );
     if (ok != true || ctrl.text.trim().isEmpty) return;
     try {
-      await ref.read(dioProvider).post('/map/preview/$mapName/pois', data: {
+      await ref.read(dioProvider).post('/map/preview/${widget.mapName}/pois', data: {
         'name': ctrl.text.trim(),
         'position': [world.dx, world.dy, 0.0],
       });
-      ref.invalidate(mapFileInfoProvider(mapName));
+      ref.invalidate(mapFileInfoProvider(widget.mapName));
     } on DioException catch (e) {
-      if (context.mounted) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
@@ -174,7 +205,18 @@ class _MapViewer extends ConsumerWidget {
     }
   }
 
-  Future<void> _deletePoi(BuildContext context, WidgetRef ref, Poi poi) async {
+  Future<void> _deletePoisNear(Offset imagePixel) async {
+    // Find nearest POI within 25 px (image-pixel space).
+    Poi? nearest;
+    var nearestDist = 25.0;
+    for (final poi in widget.info.pois) {
+      final px = _worldToPixel(poi.x, poi.y);
+      final d = (px - imagePixel).distance;
+      if (d < nearestDist) { nearest = poi; nearestDist = d; }
+    }
+    if (nearest == null) return;
+
+    final poi = nearest;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -192,10 +234,10 @@ class _MapViewer extends ConsumerWidget {
     );
     if (ok != true) return;
     try {
-      await ref.read(dioProvider).delete('/map/preview/$mapName/pois/${poi.id}');
-      ref.invalidate(mapFileInfoProvider(mapName));
+      await ref.read(dioProvider).delete('/map/preview/${widget.mapName}/pois/${poi.id}');
+      ref.invalidate(mapFileInfoProvider(widget.mapName));
     } on DioException catch (e) {
-      if (context.mounted) {
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
@@ -205,66 +247,87 @@ class _MapViewer extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final imageUrl = '$baseUrl${info.imageUrl}';
+  Widget build(BuildContext context) {
+    final imageUrl = '${widget.baseUrl}${widget.info.imageUrl}';
+    final imageW = widget.info.width.toDouble();
+    final imageH = widget.info.height.toDouble();
 
     return Stack(
       children: [
-        InteractiveViewer(
-          minScale: 0.3,
-          maxScale: 8.0,
-          boundaryMargin: const EdgeInsets.all(80),
-          child: Center(
-            child: SizedBox(
-              width: info.width.toDouble(),
-              height: info.height.toDouble(),
-              child: GestureDetector(
-                onLongPressStart: (d) => _addPoi(context, ref, d.localPosition),
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    // ── Occupancy map ────────────────────────────────────────
-                    Image.network(
-                      imageUrl,
-                      width: info.width.toDouble(),
-                      height: info.height.toDouble(),
-                      fit: BoxFit.fill,
-                      loadingBuilder: (_, child, progress) => progress == null
-                          ? child
-                          : Container(
-                              color: const Color(0xFF2A2A3E),
-                              child: const Center(
-                                child: CircularProgressIndicator(
-                                    color: Colors.white54, strokeWidth: 2),
-                              ),
+        LayoutBuilder(
+          builder: (_, constraints) {
+            final vp = Size(constraints.maxWidth, constraints.maxHeight);
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              // Long-press → add POI
+              onLongPressStart: (d) {
+                final px = _viewportToImagePixel(d.localPosition, vp);
+                if (px.dx >= 0 && px.dx < imageW && px.dy >= 0 && px.dy < imageH) {
+                  _addPoi(px);
+                }
+              },
+              // Tap → delete nearest POI (onTapDown records pos; onTap fires only for real taps)
+              onTapDown: (d) {
+                _tapDownImagePixel = _viewportToImagePixel(d.localPosition, vp);
+              },
+              onTap: () {
+                final px = _tapDownImagePixel;
+                _tapDownImagePixel = null;
+                if (px != null) _deletePoisNear(px);
+              },
+              child: InteractiveViewer(
+                transformationController: _txCtrl,
+                minScale: 0.3,
+                maxScale: 8.0,
+                boundaryMargin: const EdgeInsets.all(80),
+                child: Center(
+                  child: SizedBox(
+                    width: imageW,
+                    height: imageH,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        // ── Occupancy map ─────────────────────────────────────
+                        Image.network(
+                          imageUrl,
+                          width: imageW,
+                          height: imageH,
+                          fit: BoxFit.fill,
+                          loadingBuilder: (_, child, progress) => progress == null
+                              ? child
+                              : Container(
+                                  color: const Color(0xFF2A2A3E),
+                                  child: const Center(
+                                    child: CircularProgressIndicator(
+                                        color: Colors.white54, strokeWidth: 2),
+                                  ),
+                                ),
+                          errorBuilder: (_, __, ___) => Container(
+                            color: const Color(0xFF2A2A3E),
+                            child: const Center(
+                              child: Icon(Icons.broken_image_outlined,
+                                  color: Colors.white38, size: 48),
                             ),
-                      errorBuilder: (_, __, ___) => Container(
-                        color: const Color(0xFF2A2A3E),
-                        child: const Center(
-                          child: Icon(Icons.broken_image_outlined,
-                              color: Colors.white38, size: 48),
+                          ),
                         ),
-                      ),
+                        // ── POI markers ───────────────────────────────────────
+                        ...widget.info.pois.map((poi) {
+                          final px = _worldToPixel(poi.x, poi.y);
+                          return Positioned(
+                            left: px.dx - 10,
+                            top: px.dy - 10,
+                            child: _PoiMarker(label: poi.name),
+                          );
+                        }),
+                      ],
                     ),
-                    // ── POI markers ──────────────────────────────────────────
-                    ...info.pois.map((poi) {
-                      final px = _worldToPixel(poi.x, poi.y);
-                      return Positioned(
-                        left: px.dx - 10,
-                        top: px.dy - 10,
-                        child: GestureDetector(
-                          onTap: () => _deletePoi(context, ref, poi),
-                          child: _PoiMarker(label: poi.name),
-                        ),
-                      );
-                    }),
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         ),
-        // ── Info bar + hint ───────────────────────────────────────────────────
+        // ── Info bar + hint ──────────────────────────────────────────────────
         Positioned(
           bottom: 16,
           left: 16,
@@ -273,7 +336,7 @@ class _MapViewer extends ConsumerWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              _InfoBar(info: info),
+              _InfoBar(info: widget.info),
               const SizedBox(height: 6),
               Center(
                 child: Container(
