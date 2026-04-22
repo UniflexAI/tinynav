@@ -612,13 +612,29 @@ class BackendNode(Ros2NodeManager):
         self._start('rosbag_build_map')
 
     def cmd_nav_start(self, poi_id: str | None = None):
-        self._stop_all()
         if poi_id is not None:
             self._nav_target_pub.publish(String(data=str(poi_id)))
-        self._start('navigation')
+        with self._lock:
+            nav_running = self._nav_nodes_running
+        if nav_running:
+            # Nav nodes already running — just send the target, don't spawn duplicates.
+            self.state = 'navigation'
+            self._pub_state()
+        else:
+            self._stop_all()
+            self._start('navigation')
 
     def cmd_nav_cancel(self):
-        if self.state == 'navigation':
+        if self.state != 'navigation':
+            return
+        with self._lock:
+            nav_running = self._nav_nodes_running
+        if nav_running:
+            # Leave nav nodes up; just clear the active target so map_node stops pathing.
+            self._nav_target_pub.publish(String(data=''))
+            self.state = 'idle'
+            self._pub_state()
+        else:
             self._stop_all()
 
     def cmd_action(self, action: str):
