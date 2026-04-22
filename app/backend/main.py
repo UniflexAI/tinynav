@@ -35,7 +35,7 @@ app.add_middleware(
 
 app.include_router(device.router, prefix='/device')
 app.include_router(bag.router, prefix='/bag')
-app.include_router(map_router.router)
+app.include_router(map_router.router, prefix='/map')
 app.include_router(poi.router)
 app.include_router(nav.router, prefix='/nav')
 app.include_router(sensor.router)
