@@ -113,9 +113,25 @@ for i in $(seq 1 20); do
 done
 
 # ── 4. Frontend ───────────────────────────────────────────────────────────────
+# Flutter CanvasKit (WASM) requires Cross-Origin-Opener-Policy + Cross-Origin-Embedder-Policy
+# headers for SharedArrayBuffer support — python3 -m http.server doesn't set them,
+# which causes a white screen on mobile browsers.
 step "Start Frontend"
+_PYSERVER=$(mktemp /tmp/tinynav_server_XXXX.py)
+cat > "$_PYSERVER" << 'PYEOF'
+import http.server, sys, os
+class H(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
+        self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
+        super().end_headers()
+    def log_message(self, *a): pass
+port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+with http.server.HTTPServer(('0.0.0.0', port), H) as s:
+    s.serve_forever()
+PYEOF
 cd "$FRONTEND_DIR/build/web"
-python3 -m http.server "$FRONTEND_PORT" &>/dev/null &
+python3 "$_PYSERVER" "$FRONTEND_PORT" &>/dev/null &
 FRONTEND_PID=$!
 sleep 0.3
 kill -0 "$FRONTEND_PID" 2>/dev/null || die "Frontend server failed to start."
@@ -128,5 +144,5 @@ echo -e "  ${BOLD}Frontend${RESET}  http://${LOCAL_IP:-localhost}:${FRONTEND_POR
 echo -e "  ${BOLD}Backend ${RESET}  http://${LOCAL_IP:-localhost}:${BACKEND_PORT}/docs"
 echo -e "\n  ${DIM}Press Ctrl+C to stop.${RESET}\n"
 
-trap "echo -e '\n${YELLOW}  Stopping...${RESET}'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; ok 'Stopped.'; exit 0" INT TERM
+trap "echo -e '\n${YELLOW}  Stopping...${RESET}'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; rm -f '$_PYSERVER'; ok 'Stopped.'; exit 0" INT TERM
 wait
