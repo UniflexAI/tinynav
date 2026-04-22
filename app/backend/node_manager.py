@@ -62,6 +62,7 @@ class BackendNode(Ros2NodeManager):
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
+        self._global_path: list = []
         self._grid_info: dict | None = None
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
@@ -74,6 +75,7 @@ class BackendNode(Ros2NodeManager):
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
         )
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
+        self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
 
         # Publisher for nav target (consumed by map_node in the future)
         self._nav_target_pub = self.create_publisher(String, '/service/nav_target', 10)
@@ -149,6 +151,8 @@ class BackendNode(Ros2NodeManager):
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
             if msg.encoding == 'rgb8':
                 arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            # Flip vertically so north (max Y) is at the top, matching the map image.
+            arr = np.flipud(arr)
             _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 70])
             with self._lock:
                 self._esdf_bytes = buf.tobytes()
@@ -161,6 +165,8 @@ class BackendNode(Ros2NodeManager):
             arr = np.array(msg.data, dtype=np.int8)
             grid = arr.reshape(msg.info.height, msg.info.width, order='F')
             img = np.where(grid > 50, 255, 0).astype(np.uint8)
+            # Flip vertically so north (max Y) is at the top, matching the map image.
+            img = np.flipud(img)
             _, buf = cv2.imencode('.png', img)
             info = {
                 'origin_x': float(msg.info.origin.position.x),
@@ -182,6 +188,14 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._trajectory = pts
+
+    def _on_global_plan(self, msg: Path):
+        pts = [
+            {'x': p.pose.position.x, 'y': p.pose.position.y}
+            for p in msg.poses
+        ]
+        with self._lock:
+            self._global_path = pts
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -301,6 +315,7 @@ class BackendNode(Ros2NodeManager):
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
+                'global_path': list(self._global_path),
                 'grid_info': self._grid_info,
             }
 
@@ -472,6 +487,7 @@ class BackendNode(Ros2NodeManager):
             self._nav_nodes_running = False
             self._localized = False
             self._map_pose = None
+            self._global_path = []
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_bag_start(self):

@@ -149,6 +149,7 @@ class PlanningState {
   final Uint8List? esdfImage;
   final Uint8List? obstacleImage;
   final List<TrajPoint> trajectory;
+  final List<TrajPoint> globalPath;
   final GridInfo? gridInfo;
 
   const PlanningState({
@@ -158,6 +159,7 @@ class PlanningState {
     this.esdfImage,
     this.obstacleImage,
     required this.trajectory,
+    required this.globalPath,
     this.gridInfo,
   });
 
@@ -172,10 +174,11 @@ class PlanningState {
       return Pose.fromJson(raw as Map<String, dynamic>);
     }
 
-    final traj = (j['trajectory'] as List? ?? []).map((p) {
-      final m = p as Map<String, dynamic>;
-      return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
-    }).toList();
+    List<TrajPoint> parsePath(String key) =>
+        (j[key] as List? ?? []).map((p) {
+          final m = p as Map<String, dynamic>;
+          return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+        }).toList();
 
     return PlanningState(
       localized: j['localized'] as bool? ?? false,
@@ -183,7 +186,8 @@ class PlanningState {
       mapPose: parsePose(j['map_pose']),
       esdfImage: decodeImg(j['esdf_image'] as String?),
       obstacleImage: decodeImg(j['obstacle_image'] as String?),
-      trajectory: traj,
+      trajectory: parsePath('trajectory'),
+      globalPath: parsePath('global_path'),
       gridInfo: j['grid_info'] != null
           ? GridInfo.fromJson(j['grid_info'] as Map<String, dynamic>)
           : null,

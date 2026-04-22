@@ -30,7 +30,8 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
   bool _showObstacle = true;
   bool _showEsdf = false;
-  bool _showTrajectory = false;
+  bool _showTrajectory = true;
+  bool _showGlobalPath = true;
 
   @override
   void initState() {
@@ -102,12 +103,14 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                       return _MapView(
                         mapInfo: mapInfo,
                         imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
-                        pose: poseAsync.valueOrNull,
+                        // Use map-frame pose so the arrow sits correctly on the SLAM map.
+                        pose: planning?.mapPose ?? poseAsync.valueOrNull,
                         pois: poisAsync.valueOrNull ?? [],
                         planning: planning,
                         showObstacle: _showObstacle,
                         showEsdf: _showEsdf,
                         showTrajectory: _showTrajectory,
+                        showGlobalPath: _showGlobalPath,
                       );
                     }
                     return _LocalPlanningView(
@@ -136,10 +139,12 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   showObstacle: _showObstacle,
                   showEsdf: _showEsdf,
                   showTrajectory: _showTrajectory,
-                  onChanged: (obs, esdf, traj) => setState(() {
+                  showGlobalPath: _showGlobalPath,
+                  onChanged: (obs, esdf, traj, gp) => setState(() {
                     _showObstacle = obs;
                     _showEsdf = esdf;
                     _showTrajectory = traj;
+                    _showGlobalPath = gp;
                   }),
                 ),
               ),
@@ -185,6 +190,7 @@ class _MapView extends StatelessWidget {
   final bool showObstacle;
   final bool showEsdf;
   final bool showTrajectory;
+  final bool showGlobalPath;
 
   const _MapView({
     required this.mapInfo,
@@ -195,6 +201,7 @@ class _MapView extends StatelessWidget {
     this.showObstacle = true,
     this.showEsdf = false,
     this.showTrajectory = false,
+    this.showGlobalPath = true,
   });
 
   @override
@@ -273,6 +280,11 @@ class _MapView extends StatelessWidget {
                     mapInfo: mapInfo,
                     pose: pose,
                     pois: pois,
+                    trajectory: p?.trajectory ?? const [],
+                    globalPath: p?.globalPath ?? const [],
+                    odomPose: p?.odomPose,
+                    showTrajectory: showTrajectory,
+                    showGlobalPath: showGlobalPath,
                   ),
                 ),
               ],
@@ -360,12 +372,14 @@ class _LayerTogglePanel extends StatefulWidget {
   final bool showObstacle;
   final bool showEsdf;
   final bool showTrajectory;
-  final void Function(bool obs, bool esdf, bool traj) onChanged;
+  final bool showGlobalPath;
+  final void Function(bool obs, bool esdf, bool traj, bool gp) onChanged;
 
   const _LayerTogglePanel({
     required this.showObstacle,
     required this.showEsdf,
     required this.showTrajectory,
+    required this.showGlobalPath,
     required this.onChanged,
   });
 
@@ -416,11 +430,13 @@ class _LayerTogglePanelState extends State<_LayerTogglePanel> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 _LayerRow('Obstacle', widget.showObstacle,
-                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory)),
+                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath)),
                 _LayerRow('ESDF', widget.showEsdf,
-                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory)),
+                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath)),
                 _LayerRow('Trajectory', widget.showTrajectory,
-                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v)),
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath)),
+                _LayerRow('Global Path', widget.showGlobalPath,
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v)),
               ],
             ),
           ),
