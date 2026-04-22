@@ -66,8 +66,8 @@ class DeviceTab extends ConsumerWidget {
                 data: (s) => s.battery != null
                     ? _InfoRow(
                         'Battery',
-                        '${(s.battery! * 100).toStringAsFixed(0)}%',
-                        valueColor: s.battery! < 0.2 ? Colors.red : null,
+                        '${s.battery!.toStringAsFixed(0)}%',
+                        valueColor: s.battery! < 20 ? Colors.red : null,
                       )
                     : const _InfoRow('Battery', '—'),
                 loading: () => const _LoadingRow(),
