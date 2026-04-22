@@ -150,8 +150,6 @@ class BackendNode(Ros2NodeManager):
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
             if msg.encoding == 'rgb8':
                 arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            # Flip vertically so north (max Y) is at the top, matching the map image.
-            arr = np.flipud(arr)
             _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 70])
             with self._lock:
                 self._esdf_bytes = buf.tobytes()
@@ -164,8 +162,6 @@ class BackendNode(Ros2NodeManager):
             arr = np.array(msg.data, dtype=np.int8)
             grid = arr.reshape(msg.info.height, msg.info.width, order='F')
             img = np.where(grid > 50, 255, 0).astype(np.uint8)
-            # Flip vertically so north (max Y) is at the top, matching the map image.
-            img = np.flipud(img)
             _, buf = cv2.imencode('.png', img)
             info = {
                 'origin_x': float(msg.info.origin.position.x),
