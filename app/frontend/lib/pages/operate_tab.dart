@@ -28,6 +28,10 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   WebSocketChannel? _teleopChannel;
   double _linearX = 0, _linearY = 0, _angularZ = 0;
 
+  bool _showObstacle = true;
+  bool _showEsdf = false;
+  bool _showTrajectory = false;
+
   @override
   void initState() {
     super.initState();
@@ -92,15 +96,27 @@ class _OperateTabState extends ConsumerState<OperateTab> {
             children: [
               Positioned.fill(
                 child: mapAsync.when(
-                  data: (mapInfo) => mapInfo == null
-                      ? _LocalPlanningView(planning: planning)
-                      : _MapView(
-                          mapInfo: mapInfo,
-                          imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
-                          pose: poseAsync.valueOrNull,
-                          pois: poisAsync.valueOrNull ?? [],
-                          planning: planning,
-                        ),
+                  data: (mapInfo) {
+                    final localized = planning?.localized ?? false;
+                    if (mapInfo != null && localized) {
+                      return _MapView(
+                        mapInfo: mapInfo,
+                        imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
+                        pose: poseAsync.valueOrNull,
+                        pois: poisAsync.valueOrNull ?? [],
+                        planning: planning,
+                        showObstacle: _showObstacle,
+                        showEsdf: _showEsdf,
+                        showTrajectory: _showTrajectory,
+                      );
+                    }
+                    return _LocalPlanningView(
+                      planning: planning,
+                      showObstacle: _showObstacle,
+                      showEsdf: _showEsdf,
+                      showTrajectory: _showTrajectory,
+                    );
+                  },
                   loading: () => const Center(child: CircularProgressIndicator()),
                   error: (e, _) => Center(
                     child: Text('$e', style: const TextStyle(color: Colors.red)),
@@ -113,6 +129,20 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   left: 8,
                   child: _LocalizationChip(localized: planning.localized),
                 ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: _LayerTogglePanel(
+                  showObstacle: _showObstacle,
+                  showEsdf: _showEsdf,
+                  showTrajectory: _showTrajectory,
+                  onChanged: (obs, esdf, traj) => setState(() {
+                    _showObstacle = obs;
+                    _showEsdf = esdf;
+                    _showTrajectory = traj;
+                  }),
+                ),
+              ),
               Positioned(
                 bottom: 10,
                 left: 10,
@@ -147,6 +177,9 @@ class _MapView extends StatelessWidget {
   final Pose? pose;
   final List<Poi> pois;
   final PlanningState? planning;
+  final bool showObstacle;
+  final bool showEsdf;
+  final bool showTrajectory;
 
   const _MapView({
     required this.mapInfo,
@@ -154,6 +187,9 @@ class _MapView extends StatelessWidget {
     required this.pois,
     this.pose,
     this.planning,
+    this.showObstacle = true,
+    this.showEsdf = false,
+    this.showTrajectory = false,
   });
 
   @override
@@ -169,14 +205,11 @@ class _MapView extends StatelessWidget {
           child: LayoutBuilder(builder: (ctx, constraints) {
             final canvasW = constraints.maxWidth;
             final canvasH = constraints.maxHeight;
+            final p = planning;
 
             Positioned? esdfOverlay;
-            final p = planning;
-            if (p != null &&
-                p.localized &&
-                p.esdfImage != null &&
-                p.mapPose != null &&
-                p.gridInfo != null) {
+            Positioned? obstacleOverlay;
+            if (p != null && p.mapPose != null && p.gridInfo != null) {
               final gi = p.gridInfo!;
               final mp = p.mapPose!;
               final pxPerMeter = canvasW / (mapInfo.width * mapInfo.resolution);
@@ -186,19 +219,27 @@ class _MapView extends StatelessWidget {
               final top = canvasH -
                   (mp.y - gridH_m / 2 - mapInfo.originY) * pxPerMeter -
                   gridH_m * pxPerMeter;
-              final width = gridW_m * pxPerMeter;
-              final height = gridH_m * pxPerMeter;
+              final w = gridW_m * pxPerMeter;
+              final h = gridH_m * pxPerMeter;
 
-              esdfOverlay = Positioned(
-                left: left,
-                top: top,
-                width: width,
-                height: height,
-                child: Opacity(
-                  opacity: 0.5,
-                  child: Image.memory(p.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                ),
-              );
+              if (showEsdf && p.esdfImage != null) {
+                esdfOverlay = Positioned(
+                  left: left, top: top, width: w, height: h,
+                  child: Opacity(
+                    opacity: 0.5,
+                    child: Image.memory(p.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                  ),
+                );
+              }
+              if (showObstacle && p.obstacleImage != null) {
+                obstacleOverlay = Positioned(
+                  left: left, top: top, width: w, height: h,
+                  child: Opacity(
+                    opacity: 0.45,
+                    child: Image.memory(p.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                  ),
+                );
+              }
             }
 
             return Stack(
@@ -221,6 +262,7 @@ class _MapView extends StatelessWidget {
                       Center(child: Text('Image error: $e', style: const TextStyle(color: Colors.red))),
                 ),
                 if (esdfOverlay != null) esdfOverlay,
+                if (obstacleOverlay != null) obstacleOverlay,
                 CustomPaint(
                   painter: MapOverlayPainter(
                     mapInfo: mapInfo,
@@ -239,22 +281,22 @@ class _MapView extends StatelessWidget {
 
 // ── Local planning view ───────────────────────────────────────────────────────
 
-class _LocalPlanningView extends StatefulWidget {
+class _LocalPlanningView extends StatelessWidget {
   final PlanningState? planning;
-  const _LocalPlanningView({this.planning});
+  final bool showObstacle;
+  final bool showEsdf;
+  final bool showTrajectory;
 
-  @override
-  State<_LocalPlanningView> createState() => _LocalPlanningViewState();
-}
-
-class _LocalPlanningViewState extends State<_LocalPlanningView> {
-  bool _showObstacle = true;
-  bool _showEsdf = false;
-  bool _showTrajectory = false;
+  const _LocalPlanningView({
+    this.planning,
+    this.showObstacle = true,
+    this.showEsdf = false,
+    this.showTrajectory = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final p = widget.planning;
+    final p = planning;
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -269,12 +311,12 @@ class _LocalPlanningViewState extends State<_LocalPlanningView> {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (_showEsdf && p?.esdfImage != null)
+                  if (showEsdf && p?.esdfImage != null)
                     Opacity(
                       opacity: 0.85,
                       child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
                     ),
-                  if (_showObstacle && p?.obstacleImage != null)
+                  if (showObstacle && p?.obstacleImage != null)
                     Opacity(
                       opacity: 0.45,
                       child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
@@ -282,7 +324,7 @@ class _LocalPlanningViewState extends State<_LocalPlanningView> {
                   if (p != null)
                     CustomPaint(
                       painter: LocalPlanningPainter(
-                        trajectory: _showTrajectory ? p.trajectory : const [],
+                        trajectory: showTrajectory ? p.trajectory : const [],
                         gridInfo: p.gridInfo,
                         odomPose: p.odomPose,
                       ),
@@ -302,20 +344,6 @@ class _LocalPlanningViewState extends State<_LocalPlanningView> {
                 ],
               ),
             ),
-          ),
-        ),
-        Positioned(
-          top: 8,
-          right: 8,
-          child: _LayerTogglePanel(
-            showObstacle: _showObstacle,
-            showEsdf: _showEsdf,
-            showTrajectory: _showTrajectory,
-            onChanged: (obs, esdf, traj) => setState(() {
-              _showObstacle = obs;
-              _showEsdf = esdf;
-              _showTrajectory = traj;
-            }),
           ),
         ),
       ],
