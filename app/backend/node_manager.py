@@ -470,6 +470,8 @@ class BackendNode(Ros2NodeManager):
         self._cmd_vel_proc = None
         with self._lock:
             self._nav_nodes_running = False
+            self._localized = False
+            self._map_pose = None
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_bag_start(self):
