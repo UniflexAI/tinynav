@@ -415,15 +415,28 @@ class BackendNode(Ros2NodeManager):
         self.processes['build_map'] = self._spawn(cmd_build, extra_env=domain_env)
 
         def wait_and_convert():
+            import shutil
+            from datetime import datetime
             proc_build = self.processes.get('build_map')
             if proc_build:
                 proc_build.wait()
-            import subprocess as _sp
-            _sp.run([
+            subprocess.run([
                 'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
                 '--input_dir', self.map_path,
                 '--output_dir', self.map_path,
             ])
+            # mv map → maps/map_YYYY_MM_DD_HH_MM_SS, symlink back
+            maps_dir = os.path.join(self.tinynav_db_path, 'maps')
+            os.makedirs(maps_dir, exist_ok=True)
+            ts = datetime.now().strftime('map_%Y_%m_%d_%H_%M_%S')
+            dest = os.path.join(maps_dir, ts)
+            shutil.move(self.map_path, dest)
+            # Remove existing map path (symlink, file, or dir)
+            if os.path.islink(self.map_path) or os.path.isfile(self.map_path):
+                os.remove(self.map_path)
+            elif os.path.isdir(self.map_path):
+                shutil.rmtree(self.map_path)
+            os.symlink(dest, self.map_path)
             self._stop_all()
             self.state = 'idle'
             self._pub_state()
