@@ -30,7 +30,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
   bool _showObstacle = true;
   bool _showEsdf = false;
-  bool _showTrajectory = true;
+  bool _showTrajectory = false;
   bool _showGlobalPath = true;
 
   @override
@@ -103,13 +103,9 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                       return _MapView(
                         mapInfo: mapInfo,
                         imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
-                        // Use map-frame pose so the arrow sits correctly on the SLAM map.
                         pose: planning?.mapPose ?? poseAsync.valueOrNull,
                         pois: poisAsync.valueOrNull ?? [],
-                        planning: planning,
-                        showObstacle: _showObstacle,
-                        showEsdf: _showEsdf,
-                        showTrajectory: _showTrajectory,
+                        globalPath: planning?.globalPath ?? const [],
                         showGlobalPath: _showGlobalPath,
                       );
                     }
@@ -136,6 +132,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                 top: 8,
                 right: 8,
                 child: _LayerTogglePanel(
+                  localized: planning?.localized ?? false,
                   showObstacle: _showObstacle,
                   showEsdf: _showEsdf,
                   showTrajectory: _showTrajectory,
@@ -186,10 +183,7 @@ class _MapView extends StatelessWidget {
   final String imageUrl;
   final Pose? pose;
   final List<Poi> pois;
-  final PlanningState? planning;
-  final bool showObstacle;
-  final bool showEsdf;
-  final bool showTrajectory;
+  final List<TrajPoint> globalPath;
   final bool showGlobalPath;
 
   const _MapView({
@@ -197,10 +191,7 @@ class _MapView extends StatelessWidget {
     required this.imageUrl,
     required this.pois,
     this.pose,
-    this.planning,
-    this.showObstacle = true,
-    this.showEsdf = false,
-    this.showTrajectory = false,
+    this.globalPath = const [],
     this.showGlobalPath = true,
   });
 
@@ -214,82 +205,36 @@ class _MapView extends StatelessWidget {
           minScale: 0.5,
           maxScale: 8.0,
           boundaryMargin: const EdgeInsets.all(double.infinity),
-          child: LayoutBuilder(builder: (ctx, constraints) {
-            final canvasW = constraints.maxWidth;
-            final canvasH = constraints.maxHeight;
-            final p = planning;
-
-            Positioned? esdfOverlay;
-            Positioned? obstacleOverlay;
-            if (p != null && p.mapPose != null && p.gridInfo != null) {
-              final gi = p.gridInfo!;
-              final mp = p.mapPose!;
-              final pxPerMeter = canvasW / (mapInfo.width * mapInfo.resolution);
-              final gridW_m = gi.width * gi.resolution;
-              final gridH_m = gi.height * gi.resolution;
-              final left = (mp.x - gridW_m / 2 - mapInfo.originX) * pxPerMeter;
-              final top = canvasH -
-                  (mp.y - gridH_m / 2 - mapInfo.originY) * pxPerMeter -
-                  gridH_m * pxPerMeter;
-              final w = gridW_m * pxPerMeter;
-              final h = gridH_m * pxPerMeter;
-
-              if (showEsdf && p.esdfImage != null) {
-                esdfOverlay = Positioned(
-                  left: left, top: top, width: w, height: h,
-                  child: Opacity(
-                    opacity: 0.5,
-                    child: Image.memory(p.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                  ),
-                );
-              }
-              if (showObstacle && p.obstacleImage != null) {
-                obstacleOverlay = Positioned(
-                  left: left, top: top, width: w, height: h,
-                  child: Opacity(
-                    opacity: 0.45,
-                    child: Image.memory(p.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                  ),
-                );
-              }
-            }
-
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                Image.network(
-                  imageUrl,
-                  fit: BoxFit.fill,
-                  loadingBuilder: (_, child, progress) => progress == null
-                      ? child
-                      : Center(
-                          child: CircularProgressIndicator(
-                            value: progress.expectedTotalBytes != null
-                                ? progress.cumulativeBytesLoaded /
-                                    progress.expectedTotalBytes!
-                                : null,
-                          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.network(
+                imageUrl,
+                fit: BoxFit.fill,
+                loadingBuilder: (_, child, progress) => progress == null
+                    ? child
+                    : Center(
+                        child: CircularProgressIndicator(
+                          value: progress.expectedTotalBytes != null
+                              ? progress.cumulativeBytesLoaded /
+                                  progress.expectedTotalBytes!
+                              : null,
                         ),
-                  errorBuilder: (_, e, __) =>
-                      Center(child: Text('Image error: $e', style: const TextStyle(color: Colors.red))),
+                      ),
+                errorBuilder: (_, e, __) =>
+                    Center(child: Text('Image error: $e', style: const TextStyle(color: Colors.red))),
+              ),
+              CustomPaint(
+                painter: MapOverlayPainter(
+                  mapInfo: mapInfo,
+                  pose: pose,
+                  pois: pois,
+                  globalPath: globalPath,
+                  showGlobalPath: showGlobalPath,
                 ),
-                if (esdfOverlay != null) esdfOverlay,
-                if (obstacleOverlay != null) obstacleOverlay,
-                CustomPaint(
-                  painter: MapOverlayPainter(
-                    mapInfo: mapInfo,
-                    pose: pose,
-                    pois: pois,
-                    trajectory: p?.trajectory ?? const [],
-                    globalPath: p?.globalPath ?? const [],
-                    odomPose: p?.odomPose,
-                    showTrajectory: showTrajectory,
-                    showGlobalPath: showGlobalPath,
-                  ),
-                ),
-              ],
-            );
-          }),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -369,6 +314,7 @@ class _LocalPlanningView extends StatelessWidget {
 }
 
 class _LayerTogglePanel extends StatefulWidget {
+  final bool localized;
   final bool showObstacle;
   final bool showEsdf;
   final bool showTrajectory;
@@ -376,6 +322,7 @@ class _LayerTogglePanel extends StatefulWidget {
   final void Function(bool obs, bool esdf, bool traj, bool gp) onChanged;
 
   const _LayerTogglePanel({
+    required this.localized,
     required this.showObstacle,
     required this.showEsdf,
     required this.showTrajectory,
@@ -428,16 +375,19 @@ class _LayerTogglePanelState extends State<_LayerTogglePanel> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
-              children: [
-                _LayerRow('Obstacle', widget.showObstacle,
-                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath)),
-                _LayerRow('ESDF', widget.showEsdf,
-                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath)),
-                _LayerRow('Trajectory', widget.showTrajectory,
-                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath)),
-                _LayerRow('Global Path', widget.showGlobalPath,
-                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v)),
-              ],
+              children: widget.localized
+                  ? [
+                      _LayerRow('Global Path', widget.showGlobalPath,
+                          (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v)),
+                    ]
+                  : [
+                      _LayerRow('Obstacle', widget.showObstacle,
+                          (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath)),
+                      _LayerRow('ESDF', widget.showEsdf,
+                          (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath)),
+                      _LayerRow('Trajectory', widget.showTrajectory,
+                          (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath)),
+                    ],
             ),
           ),
         ],
