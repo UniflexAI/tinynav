@@ -2,10 +2,12 @@ import io
 import json
 import os
 import re
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 from PIL import Image
+from pydantic import BaseModel
 
 from ..map_renderer import render_map
 from ..state import runner
@@ -19,12 +21,18 @@ def _require_node():
     return runner.node
 
 
+class MapBuildRequest(BaseModel):
+    bag_name: Optional[str] = None
+
+
 @router.post('/build')
-def map_build():
+def map_build(req: MapBuildRequest = MapBuildRequest()):
     node = _require_node()
+    if req.bag_name:
+        node.set_active_bag(req.bag_name)
     active_bag = node.active_bag_path
     if active_bag is None or not os.path.exists(os.path.join(active_bag, 'bag_0.db3')):
-        raise HTTPException(400, 'No verified bag available — record and stop a bag first')
+        raise HTTPException(400, 'No verified bag available — select a bag or record a new one')
     if node.state == 'rosbag_build_map':
         raise HTTPException(409, 'Already building map')
     if node.state not in ('idle',):

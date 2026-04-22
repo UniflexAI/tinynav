@@ -390,10 +390,7 @@ class _LocalizationChip extends StatelessWidget {
             error: (e, _) => _ErrorCard('$e'),
           ),
           const SizedBox(height: 12),
-          _FileListCard(
-            title: 'Bag Files',
-            icon: Icons.folder_outlined,
-            provider: bagFilesProvider,
+          _BagFileListCard(
             onRefresh: () => ref.invalidate(bagFilesProvider),
           ),
           const SizedBox(height: 20),
@@ -504,8 +501,12 @@ class _MapBuildCardState extends ConsumerState<_MapBuildCard> {
 
   Future<void> _buildMap() async {
     setState(() => _busy = true);
+    final selectedBag = ref.read(selectedBagProvider);
     try {
-      await ref.read(dioProvider).post('/map/build');
+      await ref.read(dioProvider).post(
+        '/map/build',
+        data: selectedBag != null ? {'bag_name': selectedBag} : null,
+      );
     } on DioException catch (e) {
       if (mounted) _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
     } finally {
@@ -517,7 +518,8 @@ class _MapBuildCardState extends ConsumerState<_MapBuildCard> {
   Widget build(BuildContext context) {
     final s = widget.status;
     final isBuilding = s.rawState == 'rosbag_build_map';
-    final canBuild = s.online && s.bagFileReady && s.rawState == 'idle';
+    final selectedBag = ref.watch(selectedBagProvider);
+    final canBuild = s.online && (s.bagFileReady || selectedBag != null) && s.rawState == 'idle';
 
     return _SectionCard(
       icon: Icons.construction_rounded,
@@ -529,6 +531,25 @@ class _MapBuildCardState extends ConsumerState<_MapBuildCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _InfoRow('Status', s.mapStatus),
+          if (selectedBag != null) ...[
+            const SizedBox(height: 6),
+            Row(children: [
+              const Icon(Icons.folder_rounded, size: 13, color: Color(0xFFFFB300)),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  selectedBag,
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF4A90D9),
+                      fontWeight: FontWeight.w500),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              GestureDetector(
+                onTap: () => ref.read(selectedBagProvider.notifier).state = null,
+                child: const Icon(Icons.close_rounded, size: 14, color: Colors.grey),
+              ),
+            ]),
+          ],
           if (isBuilding) ...[
             const SizedBox(height: 8),
             LinearProgressIndicator(
@@ -555,6 +576,116 @@ class _MapBuildCardState extends ConsumerState<_MapBuildCard> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Bag file list card (with selection) ──────────────────────────────────────
+
+class _BagFileListCard extends ConsumerWidget {
+  final VoidCallback onRefresh;
+  const _BagFileListCard({required this.onRefresh});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final filesAsync = ref.watch(bagFilesProvider);
+    final selected = ref.watch(selectedBagProvider);
+
+    return _SectionCard(
+      icon: Icons.folder_outlined,
+      iconColor: Colors.grey.shade600,
+      title: 'Bag Files',
+      trailing: IconButton(
+        icon: const Icon(Icons.refresh_rounded, size: 18),
+        onPressed: onRefresh,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(),
+        tooltip: 'Refresh',
+      ),
+      child: filesAsync.when(
+        data: (files) => files.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Center(
+                  child: Text('No bags', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                ),
+              )
+            : Column(
+                children: files.map((f) {
+                  final isSelected = selected == f.name;
+                  return _BagFileRow(
+                    file: f,
+                    isSelected: isSelected,
+                    onTap: () {
+                      ref.read(selectedBagProvider.notifier).state =
+                          isSelected ? null : f.name;
+                    },
+                  );
+                }).toList(),
+              ),
+        loading: () => const Padding(
+          padding: EdgeInsets.symmetric(vertical: 12),
+          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        ),
+        error: (e, _) => Text('$e', style: const TextStyle(color: Colors.red, fontSize: 12)),
+      ),
+    );
+  }
+}
+
+class _BagFileRow extends StatelessWidget {
+  final FileEntry file;
+  final bool isSelected;
+  final VoidCallback onTap;
+  const _BagFileRow({required this.file, required this.isSelected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final dt = DateTime.fromMillisecondsSinceEpoch((file.mtime * 1000).toInt());
+    final dateStr =
+        '${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+        decoration: isSelected
+            ? BoxDecoration(
+                color: const Color(0xFF4A90D9).withOpacity(0.08),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFF4A90D9).withOpacity(0.4)),
+              )
+            : null,
+        child: Row(
+          children: [
+            Icon(Icons.folder_rounded, size: 16,
+                color: isSelected ? const Color(0xFF4A90D9) : const Color(0xFFFFB300)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                file.name,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: isSelected ? const Color(0xFF4A90D9) : null,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text('${file.sizeLabel}  $dateStr',
+                style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+            const SizedBox(width: 4),
+            Icon(
+              isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+              size: 16,
+              color: isSelected ? const Color(0xFF4A90D9) : Colors.grey.shade400,
+            ),
+          ],
+        ),
       ),
     );
   }
