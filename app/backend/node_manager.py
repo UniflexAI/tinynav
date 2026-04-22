@@ -71,6 +71,11 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
+        # Mark localized as soon as any relocalization succeeds (published unconditionally
+        # by map_node, unlike current_pose_in_map which requires POIs to be set).
+        self.create_subscription(
+            Odometry, '/map/relocalization', self._on_relocalization, 10
+        )
         self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
         self.create_subscription(
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
@@ -146,6 +151,10 @@ class BackendNode(Ros2NodeManager):
                 cb(pose)
             except Exception:
                 pass
+
+    def _on_relocalization(self, msg: Odometry):
+        with self._lock:
+            self._localized = True
 
     def _on_height_map(self, msg: Image):
         try:
