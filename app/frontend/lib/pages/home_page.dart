@@ -30,13 +30,16 @@ class HomePage extends ConsumerWidget {
       body: SafeArea(
         child: Column(
           children: [
-            // ── Header ─────────────────────────────────────────────────────
-            _Header(ip: ip, isOnline: isOnline, onDisconnect: () => _disconnect(ref)),
+            // ── Thin status bar ────────────────────────────────────────────
+            _StatusBar(ip: ip, isOnline: isOnline, onDisconnect: () => _disconnect(ref)),
             // ── Menu cards ─────────────────────────────────────────────────
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                 children: [
+                  // ── Hero ─────────────────────────────────────────────────
+                  const _HeroBanner(),
+                  const SizedBox(height: 20),
                   _MenuCard(
                     icon: Icons.memory_rounded,
                     iconColor: const Color(0xFF2B3A42),
@@ -118,63 +121,87 @@ class _SubPage extends StatelessWidget {
   }
 }
 
-// ── Header ────────────────────────────────────────────────────────────────────
+// ── Thin status bar ───────────────────────────────────────────────────────────
 
-class _Header extends StatelessWidget {
+class _StatusBar extends StatelessWidget {
   final String ip;
   final bool isOnline;
   final VoidCallback onDisconnect;
-  const _Header({required this.ip, required this.isOnline, required this.onDisconnect});
+  const _StatusBar({required this.ip, required this.isOnline, required this.onDisconnect});
 
   @override
   Widget build(BuildContext context) {
     const kGreen = Color(0xFF45C95A);
-    const kDark = Color(0xFF2B3A42);
     return Container(
       color: Colors.white,
-      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
       child: Row(
         children: [
-          Image.asset('assets/images/tinynav.png', width: 44, height: 44),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'TinyNav',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 17,
-                    color: kDark,
-                  ),
-                ),
-                Row(children: [
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: isOnline ? kGreen : Colors.red,
-                    ),
-                  ),
-                  const SizedBox(width: 5),
-                  Text(
-                    isOnline ? ip : 'Offline',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isOnline ? kGreen : Colors.red,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ]),
-              ],
+          Container(
+            width: 7, height: 7,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: isOnline ? kGreen : Colors.red,
             ),
           ),
+          const SizedBox(width: 6),
+          Text(
+            isOnline ? ip : 'Offline',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+              color: isOnline ? kGreen : Colors.red,
+            ),
+          ),
+          const Spacer(),
           IconButton(
-            icon: const Icon(Icons.logout_rounded, size: 20, color: Colors.black38),
+            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.black38),
             tooltip: 'Disconnect',
             onPressed: onDisconnect,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Hero banner ───────────────────────────────────────────────────────────────
+
+class _HeroBanner extends StatelessWidget {
+  const _HeroBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      child: Column(
+        children: [
+          Image.asset(
+            'assets/images/tinynav.png',
+            width: 120,
+            height: 120,
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'TinyNav',
+            style: TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF2B3A42),
+              letterSpacing: -0.5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Visual Navigation Module',
+            style: TextStyle(
+              fontSize: 12,
+              color: Color(0xFF9E9E9E),
+              fontWeight: FontWeight.w400,
+            ),
           ),
         ],
       ),
