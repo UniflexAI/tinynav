@@ -4,17 +4,26 @@ import 'package:flutter/material.dart';
 
 import '../core/models.dart';
 
-/// Renders robot arrow + planned trajectory on a local-centric canvas.
+/// Renders robot arrow, local trajectory, and global path on the local planning canvas.
 /// The canvas maps to the planning grid: robot is always at center.
+/// Global path (map frame) is converted to odom frame via mapPose + odomPose.
 class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> trajectory;
+  final List<TrajPoint> globalPath;
   final GridInfo? gridInfo;
   final Pose? odomPose;
+  final Pose? mapPose;
+  final bool showTrajectory;
+  final bool showGlobalPath;
 
   const LocalPlanningPainter({
     required this.trajectory,
+    this.globalPath = const [],
     this.gridInfo,
     this.odomPose,
+    this.mapPose,
+    this.showTrajectory = true,
+    this.showGlobalPath = true,
   });
 
   @override
@@ -31,41 +40,92 @@ class LocalPlanningPainter extends CustomPainter {
     final scaleX = size.width / worldW;
     final scaleY = size.height / worldH;
 
-    // Draw planned trajectory.
-    if (trajectory.length >= 2 && pose != null) {
-      final paint = Paint()
-        ..color = Colors.cyanAccent.withOpacity(0.85)
-        ..strokeWidth = 2.5
-        ..style = PaintingStyle.stroke
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round;
+    if (showGlobalPath) _drawGlobalPath(canvas, cx, cy, scaleX, scaleY, pose);
 
-      final path = Path();
-      bool first = true;
-      for (final pt in trajectory) {
-        final px = cx + (pt.x - pose.x) * scaleX;
-        final py = cy - (pt.y - pose.y) * scaleY; // y-flip: ROS +y = canvas up
-        if (first) {
-          path.moveTo(px, py);
-          first = false;
-        } else {
-          path.lineTo(px, py);
-        }
+    if (showTrajectory) _drawTrajectory(canvas, cx, cy, scaleX, scaleY, pose);
+
+    _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
+  }
+
+  void _drawTrajectory(Canvas canvas, double cx, double cy,
+      double scaleX, double scaleY, Pose? pose) {
+    if (trajectory.length < 2 || pose == null) return;
+
+    final paint = Paint()
+      ..color = Colors.cyanAccent.withOpacity(0.85)
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final path = Path();
+    bool first = true;
+    for (final pt in trajectory) {
+      final px = cx + (pt.x - pose.x) * scaleX;
+      final py = cy - (pt.y - pose.y) * scaleY;
+      if (first) {
+        path.moveTo(px, py);
+        first = false;
+      } else {
+        path.lineTo(px, py);
       }
-      canvas.drawPath(path, paint);
+    }
+    canvas.drawPath(path, paint);
 
-      // Draw a dot at the trajectory goal.
-      final goal = trajectory.last;
-      final gx = cx + (goal.x - pose.x) * scaleX;
-      final gy = cy - (goal.y - pose.y) * scaleY;
-      canvas.drawCircle(
-        Offset(gx, gy),
-        5,
-        Paint()..color = Colors.cyanAccent,
+    final goal = trajectory.last;
+    canvas.drawCircle(
+      Offset(cx + (goal.x - pose.x) * scaleX, cy - (goal.y - pose.y) * scaleY),
+      5,
+      Paint()..color = Colors.cyanAccent,
+    );
+  }
+
+  /// Global path is in map frame; convert each point to odom frame relative to robot.
+  /// offset_in_odom = R(odom_yaw - map_yaw) * (P_map - robot_map_pos)
+  void _drawGlobalPath(Canvas canvas, double cx, double cy,
+      double scaleX, double scaleY, Pose? odomPose) {
+    if (globalPath.length < 2 || odomPose == null || mapPose == null) return;
+
+    final mp = mapPose!;
+    final dyaw = odomPose.yaw - mp.yaw;
+    final cosDy = math.cos(dyaw);
+    final sinDy = math.sin(dyaw);
+
+    Offset toCanvas(TrajPoint pt) {
+      final dx = pt.x - mp.x;
+      final dy = pt.y - mp.y;
+      return Offset(
+        cx + (dx * cosDy - dy * sinDy) * scaleX,
+        cy - (dx * sinDy + dy * cosDy) * scaleY,
       );
     }
 
-    _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
+    final linePaint = Paint()
+      ..color = const Color(0xFF69F0AE).withOpacity(0.9)
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final path = Path();
+    bool first = true;
+    for (final pt in globalPath) {
+      final c = toCanvas(pt);
+      if (first) {
+        path.moveTo(c.dx, c.dy);
+        first = false;
+      } else {
+        path.lineTo(c.dx, c.dy);
+      }
+    }
+    canvas.drawPath(path, linePaint);
+
+    // Target marker at path end.
+    final gc = toCanvas(globalPath.last);
+    canvas.drawCircle(gc, 7, Paint()..color = const Color(0xFF69F0AE));
+    canvas.drawCircle(gc, 7,
+        Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 2.0);
+    canvas.drawCircle(gc, 3, Paint()..color = Colors.white);
   }
 
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
@@ -92,6 +152,10 @@ class LocalPlanningPainter extends CustomPainter {
   @override
   bool shouldRepaint(LocalPlanningPainter old) =>
       trajectory != old.trajectory ||
+      globalPath != old.globalPath ||
       gridInfo != old.gridInfo ||
-      odomPose != old.odomPose;
+      odomPose != old.odomPose ||
+      mapPose != old.mapPose ||
+      showTrajectory != old.showTrajectory ||
+      showGlobalPath != old.showGlobalPath;
 }

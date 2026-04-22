@@ -9,7 +9,6 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
-import 'map_painter.dart';
 import 'planning_painter.dart';
 
 const double _maxLinear = 0.5;   // m/s
@@ -78,11 +77,9 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
   @override
   Widget build(BuildContext context) {
-    final mapAsync = ref.watch(mapInfoProvider);
     final poisAsync = ref.watch(poisProvider);
     final poseAsync = ref.watch(poseStreamProvider);
     final planningAsync = ref.watch(planningStreamProvider);
-    final baseUrl = ref.watch(baseUrlProvider);
     final planning = planningAsync.valueOrNull;
 
     return Column(
@@ -96,30 +93,12 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: mapAsync.when(
-                  data: (mapInfo) {
-                    final localized = planning?.localized ?? false;
-                    if (mapInfo != null && localized) {
-                      return _MapView(
-                        mapInfo: mapInfo,
-                        imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
-                        pose: planning?.mapPose ?? poseAsync.valueOrNull,
-                        pois: poisAsync.valueOrNull ?? [],
-                        globalPath: planning?.globalPath ?? const [],
-                        showGlobalPath: _showGlobalPath,
-                      );
-                    }
-                    return _LocalPlanningView(
-                      planning: planning,
-                      showObstacle: _showObstacle,
-                      showEsdf: _showEsdf,
-                      showTrajectory: _showTrajectory,
-                    );
-                  },
-                  loading: () => const Center(child: CircularProgressIndicator()),
-                  error: (e, _) => Center(
-                    child: Text('$e', style: const TextStyle(color: Colors.red)),
-                  ),
+                child: _LocalPlanningView(
+                  planning: planning,
+                  showObstacle: _showObstacle,
+                  showEsdf: _showEsdf,
+                  showTrajectory: _showTrajectory,
+                  showGlobalPath: _showGlobalPath,
                 ),
               ),
               if (planning != null)
@@ -132,7 +111,6 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                 top: 8,
                 right: 8,
                 child: _LayerTogglePanel(
-                  localized: planning?.localized ?? false,
                   showObstacle: _showObstacle,
                   showEsdf: _showEsdf,
                   showTrajectory: _showTrajectory,
@@ -176,71 +154,6 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   }
 }
 
-// ── Map + overlay ─────────────────────────────────────────────────────────────
-
-class _MapView extends StatelessWidget {
-  final MapInfo mapInfo;
-  final String imageUrl;
-  final Pose? pose;
-  final List<Poi> pois;
-  final List<TrajPoint> globalPath;
-  final bool showGlobalPath;
-
-  const _MapView({
-    required this.mapInfo,
-    required this.imageUrl,
-    required this.pois,
-    this.pose,
-    this.globalPath = const [],
-    this.showGlobalPath = true,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final aspect = mapInfo.width / mapInfo.height;
-    return Center(
-      child: AspectRatio(
-        aspectRatio: aspect > 0 ? aspect : 1.0,
-        child: InteractiveViewer(
-          minScale: 0.5,
-          maxScale: 8.0,
-          boundaryMargin: const EdgeInsets.all(double.infinity),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Image.network(
-                imageUrl,
-                fit: BoxFit.fill,
-                loadingBuilder: (_, child, progress) => progress == null
-                    ? child
-                    : Center(
-                        child: CircularProgressIndicator(
-                          value: progress.expectedTotalBytes != null
-                              ? progress.cumulativeBytesLoaded /
-                                  progress.expectedTotalBytes!
-                              : null,
-                        ),
-                      ),
-                errorBuilder: (_, e, __) =>
-                    Center(child: Text('Image error: $e', style: const TextStyle(color: Colors.red))),
-              ),
-              CustomPaint(
-                painter: MapOverlayPainter(
-                  mapInfo: mapInfo,
-                  pose: pose,
-                  pois: pois,
-                  globalPath: globalPath,
-                  showGlobalPath: showGlobalPath,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 // ── Local planning view ───────────────────────────────────────────────────────
 
 class _LocalPlanningView extends StatelessWidget {
@@ -248,12 +161,14 @@ class _LocalPlanningView extends StatelessWidget {
   final bool showObstacle;
   final bool showEsdf;
   final bool showTrajectory;
+  final bool showGlobalPath;
 
   const _LocalPlanningView({
     this.planning,
     this.showObstacle = true,
     this.showEsdf = false,
     this.showTrajectory = false,
+    this.showGlobalPath = true,
   });
 
   @override
@@ -286,9 +201,13 @@ class _LocalPlanningView extends StatelessWidget {
                   if (p != null)
                     CustomPaint(
                       painter: LocalPlanningPainter(
-                        trajectory: showTrajectory ? p.trajectory : const [],
+                        trajectory: p.trajectory,
+                        globalPath: p.globalPath,
                         gridInfo: p.gridInfo,
                         odomPose: p.odomPose,
+                        mapPose: p.mapPose,
+                        showTrajectory: showTrajectory,
+                        showGlobalPath: showGlobalPath,
                       ),
                     )
                   else
@@ -314,7 +233,6 @@ class _LocalPlanningView extends StatelessWidget {
 }
 
 class _LayerTogglePanel extends StatefulWidget {
-  final bool localized;
   final bool showObstacle;
   final bool showEsdf;
   final bool showTrajectory;
@@ -322,7 +240,6 @@ class _LayerTogglePanel extends StatefulWidget {
   final void Function(bool obs, bool esdf, bool traj, bool gp) onChanged;
 
   const _LayerTogglePanel({
-    required this.localized,
     required this.showObstacle,
     required this.showEsdf,
     required this.showTrajectory,
@@ -375,19 +292,16 @@ class _LayerTogglePanelState extends State<_LayerTogglePanel> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
-              children: widget.localized
-                  ? [
-                      _LayerRow('Global Path', widget.showGlobalPath,
-                          (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v)),
-                    ]
-                  : [
-                      _LayerRow('Obstacle', widget.showObstacle,
-                          (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath)),
-                      _LayerRow('ESDF', widget.showEsdf,
-                          (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath)),
-                      _LayerRow('Trajectory', widget.showTrajectory,
-                          (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath)),
-                    ],
+              children: [
+                _LayerRow('Obstacle', widget.showObstacle,
+                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath)),
+                _LayerRow('ESDF', widget.showEsdf,
+                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath)),
+                _LayerRow('Trajectory', widget.showTrajectory,
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath)),
+                _LayerRow('Global Path', widget.showGlobalPath,
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v)),
+              ],
             ),
           ),
         ],

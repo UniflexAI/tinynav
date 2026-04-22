@@ -82,7 +82,11 @@ class _MapPreviewPageState extends ConsumerState<MapPreviewPage> {
         ],
       ),
       body: infoAsync.when(
-        data: (info) => _MapViewer(info: info, baseUrl: baseUrl),
+        data: (info) => _MapViewer(
+          info: info,
+          baseUrl: baseUrl,
+          mapName: widget.mapName,
+        ),
         loading: () => const Center(
           child: CircularProgressIndicator(color: Colors.white54),
         ),
@@ -98,11 +102,16 @@ class _MapPreviewPageState extends ConsumerState<MapPreviewPage> {
 
 // ── Map viewer ─────────────────────────────────────────────────────────────────
 
-class _MapViewer extends StatelessWidget {
+class _MapViewer extends ConsumerWidget {
   final MapFileInfo info;
   final String baseUrl;
+  final String mapName;
 
-  const _MapViewer({required this.info, required this.baseUrl});
+  const _MapViewer({
+    required this.info,
+    required this.baseUrl,
+    required this.mapName,
+  });
 
   Offset _worldToPixel(double wx, double wy) {
     final px = (wx - info.originX) / info.resolution;
@@ -110,8 +119,91 @@ class _MapViewer extends StatelessWidget {
     return Offset(px, py);
   }
 
+  Offset _pixelToWorld(Offset pixel) {
+    final wx = info.originX + pixel.dx * info.resolution;
+    final wy = info.originY + (info.height - 1 - pixel.dy) * info.resolution;
+    return Offset(wx, wy);
+  }
+
+  Future<void> _addPoi(BuildContext context, WidgetRef ref, Offset pixelPos) async {
+    final world = _pixelToWorld(pixelPos);
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Add POI'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: ctrl,
+              decoration: const InputDecoration(labelText: 'Name', hintText: 'e.g. Room A'),
+              autofocus: true,
+              textCapitalization: TextCapitalization.sentences,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '(${world.dx.toStringAsFixed(2)}, ${world.dy.toStringAsFixed(2)})',
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Add')),
+        ],
+      ),
+    );
+    if (ok != true || ctrl.text.trim().isEmpty) return;
+    try {
+      await ref.read(dioProvider).post('/map/preview/$mapName/pois', data: {
+        'name': ctrl.text.trim(),
+        'position': [world.dx, world.dy, 0.0],
+      });
+      ref.invalidate(mapFileInfoProvider(mapName));
+    } on DioException catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
+  Future<void> _deletePoi(BuildContext context, WidgetRef ref, Poi poi) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete POI'),
+        content: Text('Delete "${poi.name}"?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref.read(dioProvider).delete('/map/preview/$mapName/pois/${poi.id}');
+      ref.invalidate(mapFileInfoProvider(mapName));
+    } on DioException catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final imageUrl = '$baseUrl${info.imageUrl}';
 
     return Stack(
@@ -124,52 +216,78 @@ class _MapViewer extends StatelessWidget {
             child: SizedBox(
               width: info.width.toDouble(),
               height: info.height.toDouble(),
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  // ── Occupancy map ──────────────────────────────────────────
-                  Image.network(
-                    imageUrl,
-                    width: info.width.toDouble(),
-                    height: info.height.toDouble(),
-                    fit: BoxFit.fill,
-                    loadingBuilder: (_, child, progress) => progress == null
-                        ? child
-                        : Container(
-                            color: const Color(0xFF2A2A3E),
-                            child: const Center(
-                              child: CircularProgressIndicator(
-                                  color: Colors.white54, strokeWidth: 2),
+              child: GestureDetector(
+                onLongPressStart: (d) => _addPoi(context, ref, d.localPosition),
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    // ── Occupancy map ────────────────────────────────────────
+                    Image.network(
+                      imageUrl,
+                      width: info.width.toDouble(),
+                      height: info.height.toDouble(),
+                      fit: BoxFit.fill,
+                      loadingBuilder: (_, child, progress) => progress == null
+                          ? child
+                          : Container(
+                              color: const Color(0xFF2A2A3E),
+                              child: const Center(
+                                child: CircularProgressIndicator(
+                                    color: Colors.white54, strokeWidth: 2),
+                              ),
                             ),
-                          ),
-                    errorBuilder: (_, __, ___) => Container(
-                      color: const Color(0xFF2A2A3E),
-                      child: const Center(
-                        child: Icon(Icons.broken_image_outlined,
-                            color: Colors.white38, size: 48),
+                      errorBuilder: (_, __, ___) => Container(
+                        color: const Color(0xFF2A2A3E),
+                        child: const Center(
+                          child: Icon(Icons.broken_image_outlined,
+                              color: Colors.white38, size: 48),
+                        ),
                       ),
                     ),
-                  ),
-                  // ── POI markers ────────────────────────────────────────────
-                  ...info.pois.map((poi) {
-                    final px = _worldToPixel(poi.x, poi.y);
-                    return Positioned(
-                      left: px.dx - 6,
-                      top: px.dy - 6,
-                      child: _PoiMarker(label: poi.name),
-                    );
-                  }),
-                ],
+                    // ── POI markers ──────────────────────────────────────────
+                    ...info.pois.map((poi) {
+                      final px = _worldToPixel(poi.x, poi.y);
+                      return Positioned(
+                        left: px.dx - 10,
+                        top: px.dy - 10,
+                        child: GestureDetector(
+                          onTap: () => _deletePoi(context, ref, poi),
+                          child: _PoiMarker(label: poi.name),
+                        ),
+                      );
+                    }),
+                  ],
+                ),
               ),
             ),
           ),
         ),
-        // ── Info bar ──────────────────────────────────────────────────────────
+        // ── Info bar + hint ───────────────────────────────────────────────────
         Positioned(
           bottom: 16,
           left: 16,
           right: 16,
-          child: _InfoBar(info: info),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _InfoBar(info: info),
+              const SizedBox(height: 6),
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text(
+                    'Long-press to add POI  ·  Tap POI to delete',
+                    style: TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -188,14 +306,15 @@ class _PoiMarker extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 12,
-          height: 12,
+          width: 20,
+          height: 20,
           decoration: BoxDecoration(
             color: const Color(0xFF4A90D9),
             shape: BoxShape.circle,
             border: Border.all(color: Colors.white, width: 1.5),
             boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 3)],
           ),
+          child: const Icon(Icons.place, color: Colors.white, size: 12),
         ),
         const SizedBox(height: 2),
         Container(

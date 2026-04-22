@@ -138,3 +138,43 @@ def map_preview_image(map_name: str):
     except Exception as e:
         raise HTTPException(500, str(e))
     return Response(content=png_bytes, media_type='image/png')
+
+
+class MapPoiCreateRequest(BaseModel):
+    name: str
+    position: list[float]  # [x, y, z]
+
+
+@router.post('/preview/{map_name}/pois')
+def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
+    path = _resolve_map_path(map_name)
+    if len(req.position) != 3:
+        raise HTTPException(400, 'position must be [x, y, z]')
+    pois_file = os.path.join(path, 'pois.json')
+    pois: dict = {}
+    if os.path.exists(pois_file):
+        with open(pois_file) as f:
+            pois = json.load(f)
+    existing_ids = [int(k) for k in pois.keys()] if pois else []
+    new_id = max(existing_ids) + 1 if existing_ids else 0
+    pois[str(new_id)] = {'id': new_id, 'name': req.name, 'position': req.position}
+    with open(pois_file, 'w') as f:
+        json.dump(pois, f, indent=2)
+    return pois[str(new_id)]
+
+
+@router.delete('/preview/{map_name}/pois/{poi_id}')
+def map_preview_delete_poi(map_name: str, poi_id: int):
+    path = _resolve_map_path(map_name)
+    pois_file = os.path.join(path, 'pois.json')
+    if not os.path.exists(pois_file):
+        raise HTTPException(404, f'POI {poi_id} not found')
+    with open(pois_file) as f:
+        pois = json.load(f)
+    key = str(poi_id)
+    if key not in pois:
+        raise HTTPException(404, f'POI {poi_id} not found')
+    del pois[key]
+    with open(pois_file, 'w') as f:
+        json.dump(pois, f, indent=2)
+    return {'ok': True}
