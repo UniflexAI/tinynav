@@ -10,6 +10,7 @@ class DeviceTab extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(deviceStatusProvider);
     final sensorAsync = ref.watch(sensorModeProvider);
+    final sysAsync = ref.watch(sysInfoProvider);
     final ip = ref.watch(deviceIpProvider) ?? '—';
 
     return RefreshIndicator(
@@ -73,9 +74,29 @@ class DeviceTab extends ConsumerWidget {
                 loading: () => const _LoadingRow(),
                 error: (_, __) => const _InfoRow('Battery', '—'),
               ),
-              const _InfoRow('CPU', '—', dimmed: true),
-              const _InfoRow('GPU', '—', dimmed: true),
-              const _InfoRow('Disk', '—', dimmed: true),
+              sysAsync.when(
+                data: (sys) => Column(
+                  children: [
+                    _InfoRow('CPU', '${sys.cpuPercent.toStringAsFixed(1)}%',
+                        valueColor: sys.cpuPercent > 85 ? Colors.red : null),
+                    _InfoRow(
+                      'Memory',
+                      '${sys.memUsedGb.toStringAsFixed(1)}/${sys.memTotalGb.toStringAsFixed(1)} GB  (${sys.memPercent.toStringAsFixed(0)}%)',
+                      valueColor: sys.memPercent > 85 ? Colors.red : null,
+                    ),
+                    _InfoRow(
+                      'Disk',
+                      '${sys.diskUsedGb.toStringAsFixed(1)}/${sys.diskTotalGb.toStringAsFixed(1)} GB  (${sys.diskPercent.toStringAsFixed(0)}%)',
+                      valueColor: sys.diskPercent > 90 ? Colors.red : null,
+                    ),
+                    if (sys.gpuPercent != null)
+                      _InfoRow('GPU', '${sys.gpuPercent!.toStringAsFixed(1)}%',
+                          valueColor: sys.gpuPercent! > 85 ? Colors.red : null),
+                  ],
+                ),
+                loading: () => const _LoadingRow(),
+                error: (_, __) => const _InfoRow('System', 'unavailable', dimmed: true),
+              ),
             ],
           ),
         ],

@@ -55,6 +55,22 @@ The mock server listens on port `8000` and simulates all REST and WebSocket endp
 
 ---
 
+## Widgetbook (UI preview)
+
+Use Widgetbook to preview UI states quickly without connecting to hardware.
+
+```bash
+cd app/frontend
+flutter pub get
+flutter run -t widgetbook/main.dart -d chrome
+```
+
+This project currently uses a manual Widgetbook directory setup in `widgetbook/tinynav_widgetbook.dart` with mocked Riverpod providers for:
+- `HomePage` (idle / recording)
+- `DeviceTab` (idle / map building)
+
+---
+
 ## App structure
 
 ```
