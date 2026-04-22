@@ -75,6 +75,7 @@ class StereoPairMsg:
 class Keyframe:
     timestamp: float
     image: np.ndarray
+    right_img: np.ndarray
     disparity: np.ndarray
     depth: np.ndarray
     pose: np.ndarray
@@ -82,6 +83,7 @@ class Keyframe:
     bias: gtsam.imuBias.ConstantBias
     preintegrated_imu: gtsam.PreintegratedCombinedMeasurements
     latest_imu_timestamp: float
+    K: np.ndarray = None
 
 class PerceptionNode(Node):
     def __init__(self, verbose_timer: bool = True):
@@ -123,7 +125,7 @@ class PerceptionNode(Node):
 
         self.input_aligner_imu_filter = SimpleFilter()
         self.input_aligner_stereo_filter = SimpleFilter()
-        self.input_aligner = InputAligner(Duration(seconds=1.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
+        self.input_aligner = InputAligner(Duration(seconds=100.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
         self.input_aligner.setInputPeriod(0, Duration(seconds=0.005))
         self.input_aligner.setInputPeriod(1, Duration(seconds=0.01))
         self.input_aligner.registerCallback(0, self._aligned_imu_callback)
@@ -148,8 +150,8 @@ class PerceptionNode(Node):
 
         # Noise model (continuous-time)
         # for Realsense D435i
-        accel_noise_density = 0.25     # [m/s^2/√Hz]
-        gyro_noise_density = 0.00005 # [rad/s/√Hz]
+        accel_noise_density = 1.25     # [m/s^2/√Hz]
+        gyro_noise_density = 0.05 # [rad/s/√Hz]
         bias_acc_rw_sigma = 0.001
         bias_gyro_rw_sigma = 0.0001
         self.pre_integration_params = gtsam.PreintegrationCombinedParams.MakeSharedU()
@@ -214,7 +216,7 @@ class PerceptionNode(Node):
         left_msg = stereo_pair_msg.left_msg
         right_msg = stereo_pair_msg.right_msg
         image_timestamp = stamp2second(left_msg.header.stamp)
-        if image_timestamp - self.last_processed_timestamp < 0.1333:
+        if image_timestamp - self.last_processed_timestamp < 0.0633:
             return
 
         self.last_processed_timestamp = image_timestamp
@@ -278,13 +280,15 @@ class PerceptionNode(Node):
                 Keyframe(
                     timestamp=current_timestamp,
                     image=left_img,
+                    right_img=right_img,
                     disparity=disparity,
                     depth=depth,
                     pose=self.T_body_last,
                     velocity=np.zeros(3),
                     bias=self.B_last,
                     preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, self.B_last),
-                    latest_imu_timestamp=current_timestamp
+                    latest_imu_timestamp=current_timestamp,
+                    K=self.K,
                 )
             )
             return {
@@ -353,13 +357,15 @@ class PerceptionNode(Node):
             Keyframe(
                 timestamp=current_timestamp,
                 image=left_img,
+                right_img=right_img,
                 disparity=disparity,
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
                 velocity=self.keyframe_queue[-1].velocity,
                 bias=prev_bias,
                 preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, prev_bias),
-                latest_imu_timestamp=current_timestamp
+                latest_imu_timestamp=current_timestamp,
+                K=self.K,
             )
         )
         if len(self.keyframe_queue) > _N:
@@ -610,7 +616,6 @@ def main(args=None):
 
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(perception_node)
-    executor.add_node(imu_propagator_node)
     executor.spin()
     perception_node.destroy_node()
     imu_propagator_node.destroy_node()
