@@ -570,6 +570,19 @@ class BackendNode(Ros2NodeManager):
             dest = os.path.join(maps_dir, ts)
             shutil.move(self.map_path, dest)
             os.symlink(dest, self.map_path)
+
+            # Auto-create a home POI at the SLAM origin (0,0,0) if none exist.
+            # map_node requires at least one POI as a global localization anchor.
+            pois_path = os.path.join(dest, 'pois.json')
+            if not os.path.exists(pois_path):
+                import json as _json
+                with open(pois_path, 'w') as _f:
+                    _json.dump(
+                        {'0': {'id': 0, 'name': 'home', 'position': [0.0, 0.0, 0.0]}},
+                        _f, indent=2,
+                    )
+                self.get_logger().info('Auto-created home POI at (0,0,0)')
+
             self._stop_all()
             self.state = 'idle'
             self._pub_state()
