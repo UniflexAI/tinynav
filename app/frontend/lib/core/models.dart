@@ -156,6 +156,39 @@ class PlanningState {
   }
 }
 
+class SysInfo {
+  final double cpuPercent;
+  final double memPercent;
+  final double memUsedGb;
+  final double memTotalGb;
+  final double diskPercent;
+  final double diskUsedGb;
+  final double diskTotalGb;
+  final double? gpuPercent;
+
+  const SysInfo({
+    required this.cpuPercent,
+    required this.memPercent,
+    required this.memUsedGb,
+    required this.memTotalGb,
+    required this.diskPercent,
+    required this.diskUsedGb,
+    required this.diskTotalGb,
+    this.gpuPercent,
+  });
+
+  factory SysInfo.fromJson(Map<String, dynamic> j) => SysInfo(
+        cpuPercent: (j['cpu_percent'] as num).toDouble(),
+        memPercent: (j['mem_percent'] as num).toDouble(),
+        memUsedGb: (j['mem_used_gb'] as num).toDouble(),
+        memTotalGb: (j['mem_total_gb'] as num).toDouble(),
+        diskPercent: (j['disk_percent'] as num).toDouble(),
+        diskUsedGb: (j['disk_used_gb'] as num).toDouble(),
+        diskTotalGb: (j['disk_total_gb'] as num).toDouble(),
+        gpuPercent: (j['gpu_percent'] as num?)?.toDouble(),
+      );
+}
+
 class FileEntry {
   final String name;
   final int size;

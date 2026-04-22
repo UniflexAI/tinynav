@@ -129,6 +129,14 @@ final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   );
 });
 
+/// One-shot system info from GET /device/sysinfo. autoDispose → re-fetches on each page enter.
+final sysInfoProvider = FutureProvider.autoDispose<SysInfo>((ref) async {
+  final dio = ref.watch(dioProvider);
+  if (ref.watch(baseUrlProvider) == null) throw Exception('No device connected');
+  final resp = await dio.get('/device/sysinfo');
+  return SysInfo.fromJson(resp.data as Map<String, dynamic>);
+});
+
 /// File lists from /files/bags and /files/maps.
 final bagFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
   final dio = ref.watch(dioProvider);
