@@ -96,6 +96,9 @@ class BackendNode(Ros2NodeManager):
         # Battery level from /battery topic (published by unitree_control)
         self._battery: float | None = None
 
+        # Path to the last successfully verified bag (after stop + ros2 bag info check)
+        self._last_verified_bag: str | None = None
+
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
@@ -309,12 +312,20 @@ class BackendNode(Ros2NodeManager):
     # Command API (called from FastAPI handlers — thread-safe enough)     #
     # ------------------------------------------------------------------ #
 
+    @property
+    def active_bag_path(self) -> str | None:
+        """Most recently verified bag folder, ready for map building."""
+        lvb = self._last_verified_bag
+        if lvb and os.path.isdir(lvb):
+            return lvb
+        return None
+
     def get_status(self) -> dict:
         with self._lock:
             raw = self.state
             pct = self.mapping_percent
             battery = self._battery
-        bag_files_exist = os.path.exists(os.path.join(self.bag_path, 'bag_0.db3'))
+        bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
             'battery': battery,
@@ -342,7 +353,70 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_bag_stop(self):
         if self.state == 'realsense_bag_record':
+            bag_path = self.bag_path
             self._stop_all()
+            threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
+
+    def _finalize_bag(self, bag_path: str):
+        import shutil
+        from datetime import datetime
+        time.sleep(1.5)  # wait for ros2 bag to flush
+        if not os.path.isdir(bag_path):
+            return
+        try:
+            result = subprocess.run(
+                ['ros2', 'bag', 'info', bag_path],
+                capture_output=True,
+                timeout=30,
+                env={**os.environ},
+            )
+            if result.returncode != 0:
+                return  # bag corrupted — leave in place
+        except Exception:
+            return
+        rosbags_dir = os.path.join(os.path.dirname(bag_path), 'rosbags')
+        os.makedirs(rosbags_dir, exist_ok=True)
+        ts = datetime.now().strftime('bag_%Y_%m_%d_%H_%M_%S')
+        dest = os.path.join(rosbags_dir, ts)
+        shutil.move(bag_path, dest)
+        with self._lock:
+            self._last_verified_bag = dest
+
+    def _start_rosbag_build_map(self):
+        """Override to use the last verified bag instead of the default bag_path."""
+        active = self.active_bag_path
+        if active is None:
+            self.get_logger().warn('No verified bag available for map building')
+            return
+        bag_file = os.path.join(active, 'bag_0.db3')
+        if not os.path.exists(bag_file):
+            self.get_logger().warn(f'bag_0.db3 not found in {active}')
+            return
+        domain_env = {'ROS_DOMAIN_ID': self.ros_domain_id} if self.ros_domain_id is not None else {}
+        cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+        self.processes['perception'] = self._spawn(cmd_perception, extra_env=domain_env)
+        cmd_build = [
+            'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
+            '--map_save_path', self.map_path,
+            '--bag_file', bag_file,
+        ]
+        self.processes['build_map'] = self._spawn(cmd_build, extra_env=domain_env)
+
+        def wait_and_convert():
+            proc_build = self.processes.get('build_map')
+            if proc_build:
+                proc_build.wait()
+            import subprocess as _sp
+            _sp.run([
+                'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
+                '--input_dir', self.map_path,
+                '--output_dir', self.map_path,
+            ])
+            self._stop_all()
+            self.state = 'idle'
+            self._pub_state()
+
+        threading.Thread(target=wait_and_convert, daemon=True).start()
 
     def cmd_map_build(self):
         self._stop_all()

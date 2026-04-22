@@ -22,9 +22,9 @@ def _require_node():
 @router.post('/build')
 def map_build():
     node = _require_node()
-    bag_file = os.path.join(node.bag_path, 'bag_0.db3')
-    if not os.path.exists(bag_file):
-        raise HTTPException(400, 'No bag file found — record a bag first')
+    active_bag = node.active_bag_path
+    if active_bag is None or not os.path.exists(os.path.join(active_bag, 'bag_0.db3')):
+        raise HTTPException(400, 'No verified bag available — record and stop a bag first')
     if node.state == 'rosbag_build_map':
         raise HTTPException(409, 'Already building map')
     if node.state not in ('idle',):
