@@ -87,11 +87,22 @@ class BackendNode(Ros2NodeManager):
         self._realsense_proc: subprocess.Popen | None = None
         self._perception_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
+        self._unitree_proc: subprocess.Popen | None = None
+
+        # Battery level from /battery topic (published by unitree_control)
+        self._battery: float | None = None
+
+        self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self._detect_and_init_sensor()
+        self._start_unitree_if_configured()
 
     # ------------------------------------------------------------------ #
     # ROS callbacks                                                        #
     # ------------------------------------------------------------------ #
+
+    def _on_battery(self, msg: Float32):
+        with self._lock:
+            self._battery = float(msg.data)
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -264,6 +275,21 @@ class BackendNode(Ros2NodeManager):
                 'grid_info': self._grid_info,
             }
 
+    def _start_unitree_if_configured(self):
+        iface = os.environ.get('UNITREE_NETWORK_INTERFACE')
+        if not iface:
+            return
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        _env['UNITREE_NETWORK_INTERFACE'] = iface
+        self._unitree_proc = subprocess.Popen(
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
+            preexec_fn=os.setsid,
+            cwd='/tinynav',
+            env=_env,
+        )
+        self.get_logger().info(f'unitree_control started (interface={iface})')
+
     def get_sensor_mode(self) -> str:
         return self._sensor_mode
 
@@ -282,9 +308,11 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             raw = self.state
             pct = self.mapping_percent
+            battery = self._battery
         bag_files_exist = os.path.exists(os.path.join(self.bag_path, 'bag_0.db3'))
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
+            'battery': battery,
             'bagStatus': 'recording' if raw == 'realsense_bag_record' else 'idle',
             'bagFileReady': bag_files_exist,
             'mapStatus': self._derive_map_status(raw, pct, map_files_exist),
@@ -372,7 +400,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc):
+            for proc in (self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)
