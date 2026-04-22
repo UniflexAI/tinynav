@@ -113,15 +113,17 @@ class _MapViewer extends ConsumerWidget {
     required this.mapName,
   });
 
+  // The PNG is (Nx, Ny) with axis-0 = world-X, axis-1 = world-Y.
+  // np.flipud flips axis-0, so: col = Y-index, row = (Nx-1 - X-index).
   Offset _worldToPixel(double wx, double wy) {
-    final px = (wx - info.originX) / info.resolution;
-    final py = (info.height - 1) - (wy - info.originY) / info.resolution;
+    final px = (wy - info.originY) / info.resolution;                        // col = Y index
+    final py = (info.height - 1) - (wx - info.originX) / info.resolution;   // row = Nx-1-X
     return Offset(px, py);
   }
 
   Offset _pixelToWorld(Offset pixel) {
-    final wx = info.originX + pixel.dx * info.resolution;
-    final wy = info.originY + (info.height - 1 - pixel.dy) * info.resolution;
+    final wx = info.originX + (info.height - 1 - pixel.dy) * info.resolution; // X from row
+    final wy = info.originY + pixel.dx * info.resolution;                      // Y from col
     return Offset(wx, wy);
   }
 

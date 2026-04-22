@@ -43,9 +43,10 @@ def render_map(map_path: str) -> tuple[bytes, dict]:
     img[free_2d] = [210, 210, 210]
     img[occupied_2d] = [35, 35, 35]
 
-    # Grid is stored (Ny, Nx, Nz) — row=Y, col=X (standard image convention).
-    # Just flip rows so row 0 = world-Y max (+Y is up on screen).
-    img = np.flipud(img)  # (Ny, Nx, 3), row 0 = max-Y
+    # Grid is (Nx, Ny, Nz): axis-0=X, axis-1=Y.
+    # After flipud: row 0 = world-X max, col = world-Y index.
+    # So: width (cols) = Ny ↔ world-Y, height (rows) = Nx ↔ world-X.
+    img = np.flipud(img)
 
     pil_img = Image.fromarray(img, mode='RGB')
     buf = io.BytesIO()
@@ -55,6 +56,6 @@ def render_map(map_path: str) -> tuple[bytes, dict]:
         'origin_x': origin_x,
         'origin_y': origin_y,
         'resolution': resolution,
-        'width': ny,    # image columns ↔ world-X
-        'height': nx,   # image rows    ↔ world-Y
+        'width': ny,    # image columns (Ny) ↔ world-Y
+        'height': nx,   # image rows    (Nx) ↔ world-X
     }

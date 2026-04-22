@@ -4,6 +4,7 @@ mapping progress, plus a NodeRunner that spins it in a background thread.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -76,8 +77,8 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
 
-        # Publisher for nav target (consumed by map_node in the future)
-        self._nav_target_pub = self.create_publisher(String, '/service/nav_target', 10)
+        # Publisher for POI nav target consumed by map_node via /mapping/cmd_pois
+        self._cmd_pois_pub = self.create_publisher(String, '/mapping/cmd_pois', 10)
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -609,9 +610,29 @@ class BackendNode(Ros2NodeManager):
         self._stop_all()
         self._start('rosbag_build_map')
 
+    def _publish_cmd_pois(self, poi_id: int | None):
+        """Publish the selected POI to map_node as JSON on /mapping/cmd_pois.
+        Sending an empty dict clears the current nav target."""
+        if poi_id is None:
+            self._cmd_pois_pub.publish(String(data='{}'))
+            return
+        pois_file = os.path.join(self.map_path, 'pois.json')
+        if not os.path.exists(pois_file):
+            self.get_logger().warn('No pois.json found, cannot publish cmd_pois')
+            return
+        with open(pois_file) as f:
+            pois = json.load(f)
+        key = str(poi_id)
+        if key not in pois:
+            self.get_logger().warn(f'POI {poi_id} not found in pois.json')
+            return
+        # Re-index as "0" to match pub_pois.py convention expected by map_node
+        payload = {'0': pois[key]}
+        self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
+
     def cmd_nav_start(self, poi_id: str | None = None):
         if poi_id is not None:
-            self._nav_target_pub.publish(String(data=str(poi_id)))
+            self._publish_cmd_pois(int(poi_id))
         with self._lock:
             nav_running = self._nav_nodes_running
         if nav_running:
@@ -628,8 +649,8 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             nav_running = self._nav_nodes_running
         if nav_running:
-            # Leave nav nodes up; just clear the active target so map_node stops pathing.
-            self._nav_target_pub.publish(String(data=''))
+            # Clear the active nav target so map_node stops pathing.
+            self._publish_cmd_pois(None)
             self.state = 'idle'
             self._pub_state()
         else:
