@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/providers.dart';
 import 'device_tab.dart';
 import 'map_tab.dart';
-import 'nav_tab.dart';
+import 'operate_tab.dart';
 
 // ── Top-level menu ────────────────────────────────────────────────────────────
 
@@ -38,33 +38,33 @@ class HomePage extends ConsumerWidget {
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
                 children: [
                   _MenuCard(
-                    icon: Icons.sensors,
+                    icon: Icons.memory_rounded,
                     iconColor: const Color(0xFFFF6B35),
                     title: 'Device',
-                    subtitle: 'Status · Bag recording · Map build',
+                    subtitle: 'Status · Sensor · System info',
                     badge: status?.rawState == 'realsense_bag_record' ? 'REC' : null,
                     badgeColor: Colors.red,
                     onTap: () => _push(context, 'Device', const DeviceTab()),
                   ),
                   const SizedBox(height: 12),
                   _MenuCard(
-                    icon: Icons.map_outlined,
+                    icon: Icons.folder_outlined,
                     iconColor: const Color(0xFF4A90D9),
                     title: 'Map',
-                    subtitle: 'Visualize · POI · Local planning',
+                    subtitle: 'Bag recording · Map building · Files',
                     badge: status?.rawState == 'rosbag_build_map' ? 'Building' : null,
                     badgeColor: const Color(0xFF4A90D9),
                     onTap: () => _push(context, 'Map', const MapTab()),
                   ),
                   const SizedBox(height: 12),
                   _MenuCard(
-                    icon: Icons.navigation_outlined,
+                    icon: Icons.sports_esports_outlined,
                     iconColor: const Color(0xFF34C759),
-                    title: 'Navigate',
-                    subtitle: 'Go to POI · Cancel · Nav status',
-                    badge: status?.rawState == 'navigation' ? 'Active' : null,
+                    title: 'Operate',
+                    subtitle: 'Live map · Camera · Teleop · POI',
+                    badge: status?.rawState == 'navigation' ? 'Navigating' : null,
                     badgeColor: const Color(0xFF34C759),
-                    onTap: () => _push(context, 'Navigate', const NavTab()),
+                    onTap: () => _push(context, 'Operate', const OperateTab()),
                   ),
                   const SizedBox(height: 24),
                   if (status != null) _QuickStatusCard(status: status),
