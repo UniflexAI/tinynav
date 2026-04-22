@@ -161,6 +161,9 @@ class BackendNode(Ros2NodeManager):
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
             if msg.encoding == 'rgb8':
                 arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            # Grid is (X_dim, Y_dim, 3): rows=X, cols=Y.
+            # Transpose + flipud → rows=Y(inverted), cols=X, so canvas X=right Y=up matches painter.
+            arr = np.flipud(arr.transpose(1, 0, 2))
             _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 70])
             with self._lock:
                 self._esdf_bytes = buf.tobytes()
@@ -171,15 +174,17 @@ class BackendNode(Ros2NodeManager):
         try:
             # Planning node stores OccupancyGrid in Fortran (column-major) order.
             arr = np.array(msg.data, dtype=np.int8)
-            grid = arr.reshape(msg.info.height, msg.info.width, order='F')
+            grid = arr.reshape(msg.info.height, msg.info.width, order='F')  # (X_dim, Y_dim)
             img = np.where(grid > 50, 255, 0).astype(np.uint8)
+            # Transpose + flipud → rows=Y(inverted), cols=X, matching painter (X=right, Y=up).
+            img = np.flipud(img.T)
             _, buf = cv2.imencode('.png', img)
             info = {
                 'origin_x': float(msg.info.origin.position.x),
                 'origin_y': float(msg.info.origin.position.y),
                 'resolution': float(msg.info.resolution),
-                'width': int(msg.info.width),
-                'height': int(msg.info.height),
+                'width': int(msg.info.height),   # X_dim → image cols (horizontal)
+                'height': int(msg.info.width),   # Y_dim → image rows (vertical)
             }
             with self._lock:
                 self._obstacle_bytes = buf.tobytes()

@@ -132,17 +132,17 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
     super.dispose();
   }
 
-  // The PNG is (Nx, Ny) with axis-0 = world-X, axis-1 = world-Y.
-  // np.flipud flips axis-0, so: col = Y-index, row = (Nx-1 - X-index).
+  // PNG is (Ny, Nx, 3) after transpose+flipud: cols=X, rows=Y(inverted, row-0=maxY).
+  // col = X-index,  row = (Ny-1 - Y-index).
   Offset _worldToPixel(double wx, double wy) {
-    final px = (wy - widget.info.originY) / widget.info.resolution;
-    final py = (widget.info.height - 1) - (wx - widget.info.originX) / widget.info.resolution;
+    final px = (wx - widget.info.originX) / widget.info.resolution;
+    final py = (widget.info.height - 1) - (wy - widget.info.originY) / widget.info.resolution;
     return Offset(px, py);
   }
 
   Offset _pixelToWorld(Offset pixel) {
-    final wx = widget.info.originX + (widget.info.height - 1 - pixel.dy) * widget.info.resolution;
-    final wy = widget.info.originY + pixel.dx * widget.info.resolution;
+    final wx = widget.info.originX + pixel.dx * widget.info.resolution;
+    final wy = widget.info.originY + (widget.info.height - 1 - pixel.dy) * widget.info.resolution;
     return Offset(wx, wy);
   }
 
