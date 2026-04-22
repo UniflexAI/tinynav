@@ -5,6 +5,7 @@ WebSocket endpoints:
   WS /ws/map-update  — pushes a notification when map files change
   WS /ws/preview     — streams JPEG frames for a given image topic
   WS /ws/planning    — polls planning snapshot at 5 fps
+  WS /ws/teleop      — receives cmd_vel commands from the client
 """
 from __future__ import annotations
 
@@ -163,4 +164,33 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
         try:
             node.preview_callbacks[topic].remove(_on_frame)
         except ValueError:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+# /ws/teleop  — receives velocity commands and publishes to /cmd_vel          #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/teleop')
+async def ws_teleop(ws: WebSocket):
+    await ws.accept()
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+    try:
+        while True:
+            data = await ws.receive_text()
+            msg = json.loads(data)
+            node.publish_cmd_vel(
+                float(msg.get('linear_x', 0.0)),
+                float(msg.get('linear_y', 0.0)),
+                float(msg.get('angular_z', 0.0)),
+            )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            node.publish_cmd_vel(0.0, 0.0, 0.0)
+        except Exception:
             pass

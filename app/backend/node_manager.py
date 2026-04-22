@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 import base64
 
 import rclpy
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Image
@@ -75,6 +76,9 @@ class BackendNode(Ros2NodeManager):
 
         # Publisher for nav target (consumed by map_node in the future)
         self._nav_target_pub = self.create_publisher(String, '/service/nav_target', 10)
+
+        # Publisher for teleop velocity commands
+        self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
 
         # Sensor mode detection and image subscriptions
         self._sensor_mode: str = 'unknown'  # 'looper' | 'realsense' | 'unknown'
@@ -322,6 +326,13 @@ class BackendNode(Ros2NodeManager):
     def cmd_nav_cancel(self):
         if self.state == 'navigation':
             self._stop_all()
+
+    def publish_cmd_vel(self, linear_x: float, linear_y: float, angular_z: float):
+        msg = Twist()
+        msg.linear.x = float(linear_x)
+        msg.linear.y = float(linear_y)
+        msg.angular.z = float(angular_z)
+        self._cmd_vel_pub.publish(msg)
 
 
 class NodeRunner:

@@ -129,6 +129,33 @@ final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   );
 });
 
+/// File lists from /files/bags and /files/maps.
+final bagFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
+  final dio = ref.watch(dioProvider);
+  if (ref.watch(baseUrlProvider) == null) return [];
+  try {
+    final resp = await dio.get('/files/bags');
+    return (resp.data['files'] as List)
+        .map((j) => FileEntry.fromJson(j as Map<String, dynamic>))
+        .toList();
+  } catch (_) {
+    return [];
+  }
+});
+
+final mapFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
+  final dio = ref.watch(dioProvider);
+  if (ref.watch(baseUrlProvider) == null) return [];
+  try {
+    final resp = await dio.get('/files/maps');
+    return (resp.data['files'] as List)
+        .map((j) => FileEntry.fromJson(j as Map<String, dynamic>))
+        .toList();
+  } catch (_) {
+    return [];
+  }
+});
+
 /// One-shot fetch of POI list from GET /map/pois.
 final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
   final dio = ref.watch(dioProvider);

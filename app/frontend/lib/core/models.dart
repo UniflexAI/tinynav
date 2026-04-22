@@ -156,6 +156,36 @@ class PlanningState {
   }
 }
 
+class FileEntry {
+  final String name;
+  final int size;
+  final double mtime;
+  final bool isDir;
+
+  const FileEntry({
+    required this.name,
+    required this.size,
+    required this.mtime,
+    required this.isDir,
+  });
+
+  factory FileEntry.fromJson(Map<String, dynamic> j) => FileEntry(
+        name: j['name'] as String,
+        size: (j['size'] as num).toInt(),
+        mtime: (j['mtime'] as num).toDouble(),
+        isDir: j['is_dir'] as bool? ?? false,
+      );
+
+  String get sizeLabel {
+    if (size < 1024) return '${size}B';
+    if (size < 1024 * 1024) return '${(size / 1024).toStringAsFixed(1)}KB';
+    if (size < 1024 * 1024 * 1024) {
+      return '${(size / (1024 * 1024)).toStringAsFixed(1)}MB';
+    }
+    return '${(size / (1024 * 1024 * 1024)).toStringAsFixed(2)}GB';
+  }
+}
+
 class Poi {
   final int id;
   final String name;
