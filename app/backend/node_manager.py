@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -372,6 +373,10 @@ class BackendNode(Ros2NodeManager):
             )
             if result.returncode != 0:
                 return  # bag corrupted — leave in place
+            output = result.stdout.decode('utf-8', errors='replace')
+            match = re.search(r'Messages:\s+(\d+)', output)
+            if not match or int(match.group(1)) == 0:
+                return  # empty bag — leave in place
         except Exception:
             return
         rosbags_dir = os.path.join(os.path.dirname(bag_path), 'rosbags')
