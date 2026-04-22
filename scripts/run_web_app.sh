@@ -47,6 +47,18 @@ FRONTEND_PORT="${FRONTEND_PORT:-8080}"
 
 banner
 
+# ── Flags ─────────────────────────────────────────────────────────────────────
+NO_BUILD=0
+for arg in "$@"; do
+  case "$arg" in
+    --no-build|-n) NO_BUILD=1 ;;
+    --help|-h)
+      echo "Usage: $0 [--no-build|-n]"
+      echo "  --no-build  Skip Flutter install + build; serve existing build/web"
+      exit 0 ;;
+  esac
+done
+
 # ── Port check ────────────────────────────────────────────────────────────────
 for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   if lsof -iTCP:"$port" -sTCP:LISTEN -t &>/dev/null 2>&1 || \
@@ -55,34 +67,40 @@ for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   fi
 done
 
-# ── 1. Flutter ────────────────────────────────────────────────────────────────
-step "Flutter"
-if command -v flutter &>/dev/null; then
-  ok "Flutter found: $(command -v flutter)"
-elif [ -x "$FLUTTER_INSTALL_DIR/bin/flutter" ]; then
-  export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
-  ok "Flutter found: $FLUTTER_INSTALL_DIR"
+# ── 1 & 2. Flutter + Build web ────────────────────────────────────────────────
+if [ "$NO_BUILD" -eq 1 ]; then
+  step "Skip Build (--no-build)"
+  [ -f "$FRONTEND_DIR/build/web/index.html" ] \
+    || die "No existing build found at app/frontend/build/web — run without --no-build first."
+  ok "Using existing build/web"
 else
-  warn "Flutter not found — downloading $FLUTTER_VERSION..."
-  curl -L --progress-bar "$FLUTTER_URL" -o "/tmp/$FLUTTER_TAR"
-  info "Extracting..."
-  tar -xf "/tmp/$FLUTTER_TAR" -C "$HOME"
-  rm "/tmp/$FLUTTER_TAR"
-  export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
-  ok "Flutter installed at $FLUTTER_INSTALL_DIR"
+  step "Flutter"
+  if command -v flutter &>/dev/null; then
+    ok "Flutter found: $(command -v flutter)"
+  elif [ -x "$FLUTTER_INSTALL_DIR/bin/flutter" ]; then
+    export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
+    ok "Flutter found: $FLUTTER_INSTALL_DIR"
+  else
+    warn "Flutter not found — downloading $FLUTTER_VERSION..."
+    curl -L --progress-bar "$FLUTTER_URL" -o "/tmp/$FLUTTER_TAR"
+    info "Extracting..."
+    tar -xf "/tmp/$FLUTTER_TAR" -C "$HOME"
+    rm "/tmp/$FLUTTER_TAR"
+    export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
+    ok "Flutter installed at $FLUTTER_INSTALL_DIR"
+  fi
+  echo -e "  ${DIM}$(flutter --version 2>&1 | head -1)${RESET}"
+
+  step "Build Flutter Web"
+  cd "$FRONTEND_DIR"
+  info "flutter pub get"
+  flutter pub get --suppress-analytics
+
+  info "flutter build web --release"
+  flutter build web --release --suppress-analytics 2>&1 | \
+    grep -v "^$" | sed "s/^/  ${DIM}/" | sed "s/$/${RESET}/" || true
+  ok "Build complete → app/frontend/build/web"
 fi
-echo -e "  ${DIM}$(flutter --version 2>&1 | head -1)${RESET}"
-
-# ── 2. Build web ──────────────────────────────────────────────────────────────
-step "Build Flutter Web"
-cd "$FRONTEND_DIR"
-info "flutter pub get"
-flutter pub get --suppress-analytics
-
-info "flutter build web --release"
-flutter build web --release --suppress-analytics 2>&1 | \
-  grep -v "^$" | sed "s/^/  ${DIM}/" | sed "s/$/${RESET}/" || true
-ok "Build complete → app/frontend/build/web"
 
 # ── 3. Backend ────────────────────────────────────────────────────────────────
 step "Start Backend"
