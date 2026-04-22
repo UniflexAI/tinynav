@@ -129,8 +129,8 @@ class LocalPlanningPainter extends CustomPainter {
   }
 
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
-    final cosY = math.cos(yaw);
-    final sinY = math.sin(yaw);
+    final cosY = math.cos(yaw - math.pi / 2);
+    final sinY = math.sin(yaw - math.pi / 2);
 
     final tip   = Offset(center.dx + cosY * 14, center.dy - sinY * 14);
     final left  = Offset(center.dx - sinY *  6, center.dy - cosY *  6);
