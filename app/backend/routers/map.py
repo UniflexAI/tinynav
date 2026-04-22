@@ -1,7 +1,11 @@
+import io
+import json
 import os
+import re
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
+from PIL import Image
 
 from ..map_renderer import render_map
 from ..state import runner
@@ -54,6 +58,56 @@ def map_image():
         png_bytes, _ = render_map(node.map_path)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return Response(content=png_bytes, media_type='image/png')
+
+
+def _resolve_map_path(map_name: str) -> str:
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', map_name):
+        raise HTTPException(400, 'Invalid map name')
+    root = os.environ.get('TINYNAV_DB_PATH', '/tinynav/tinynav_db')
+    path = os.path.join(root, map_name)
+    if not os.path.isdir(path) or not os.path.exists(os.path.join(path, 'occupancy_grid.npy')):
+        raise HTTPException(404, f'Map {map_name!r} not found')
+    return path
+
+
+@router.get('/files/{map_name}')
+def map_file_info(map_name: str):
+    """Metadata + POIs for a named map folder."""
+    path = _resolve_map_path(map_name)
+    try:
+        png_bytes, meta = render_map(path)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+    img = Image.open(io.BytesIO(png_bytes))
+    img_w, img_h = img.size  # PIL (width, height)
+
+    pois: list = []
+    pois_file = os.path.join(path, 'pois.json')
+    if os.path.exists(pois_file):
+        with open(pois_file) as f:
+            pois = list(json.load(f).values())
+
+    return {
+        'imageUrl': f'/map/files/{map_name}/image',
+        'origin_x': meta['origin_x'],
+        'origin_y': meta['origin_y'],
+        'resolution': meta['resolution'],
+        'width': img_w,
+        'height': img_h,
+        'pois': pois,
+    }
+
+
+@router.get('/files/{map_name}/image', response_class=Response)
+def map_file_image(map_name: str):
+    """Rendered PNG for a named map folder."""
+    path = _resolve_map_path(map_name)
+    try:
+        png_bytes, _ = render_map(path)
     except Exception as e:
         raise HTTPException(500, str(e))
     return Response(content=png_bytes, media_type='image/png')

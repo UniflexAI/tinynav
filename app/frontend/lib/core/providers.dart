@@ -164,6 +164,15 @@ final mapFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async
   }
 });
 
+/// Metadata + POIs for a named map folder (from GET /map/files/{name}).
+final mapFileInfoProvider =
+    FutureProvider.autoDispose.family<MapFileInfo, String>((ref, mapName) async {
+  final dio = ref.watch(dioProvider);
+  if (ref.watch(baseUrlProvider) == null) throw Exception('No device connected');
+  final resp = await dio.get('/map/files/$mapName');
+  return MapFileInfo.fromJson(resp.data as Map<String, dynamic>);
+});
+
 /// One-shot fetch of POI list from GET /map/pois.
 final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
   final dio = ref.watch(dioProvider);

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
+import 'map_preview_page.dart';
 
 class MapTab extends ConsumerWidget {
   const MapTab({super.key});
@@ -46,6 +47,12 @@ class MapTab extends ConsumerWidget {
             icon: Icons.map_outlined,
             provider: mapFilesProvider,
             onRefresh: () => ref.invalidate(mapFilesProvider),
+            onTapFile: (f) => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => MapPreviewPage(mapName: f.name),
+              ),
+            ),
           ),
           const SizedBox(height: 24),
         ],
@@ -198,12 +205,14 @@ class _FileListCard extends ConsumerWidget {
   final IconData icon;
   final ProviderListenable<AsyncValue<List<FileEntry>>> provider;
   final VoidCallback onRefresh;
+  final void Function(FileEntry)? onTapFile;
 
   const _FileListCard({
     required this.title,
     required this.icon,
     required this.provider,
     required this.onRefresh,
+    this.onTapFile,
   });
 
   @override
@@ -230,7 +239,9 @@ class _FileListCard extends ConsumerWidget {
                 ),
               )
             : Column(
-                children: files.map((f) => _FileRow(file: f)).toList(),
+                children: files
+                    .map((f) => _FileRow(file: f, onTap: onTapFile != null ? () => onTapFile!(f) : null))
+                    .toList(),
               ),
         loading: () => const Padding(
           padding: EdgeInsets.symmetric(vertical: 12),
@@ -244,7 +255,8 @@ class _FileListCard extends ConsumerWidget {
 
 class _FileRow extends StatelessWidget {
   final FileEntry file;
-  const _FileRow({required this.file});
+  final VoidCallback? onTap;
+  const _FileRow({required this.file, this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -253,7 +265,7 @@ class _FileRow extends StatelessWidget {
         '${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
         '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
-    return Padding(
+    final row = Padding(
       padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         children: [
@@ -275,9 +287,16 @@ class _FileRow extends StatelessWidget {
             '${file.sizeLabel}  $dateStr',
             style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
           ),
+          if (onTap != null) ...[
+            const SizedBox(width: 4),
+            const Icon(Icons.chevron_right_rounded, size: 16, color: Color(0xFFBDBDBD)),
+          ],
         ],
       ),
     );
+
+    if (onTap == null) return row;
+    return InkWell(onTap: onTap, borderRadius: BorderRadius.circular(8), child: row);
   }
 }
 

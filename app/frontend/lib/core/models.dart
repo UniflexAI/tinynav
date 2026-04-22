@@ -77,6 +77,38 @@ class MapInfo {
       );
 }
 
+class MapFileInfo {
+  final String imageUrl;
+  final double originX;
+  final double originY;
+  final double resolution;
+  final int width;
+  final int height;
+  final List<Poi> pois;
+
+  const MapFileInfo({
+    required this.imageUrl,
+    required this.originX,
+    required this.originY,
+    required this.resolution,
+    required this.width,
+    required this.height,
+    required this.pois,
+  });
+
+  factory MapFileInfo.fromJson(Map<String, dynamic> json) => MapFileInfo(
+        imageUrl: json['imageUrl'] as String,
+        originX: (json['origin_x'] as num).toDouble(),
+        originY: (json['origin_y'] as num).toDouble(),
+        resolution: (json['resolution'] as num).toDouble(),
+        width: json['width'] as int,
+        height: json['height'] as int,
+        pois: (json['pois'] as List)
+            .map((p) => Poi.fromJson(p as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
 class TrajPoint {
   final double x;
   final double y;
