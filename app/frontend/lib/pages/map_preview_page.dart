@@ -1,16 +1,50 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
 
-class MapPreviewPage extends ConsumerWidget {
+class MapPreviewPage extends ConsumerStatefulWidget {
   final String mapName;
   const MapPreviewPage({super.key, required this.mapName});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final infoAsync = ref.watch(mapFileInfoProvider(mapName));
+  ConsumerState<MapPreviewPage> createState() => _MapPreviewPageState();
+}
+
+class _MapPreviewPageState extends ConsumerState<MapPreviewPage> {
+  bool _setting = false;
+
+  Future<void> _setAsNavMap() async {
+    setState(() => _setting = true);
+    try {
+      await ref.read(dioProvider).post('/map/set-active/${widget.mapName}');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${widget.mapName} set as navigation map'),
+            backgroundColor: const Color(0xFF45C95A),
+          ),
+        );
+      }
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _setting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final infoAsync = ref.watch(mapFileInfoProvider(widget.mapName));
     final baseUrl = ref.watch(baseUrlProvider) ?? '';
 
     return Scaffold(
@@ -20,10 +54,32 @@ class MapPreviewPage extends ConsumerWidget {
         foregroundColor: Colors.white,
         elevation: 0,
         title: Text(
-          mapName,
+          widget.mapName,
           style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
           overflow: TextOverflow.ellipsis,
         ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: FilledButton.icon(
+              onPressed: _setting ? null : _setAsNavMap,
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF45C95A),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              icon: _setting
+                  ? const SizedBox(
+                      width: 14, height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Icon(Icons.navigation_rounded, size: 16),
+              label: const Text('Set as Nav Map', style: TextStyle(fontSize: 13)),
+            ),
+          ),
+        ],
       ),
       body: infoAsync.when(
         data: (info) => _MapViewer(info: info, baseUrl: baseUrl),
