@@ -316,7 +316,7 @@ class _SectionCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
-              Icon(icon, size: 18, color: iconColor ?? const Color(0xFFFF6B35)),
+              Icon(icon, size: 18, color: iconColor ?? const Color(0xFF2B3A42)),
               const SizedBox(width: 8),
               Text(title,
                   style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),

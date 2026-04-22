@@ -416,7 +416,7 @@ class _LayerRow extends StatelessWidget {
             child: Switch(
               value: value,
               onChanged: onChanged,
-              activeColor: const Color(0xFFFF6B35),
+              activeColor: const Color(0xFF45C95A),
             ),
           ),
         ),
@@ -1066,7 +1066,7 @@ class _JoystickPainter extends CustomPainter {
     canvas.drawCircle(
       thumbOffset,
       padRadius * 0.3,
-      Paint()..color = const Color(0xFFFF6B35),
+      Paint()..color = const Color(0xFF45C95A),
     );
   }
 

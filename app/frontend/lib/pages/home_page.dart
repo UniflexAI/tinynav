@@ -39,7 +39,7 @@ class HomePage extends ConsumerWidget {
                 children: [
                   _MenuCard(
                     icon: Icons.memory_rounded,
-                    iconColor: const Color(0xFFFF6B35),
+                    iconColor: const Color(0xFF2B3A42),
                     title: 'Device',
                     subtitle: 'Status · Sensor · System info',
                     badge: status?.rawState == 'realsense_bag_record' ? 'REC' : null,
@@ -59,11 +59,11 @@ class HomePage extends ConsumerWidget {
                   const SizedBox(height: 12),
                   _MenuCard(
                     icon: Icons.sports_esports_outlined,
-                    iconColor: const Color(0xFF34C759),
+                    iconColor: const Color(0xFF45C95A),
                     title: 'Operate',
                     subtitle: 'Live map · Camera · Teleop · POI',
                     badge: status?.rawState == 'navigation' ? 'Navigating' : null,
-                    badgeColor: const Color(0xFF34C759),
+                    badgeColor: const Color(0xFF45C95A),
                     onTap: () => _push(context, 'Operate', const OperateTab()),
                   ),
                   const SizedBox(height: 24),
@@ -128,35 +128,34 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const kGreen = Color(0xFF45C95A);
+    const kDark = Color(0xFF2B3A42);
     return Container(
       color: Colors.white,
-      padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
       child: Row(
         children: [
-          // Logo / brand
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: const Color(0xFFFF6B35),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Icon(Icons.navigation_rounded, color: Colors.white, size: 22),
-          ),
-          const SizedBox(width: 12),
+          Image.asset('assets/images/tinynav.png', width: 44, height: 44),
+          const SizedBox(width: 10),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('TinyNav',
-                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
+                const Text(
+                  'TinyNav',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 17,
+                    color: kDark,
+                  ),
+                ),
                 Row(children: [
                   Container(
                     width: 6,
                     height: 6,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: isOnline ? const Color(0xFF34C759) : Colors.red,
+                      color: isOnline ? kGreen : Colors.red,
                     ),
                   ),
                   const SizedBox(width: 5),
@@ -164,7 +163,7 @@ class _Header extends StatelessWidget {
                     isOnline ? ip : 'Offline',
                     style: TextStyle(
                       fontSize: 12,
-                      color: isOnline ? const Color(0xFF34C759) : Colors.red,
+                      color: isOnline ? kGreen : Colors.red,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -173,7 +172,7 @@ class _Header extends StatelessWidget {
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.logout_rounded, size: 20, color: Colors.black54),
+            icon: const Icon(Icons.logout_rounded, size: 20, color: Colors.black38),
             tooltip: 'Disconnect',
             onPressed: onDisconnect,
           ),
@@ -296,7 +295,7 @@ class _QuickStatusCard extends StatelessWidget {
               _StatItem(
                 label: 'State',
                 value: status.rawState ?? '—',
-                color: const Color(0xFFFF6B35),
+                color: const Color(0xFF2B3A42),
               ),
               const SizedBox(width: 12),
               _StatItem(
@@ -308,7 +307,7 @@ class _QuickStatusCard extends StatelessWidget {
               _StatItem(
                 label: 'Map',
                 value: status.mapStatus ?? '—',
-                color: const Color(0xFF34C759),
+                color: const Color(0xFF45C95A),
               ),
             ],
           ),

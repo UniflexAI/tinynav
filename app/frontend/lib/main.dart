@@ -33,27 +33,28 @@ class TinyNavApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFFFF6B35),
-          primary: const Color(0xFFFF6B35),
+          seedColor: const Color(0xFF45C95A),
+          primary: const Color(0xFF45C95A),
         ),
         useMaterial3: true,
         scaffoldBackgroundColor: const Color(0xFFF2F3F5),
         appBarTheme: const AppBarTheme(
           backgroundColor: Colors.white,
-          foregroundColor: Colors.black,
+          foregroundColor: Color(0xFF2B3A42),
           elevation: 0,
           surfaceTintColor: Colors.transparent,
         ),
         filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(
-            backgroundColor: const Color(0xFFFF6B35),
+            backgroundColor: const Color(0xFF45C95A),
+            foregroundColor: Colors.white,
             shape: const StadiumBorder(),
           ),
         ),
         outlinedButtonTheme: OutlinedButtonThemeData(
           style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xFFFF6B35),
-            side: const BorderSide(color: Color(0xFFFF6B35)),
+            foregroundColor: const Color(0xFF2B3A42),
+            side: const BorderSide(color: Color(0xFF2B3A42)),
             shape: const StadiumBorder(),
           ),
         ),
