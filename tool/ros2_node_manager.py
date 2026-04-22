@@ -6,8 +6,6 @@ import subprocess
 import os
 import shutil
 import threading
-import random
-
 class Ros2NodeManager(Node):
     def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
         super().__init__('ros2_node_manager')
@@ -17,8 +15,7 @@ class Ros2NodeManager(Node):
         self.bag_path = os.path.join(tinynav_db_path, 'bag')
         self.map_path = os.path.join(tinynav_db_path, 'map')
         self.nav_out_path = os.path.join(tinynav_db_path, 'nav_out')
-        self.ros_domain_id = str(random.randint(1, 100))
-        self.get_logger().info(f'Using randomized ROS_DOMAIN_ID={self.ros_domain_id}')
+        self.ros_domain_id = '0'
         
         self.state_pub = self.create_publisher(String, '/service/state', 10)
         self.create_subscription(String, '/service/command', self._cmd_cb, 10)
