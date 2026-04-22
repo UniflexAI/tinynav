@@ -10,6 +10,7 @@ class DeviceStatus {
   final double mappingPercent;
   final String navStatus;
   final String rawState;
+  final bool navNodesRunning;
 
   const DeviceStatus({
     required this.online,
@@ -20,6 +21,7 @@ class DeviceStatus {
     required this.mappingPercent,
     required this.navStatus,
     required this.rawState,
+    required this.navNodesRunning,
   });
 
   factory DeviceStatus.fromJson(Map<String, dynamic> json) => DeviceStatus(
@@ -31,6 +33,7 @@ class DeviceStatus {
         mappingPercent: (json['mappingPercent'] as num?)?.toDouble() ?? 0.0,
         navStatus: json['navStatus'] as String? ?? 'idle',
         rawState: json['rawState'] as String? ?? 'unknown',
+        navNodesRunning: json['navNodesRunning'] as bool? ?? false,
       );
 }
 

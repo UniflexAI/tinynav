@@ -100,6 +100,11 @@ class BackendNode(Ros2NodeManager):
         # Path to the last successfully verified bag (after stop + ros2 bag info check)
         self._last_verified_bag: str | None = None
 
+        # Nav nodes (map_node + cmd_vel_control) managed independently of _stop_all
+        self._nav_nodes_running: bool = False
+        self._map_node_proc: subprocess.Popen | None = None
+        self._cmd_vel_proc: subprocess.Popen | None = None
+
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
@@ -253,11 +258,21 @@ class BackendNode(Ros2NodeManager):
         self._last_frame_time[topic] = now
 
         try:
-            arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
-            if arr.shape[2] == 1:
-                arr = arr[:, :, 0]
-            elif msg.encoding == 'rgb8':
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            if msg.encoding == '32FC1':
+                arr = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+                arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                valid = arr[arr > 0]
+                if valid.size > 0:
+                    p95 = float(np.percentile(valid, 95))
+                    arr = np.clip(arr / (p95 + 1e-6), 0.0, 1.0)
+                arr = (arr * 255).astype(np.uint8)
+                arr = cv2.applyColorMap(arr, cv2.COLORMAP_JET)
+            else:
+                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+                if arr.shape[2] == 1:
+                    arr = arr[:, :, 0]
+                elif msg.encoding == 'rgb8':
+                    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 50])
             frame = buf.tobytes()
         except Exception:
@@ -333,6 +348,7 @@ class BackendNode(Ros2NodeManager):
             raw = self.state
             pct = self.mapping_percent
             battery = self._battery
+            nav_nodes = self._nav_nodes_running
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -343,6 +359,7 @@ class BackendNode(Ros2NodeManager):
             'mappingPercent': pct,
             'navStatus': 'navigating' if raw == 'navigation' else 'idle',
             'rawState': raw,
+            'navNodesRunning': nav_nodes,
         }
 
     @staticmethod
@@ -354,6 +371,76 @@ class BackendNode(Ros2NodeManager):
         if files_exist and raw == 'idle':
             return 'success'
         return 'idle'
+
+    # ------------------------------------------------------------------ #
+    # Sensor proc helpers                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _kill_proc(self, proc: subprocess.Popen | None):
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), 15)
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def _stop_sensor_procs(self):
+        for attr in ('_realsense_proc', '_perception_proc', '_planning_proc'):
+            self._kill_proc(getattr(self, attr))
+            setattr(self, attr, None)
+
+    def _restart_sensor_procs(self):
+        if self._sensor_mode != 'realsense':
+            return
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        self._realsense_proc = subprocess.Popen(
+            ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid
+        )
+        self._perception_proc = subprocess.Popen(
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+        )
+        self._planning_proc = subprocess.Popen(
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+        )
+        self.get_logger().info('Sensor procs restarted after map build')
+
+    # ------------------------------------------------------------------ #
+    # Nav nodes toggle                                                     #
+    # ------------------------------------------------------------------ #
+
+    def cmd_start_nav_nodes(self):
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        _env['ROS_DOMAIN_ID'] = self.ros_domain_id
+        self._map_node_proc = subprocess.Popen(
+            [
+                'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+                '--tinynav_map_path', self.map_path,
+            ],
+            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+        )
+        self._cmd_vel_proc = subprocess.Popen(
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+        )
+        with self._lock:
+            self._nav_nodes_running = True
+        self.get_logger().info('Nav nodes started')
+
+    def cmd_stop_nav_nodes(self):
+        self._kill_proc(self._map_node_proc)
+        self._kill_proc(self._cmd_vel_proc)
+        self._map_node_proc = None
+        self._cmd_vel_proc = None
+        with self._lock:
+            self._nav_nodes_running = False
+        self.get_logger().info('Nav nodes stopped')
 
     def cmd_bag_start(self):
         self._stop_all()
@@ -440,10 +527,12 @@ class BackendNode(Ros2NodeManager):
             self._stop_all()
             self.state = 'idle'
             self._pub_state()
+            self._restart_sensor_procs()
 
         threading.Thread(target=wait_and_convert, daemon=True).start()
 
     def cmd_map_build(self):
+        self._stop_sensor_procs()
         self._stop_all()
         self._start('rosbag_build_map')
 
@@ -507,7 +596,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc):
+            for proc in (self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)
