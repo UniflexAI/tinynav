@@ -86,9 +86,10 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final mapInfo = mapInfoAsync.valueOrNull;
     final baseUrl = ref.watch(baseUrlProvider) ?? '';
 
-    // Use global map view when nav is active (global path present) and map is loaded.
+    // Split view when localized: global map (left) + local planning (right).
+    final localized = planning?.localized ?? false;
     final hasGlobalPath = planning?.globalPath.isNotEmpty == true;
-    final useMapView = _showGlobalPath && hasGlobalPath && mapInfo != null;
+    final showSplitView = localized && _showGlobalPath && hasGlobalPath && mapInfo != null;
 
     return Column(
       children: [
@@ -101,12 +102,28 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: useMapView
-                    ? _GlobalMapView(
-                        mapInfo: mapInfo,
-                        baseUrl: baseUrl,
-                        planning: planning,
-                        pois: poisAsync.valueOrNull ?? [],
+                child: showSplitView
+                    ? Row(
+                        children: [
+                          Expanded(
+                            child: _GlobalMapView(
+                              mapInfo: mapInfo,
+                              baseUrl: baseUrl,
+                              planning: planning,
+                              pois: poisAsync.valueOrNull ?? [],
+                            ),
+                          ),
+                          const VerticalDivider(width: 1, thickness: 1, color: Color(0xFF303030)),
+                          Expanded(
+                            child: _LocalPlanningView(
+                              planning: planning,
+                              showObstacle: _showObstacle,
+                              showEsdf: _showEsdf,
+                              showTrajectory: _showTrajectory,
+                              showGlobalPath: false,
+                            ),
+                          ),
+                        ],
                       )
                     : _LocalPlanningView(
                         planning: planning,
