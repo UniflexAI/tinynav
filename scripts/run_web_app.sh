@@ -97,8 +97,10 @@ else
       warn "Existing Flutter SDK is wrong architecture — removing and re-downloading..."
       rm -rf "$FLUTTER_INSTALL_DIR"
     fi
-    warn "Flutter not found — downloading $FLUTTER_VERSION..."
-    curl -L --progress-bar "$FLUTTER_URL" -o "/tmp/$FLUTTER_TAR"
+    warn "Flutter not found — downloading $FLUTTER_VERSION ($(uname -m))..."
+    info "URL: $FLUTTER_URL"
+    curl -L --fail --progress-bar "$FLUTTER_URL" -o "/tmp/$FLUTTER_TAR" \
+      || die "Download failed — URL may not exist for this architecture/version: $FLUTTER_URL"
     info "Extracting..."
     tar -xf "/tmp/$FLUTTER_TAR" -C "$HOME"
     rm "/tmp/$FLUTTER_TAR"
