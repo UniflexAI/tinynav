@@ -160,8 +160,6 @@ class FoundationStereoTRT(TRTBase):
             image = image[:, :, :3]
         else:
             raise ValueError(f"Unsupported image shape: {image.shape}")
-
-        image = cv2.resize(image, (self.net_w, self.net_h), interpolation=cv2.INTER_LINEAR)
         image = image.astype(np.float32, copy=False)
         return np.transpose(image, (2, 0, 1))[None, ...]
 
@@ -170,7 +168,11 @@ class FoundationStereoTRT(TRTBase):
             raise ValueError(f"Left/right shape mismatch: {left_img.shape} vs {right_img.shape}")
 
         h_in, w_in = left_img.shape[:2]
-        scale_x = self.net_w / float(w_in)
+        if (h_in, w_in) != (self.net_h, self.net_w):
+            raise ValueError(
+                f"Input image size must match engine size ({self.net_h}, {self.net_w}), "
+                f"got ({h_in}, {w_in}). Rebuild engine for this resolution."
+            )
 
         left_tensor = self._to_three_channel_float(left_img)
         right_tensor = self._to_three_channel_float(right_img)
@@ -182,12 +184,7 @@ class FoundationStereoTRT(TRTBase):
 
         disp_net = np.asarray(results[self.output_name], dtype=np.float32).reshape(self.net_h, self.net_w)
         disp_net = np.clip(disp_net, 0.0, None)
-
-        if (h_in, w_in) != (self.net_h, self.net_w):
-            disp = cv2.resize(disp_net, (w_in, h_in), interpolation=cv2.INTER_LINEAR)
-            disp = disp / scale_x
-        else:
-            disp = disp_net
+        disp = disp_net
 
         depth = disparity_to_depth(disp, baseline, focal_length)
         return disp, depth

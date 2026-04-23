@@ -235,19 +235,6 @@ class GlobalPointCloudPublisher(Node):
         self.cloud_pub = self.create_publisher(PointCloud2, "/slam/global_cloud", 10)
         self.path_pub = self.create_publisher(Path, "/slam/global_cloud_path", 10)
 
-        self.input_cloud_sub = None
-        if self.args.input_cloud_topic:
-            self.input_cloud_sub = self.create_subscription(
-                PointCloud2,
-                self.args.input_cloud_topic,
-                self.input_cloud_callback,
-                10,
-            )
-            self.get_logger().info(
-                f"Pass-through mode enabled: subscribing {self.args.input_cloud_topic} -> publishing /slam/global_cloud"
-            )
-            return
-
         self.depth_log_sub = self.create_subscription(Image, args.depth_topic, self.depth_log_callback, self.sensor_qos)
         self.pose_log_sub = self.create_subscription(PoseStamped, args.pose_topic, self.pose_log_callback, 10)
         image_msg_type = CompressedImage if args.image_mode == "color" else Image
@@ -263,16 +250,6 @@ class GlobalPointCloudPublisher(Node):
             f"Publishing global cloud on /slam/global_cloud from {args.depth_topic} + "
             f"{args.pose_topic} + {self.image_topic} ({args.image_mode})"
         )
-
-    def input_cloud_callback(self, msg: PointCloud2):
-        self.cloud_pub.publish(msg)
-        if not self._published_once:
-            self._published_once = True
-            self.get_logger().info(
-                f"Published first global cloud from input topic {self.args.input_cloud_topic} "
-                f"with frame {msg.header.frame_id} and {msg.width} points.",
-                once=True,
-            )
 
     def camera_info_callback(self, msg: CameraInfo):
         self.depth_frame_id = msg.header.frame_id or self.depth_frame_id
@@ -563,11 +540,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pose-topic", default="/insight/vio_20hz")
     parser.add_argument("--depth-topic", default="/keyframe/depth")
     parser.add_argument("--image-mode", choices=("grayscale", "color"), default="color")
-    parser.add_argument(
-        "--input-cloud-topic",
-        default="",
-        help="If set, bypass depth/pose/image projection and republish this PointCloud2 topic to /slam/global_cloud.",
-    )
     return parser
 
 

@@ -77,6 +77,9 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
         --layerPrecisions='/cost_volume/Unsqueeze:fp16,/cost_volume/post_process/conv_block3/conv_block3.0/BatchNormalization:fp32,/cost_volume/post_process/norm/norm.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.1/Relu:fp32,/disparity_refinement/upsample2_conv/upsample2_conv.0/BatchNormalization:fp32' \
         --fp16
 
+# foundation_stereo.onnx export settings:
+#   --valid_iters 8
+#   --max_disp 192
 $(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
 
