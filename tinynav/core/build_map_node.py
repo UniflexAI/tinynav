@@ -100,7 +100,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-@njit(cache=False, parallel=True)
+@njit(cache=True, parallel=True)
 def sdf_min_dist_parallel(position_grid, positions, sdf_map):
     """Parallel over grid points: each voxel gets min distance to all positions."""
     ni, nj, nk = position_grid.shape[0], position_grid.shape[1], position_grid.shape[2]
