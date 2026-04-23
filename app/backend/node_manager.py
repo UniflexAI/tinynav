@@ -30,6 +30,8 @@ from tool.ros2_node_manager import Ros2NodeManager
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
+_MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic collision during map build
+
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
 
@@ -494,6 +496,13 @@ class BackendNode(Ros2NodeManager):
                 stdout=lf, stderr=subprocess.STDOUT,
             )
             lf.close()
+            lf = self._make_log('planning')
+            self._planning_proc = subprocess.Popen(
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+                stdout=lf, stderr=subprocess.STDOUT,
+            )
+            lf.close()
             self.get_logger().info('Sensor procs restarted after map build')
             return
         if self._sensor_mode != 'realsense':
@@ -620,7 +629,9 @@ class BackendNode(Ros2NodeManager):
             _shutil.rmtree(self.map_path)
 
         _env = os.environ.copy()
-        if self.ros_domain_id is not None:
+        if self._sensor_mode == 'looper':
+            _env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
+        elif self.ros_domain_id is not None:
             _env['ROS_DOMAIN_ID'] = self.ros_domain_id
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         lf = self._make_log('perception')
