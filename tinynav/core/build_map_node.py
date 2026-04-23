@@ -329,10 +329,6 @@ class BagPlayer(Node):
             pub = self.create_publisher(msg_type, topic_info.name, 10)
             self._topic_publishers[topic_info.name] = (pub, msg_type)
 
-        self.get_logger().info("Bag topics and message types:")
-        for topic_info in sorted(topic_infos, key=lambda t: t.name):
-            self.get_logger().info(f"  {topic_info.name} -> {topic_info.type}")
-
         # /clock publisher (for use_sim_time)
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
         self._mapping_percent_pub = self.create_publisher(Float32, "/mapping/percent", 10)
