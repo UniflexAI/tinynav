@@ -76,16 +76,9 @@ class LooperBridgeNode(Node):
         )
 
     def vio_100hz_callback(self, pose_msg: PoseStamped):
-        T_world_imu = pose_msg2np(pose_msg)
-        if self.T_i_depth is not None:
-            T_world_camera = T_world_imu @ self.T_i_depth
-            odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
-        else:
-            self.get_logger().warning(
-                "T_i_depth unavailable for /insight/vio_100hz; publishing imu frame on /slam/odometry.",
-                throttle_duration_sec=2.0,
-            )
-            odom_msg = np2msg(T_world_imu, pose_msg.header.stamp, "world", "imu")
+        # /insight/vio_100hz already reports T_world_camera.
+        T_world_camera = pose_msg2np(pose_msg)
+        odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
         self.odom_pub.publish(odom_msg)
         self.get_logger().info(
             f"Bridged first /insight/vio_100hz message at "
