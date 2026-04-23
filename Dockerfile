@@ -242,7 +242,9 @@ RUN git clone https://github.com/flutter/flutter.git -b stable --depth 1 /opt/fl
 ENV PATH="/opt/flutter/bin:$PATH"
 RUN flutter config --enable-web \
     && flutter precache --web \
-    && cd /tinynav/app/frontend && flutter pub get
+    && cd /tinynav/app/frontend \
+    && flutter pub get \
+    && flutter build web --release --suppress-analytics
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
