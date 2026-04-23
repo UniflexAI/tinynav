@@ -9,6 +9,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import 'map_painter.dart';
 import 'planning_painter.dart';
 
 const double _maxLinear = 0.5;   // m/s
@@ -81,6 +82,13 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final poseAsync = ref.watch(poseStreamProvider);
     final planningAsync = ref.watch(planningStreamProvider);
     final planning = planningAsync.valueOrNull;
+    final mapInfoAsync = ref.watch(mapInfoProvider);
+    final mapInfo = mapInfoAsync.valueOrNull;
+    final baseUrl = ref.watch(baseUrlProvider) ?? '';
+
+    // Use global map view when nav is active (global path present) and map is loaded.
+    final hasGlobalPath = planning?.globalPath.isNotEmpty == true;
+    final useMapView = _showGlobalPath && hasGlobalPath && mapInfo != null;
 
     return Column(
       children: [
@@ -93,13 +101,20 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: _LocalPlanningView(
-                  planning: planning,
-                  showObstacle: _showObstacle,
-                  showEsdf: _showEsdf,
-                  showTrajectory: _showTrajectory,
-                  showGlobalPath: _showGlobalPath,
-                ),
+                child: useMapView
+                    ? _GlobalMapView(
+                        mapInfo: mapInfo,
+                        baseUrl: baseUrl,
+                        planning: planning,
+                        pois: poisAsync.valueOrNull ?? [],
+                      )
+                    : _LocalPlanningView(
+                        planning: planning,
+                        showObstacle: _showObstacle,
+                        showEsdf: _showEsdf,
+                        showTrajectory: _showTrajectory,
+                        showGlobalPath: false,
+                      ),
               ),
               if (planning != null)
                 Positioned(
@@ -147,6 +162,64 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: _JoystickPanel(
             onLeft: _onLeftJoystick,
             onRight: _onRightJoystick,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ── Global map view (nav path in map frame on SLAM map PNG) ──────────────────
+
+class _GlobalMapView extends StatelessWidget {
+  final MapInfo mapInfo;
+  final String baseUrl;
+  final PlanningState? planning;
+  final List<Poi> pois;
+
+  const _GlobalMapView({
+    required this.mapInfo,
+    required this.baseUrl,
+    this.planning,
+    this.pois = const [],
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = planning;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Container(color: const Color(0xFF0D1117)),
+        Center(
+          child: AspectRatio(
+            aspectRatio: mapInfo.width / mapInfo.height,
+            child: InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 8.0,
+              boundaryMargin: const EdgeInsets.all(double.infinity),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.network(
+                    '$baseUrl${mapInfo.imageUrl}',
+                    fit: BoxFit.fill,
+                    gaplessPlayback: true,
+                    errorBuilder: (_, __, ___) => const ColoredBox(color: Color(0xFF1A1A2E)),
+                  ),
+                  if (p != null)
+                    CustomPaint(
+                      painter: MapOverlayPainter(
+                        mapInfo: mapInfo,
+                        pose: p.mapPose,
+                        pois: pois,
+                        globalPath: p.globalPath,
+                        showGlobalPath: true,
+                      ),
+                    ),
+                ],
+              ),
+            ),
           ),
         ),
       ],
