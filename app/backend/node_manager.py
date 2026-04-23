@@ -574,6 +574,8 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_bag_start(self):
+        if self._sensor_mode == 'looper':
+            self._stop_sensor_procs()
         self._stop_all()
         self._start('realsense_bag_record')
 
@@ -581,7 +583,14 @@ class BackendNode(Ros2NodeManager):
         if self.state == 'realsense_bag_record':
             bag_path = self.bag_path
             self._stop_all()
-            threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
+            if self._sensor_mode == 'looper':
+                threading.Thread(target=self._finalize_bag_and_restart, args=(bag_path,), daemon=True).start()
+            else:
+                threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
+
+    def _finalize_bag_and_restart(self, bag_path: str):
+        self._finalize_bag(bag_path)
+        self._restart_sensor_procs()
 
     def _finalize_bag(self, bag_path: str):
         import shutil
