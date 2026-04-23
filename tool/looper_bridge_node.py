@@ -110,7 +110,7 @@ class LooperBridgeNode(Node):
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
     def should_add_keyframe(self, T_world_camera: np.ndarray, stamp) -> bool:
-        if self.last_keyframe_pose is None:
+        if self.last_keyframe_pose is None or self.last_keyframe_time is None:
             return True
         current_time = self.stamp_to_sec(stamp)
         translation = np.linalg.norm(
