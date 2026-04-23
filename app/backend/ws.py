@@ -153,7 +153,9 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
         except Exception:
             pass
 
-    node.preview_callbacks[topic].append(_on_frame)
+    if not node.add_preview_callback(topic, _on_frame):
+        await ws.close(code=1013)
+        return
     try:
         while True:
             frame = await queue.get()
@@ -161,10 +163,7 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
     except WebSocketDisconnect:
         pass
     finally:
-        try:
-            node.preview_callbacks[topic].remove(_on_frame)
-        except ValueError:
-            pass
+        node.remove_preview_callback(topic, _on_frame)
 
 
 # --------------------------------------------------------------------------- #

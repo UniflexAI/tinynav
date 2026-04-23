@@ -304,18 +304,51 @@ class BackendNode(Ros2NodeManager):
             self._last_frame[topic] = b''
             self._last_frame_time[topic] = 0.0
             self.preview_callbacks[topic] = []
-            if topic == _COLOR_TOPIC_LOOPER:
-                self._image_subs[topic] = self.create_subscription(
-                    CompressedImage, topic,
-                    lambda msg, t=topic: self._on_compressed_image(msg, t),
-                    1,
-                )
-            else:
-                self._image_subs[topic] = self.create_subscription(
-                    Image, topic,
-                    lambda msg, t=topic: self._on_image(msg, t),
-                    1,
-                )
+
+    def add_preview_callback(self, topic: str, cb) -> bool:
+        """Register a frame callback; creates the ROS subscription on the first caller."""
+        if topic not in self.preview_callbacks:
+            return False
+        with self._lock:
+            self.preview_callbacks[topic].append(cb)
+            first = len(self.preview_callbacks[topic]) == 1
+        if first:
+            self._create_image_sub(topic)
+        return True
+
+    def remove_preview_callback(self, topic: str, cb):
+        """Unregister a frame callback; destroys the ROS subscription when the last caller leaves."""
+        if topic not in self.preview_callbacks:
+            return
+        with self._lock:
+            try:
+                self.preview_callbacks[topic].remove(cb)
+            except ValueError:
+                pass
+            empty = len(self.preview_callbacks[topic]) == 0
+        if empty:
+            self._destroy_image_sub(topic)
+
+    def _create_image_sub(self, topic: str):
+        if topic in self._image_subs:
+            return
+        if topic == _COLOR_TOPIC_LOOPER:
+            self._image_subs[topic] = self.create_subscription(
+                CompressedImage, topic,
+                lambda msg, t=topic: self._on_compressed_image(msg, t),
+                1,
+            )
+        else:
+            self._image_subs[topic] = self.create_subscription(
+                Image, topic,
+                lambda msg, t=topic: self._on_image(msg, t),
+                1,
+            )
+
+    def _destroy_image_sub(self, topic: str):
+        sub = self._image_subs.pop(topic, None)
+        if sub is not None:
+            self.destroy_subscription(sub)
 
     def _on_compressed_image(self, msg: CompressedImage, topic: str):
         now = time.time()
