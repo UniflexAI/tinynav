@@ -60,7 +60,6 @@ class CmdVelControlNode(Node):
         self.path_duration = 0.0
         self.path_pos_spline = None
         self.path_ori_slerp = None
-        self.path_robot_to_camera = self.T_robot_to_camera
 
         # PID for tracking path against /slam/odometry.
         self.pos_pid = PIDController(kp=1.2, ki=0.05, kd=0.08, integral_limit=1.5)
@@ -92,11 +91,19 @@ class CmdVelControlNode(Node):
         fwd = T[:3, :3] @ np.array([1.0, 0.0, 0.0], dtype=np.float64)
         return float(np.arctan2(fwd[1], fwd[0]))
 
-    def _world_robot_from_pose_quat(self, position: np.ndarray, quat: np.ndarray) -> np.ndarray:
+    def _world_from_pose_quat(self, position: np.ndarray, quat: np.ndarray) -> np.ndarray:
         T_world_cam = np.eye(4)
         T_world_cam[:3, :3] = R.from_quat(quat).as_matrix()
         T_world_cam[:3, 3] = np.asarray(position, dtype=np.float64)
-        return T_world_cam @ self.path_robot_to_camera
+        return T_world_cam
+
+    def _path_pose_camera_to_body(self, position: np.ndarray, quat: np.ndarray):
+        """Convert path pose from world-camera to world-body by right multiply."""
+        T_world_cam = self._world_from_pose_quat(position, quat)
+        T_world_body = T_world_cam @ self.T_robot_to_camera
+        pos_body = T_world_body[:3, 3].copy()
+        quat_body = R.from_matrix(T_world_body[:3, :3]).as_quat()
+        return pos_body, quat_body
 
     def _current_world_robot_from_odom(self):
         if self.pose is None:
@@ -105,7 +112,7 @@ class CmdVelControlNode(Node):
         q = self.pose.pose.pose.orientation
         pos = np.array([p.x, p.y, p.z], dtype=np.float64)
         quat = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
-        return self._world_robot_from_pose_quat(pos, quat)
+        return self._world_from_pose_quat(pos, quat) @ self.T_robot_to_camera
 
     def _build_path_interpolators(self, path_msg: Path):
         poses = path_msg.poses
@@ -119,8 +126,11 @@ class CmdVelControlNode(Node):
         for i, pose_stamped in enumerate(poses):
             p = pose_stamped.pose.position
             q = pose_stamped.pose.orientation
-            positions[i] = np.array([p.x, p.y, p.z], dtype=np.float64)
-            quats[i] = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
+            pos_cam = np.array([p.x, p.y, p.z], dtype=np.float64)
+            quat_cam = np.array([q.x, q.y, q.z, q.w], dtype=np.float64)
+            pos_body, quat_body = self._path_pose_camera_to_body(pos_cam, quat_cam)
+            positions[i] = pos_body
+            quats[i] = quat_body
 
         try:
             rotations = R.from_quat(quats)
@@ -167,9 +177,7 @@ class CmdVelControlNode(Node):
         T2[:3, :3] = R.from_quat(q1).as_matrix()
         T2[:3, 3] = p1
 
-        T_robot_1 = T1 @ self.T_robot_to_camera
-        T_robot_2 = T2 @ self.T_robot_to_camera
-        T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
+        T_robot_2_to_1 = np.linalg.inv(T1) @ T2
 
         dt = max(1e-3, t1 - t0)
         linear_velocity_vec = T_robot_2_to_1[:3, 3] / dt
@@ -187,7 +195,7 @@ class CmdVelControlNode(Node):
         ref_pos, ref_quat = self._sample_pose_at(t_ref)
         if ref_pos is None:
             return None, None
-        T_robot_ref = self._world_robot_from_pose_quat(ref_pos, ref_quat)
+        T_robot_ref = self._world_from_pose_quat(ref_pos, ref_quat)
 
         # Position error in current robot frame; control forward axis only.
         T_ref_in_robot = np.linalg.inv(T_robot_now) @ T_robot_ref
