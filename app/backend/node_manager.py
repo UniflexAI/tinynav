@@ -178,6 +178,8 @@ class BackendNode(Ros2NodeManager):
             # Grid is (X_dim, Y_dim, 3): rows=X, cols=Y.
             # Transpose + flipud → rows=Y(inverted), cols=X, so canvas X=right Y=up matches painter.
             arr = np.flipud(arr.transpose(1, 0, 2))
+            # Invert JET colormap so dangerous (near obstacle) = red, safe = blue.
+            arr = arr[:, :, ::-1]
             _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 70])
             with self._lock:
                 self._esdf_bytes = buf.tobytes()
@@ -431,9 +433,6 @@ class BackendNode(Ros2NodeManager):
 
     def get_planning_snapshot(self) -> dict:
         with self._lock:
-            global_path_odom = self._transform_path_to_odom(
-                self._global_path, self._map_pose, self._odom_pose_at_kf,
-            )
             return {
                 'localized': self._localized,
                 'odom_pose': self._odom_pose,
@@ -442,7 +441,7 @@ class BackendNode(Ros2NodeManager):
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
-                'global_path': global_path_odom,
+                'global_path': list(self._global_path),
                 'grid_info': self._grid_info,
             }
 
