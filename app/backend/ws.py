@@ -21,6 +21,16 @@ from .state import runner
 router = APIRouter(tags=['ws'])
 
 
+def _safe_put(queue: asyncio.Queue, item):
+    """Put item onto queue, dropping the oldest entry if full."""
+    if queue.full():
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    queue.put_nowait(item)
+
+
 # --------------------------------------------------------------------------- #
 # /ws/status  — polls node state every 1 s and broadcasts                     #
 # --------------------------------------------------------------------------- #
@@ -54,15 +64,7 @@ async def ws_pose(ws: WebSocket):
 
     def _on_pose(pose: dict):
         # Called from rclpy spin thread — schedule onto event loop.
-        # Drop oldest entry if full so put_nowait never raises QueueFull.
-        def _put():
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            queue.put_nowait(pose)
-        loop.call_soon_threadsafe(_put)
+        loop.call_soon_threadsafe(lambda: _safe_put(queue, pose))
 
     node = runner.node
     if node is None:
@@ -154,14 +156,7 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
 
     def _on_frame(frame: bytes):
         # Drop oldest frame if full — always keep the latest.
-        def _put():
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            queue.put_nowait(frame)
-        loop.call_soon_threadsafe(_put)
+        loop.call_soon_threadsafe(lambda: _safe_put(queue, frame))
 
     if not node.add_preview_callback(topic, _on_frame):
         await ws.close(code=1013)

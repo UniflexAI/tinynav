@@ -292,31 +292,11 @@ class BackendNode(Ros2NodeManager):
             if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
                 self.get_logger().info('Sensor mode: looper — launching looper bridge')
-                _env = os.environ.copy()
-                _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-                lf = self._make_log('looper_bridge')
-                self._looper_bridge_proc = subprocess.Popen(
-                    ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
-                    preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-                    stdout=lf, stderr=subprocess.STDOUT,
-                )
-                lf.close()
-                lf = self._make_log('planning')
-                self._planning_proc = subprocess.Popen(
-                    ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-                    preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-                    stdout=lf, stderr=subprocess.STDOUT,
-                )
-                lf.close()
             else:
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver and perception')
-                lf = self._make_log('realsense')
-                self._realsense_proc = subprocess.Popen(
-                    ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid,
-                    stdout=lf, stderr=subprocess.STDOUT,
-                )
-                lf.close()
+
+            if self._sensor_mode in ('looper', 'realsense'):
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
                 lf = self._make_log('perception')
@@ -439,9 +419,7 @@ class BackendNode(Ros2NodeManager):
     def get_planning_snapshot(self) -> dict:
         with self._lock:
             path_snapshot = list(self._global_path)
-        global_path = self._transform_path_via_tf(path_snapshot)
-        with self._lock:
-            return {
+            snapshot = {
                 'localized': self._localized,
                 'odom_pose': self._odom_pose,
                 'odom_pose_at_kf': self._odom_pose_at_kf,
@@ -449,9 +427,11 @@ class BackendNode(Ros2NodeManager):
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
-                'global_path': global_path,
+                'global_path': None,  # filled after TF transform
                 'grid_info': self._grid_info,
             }
+        snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
+        return snapshot
 
     def _start_unitree_if_configured(self):
         iface = os.environ.get('UNITREE_NETWORK_INTERFACE')
@@ -460,10 +440,9 @@ class BackendNode(Ros2NodeManager):
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         _env['UNITREE_NETWORK_INTERFACE'] = iface
-        self._unitree_proc = subprocess.Popen(
+        self._unitree_proc = self._launch_proc(
+            'unitree',
             ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
-            preexec_fn=os.setsid,
-            cwd='/tinynav',
             env=_env,
         )
         self.get_logger().info(f'unitree_control started (interface={iface})')
@@ -553,53 +532,56 @@ class BackendNode(Ros2NodeManager):
         path = os.path.join(logs_dir, f'{ts}_{name}.txt')
         return open(path, 'w')
 
+    def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
+                      cwd: str = '/tinynav') -> subprocess.Popen:
+        """Spawn a subprocess with standard logging and process-group setup."""
+        lf = self._make_log(name)
+        proc = subprocess.Popen(
+            cmd, preexec_fn=os.setsid, cwd=cwd,
+            env=env or os.environ.copy(),
+            stdout=lf, stderr=subprocess.STDOUT,
+        )
+        lf.close()
+        return proc
+
     def _stop_sensor_procs(self):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
 
+    def _launch_sensor_procs(self, env: dict):
+        """Start sensor procs based on current _sensor_mode."""
+        if self._sensor_mode == 'looper':
+            self._looper_bridge_proc = self._launch_proc(
+                'looper_bridge',
+                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
+                env=env,
+            )
+            self._planning_proc = self._launch_proc(
+                'planning',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                env=env,
+            )
+        elif self._sensor_mode == 'realsense':
+            self._realsense_proc = self._launch_proc(
+                'realsense',
+                ['bash', _REALSENSE_SCRIPT],
+            )
+            self._perception_proc = self._launch_proc(
+                'perception',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                env=env,
+            )
+            self._planning_proc = self._launch_proc(
+                'planning',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                env=env,
+            )
+
     def _restart_sensor_procs(self):
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-        if self._sensor_mode == 'looper':
-            lf = self._make_log('looper_bridge')
-            self._looper_bridge_proc = subprocess.Popen(
-                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
-                preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-                stdout=lf, stderr=subprocess.STDOUT,
-            )
-            lf.close()
-            lf = self._make_log('planning')
-            self._planning_proc = subprocess.Popen(
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-                preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-                stdout=lf, stderr=subprocess.STDOUT,
-            )
-            lf.close()
-            self.get_logger().info('Sensor procs restarted after map build')
-            return
-        if self._sensor_mode != 'realsense':
-            return
-        lf = self._make_log('realsense')
-        self._realsense_proc = subprocess.Popen(
-            ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid,
-            stdout=lf, stderr=subprocess.STDOUT,
-        )
-        lf.close()
-        lf = self._make_log('perception')
-        self._perception_proc = subprocess.Popen(
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
-            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-            stdout=lf, stderr=subprocess.STDOUT,
-        )
-        lf.close()
-        lf = self._make_log('planning')
-        self._planning_proc = subprocess.Popen(
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-            stdout=lf, stderr=subprocess.STDOUT,
-        )
-        lf.close()
+        self._launch_sensor_procs(_env)
         self.get_logger().info('Sensor procs restarted after map build')
 
     # ------------------------------------------------------------------ #
@@ -610,23 +592,19 @@ class BackendNode(Ros2NodeManager):
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         _env['ROS_DOMAIN_ID'] = self.ros_domain_id
-        lf = self._make_log('map_node')
-        self._map_node_proc = subprocess.Popen(
+        self._map_node_proc = self._launch_proc(
+            'map_node',
             [
                 'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
                 '--tinynav_map_path', self.map_path,
             ],
-            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-            stdout=lf, stderr=subprocess.STDOUT,
+            env=_env,
         )
-        lf.close()
-        lf = self._make_log('cmd_vel_control')
-        self._cmd_vel_proc = subprocess.Popen(
+        self._cmd_vel_proc = self._launch_proc(
+            'cmd_vel_control',
             ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
-            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-            stdout=lf, stderr=subprocess.STDOUT,
+            env=_env,
         )
-        lf.close()
         with self._lock:
             self._nav_nodes_running = True
         self.get_logger().info('Nav nodes started')
@@ -654,13 +632,13 @@ class BackendNode(Ros2NodeManager):
             bag_path = self.bag_path
             self._stop_all()
             if self._sensor_mode == 'looper':
-                threading.Thread(target=self._finalize_bag_and_restart, args=(bag_path,), daemon=True).start()
+                threading.Thread(
+                    target=lambda bp: (self._finalize_bag(bp), self._restart_sensor_procs()),
+                    args=(bag_path,), daemon=True,
+                ).start()
             else:
                 threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
 
-    def _finalize_bag_and_restart(self, bag_path: str):
-        self._finalize_bag(bag_path)
-        self._restart_sensor_procs()
 
     def _finalize_bag(self, bag_path: str):
         import shutil
@@ -716,62 +694,59 @@ class BackendNode(Ros2NodeManager):
         elif self.ros_domain_id is not None:
             _env['ROS_DOMAIN_ID'] = self.ros_domain_id
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-        lf = self._make_log('perception')
-        self.processes['perception'] = subprocess.Popen(
+        self.processes['perception'] = self._launch_proc(
+            'perception',
             ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
-            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-            stdout=lf, stderr=subprocess.STDOUT,
+            env=_env,
         )
-        lf.close()
-        lf = self._make_log('build_map_node')
-        self.processes['build_map'] = subprocess.Popen(
+        self.processes['build_map'] = self._launch_proc(
+            'build_map_node',
             [
                 'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
                 '--map_save_path', self.map_path,
                 '--bag_file', bag_file,
             ],
-            preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-            stdout=lf, stderr=subprocess.STDOUT,
+            env=_env,
         )
-        lf.close()
 
-        def wait_and_convert():
-            import shutil
-            from datetime import datetime
-            proc_build = self.processes.get('build_map')
-            if proc_build:
-                proc_build.wait()
-            subprocess.run([
-                'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
-                '--input_dir', self.map_path,
-                '--output_dir', self.map_path,
-            ])
-            # mv map → maps/map_YYYY_MM_DD_HH_MM_SS, symlink back
-            maps_dir = os.path.join(self.tinynav_db_path, 'maps')
-            os.makedirs(maps_dir, exist_ok=True)
-            ts = datetime.now().strftime('map_%Y_%m_%d_%H_%M_%S')
-            dest = os.path.join(maps_dir, ts)
-            shutil.move(self.map_path, dest)
-            os.symlink(dest, self.map_path)
+        threading.Thread(target=self._on_build_map_done, daemon=True).start()
 
-            # Auto-create a home POI at the SLAM origin (0,0,0) if none exist.
-            # map_node requires at least one POI as a global localization anchor.
-            pois_path = os.path.join(dest, 'pois.json')
-            if not os.path.exists(pois_path):
-                import json as _json
-                with open(pois_path, 'w') as _f:
-                    _json.dump(
-                        {'0': {'id': 0, 'name': 'home', 'position': [0.0, 0.0, 0.0]}},
-                        _f, indent=2,
-                    )
-                self.get_logger().info('Auto-created home POI at (0,0,0)')
+    def _on_build_map_done(self):
+        """Wait for build_map to finish, then convert, archive, and restart."""
+        import shutil
+        from datetime import datetime
+        proc_build = self.processes.get('build_map')
+        if proc_build:
+            proc_build.wait()
+        subprocess.run([
+            'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
+            '--input_dir', self.map_path,
+            '--output_dir', self.map_path,
+        ])
+        # mv map → maps/map_YYYY_MM_DD_HH_MM_SS, symlink back
+        maps_dir = os.path.join(self.tinynav_db_path, 'maps')
+        os.makedirs(maps_dir, exist_ok=True)
+        ts = datetime.now().strftime('map_%Y_%m_%d_%H_%M_%S')
+        dest = os.path.join(maps_dir, ts)
+        shutil.move(self.map_path, dest)
+        os.symlink(dest, self.map_path)
 
-            self._stop_all()
-            self.state = 'idle'
-            self._pub_state()
-            self._restart_sensor_procs()
+        # Auto-create a home POI at the SLAM origin (0,0,0) if none exist.
+        # map_node requires at least one POI as a global localization anchor.
+        pois_path = os.path.join(dest, 'pois.json')
+        if not os.path.exists(pois_path):
+            with open(pois_path, 'w') as _f:
+                json.dump(
+                    {'0': {'id': 0, 'name': 'home', 'position': [0.0, 0.0, 0.0]}},
+                    _f, indent=2,
+                )
+            self.get_logger().info('Auto-created home POI at (0,0,0)')
 
-        threading.Thread(target=wait_and_convert, daemon=True).start()
+        self._stop_all()
+        self.state = 'idle'
+        self._pub_state()
+        self._restart_sensor_procs()
+
 
     def cmd_map_build(self):
         self._stop_sensor_procs()
