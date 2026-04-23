@@ -81,7 +81,8 @@ class Ros2NodeManager(Node):
             '/camera/camera/color/camera_info',
             '/camera/camera/color/image_rect_raw/compressed',
             '/camera/camera/imu',
-            '/tf_static'
+            '/tf_static',
+            '/tf'
         ]
         cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', self.bag_path] + topics
         self.processes['bag_record'] = self._spawn(cmd_bag)
