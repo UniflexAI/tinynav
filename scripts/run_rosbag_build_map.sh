@@ -1,8 +1,17 @@
 #!/bin/bash
-rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_looper)
-map_save_path=/tinynav/output/map_go2_looper
 
-tmux new-session \; \
+SESSION_NAME="tinynav_build_map"
+rosbag_path=/tinynav/rosbag2_go2_simulation
+map_save_path=/tinynav/output/map_go2_simulation
+
+tmux has-session -t $SESSION_NAME 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo "Session $SESSION_NAME already exists. Attaching..."
+    tmux attach -t $SESSION_NAME
+    exit 0
+fi
+
+tmux new-session -s $SESSION_NAME \; \
   split-window -h \; \
   split-window -v \; \
   select-pane -t 0 \; split-window -v \; \

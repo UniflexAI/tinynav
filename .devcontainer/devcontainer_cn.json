@@ -6,6 +6,9 @@
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
     "GDK_SCALE": "2",
+    "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
+    "ROS_LOCALHOST_ONLY": "0",
+    "ROS_DOMAIN_ID": "0",
     "HF_ENDPOINT": "https://hf-mirror.com",
     "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/",
     "PIP_TRUSTED_HOST": "mirrors.aliyun.com"
@@ -31,4 +34,3 @@
   "postCreateCommand": "echo 'Devcontainer ready.'",
   "postStartCommand": "/usr/local/bin/entrypoint.sh"
 }
-

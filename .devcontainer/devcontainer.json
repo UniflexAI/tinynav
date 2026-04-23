@@ -5,7 +5,10 @@
 
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
-    "GDK_SCALE": "2"
+    "GDK_SCALE": "2",
+    "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
+    "ROS_LOCALHOST_ONLY": "0",
+    "ROS_DOMAIN_ID": "0"
   },
 
   "runArgs": [

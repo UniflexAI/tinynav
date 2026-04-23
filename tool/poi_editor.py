@@ -438,24 +438,24 @@ def main(
     T_rgb_to_infra1 = np.load(tinynav_map_path / "T_rgb_to_infra1.npy", allow_pickle=True)
 
     fx, _, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
-    with server.gui.add_folder("cameras") as _:
-        for timestamp, rgb_pose in poses.items():
-            rgb_pose = rgb_pose @ T_rgb_to_infra1 
-            rgb_image = rgb_images[str(timestamp)]
-            _ = rgb_image.shape[:2]
-            R = vtf.SO3.from_matrix(rgb_pose[:3, :3])
-            t = rgb_pose[:3, 3]
-            camera_frustum = server.scene.add_camera_frustum(
-                name=f"/cameras/camera_{timestamp}",
-                fov=float(2 * np.arctan((cx / fx))),
-                scale=0.01,
-                aspect=float(cx / cy),
-                image=None,
-                wxyz=R.wxyz,
-                position=t,
-                format="jpeg",
-                jpeg_quality=50
-            )
+    # with server.gui.add_folder("cameras") as _:
+    #     for timestamp, rgb_pose in poses.items():
+    #         rgb_pose = rgb_pose @ T_rgb_to_infra1 
+    #         rgb_image = rgb_images[str(timestamp)]
+    #         _ = rgb_image.shape[:2]
+    #         R = vtf.SO3.from_matrix(rgb_pose[:3, :3])
+    #         t = rgb_pose[:3, 3]
+    #         camera_frustum = server.scene.add_camera_frustum(
+    #             name=f"/cameras/camera_{timestamp}",
+    #             fov=float(2 * np.arctan((cx / fx))),
+    #             scale=0.01,
+    #             aspect=float(cx / cy),
+    #             image=None,
+    #             wxyz=R.wxyz,
+    #             position=t,
+    #             format="jpeg",
+    #             jpeg_quality=50
+    #         )
 
     # Load splat or point cloud files
     splat_path = Path(f"{tinynav_map_path}/splat.ply")
