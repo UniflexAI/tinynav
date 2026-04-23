@@ -37,7 +37,11 @@ spinner() {
 # ── Config ────────────────────────────────────────────────────────────────────
 FLUTTER_INSTALL_DIR="$HOME/flutter"
 FLUTTER_VERSION="3.32.0"
-FLUTTER_TAR="flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+case "$(uname -m)" in
+  aarch64|arm64) _FLUTTER_ARCH="arm64_" ;;
+  *)             _FLUTTER_ARCH="" ;;
+esac
+FLUTTER_TAR="flutter_linux_${_FLUTTER_ARCH}${FLUTTER_VERSION}-stable.tar.xz"
 FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/${FLUTTER_TAR}"
 
 TINYNAV_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -77,13 +81,22 @@ else
   # Suppress git "dubious ownership" errors when Flutter SDK is owned by another user (common in Docker)
   git config --global --add safe.directory '*' 2>/dev/null || true
 
+  _flutter_arch_ok() {
+    local dart="$1/bin/cache/dart-sdk/bin/dart"
+    [ -f "$dart" ] && file "$dart" 2>/dev/null | grep -qiE "$(uname -m | sed 's/x86_64/x86-64/;s/aarch64/aarch64/')"
+  }
+
   step "Flutter"
-  if command -v flutter &>/dev/null; then
+  if command -v flutter &>/dev/null && _flutter_arch_ok "$(dirname "$(dirname "$(command -v flutter)")")"; then
     ok "Flutter found: $(command -v flutter)"
-  elif [ -x "$FLUTTER_INSTALL_DIR/bin/flutter" ]; then
+  elif [ -x "$FLUTTER_INSTALL_DIR/bin/flutter" ] && _flutter_arch_ok "$FLUTTER_INSTALL_DIR"; then
     export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
     ok "Flutter found: $FLUTTER_INSTALL_DIR"
   else
+    if [ -d "$FLUTTER_INSTALL_DIR" ]; then
+      warn "Existing Flutter SDK is wrong architecture — removing and re-downloading..."
+      rm -rf "$FLUTTER_INSTALL_DIR"
+    fi
     warn "Flutter not found — downloading $FLUTTER_VERSION..."
     curl -L --progress-bar "$FLUTTER_URL" -o "/tmp/$FLUTTER_TAR"
     info "Extracting..."
