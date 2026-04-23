@@ -538,7 +538,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Project SLAM depth into a global world-frame point cloud."
     )
     parser.add_argument("--pose-topic", default="/insight/vio_20hz")
-    parser.add_argument("--depth-topic", default="/keyframe/depth")
+    parser.add_argument("--depth-topic", default="/camera/camera/depth/image_rect_raw")
     parser.add_argument("--image-mode", choices=("grayscale", "color"), default="color")
     return parser
 
