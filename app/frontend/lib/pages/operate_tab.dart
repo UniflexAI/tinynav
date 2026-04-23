@@ -82,14 +82,6 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final poseAsync = ref.watch(poseStreamProvider);
     final planningAsync = ref.watch(planningStreamProvider);
     final planning = planningAsync.valueOrNull;
-    final mapInfoAsync = ref.watch(mapInfoProvider);
-    final mapInfo = mapInfoAsync.valueOrNull;
-    final baseUrl = ref.watch(baseUrlProvider) ?? '';
-
-    // Split view when localized: global map (left) + local planning (right).
-    final localized = planning?.localized ?? false;
-    final hasGlobalPath = planning?.globalPath.isNotEmpty == true;
-    final showSplitView = localized && _showGlobalPath && hasGlobalPath && mapInfo != null;
 
     return Column(
       children: [
@@ -102,36 +94,13 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: showSplitView
-                    ? Row(
-                        children: [
-                          Expanded(
-                            child: _GlobalMapView(
-                              mapInfo: mapInfo,
-                              baseUrl: baseUrl,
-                              planning: planning,
-                              pois: poisAsync.valueOrNull ?? [],
-                            ),
-                          ),
-                          const VerticalDivider(width: 1, thickness: 1, color: Color(0xFF303030)),
-                          Expanded(
-                            child: _LocalPlanningView(
-                              planning: planning,
-                              showObstacle: _showObstacle,
-                              showEsdf: _showEsdf,
-                              showTrajectory: _showTrajectory,
-                              showGlobalPath: false,
-                            ),
-                          ),
-                        ],
-                      )
-                    : _LocalPlanningView(
-                        planning: planning,
-                        showObstacle: _showObstacle,
-                        showEsdf: _showEsdf,
-                        showTrajectory: _showTrajectory,
-                        showGlobalPath: false,
-                      ),
+                child: _LocalPlanningView(
+                  planning: planning,
+                  showObstacle: _showObstacle,
+                  showEsdf: _showEsdf,
+                  showTrajectory: _showTrajectory,
+                  showGlobalPath: _showGlobalPath,
+                ),
               ),
               if (planning != null)
                 Positioned(
