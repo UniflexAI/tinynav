@@ -264,6 +264,13 @@ class BackendNode(Ros2NodeManager):
                     stdout=lf, stderr=subprocess.STDOUT,
                 )
                 lf.close()
+                lf = self._make_log('planning')
+                self._planning_proc = subprocess.Popen(
+                    ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                    preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+                    stdout=lf, stderr=subprocess.STDOUT,
+                )
+                lf.close()
             else:
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver and perception')
