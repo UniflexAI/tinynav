@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from numba import njit
 import message_filters
 from rclpy.time import Time
+from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
@@ -591,8 +592,10 @@ class PlanningNode(Node):
             path = Path()
             path.header = depth_msg.header
             path.header.frame_id = "world"
+            traj_dt = 0.1
+            base_time = Time.from_msg(depth_msg.header.stamp)
             for i in top_indices:
-                for j in range(0, len(trajectories[i]), 10):
+                for j in range(0, len(trajectories[i]), 1):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
                     if self.poi_changed or self.target_pose is None:
                         x,y,z,qx,qy,qz,qw = trajectories[i][0]
@@ -602,7 +605,8 @@ class PlanningNode(Node):
                             self.get_logger().info("target pose is None, using first point")
 
                     pose = PoseStamped()
-                    pose.header = depth_msg.header
+                    pose.header.frame_id = "world"
+                    pose.header.stamp = (base_time + Duration(seconds=float(j * traj_dt))).to_msg()
                     pose.pose.position.x = x
                     pose.pose.position.y = y
                     pose.pose.position.z = z
