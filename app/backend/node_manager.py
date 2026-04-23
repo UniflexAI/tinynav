@@ -30,12 +30,22 @@ from tool.ros2_node_manager import Ros2NodeManager
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
-_IMAGE_TOPICS_ALL = [
-    '/camera/camera/color/image_raw',
+_COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
+_COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
+
+_IMAGE_TOPICS_REALSENSE = [
+    _COLOR_TOPIC_REALSENSE,
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
 ]
+_IMAGE_TOPICS_LOOPER = [
+    _COLOR_TOPIC_LOOPER,
+    '/camera/camera/infra1/image_rect_raw',
+    '/camera/camera/infra2/image_rect_raw',
+    '/slam/depth',
+]
+_IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
 _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
 
 
@@ -96,6 +106,7 @@ class BackendNode(Ros2NodeManager):
         self._image_subs: dict = {}
         self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
         self._last_frame_time: dict[str, float] = {}
+        self._looper_bridge_proc: subprocess.Popen | None = None
         self._realsense_proc: subprocess.Popen | None = None
         self._perception_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
@@ -242,7 +253,16 @@ class BackendNode(Ros2NodeManager):
             )
             if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
-                self.get_logger().info('Sensor mode: looper')
+                self.get_logger().info('Sensor mode: looper — launching looper bridge')
+                _env = os.environ.copy()
+                _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+                lf = self._make_log('looper_bridge')
+                self._looper_bridge_proc = subprocess.Popen(
+                    ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
+                    preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+                    stdout=lf, stderr=subprocess.STDOUT,
+                )
+                lf.close()
             else:
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver and perception')
@@ -270,15 +290,37 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warn(f'Sensor detection failed: {e}')
             self._sensor_mode = 'unknown'
 
-        for topic in _IMAGE_TOPICS_ALL:
-            self._image_subs[topic] = self.create_subscription(
-                Image, topic,
-                lambda msg, t=topic: self._on_image(msg, t),
-                1,
-            )
+        topics = _IMAGE_TOPICS_LOOPER if self._sensor_mode == 'looper' else _IMAGE_TOPICS_REALSENSE
+        for topic in topics:
             self._last_frame[topic] = b''
             self._last_frame_time[topic] = 0.0
             self.preview_callbacks[topic] = []
+            if topic == _COLOR_TOPIC_LOOPER:
+                self._image_subs[topic] = self.create_subscription(
+                    CompressedImage, topic,
+                    lambda msg, t=topic: self._on_compressed_image(msg, t),
+                    1,
+                )
+            else:
+                self._image_subs[topic] = self.create_subscription(
+                    Image, topic,
+                    lambda msg, t=topic: self._on_image(msg, t),
+                    1,
+                )
+
+    def _on_compressed_image(self, msg: CompressedImage, topic: str):
+        now = time.time()
+        if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
+            return
+        self._last_frame_time[topic] = now
+        frame = bytes(msg.data)
+        with self._lock:
+            self._last_frame[topic] = frame
+        for cb in self.preview_callbacks.get(topic, []):
+            try:
+                cb(frame)
+            except Exception:
+                pass
 
     def _on_image(self, msg: Image, topic: str):
         now = time.time()
@@ -348,7 +390,9 @@ class BackendNode(Ros2NodeManager):
         return self._sensor_mode
 
     def get_image_topics(self) -> list[str]:
-        return _IMAGE_TOPICS_ALL
+        if self._sensor_mode == 'looper':
+            return _IMAGE_TOPICS_LOOPER
+        return _IMAGE_TOPICS_REALSENSE
 
     def get_preview_frame(self, topic: str) -> bytes:
         with self._lock:
@@ -428,15 +472,25 @@ class BackendNode(Ros2NodeManager):
         return open(path, 'w')
 
     def _stop_sensor_procs(self):
-        for attr in ('_realsense_proc', '_perception_proc', '_planning_proc'):
+        for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
 
     def _restart_sensor_procs(self):
-        if self._sensor_mode != 'realsense':
-            return
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        if self._sensor_mode == 'looper':
+            lf = self._make_log('looper_bridge')
+            self._looper_bridge_proc = subprocess.Popen(
+                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
+                preexec_fn=os.setsid, cwd='/tinynav', env=_env,
+                stdout=lf, stderr=subprocess.STDOUT,
+            )
+            lf.close()
+            self.get_logger().info('Sensor procs restarted after map build')
+            return
+        if self._sensor_mode != 'realsense':
+            return
         lf = self._make_log('realsense')
         self._realsense_proc = subprocess.Popen(
             ['bash', _REALSENSE_SCRIPT], preexec_fn=os.setsid,
@@ -720,7 +774,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)

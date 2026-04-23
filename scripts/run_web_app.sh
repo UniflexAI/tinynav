@@ -66,8 +66,8 @@ for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
 done
 
 # ── 1 & 2. Flutter + Build web ────────────────────────────────────────────────
-if [ "$NO_BUILD" -eq 1 ]; then
-  step "Skip Build (--no-build)"
+if [ "$NO_BUILD" -eq 1 ] || [ -f "$FRONTEND_DIR/build/web/index.html" ]; then
+  step "Skip Build"
   [ -f "$FRONTEND_DIR/build/web/index.html" ] \
     || die "No existing build found at app/frontend/build/web — run without --no-build first."
   ok "Using existing build/web"
