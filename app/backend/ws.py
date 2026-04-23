@@ -53,11 +53,16 @@ async def ws_pose(ws: WebSocket):
     loop = asyncio.get_event_loop()
 
     def _on_pose(pose: dict):
-        # Called from rclpy spin thread — schedule safely onto the event loop.
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, pose)
-        except Exception:
-            pass
+        # Called from rclpy spin thread — schedule onto event loop.
+        # Drop oldest entry if full so put_nowait never raises QueueFull.
+        def _put():
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(pose)
+        loop.call_soon_threadsafe(_put)
 
     node = runner.node
     if node is None:
@@ -148,10 +153,15 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
     loop = asyncio.get_event_loop()
 
     def _on_frame(frame: bytes):
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, frame)
-        except Exception:
-            pass
+        # Drop oldest frame if full — always keep the latest.
+        def _put():
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(frame)
+        loop.call_soon_threadsafe(_put)
 
     if not node.add_preview_callback(topic, _on_frame):
         await ws.close(code=1013)
