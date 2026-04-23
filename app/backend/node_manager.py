@@ -239,10 +239,37 @@ class BackendNode(Ros2NodeManager):
             'x': msg.pose.pose.position.x,
             'y': msg.pose.pose.position.y,
             'z': msg.pose.pose.position.z,
+            'qx': q.x, 'qy': q.y, 'qz': q.z, 'qw': q.w,
             'yaw': yaw,
             'timestamp': msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
             'source': source,
         }
+
+    @staticmethod
+    def _quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+        return np.array([
+            [1 - 2*(qy*qy + qz*qz),     2*(qx*qy - qw*qz),     2*(qx*qz + qw*qy)],
+            [    2*(qx*qy + qw*qz), 1 - 2*(qx*qx + qz*qz),     2*(qy*qz - qw*qx)],
+            [    2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx), 1 - 2*(qx*qx + qy*qy)],
+        ])
+
+    def _transform_path_to_odom(self, path: list, map_pose: dict, odom_pose_at_kf: dict) -> list:
+        """Convert map-frame path points to odom frame using exact T_odom_map."""
+        if not path or not map_pose or not odom_pose_at_kf:
+            return path
+        R_kf  = self._quat_to_rot(odom_pose_at_kf['qx'], odom_pose_at_kf['qy'],
+                                   odom_pose_at_kf['qz'], odom_pose_at_kf['qw'])
+        R_mp  = self._quat_to_rot(map_pose['qx'], map_pose['qy'],
+                                   map_pose['qz'], map_pose['qw'])
+        R     = R_kf @ R_mp.T                          # rotation: map → odom
+        kf_p  = np.array([odom_pose_at_kf['x'], odom_pose_at_kf['y'], odom_pose_at_kf['z']])
+        mp_p  = np.array([map_pose['x'],         map_pose['y'],         map_pose['z']])
+        t     = kf_p - R @ mp_p                        # translation: map → odom
+        result = []
+        for pt in path:
+            p = R @ np.array([pt['x'], pt['y'], 0.0]) + t
+            result.append({'x': float(p[0]), 'y': float(p[1])})
+        return result
 
     # ------------------------------------------------------------------ #
     # Sensor / camera                                                      #
@@ -404,6 +431,9 @@ class BackendNode(Ros2NodeManager):
 
     def get_planning_snapshot(self) -> dict:
         with self._lock:
+            global_path_odom = self._transform_path_to_odom(
+                self._global_path, self._map_pose, self._odom_pose_at_kf,
+            )
             return {
                 'localized': self._localized,
                 'odom_pose': self._odom_pose,
@@ -412,7 +442,7 @@ class BackendNode(Ros2NodeManager):
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
-                'global_path': list(self._global_path),
+                'global_path': global_path_odom,
                 'grid_info': self._grid_info,
             }
 
