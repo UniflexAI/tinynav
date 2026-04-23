@@ -6,14 +6,12 @@ import '../core/models.dart';
 
 /// Renders robot arrow, local trajectory, and global path on the local planning canvas.
 /// The canvas maps to the planning grid: robot is always at center.
-/// Global path (map frame) is converted to odom frame via mapPose + odomPose.
+/// Global path arrives pre-converted to odom frame by the backend.
 class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> trajectory;
   final List<TrajPoint> globalPath;
   final GridInfo? gridInfo;
   final Pose? odomPose;
-  final Pose? odomPoseAtKf;
-  final Pose? mapPose;
   final bool showTrajectory;
   final bool showGlobalPath;
 
@@ -22,8 +20,6 @@ class LocalPlanningPainter extends CustomPainter {
     this.globalPath = const [],
     this.gridInfo,
     this.odomPose,
-    this.odomPoseAtKf,
-    this.mapPose,
     this.showTrajectory = true,
     this.showGlobalPath = true,
   });
@@ -82,31 +78,15 @@ class LocalPlanningPainter extends CustomPainter {
     );
   }
 
-  /// Global path is in map frame; convert to odom frame using the T_odom_map transform
-  /// frozen at the last keyframe (odomPoseAtKf), then offset by current odomPose.
+  /// Global path is already in odom frame (backend transforms via exact T_odom_map).
   void _drawGlobalPath(Canvas canvas, double cx, double cy,
       double scaleX, double scaleY, Pose? odomPose) {
-    if (globalPath.length < 2 || odomPose == null || mapPose == null || odomPoseAtKf == null) return;
+    if (globalPath.length < 2 || odomPose == null) return;
 
-    final mp = mapPose!;
-    final kf = odomPoseAtKf!;
-    // T_odom_map rotation, fixed at keyframe time — does not change between keyframes.
-    final kfYaw = kf.yaw - mp.yaw;
-    final cosKF = math.cos(kfYaw);
-    final sinKF = math.sin(kfYaw);
-
-    Offset toCanvas(TrajPoint pt) {
-      final dx = pt.x - mp.x;
-      final dy = pt.y - mp.y;
-      // Rotate into odom frame using the frozen keyframe transform, then add kf odom position.
-      final ox = dx * cosKF - dy * sinKF + kf.x;
-      final oy = dx * sinKF + dy * cosKF + kf.y;
-      // Canvas center is current robot odom position.
-      return Offset(
-        cx + (ox - odomPose.x) * scaleX,
-        cy - (oy - odomPose.y) * scaleY,
-      );
-    }
+    Offset toCanvas(TrajPoint pt) => Offset(
+      cx + (pt.x - odomPose.x) * scaleX,
+      cy - (pt.y - odomPose.y) * scaleY,
+    );
 
     final linePaint = Paint()
       ..color = const Color(0xFF69F0AE).withOpacity(0.9)
@@ -163,8 +143,6 @@ class LocalPlanningPainter extends CustomPainter {
       globalPath != old.globalPath ||
       gridInfo != old.gridInfo ||
       odomPose != old.odomPose ||
-      odomPoseAtKf != old.odomPoseAtKf ||
-      mapPose != old.mapPose ||
       showTrajectory != old.showTrajectory ||
       showGlobalPath != old.showGlobalPath;
 }
