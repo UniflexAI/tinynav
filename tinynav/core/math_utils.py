@@ -50,7 +50,7 @@ def quat_to_matrix(q):
     R[2, 2] = 1 - 2 * (xx + yy)
     return R
 
-@njit(cache=False)
+@njit(cache=True)
 def matrix_to_quat(R):
     """Convert a rotation matrix to a quaternion [x, y, z, w]."""
     m00, m01, m02 = R[0, 0], R[0, 1], R[0, 2]

@@ -3,7 +3,7 @@ import os
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool
 import numpy as np
 import sys
 import json
@@ -161,14 +161,10 @@ class MapNode(Node):
 
         self.bridge = CvBridge()
 
-        # subs
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
-        self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
-
-        # pubs
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
@@ -216,8 +212,16 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
 
-        self.pois = {}
-        self.poi_index = -1
+        if os.path.exists(f"{tinynav_map_path}/pois.json"):
+            self.pois = json.load(open(f"{tinynav_map_path}/pois.json"))
+        else:
+            self.pois = {}
+        self.poi_index = min(0, len(self.pois) - 1)
+        pois_dict = {}
+        keys = sorted([int (key) for key in self.pois.keys()])
+        for index, key in enumerate(keys):
+            pois_dict[index] = np.array(self.pois[str(key)]["position"])
+        self.pois = pois_dict
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -229,23 +233,6 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
-
-    def pois_callback(self, msg: String):
-        self.get_logger().info("Received POIs from planner: " + msg.data)
-        try:
-            self.pois = json.loads(msg.data)
-
-            pois_dict = {}
-            keys = sorted([int (key) for key in self.pois.keys()])
-            for index, key in enumerate(keys):
-                pois_dict[index] = np.array(self.pois[str(key)]["position"])
-            self.pois = pois_dict
-
-            self.poi_index = min(0, len(self.pois) - 1)
-            self.get_logger().info(f"Parsed POIs: {self.pois}")
-        except json.JSONDecodeError as e:
-            self.get_logger().error(f"Failed to parse POIs JSON: {e}")
-            self.pois = {}
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -591,7 +578,7 @@ class MapNode(Node):
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
                         accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                        if accumulated_distance > 5.0:
+                        if accumulated_distance > max_speed * 5:
                             target_position = paths_in_map[i]
                             break
                         start_point = paths_in_map[i]

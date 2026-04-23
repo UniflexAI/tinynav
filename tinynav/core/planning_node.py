@@ -539,7 +539,7 @@ class PlanningNode(Node):
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-            # self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(

@@ -439,8 +439,7 @@ class BuildMapNode(Node):
         # Add stop signal subscription and save finished publisher
         self.mapping_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.mapping_stop_callback, 10)
         self.mapping_save_finished_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
-        # Keep sync queue bounded to reduce memory spikes/OOM risk on Jetson during map building.
-        self.ts = ApproximateTimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 200, 0.02)
+        self.ts = ApproximateTimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000, 0.02)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
@@ -469,6 +468,8 @@ class BuildMapNode(Node):
         self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
+
+        self.edges = set()
 
     def tf_callback(self, msg:TFMessage):
         T_infra1_to_link = None
@@ -581,6 +582,7 @@ class BuildMapNode(Node):
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
                 T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
                 self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+                self.edges.add((self.last_keyframe_timestamp, keyframe_image_timestamp))
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
                 self.odom[keyframe_image_timestamp] = odom
 
@@ -604,6 +606,7 @@ class BuildMapNode(Node):
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                                self.edges.add((prev_timestamp, curr_timestamp))
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
                 find_loop_and_pose_graph(keyframe_image_timestamp)
@@ -678,6 +681,8 @@ class BuildMapNode(Node):
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
+        np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
+
         # Generate occupancy map
         occupancy_resolution = 0.05
         occupancy_step = 10
