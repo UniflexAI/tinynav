@@ -74,6 +74,9 @@ if [ "$NO_BUILD" -eq 1 ]; then
     || die "No existing build found at app/frontend/build/web — run without --no-build first."
   ok "Using existing build/web"
 else
+  # Suppress git "dubious ownership" errors when Flutter SDK is owned by another user (common in Docker)
+  git config --global --add safe.directory '*' 2>/dev/null || true
+
   step "Flutter"
   if command -v flutter &>/dev/null; then
     ok "Flutter found: $(command -v flutter)"
