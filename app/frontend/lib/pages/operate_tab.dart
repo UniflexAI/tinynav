@@ -70,6 +70,12 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     _sendVelocity();
   }
 
+  Future<void> _emergencyStop() async {
+    _linearX = 0; _linearY = 0; _angularZ = 0;
+    _sendVelocity();
+    try { await ref.read(dioProvider).post('/nav/cancel'); } catch (_) {}
+  }
+
   @override
   void dispose() {
     _teleopChannel?.sink.close();
@@ -148,6 +154,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: _JoystickPanel(
             onLeft: _onLeftJoystick,
             onRight: _onRightJoystick,
+            onStop: _emergencyStop,
           ),
         ),
       ],
@@ -970,8 +977,9 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
 class _JoystickPanel extends ConsumerWidget {
   final void Function(double x, double y) onLeft;
   final void Function(double x, double y) onRight;
+  final Future<void> Function() onStop;
 
-  const _JoystickPanel({required this.onLeft, required this.onRight});
+  const _JoystickPanel({required this.onLeft, required this.onRight, required this.onStop});
 
   Future<void> _sendAction(WidgetRef ref, BuildContext context, String command) async {
     try {
@@ -1004,7 +1012,7 @@ class _JoystickPanel extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: 12),
-          // ── Sit / Stand ─────────────────────────────────────────────
+          // ── Center: STOP + Sit / Stand ───────────────────────────────
           Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -1013,7 +1021,9 @@ class _JoystickPanel extends ConsumerWidget {
                 label: 'Sit',
                 onTap: () => _sendAction(ref, context, 'sit'),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 8),
+              _EStopButton(onStop: onStop),
+              const SizedBox(height: 8),
               _ActionButton(
                 icon: Icons.directions_walk_rounded,
                 label: 'Stand',
@@ -1064,6 +1074,54 @@ class _ActionButton extends StatelessWidget {
             Icon(icon, size: 20, color: const Color(0xFF2B3A42)),
             const SizedBox(height: 3),
             Text(label, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Color(0xFF2B3A42))),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EStopButton extends StatefulWidget {
+  final Future<void> Function() onStop;
+  const _EStopButton({required this.onStop});
+
+  @override
+  State<_EStopButton> createState() => _EStopButtonState();
+}
+
+class _EStopButtonState extends State<_EStopButton> {
+  bool _pressing = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressing = true),
+      onTapUp: (_) async {
+        setState(() => _pressing = false);
+        await widget.onStop();
+      },
+      onTapCancel: () => setState(() => _pressing = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 80),
+        width: 56,
+        height: 56,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: _pressing ? const Color(0xFFB71C1C) : const Color(0xFFE53935),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFFE53935).withOpacity(0.45),
+              blurRadius: _pressing ? 4 : 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.pan_tool_rounded, color: Colors.white, size: 18),
+            SizedBox(height: 2),
+            Text('STOP', style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
           ],
         ),
       ),
