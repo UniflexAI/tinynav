@@ -12,6 +12,7 @@ class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> globalPath;
   final GridInfo? gridInfo;
   final Pose? odomPose;
+  final Pose? odomPoseAtKf;
   final Pose? mapPose;
   final bool showTrajectory;
   final bool showGlobalPath;
@@ -21,6 +22,7 @@ class LocalPlanningPainter extends CustomPainter {
     this.globalPath = const [],
     this.gridInfo,
     this.odomPose,
+    this.odomPoseAtKf,
     this.mapPose,
     this.showTrajectory = true,
     this.showGlobalPath = true,
@@ -80,23 +82,29 @@ class LocalPlanningPainter extends CustomPainter {
     );
   }
 
-  /// Global path is in map frame; convert each point to odom frame relative to robot.
-  /// offset_in_odom = R(odom_yaw - map_yaw) * (P_map - robot_map_pos)
+  /// Global path is in map frame; convert to odom frame using the T_odom_map transform
+  /// frozen at the last keyframe (odomPoseAtKf), then offset by current odomPose.
   void _drawGlobalPath(Canvas canvas, double cx, double cy,
       double scaleX, double scaleY, Pose? odomPose) {
-    if (globalPath.length < 2 || odomPose == null || mapPose == null) return;
+    if (globalPath.length < 2 || odomPose == null || mapPose == null || odomPoseAtKf == null) return;
 
     final mp = mapPose!;
-    final dyaw = odomPose.yaw - mp.yaw;
-    final cosDy = math.cos(dyaw);
-    final sinDy = math.sin(dyaw);
+    final kf = odomPoseAtKf!;
+    // T_odom_map rotation, fixed at keyframe time — does not change between keyframes.
+    final kfYaw = kf.yaw - mp.yaw;
+    final cosKF = math.cos(kfYaw);
+    final sinKF = math.sin(kfYaw);
 
     Offset toCanvas(TrajPoint pt) {
       final dx = pt.x - mp.x;
       final dy = pt.y - mp.y;
+      // Rotate into odom frame using the frozen keyframe transform, then add kf odom position.
+      final ox = dx * cosKF - dy * sinKF + kf.x;
+      final oy = dx * sinKF + dy * cosKF + kf.y;
+      // Canvas center is current robot odom position.
       return Offset(
-        cx + (dx * cosDy - dy * sinDy) * scaleX,
-        cy - (dx * sinDy + dy * cosDy) * scaleY,
+        cx + (ox - odomPose.x) * scaleX,
+        cy - (oy - odomPose.y) * scaleY,
       );
     }
 
@@ -155,6 +163,7 @@ class LocalPlanningPainter extends CustomPainter {
       globalPath != old.globalPath ||
       gridInfo != old.gridInfo ||
       odomPose != old.odomPose ||
+      odomPoseAtKf != old.odomPoseAtKf ||
       mapPose != old.mapPose ||
       showTrajectory != old.showTrajectory ||
       showGlobalPath != old.showGlobalPath;
