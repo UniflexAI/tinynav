@@ -69,6 +69,7 @@ class BackendNode(Ros2NodeManager):
 
         # Planning / localization state (read via get_planning_snapshot)
         self._odom_pose: dict | None = None
+        self._odom_pose_at_kf: dict | None = None  # odom pose snapshotted at last mapPose update
         self._map_pose: dict | None = None
         self._localized: bool = False
         self._esdf_bytes: bytes = b''
@@ -157,6 +158,7 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self.current_pose = pose
             self._map_pose = pose
+            self._odom_pose_at_kf = self._odom_pose  # freeze odom at this keyframe
             self._localized = True
         for cb in self.pose_callbacks:
             try:
@@ -405,6 +407,7 @@ class BackendNode(Ros2NodeManager):
             return {
                 'localized': self._localized,
                 'odom_pose': self._odom_pose,
+                'odom_pose_at_kf': self._odom_pose_at_kf,
                 'map_pose': self._map_pose,
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,

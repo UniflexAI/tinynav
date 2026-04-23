@@ -205,6 +205,7 @@ class _LocalPlanningView extends StatelessWidget {
                         globalPath: p.globalPath,
                         gridInfo: p.gridInfo,
                         odomPose: p.odomPose,
+                        odomPoseAtKf: p.odomPoseAtKf,
                         mapPose: p.mapPose,
                         showTrajectory: showTrajectory,
                         showGlobalPath: showGlobalPath,

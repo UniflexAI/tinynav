@@ -145,6 +145,7 @@ class GridInfo {
 class PlanningState {
   final bool localized;
   final Pose? odomPose;
+  final Pose? odomPoseAtKf;
   final Pose? mapPose;
   final Uint8List? esdfImage;
   final Uint8List? obstacleImage;
@@ -155,6 +156,7 @@ class PlanningState {
   const PlanningState({
     required this.localized,
     this.odomPose,
+    this.odomPoseAtKf,
     this.mapPose,
     this.esdfImage,
     this.obstacleImage,
@@ -183,6 +185,7 @@ class PlanningState {
     return PlanningState(
       localized: j['localized'] as bool? ?? false,
       odomPose: parsePose(j['odom_pose']),
+      odomPoseAtKf: parsePose(j['odom_pose_at_kf']),
       mapPose: parsePose(j['map_pose']),
       esdfImage: decodeImg(j['esdf_image'] as String?),
       obstacleImage: decodeImg(j['obstacle_image'] as String?),
