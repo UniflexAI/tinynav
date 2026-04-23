@@ -36,13 +36,7 @@ spinner() {
 
 # ── Config ────────────────────────────────────────────────────────────────────
 FLUTTER_INSTALL_DIR="$HOME/flutter"
-FLUTTER_VERSION="3.32.0"
-case "$(uname -m)" in
-  aarch64|arm64) _FLUTTER_ARCH="arm64_" ;;
-  *)             _FLUTTER_ARCH="" ;;
-esac
-FLUTTER_TAR="flutter_linux_${_FLUTTER_ARCH}${FLUTTER_VERSION}-stable.tar.xz"
-FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/${FLUTTER_TAR}"
+FLUTTER_GIT="https://github.com/flutter/flutter.git"
 
 TINYNAV_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FRONTEND_DIR="$TINYNAV_ROOT/app/frontend"
@@ -81,30 +75,19 @@ else
   # Suppress git "dubious ownership" errors when Flutter SDK is owned by another user (common in Docker)
   git config --global --add safe.directory '*' 2>/dev/null || true
 
-  _flutter_arch_ok() {
-    local dart="$1/bin/cache/dart-sdk/bin/dart"
-    [ -f "$dart" ] && file "$dart" 2>/dev/null | grep -qiE "$(uname -m | sed 's/x86_64/x86-64/;s/aarch64/aarch64/')"
-  }
-
   step "Flutter"
-  if command -v flutter &>/dev/null && _flutter_arch_ok "$(dirname "$(dirname "$(command -v flutter)")")"; then
+  if command -v flutter &>/dev/null; then
     ok "Flutter found: $(command -v flutter)"
-  elif [ -x "$FLUTTER_INSTALL_DIR/bin/flutter" ] && _flutter_arch_ok "$FLUTTER_INSTALL_DIR"; then
+  elif [ -x "$FLUTTER_INSTALL_DIR/bin/flutter" ]; then
     export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
     ok "Flutter found: $FLUTTER_INSTALL_DIR"
   else
-    if [ -d "$FLUTTER_INSTALL_DIR" ]; then
-      warn "Existing Flutter SDK is wrong architecture — removing and re-downloading..."
-      rm -rf "$FLUTTER_INSTALL_DIR"
-    fi
-    warn "Flutter not found — downloading $FLUTTER_VERSION ($(uname -m))..."
-    info "URL: $FLUTTER_URL"
-    curl -L --fail --progress-bar "$FLUTTER_URL" -o "/tmp/$FLUTTER_TAR" \
-      || die "Download failed — URL may not exist for this architecture/version: $FLUTTER_URL"
-    info "Extracting..."
-    tar -xf "/tmp/$FLUTTER_TAR" -C "$HOME"
-    rm "/tmp/$FLUTTER_TAR"
+    info "Cloning Flutter stable branch..."
+    git clone --depth 1 -b stable "$FLUTTER_GIT" "$FLUTTER_INSTALL_DIR" \
+      || die "Failed to clone Flutter from $FLUTTER_GIT"
     export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
+    info "flutter doctor"
+    flutter doctor --suppress-analytics -v 2>&1 | grep -E '^\[|✓|✗|!|•' || true
     ok "Flutter installed at $FLUTTER_INSTALL_DIR"
   fi
   echo -e "  ${DIM}$(flutter --version 2>&1 | head -1)${RESET}"
