@@ -1,5 +1,7 @@
+import argparse
 import math
 import logging
+import sys
 
 import numpy as np
 import rclpy
@@ -13,24 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class CmdVelControlNode(Node):
-    TIMER_HZ = 50.0
-
-    # Acceleration limits
-    MAX_LINEAR_ACC = 0.3   # m/s^2 per second
-    MAX_ANGULAR_ACC = 2.5  # rad/s^2 per second
-
-    LOOKAHEAD_DIST = 0.2
-
-    # Proportional gain on heading error -> angular velocity
-    HEADING_GAIN = 1.5
-
-    # Path interpolation resolution
-    PATH_RESOLUTION = 0.05  # meters
-    HEADING_FALLBACK_POS_EPS = 0.08  # meters
-
     def __init__(self):
         super().__init__("cmd_vel_control_node")
-        self.logger = self.get_logger()
+        self.logger = logging.getLogger(__name__)
 
         # Camera-to-robot base transform (left-multiply camera pose to get robot pose)
         self.T_robot_to_camera = np.array([
@@ -43,6 +30,10 @@ class CmdVelControlNode(Node):
         # Previous published command for acceleration limiting
         self._prev_vx = 0.0
         self._prev_vyaw = 0.0
+        self._prev_forward_err = 0.0
+        self._prev_heading_err = 0.0
+        self._forward_err_i = 0.0
+        self._heading_err_i = 0.0
 
         # Propagated camera pose from perception /slam/odom_100hz
         self.position = np.zeros(3)
@@ -61,8 +52,8 @@ class CmdVelControlNode(Node):
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.debug_pub = self.create_publisher(Float32MultiArray, "/control/debug", 10)
 
-        # 50 Hz timer
-        self.create_timer(1.0 / self.TIMER_HZ, self._control_loop)
+        # TIMER_HZ = 50.0
+        self.create_timer(1.0 / 50.0, self._control_loop)
 
     def _odom_100hz_cb(self, msg: Odometry):
         p = msg.pose.pose.position
@@ -89,16 +80,48 @@ class CmdVelControlNode(Node):
 
         robot_pos = T_robot[:3, 3]
         robot_yaw = math.atan2(T_robot[1, 0], T_robot[0, 0])
-
+        
         forward_err, heading_err = self._compute_path_error(robot_pos, robot_yaw)
         if forward_err is None:
             self._publish_zero()
             return
 
-        vx = float(np.clip(forward_err, 0.0, 0.5))
-        vyaw = float(np.clip(self.HEADING_GAIN * heading_err, -0.5, 0.5))
+        # TIMER_HZ = 50.0
+        dt = 1.0 / 50.0
+
+        self._forward_err_i += forward_err * dt
+        # FORWARD_I_CLAMP = 0.6
+        self._forward_err_i = float(np.clip(self._forward_err_i, -0.6, 0.6))
+        d_forward = (forward_err - self._prev_forward_err) / dt
+        vx_cmd = (
+            # FORWARD_KP = 1.2, FORWARD_KI = 0.1, FORWARD_KD = 0.05
+            1.2 * forward_err
+            + 0.1 * self._forward_err_i
+            + 0.05 * d_forward
+        )
+        vx_target = float(np.clip(vx_cmd, 0.0, 0.5))
+
+        self._heading_err_i += heading_err * dt
+        # HEADING_I_CLAMP = 1.2
+        self._heading_err_i = float(np.clip(self._heading_err_i, -1.2, 1.2))
+        d_heading = (heading_err - self._prev_heading_err) / dt
+        vyaw_cmd = (
+            # HEADING_KP = 1.5, HEADING_KI = 0.05, HEADING_KD = 0.08
+            1.5 * heading_err
+            + 0.05 * self._heading_err_i
+            + 0.08 * d_heading
+        )
+        vyaw_target = float(np.clip(vyaw_cmd, -0.5, 0.5))
+
+        # Keep rate limits for smooth control
+        # MAX_LINEAR_ACC = 0.3, MAX_ANGULAR_ACC = 2.5
+        vx = self._clamp_step(vx_target, self._prev_vx, 0.3 * dt)
+        vyaw = self._clamp_step(vyaw_target, self._prev_vyaw, 2.5 * dt)
+
         self._prev_vx = vx
         self._prev_vyaw = vyaw
+        self._prev_forward_err = forward_err
+        self._prev_heading_err = heading_err
 
         cmd = Twist()
         cmd.linear.x = vx
@@ -108,74 +131,49 @@ class CmdVelControlNode(Node):
         dbg = Float32MultiArray()
         dbg.data = [float(heading_err), float(vx), float(vyaw)]
         self.debug_pub.publish(dbg)
-
-    def _interpolate_path(self, poses):
-        if len(poses) == 0:
-            return []
-        if len(poses) == 1:
-            p = poses[0].pose.position
-            return [(float(p.x), float(p.y))]
-
-        new_poses = []
-        for i in range(len(poses) - 1):
-            p1 = poses[i].pose.position
-            p2 = poses[i + 1].pose.position
-
-            x1, y1 = p1.x, p1.y
-            x2, y2 = p2.x, p2.y
-
-            dist = math.hypot(x2 - x1, y2 - y1)
-            steps = max(1, int(dist / self.PATH_RESOLUTION))
-
-            for s in range(steps):
-                t = s / steps
-                x = x1 * (1 - t) + x2 * t
-                y = y1 * (1 - t) + y2 * t
-
-                new_poses.append((x, y))
-
-        last = poses[-1].pose.position
-        new_poses.append((last.x, last.y))
-
-        return new_poses
+        self.logger.info(
+            "forward_err=%.4f heading_err=%.4f vx=%.3f wz=%.3f",
+            forward_err,
+            heading_err,
+            vx,
+            vyaw,
+        )
 
     def _compute_path_error(self, robot_pos: np.ndarray, robot_yaw: float):
         if self.trajectory is None or not self.trajectory.poses:
             return None, None
 
-        path_xy = self._interpolate_path(self.trajectory.poses)
+        poses = self.trajectory.poses
 
         rx, ry = robot_pos[0], robot_pos[1]
 
         best_idx = 0
         best_dist = float("inf")
-        for i, (x, y) in enumerate(path_xy):
+        for i, pose_stamped in enumerate(poses):
+            p = pose_stamped.pose.position
+            x, y = float(p.x), float(p.y)
             d = (x - rx) ** 2 + (y - ry) ** 2
             if d < best_dist:
                 best_dist = d
                 best_idx = i
 
-        target_xy = None
-        for i in range(best_idx, len(path_xy)):
-            x, y = path_xy[i]
-            if math.hypot(x - rx, y - ry) >= self.LOOKAHEAD_DIST:
-                target_xy = (x, y)
+        target_pose = None
+        for i in range(best_idx, len(poses)):
+            p = poses[i].pose.position
+            x, y = float(p.x), float(p.y)
+            # LOOKAHEAD_DIST = 0.2
+            if math.hypot(x - rx, y - ry) >= 0.2:
+                target_pose = poses[i].pose
                 break
-        if target_xy is None:
-            target_xy = path_xy[-1]
+        if target_pose is None:
+            target_pose = poses[-1].pose
 
-        dx = target_xy[0] - rx
-        dy = target_xy[1] - ry
+        dx = float(target_pose.position.x) - rx
+        dy = float(target_pose.position.y) - ry
         forward_err = math.hypot(dx, dy)
 
-        # Simplified heading rule:
-        # 1) if position error is large enough, head to target XY;
-        # 2) otherwise, use path orientation yaw as heading target.
-        if forward_err > self.HEADING_FALLBACK_POS_EPS:
-            target_yaw = math.atan2(dy, dx)
-        else:
-            q = self.trajectory.poses[-1].pose.orientation
-            target_yaw = float(R.from_quat([q.x, q.y, q.z, q.w]).as_euler("xyz")[2])
+        q = target_pose.orientation
+        target_yaw = float(R.from_quat([q.x, q.y, q.z, q.w]).as_euler("xyz")[2])
         heading_err = self._wrap_angle(target_yaw - robot_yaw)
         return forward_err, heading_err
 
@@ -188,9 +186,13 @@ class CmdVelControlNode(Node):
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
     def _publish_zero(self):
-        dt = 1.0 / self.TIMER_HZ
-        self._prev_vx = self._clamp_step(0.0, self._prev_vx, self.MAX_LINEAR_ACC * dt)
-        self._prev_vyaw = self._clamp_step(0.0, self._prev_vyaw, self.MAX_ANGULAR_ACC * dt)
+        # TIMER_HZ = 50.0, MAX_LINEAR_ACC = 0.3, MAX_ANGULAR_ACC = 2.5
+        dt = 1.0 / 50.0
+        self._prev_vx = self._clamp_step(0.0, self._prev_vx, 0.3 * dt)
+        self._prev_vyaw = self._clamp_step(0.0, self._prev_vyaw, 2.5 * dt)
+        # Decay integrators when tracking is unavailable to avoid windup on resume.
+        self._forward_err_i *= 0.9
+        self._heading_err_i *= 0.9
         cmd = Twist()
         cmd.linear.x = self._prev_vx
         cmd.angular.z = self._prev_vyaw
@@ -203,11 +205,15 @@ class CmdVelControlNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--log_file", type=str, default="cmd_vel_control.log", help="Path to the log file")
+    parsed_args, _ = parser.parse_known_args(sys.argv[1:])
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
     )
 
     node = CmdVelControlNode()
