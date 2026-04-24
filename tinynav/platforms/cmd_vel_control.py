@@ -29,7 +29,8 @@ class CmdVelControlNode(Node):
         self.path = None
 
         # === Control loop (ported from planning_node_compare style) ===
-        self.cmd_rate_hz = 20.0
+        # Planner input is typically 7-10 Hz; over-driving cmd publish rate amplifies jitter.
+        self.cmd_rate_hz = 12.0
         # Use minima; actual stale thresholds are scaled by observed planner period.
         self.path_stale_slow_s = 0.35
         self.path_stale_stop_s = 0.8
@@ -38,9 +39,11 @@ class CmdVelControlNode(Node):
         self.max_linear_acc = 0.4   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
         self.planner_dt = 0.1       # trajectory dt in planning_node
+        # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
+        self.path_pose_stride = 10
         self.path_period_ema = 0.12
         self.path_filter_tau = 0.30
-        self.lookahead_steps = 3
+        self.lookahead_steps = 1
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -115,7 +118,8 @@ class CmdVelControlNode(Node):
         T_robot_2 = T2 @ self.T_robot_to_camera
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
         p = T_robot_2_to_1[:3, 3]
-        dt = self.planner_dt * max(1, step_idx)
+        # dt must match actual spacing between published Path poses, not raw trajectory dt.
+        dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
