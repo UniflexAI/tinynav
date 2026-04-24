@@ -64,6 +64,8 @@ class CmdVelControlNode(Node):
         # PID for tracking path against /slam/odometry.
         self.pos_pid = PIDController(kp=1.2, ki=0.05, kd=0.08, integral_limit=1.5)
         self.yaw_pid = PIDController(kp=1.8, ki=0.03, kd=0.10, integral_limit=1.0)
+        # Cross-track coupling: map lateral error (robot-frame y) into yaw-rate correction.
+        self.cross_track_gain = 1.2
 
         # === Control loop (ported from planning_node_compare style) ===
         self.cmd_rate_hz = 20.0
@@ -200,13 +202,14 @@ class CmdVelControlNode(Node):
         # Position error in current robot frame; control forward axis only.
         T_ref_in_robot = np.linalg.inv(T_robot_now) @ T_robot_ref
         pos_err_forward = float(T_ref_in_robot[0, 3])
+        pos_err_lateral = float(T_ref_in_robot[1, 3])
 
         yaw_now = self._yaw_from_transform(T_robot_now)
         yaw_ref = self._yaw_from_transform(T_robot_ref)
         yaw_err = self._wrap_to_pi(yaw_ref - yaw_now)
 
         vx_correction = self.pos_pid.update(pos_err_forward, dt)
-        wz_correction = self.yaw_pid.update(yaw_err, dt)
+        wz_correction = self.yaw_pid.update(yaw_err, dt) + self.cross_track_gain * pos_err_lateral
         return vx_correction, wz_correction
 
     def cmd_timer_callback(self):
