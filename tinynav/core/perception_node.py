@@ -612,13 +612,10 @@ def main(args=None):
     parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
-    imu_propagator_node = ImuPropagatorNode()
-
-    executor = rclpy.executors.MultiThreadedExecutor()
+    executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(perception_node)
     executor.spin()
     perception_node.destroy_node()
-    imu_propagator_node.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
