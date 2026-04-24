@@ -591,7 +591,6 @@ class BackendNode(Ros2NodeManager):
     def cmd_start_nav_nodes(self):
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-        _env['ROS_DOMAIN_ID'] = self.ros_domain_id
         self._map_node_proc = self._launch_proc(
             'map_node',
             [
@@ -691,8 +690,6 @@ class BackendNode(Ros2NodeManager):
         _env = os.environ.copy()
         if self._sensor_mode == 'looper':
             _env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
-        elif self.ros_domain_id is not None:
-            _env['ROS_DOMAIN_ID'] = self.ros_domain_id
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self.processes['perception'] = self._launch_proc(
             'perception',
