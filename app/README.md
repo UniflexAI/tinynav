@@ -50,8 +50,8 @@ TINYNAV_DB_PATH=/data/mydb FRONTEND_PORT=9090 bash /tinynav/scripts/run_web_app.
 │  Flutter Web App    │ ◄──────────────────────────► │  FastAPI Backend     │
 │  (port 8080)        │                              │  (port 8000)         │
 └─────────────────────┘                              └────────┬─────────────┘
-                                                             │ rclpy spin thread
-                                                    ┌────────▼─────────────┐
+                                                              │ rclpy spin thread
+                                                    ┌─────────▼────────────┐
                                                     │  ROS 2 / TinyNav     │
                                                     │  (map_node, planning │
                                                     │   node, perception…) │
