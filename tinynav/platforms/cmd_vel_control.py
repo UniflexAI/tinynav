@@ -34,9 +34,9 @@ class CmdVelControlNode(Node):
         # Use minima; actual stale thresholds are scaled by observed planner period.
         self.path_stale_slow_s = 0.35
         self.path_stale_stop_s = 0.8
-        self.path_stale_slow_factor = 2.5
+        self.path_stale_slow_factor = 3.5
         self.path_stale_stop_factor = 5.0
-        self.max_linear_acc = 0.4   # m/s^2
+        self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
@@ -44,6 +44,9 @@ class CmdVelControlNode(Node):
         self.path_period_ema = 0.12
         self.path_filter_tau = 0.30
         self.lookahead_steps = 1
+        # Static-friction compensation: very small vx often cannot move the robot.
+        self.min_effective_linear_speed = 0.08
+        self.linear_engage_threshold = 0.04
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -83,6 +86,13 @@ class CmdVelControlNode(Node):
         out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
+        # Keep a minimum forward speed when planner requests motion and path is fresh.
+        if (
+            age <= stale_slow_s
+            and abs(target_cmd.linear.x) >= self.linear_engage_threshold
+            and abs(out.linear.x) < self.min_effective_linear_speed
+        ):
+            out.linear.x = float(np.sign(target_cmd.linear.x) * self.min_effective_linear_speed)
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
