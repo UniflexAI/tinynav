@@ -45,7 +45,7 @@ class CmdVelControlNode(Node):
         self.path_filter_tau = 0.30
         self.lookahead_steps = 1
         # Static-friction compensation: very small vx often cannot move the robot.
-        self.min_effective_linear_speed = 0.08
+        self.min_effective_linear_speed = 0.2
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.1
 

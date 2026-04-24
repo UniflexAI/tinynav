@@ -30,7 +30,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
   bool _showObstacle = true;
   bool _showEsdf = true;
-  bool _showTrajectory = false;
+  bool _showTrajectory = true;
   bool _showGlobalPath = true;
 
   @override
@@ -811,6 +811,9 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     final topicsAsync = ref.watch(imageTopicsProvider);
     final selectedTopic = ref.watch(selectedPreviewTopicProvider);
     final topics = topicsAsync.valueOrNull ?? [];
+    final baseUrl = ref.watch(baseUrlProvider);
+    final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
+    final planning = ref.watch(planningStreamProvider).valueOrNull;
 
     // Auto-select color topic on first load
     ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
@@ -857,6 +860,13 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                   ),
                 ],
               ),
+            ),
+          // ── Map PiP ──────────────────────────────────────────────────
+          if (mapInfo != null && planning != null &&
+              planning.localized && baseUrl != null)
+            Positioned(
+              top: 8, left: 8,
+              child: _MapPip(mapInfo: mapInfo, planning: planning, baseUrl: baseUrl),
             ),
           // ── Topic selector ───────────────────────────────────────────
           Positioned(
@@ -968,6 +978,50 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _MapPip extends StatelessWidget {
+  final MapInfo mapInfo;
+  final PlanningState planning;
+  final String baseUrl;
+
+  const _MapPip({required this.mapInfo, required this.planning, required this.baseUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    const pipSize = 120.0;
+    return Container(
+      width: pipSize,
+      height: pipSize,
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.white30, width: 1),
+        borderRadius: BorderRadius.circular(8),
+        color: const Color(0xFF1A1A2E),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(7),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.network(
+              '$baseUrl${mapInfo.imageUrl}',
+              fit: BoxFit.fill,
+              gaplessPlayback: true,
+              errorBuilder: (_, __, ___) => const SizedBox(),
+            ),
+            CustomPaint(
+              painter: MapOverlayPainter(
+                mapInfo: mapInfo,
+                pose: planning.mapPose,
+                globalPath: planning.globalPath,
+                showGlobalPath: true,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
