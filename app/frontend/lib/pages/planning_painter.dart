@@ -14,6 +14,7 @@ class LocalPlanningPainter extends CustomPainter {
   final Pose? odomPose;
   final bool showTrajectory;
   final bool showGlobalPath;
+  final TrajPoint? navTargetPose;
 
   const LocalPlanningPainter({
     required this.trajectory,
@@ -22,6 +23,7 @@ class LocalPlanningPainter extends CustomPainter {
     this.odomPose,
     this.showTrajectory = true,
     this.showGlobalPath = true,
+    this.navTargetPose,
   });
 
   @override
@@ -41,6 +43,9 @@ class LocalPlanningPainter extends CustomPainter {
     if (showGlobalPath) _drawGlobalPath(canvas, cx, cy, scaleX, scaleY, pose);
 
     if (showTrajectory) _drawTrajectory(canvas, cx, cy, scaleX, scaleY, pose);
+
+    if (navTargetPose != null && pose != null)
+      _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
 
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
   }
@@ -116,6 +121,29 @@ class LocalPlanningPainter extends CustomPainter {
     canvas.drawCircle(gc, 3, Paint()..color = Colors.white);
   }
 
+  void _drawNavTarget(Canvas canvas, double cx, double cy,
+      double scaleX, double scaleY, Pose odomPose, TrajPoint target) {
+    final px = cx + (target.x - odomPose.x) * scaleX;
+    final py = cy - (target.y - odomPose.y) * scaleY;
+    final c = Offset(px, py);
+    const r = 10.0;
+    const arm = 6.0;
+    final ring = Paint()
+      ..color = const Color(0xFFFF6D00)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5;
+    final cross = Paint()
+      ..color = const Color(0xFFFF6D00)
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke;
+    canvas.drawCircle(c, r, ring);
+    canvas.drawCircle(c, 3, Paint()..color = const Color(0xFFFF6D00));
+    canvas.drawLine(Offset(px - r - arm, py), Offset(px - r + arm, py), cross);
+    canvas.drawLine(Offset(px + r - arm, py), Offset(px + r + arm, py), cross);
+    canvas.drawLine(Offset(px, py - r - arm), Offset(px, py - r + arm), cross);
+    canvas.drawLine(Offset(px, py + r - arm), Offset(px, py + r + arm), cross);
+  }
+
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
@@ -144,5 +172,6 @@ class LocalPlanningPainter extends CustomPainter {
       gridInfo != old.gridInfo ||
       odomPose != old.odomPose ||
       showTrajectory != old.showTrajectory ||
-      showGlobalPath != old.showGlobalPath;
+      showGlobalPath != old.showGlobalPath ||
+      navTargetPose != old.navTargetPose;
 }

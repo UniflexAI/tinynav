@@ -79,6 +79,7 @@ class BackendNode(Ros2NodeManager):
         self._trajectory: list = []
         self._global_path: list = []
         self._grid_info: dict | None = None
+        self._nav_target_pose: dict | None = None
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._on_slam_odom, 10)
@@ -96,6 +97,9 @@ class BackendNode(Ros2NodeManager):
         )
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
+        self.create_subscription(
+            Odometry, '/control/target_pose', self._on_nav_target_pose, 1
+        )
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -174,6 +178,13 @@ class BackendNode(Ros2NodeManager):
     def _on_relocalization(self, msg: Odometry):
         with self._lock:
             self._localized = True
+
+    def _on_nav_target_pose(self, msg: Odometry):
+        with self._lock:
+            self._nav_target_pose = {
+                'x': msg.pose.pose.position.x,
+                'y': msg.pose.pose.position.y,
+            }
 
     def _on_height_map(self, msg: Image):
         try:
@@ -429,6 +440,7 @@ class BackendNode(Ros2NodeManager):
                 'trajectory': list(self._trajectory),
                 'global_path': None,  # filled after TF transform
                 'grid_info': self._grid_info,
+                'nav_target_pose': self._nav_target_pose,
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot
@@ -618,6 +630,7 @@ class BackendNode(Ros2NodeManager):
             self._localized = False
             self._map_pose = None
             self._global_path = []
+            self._nav_target_pose = None
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
@@ -652,6 +665,7 @@ class BackendNode(Ros2NodeManager):
             self._localized = False
             self._map_pose = None
             self._global_path = []
+            self._nav_target_pose = None
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')

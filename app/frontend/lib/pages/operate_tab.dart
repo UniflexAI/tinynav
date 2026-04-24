@@ -29,7 +29,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   double _linearX = 0, _linearY = 0, _angularZ = 0;
 
   bool _showObstacle = true;
-  bool _showEsdf = false;
+  bool _showEsdf = true;
   bool _showTrajectory = false;
   bool _showGlobalPath = true;
 
@@ -273,6 +273,7 @@ class _LocalPlanningView extends StatelessWidget {
                         odomPose: p.odomPose,
                         showTrajectory: showTrajectory,
                         showGlobalPath: showGlobalPath,
+                        navTargetPose: p.navTargetPose,
                       ),
                     )
                   else

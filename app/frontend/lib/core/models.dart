@@ -152,6 +152,7 @@ class PlanningState {
   final List<TrajPoint> trajectory;
   final List<TrajPoint> globalPath;
   final GridInfo? gridInfo;
+  final TrajPoint? navTargetPose;
 
   const PlanningState({
     required this.localized,
@@ -163,6 +164,7 @@ class PlanningState {
     required this.trajectory,
     required this.globalPath,
     this.gridInfo,
+    this.navTargetPose,
   });
 
   factory PlanningState.fromJson(Map<String, dynamic> j) {
@@ -193,6 +195,12 @@ class PlanningState {
       globalPath: parsePath('global_path'),
       gridInfo: j['grid_info'] != null
           ? GridInfo.fromJson(j['grid_info'] as Map<String, dynamic>)
+          : null,
+      navTargetPose: j['nav_target_pose'] != null
+          ? TrajPoint(
+              (j['nav_target_pose']['x'] as num).toDouble(),
+              (j['nav_target_pose']['y'] as num).toDouble(),
+            )
           : null,
     );
   }
