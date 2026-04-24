@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from numba import njit
 import message_filters
 from rclpy.time import Time
+from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
@@ -186,12 +187,13 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 def generate_trajectory_library_3d(
     num_samples=11, duration=2.0, dt=0.1,
     acc_std=0.00001, omega_y_std_deg=20.0,
-    max_acc=0.2, max_omega=np.pi / 8,
     init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
     num_steps = int(duration / dt) + 1
 
+    max_acc = 0.2
     acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
+    max_omega = np.pi / 8
     omega_y_samples = np.linspace(-max_omega, max_omega, num_samples)
 
     num_samples = len(acc_samples) * len(omega_y_samples)
@@ -368,6 +370,7 @@ class PlanningNode(Node):
         self.current_pose = None  # Store the latest pose from odometry
 
         self.smoothed_velocity = 0.0
+        self.dt = 0.1
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -555,34 +558,14 @@ class PlanningNode(Node):
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            robot_center = self.camera_to_robot_center(T)
             v_dir = T[:3, :3] @ np.array([0, 0, 1])
-            forward_xy = v_dir[:2]
-            forward_xy_norm = np.linalg.norm(forward_xy)
-            behind_target = False
-            planning_duration = 2.0
-            max_omega = np.pi / 8
-            if self.target_pose is not None and forward_xy_norm > 1e-6:
-                forward_xy = forward_xy / forward_xy_norm
-                to_target_xy = self.target_pose[:2] - robot_center[:2]
-                to_target_xy_norm = np.linalg.norm(to_target_xy)
-                if to_target_xy_norm > 1e-6:
-                    to_target_xy = to_target_xy / to_target_xy_norm
-                    # dot < 0 means target lies behind current heading.
-                    behind_target = np.dot(forward_xy, to_target_xy) < -0.2
-            if behind_target:
-                magnitude = 0.0
-                planning_duration = 3.0
-                max_omega = 0.6
-            else:
-                magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
+            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
             init_v = v_dir * float(magnitude)
             trajectories, params = generate_trajectory_library_3d(
-                duration=planning_duration,
-                max_omega=max_omega,
                 init_p = self.camera_to_robot_center(T),
                 init_v = init_v,
-                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w]),
+                dt = self.dt
             )
             self.last_T = T
             self.last_stamp = stamp
@@ -598,21 +581,7 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                heading_cost = 0.0
-                if target_pose is not None:
-                    qx, qy, qz, qw = traj[-1, 3], traj[-1, 4], traj[-1, 5], traj[-1, 6]
-                    fwd_x = 2.0 * (qx * qz + qw * qy)
-                    fwd_y = 2.0 * (qy * qz - qw * qx)
-                    fwd_n = np.hypot(fwd_x, fwd_y)
-                    to_target_xy = target_pose[:2] - traj_end[:2]
-                    tgt_n = np.hypot(to_target_xy[0], to_target_xy[1])
-                    if fwd_n > 1e-6 and tgt_n > 1e-6:
-                        fwd_x /= fwd_n
-                        fwd_y /= fwd_n
-                        tgt_x = to_target_xy[0] / tgt_n
-                        tgt_y = to_target_xy[1] / tgt_n
-                        heading_cost = 40.0 * (1.0 - (fwd_x * tgt_x + fwd_y * tgt_y))
-                return score * 100000 + 100 * dist + heading_cost + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
@@ -625,8 +594,9 @@ class PlanningNode(Node):
             path = Path()
             path.header = depth_msg.header
             path.header.frame_id = "world"
+            base_time = Time.from_msg(depth_msg.header.stamp)
             for i in top_indices:
-                for j in range(0, len(trajectories[i]), 10):
+                for j in range(0, len(trajectories[i]), 2):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
                     if self.poi_changed or self.target_pose is None:
                         x,y,z,qx,qy,qz,qw = trajectories[i][0]
@@ -637,6 +607,7 @@ class PlanningNode(Node):
 
                     pose = PoseStamped()
                     pose.header = depth_msg.header
+                    pose.header.stamp = (base_time + Duration(seconds=float(j) * self.dt)).to_msg()
                     pose.pose.position.x = x
                     pose.pose.position.y = y
                     pose.pose.position.z = z
