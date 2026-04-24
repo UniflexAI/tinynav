@@ -47,6 +47,7 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = 0.08
         self.linear_engage_threshold = 0.04
+        self.fixed_reverse_speed = 0.1
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -135,6 +136,8 @@ class CmdVelControlNode(Node):
         angular_velocity_vec = r.as_rotvec() / dt
 
         vx = np.clip(linear_velocity_vec[0], -0.1, 0.3)
+        if vx < 0.0:
+            vx = -self.fixed_reverse_speed
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
 
