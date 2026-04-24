@@ -4,7 +4,6 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Bool, Float32
 import numpy as np
-from numba import njit, prange
 
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Header
@@ -34,6 +33,7 @@ from typing import Dict
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped,Point
 from scipy.spatial.transform import Rotation as R
+from scipy.ndimage import distance_transform_edt
 
 from rclpy.executors import SingleThreadedExecutor
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
@@ -100,27 +100,6 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-@njit(cache=True, parallel=True)
-def sdf_min_dist_parallel(position_grid, positions, sdf_map):
-    """Parallel over grid points: each voxel gets min distance to all positions."""
-    ni, nj, nk = position_grid.shape[0], position_grid.shape[1], position_grid.shape[2]
-    n_pos = positions.shape[0]
-    for i in prange(ni):
-        for j in range(nj):
-            for k in range(nk):
-                gx = position_grid[i, j, k, 0]
-                gy = position_grid[i, j, k, 1]
-                gz = position_grid[i, j, k, 2]
-                min_d = np.inf
-                for p in range(n_pos):
-                    dx = gx - positions[p, 0]
-                    dy = gy - positions[p, 1]
-                    dz = gz - positions[p, 2]
-                    d = np.sqrt(dx * dx + dy * dy + dz * dz)
-                    if d < min_d:
-                        min_d = d
-                sdf_map[i, j, k] = min_d
-
 def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100):
     """
         Generate a occupancy grid map from the depth images.
@@ -131,15 +110,17 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
     """
     raycast_shape = (100, 100, 20)
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    odom_pose_min_position = np.array([np.inf, np.inf, np.inf])
-    odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf])
+    odom_pose_min_position = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+    odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
     for timestamp, odom_pose in poses.items():
         odom_translation = odom_pose[:3, 3]
         odom_pose_min_position = np.minimum(odom_pose_min_position, odom_translation)
         odom_pose_max_position = np.maximum(odom_pose_max_position, odom_translation)
     odom_pose_min_position = np.floor(odom_pose_min_position / resolution) * resolution
     odom_pose_max_position = np.ceil(odom_pose_max_position / resolution) * resolution
-    global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
+    global_grid_shape = np.ceil(
+        (odom_pose_max_position - odom_pose_min_position) / resolution + np.array(raycast_shape)
+    ).astype(np.int32)
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
 
@@ -153,15 +134,25 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
         odom_position = odom_pose[:3, 3]
         odom_positions.append(odom_position)
 
-    sdf_map = np.full_like(global_grid, np.inf, dtype=np.float32)
-    # compute the sdf w.r.t odom_position: odom_sdf_map[i,j,k] = || (i,j,k)*resolution + origin - odom_position ||
-    ix = np.arange(global_grid_shape[0], dtype=np.float32)
-    iy = np.arange(global_grid_shape[1], dtype=np.float32)
-    iz = np.arange(global_grid_shape[2], dtype=np.float32)
-    xx, yy, zz = np.meshgrid(ix, iy, iz, indexing="ij")
-    grid_positions = global_origin + resolution * np.stack([xx, yy, zz], axis=-1)
-    with Timer(name="sdf_min_dist_baseline", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        sdf_min_dist_parallel(grid_positions, np.array(odom_positions), sdf_map)
+    voxels = int(np.prod(global_grid_shape))
+    print(
+        "[generate_occupancy_map] SDF stage params: "
+        f"resolution={resolution}, step={step}, "
+        f"num_poses={len(odom_positions)}, global_grid_shape={tuple(global_grid_shape.tolist())}, "
+        f"global_origin={global_origin.tolist()}, voxels={voxels}"
+    )
+
+    # Compute SDF as voxel distance to nearest odom seed using SciPy EDT.
+    with Timer(name="sdf_distance_transform_edt", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        if len(odom_positions) == 0:
+            sdf_map = np.full(global_grid_shape, np.inf, dtype=np.float32)
+        else:
+            seed_mask = np.ones(global_grid_shape, dtype=np.uint8)
+            odom_positions_np = np.asarray(odom_positions, dtype=np.float32)
+            seed_indices = np.rint((odom_positions_np - global_origin) / resolution).astype(np.int32)
+            seed_indices = np.clip(seed_indices, 0, global_grid_shape - 1)
+            seed_mask[seed_indices[:, 0], seed_indices[:, 1], seed_indices[:, 2]] = 0
+            sdf_map = distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
 
     # 0 is the unknown.
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
@@ -328,6 +319,10 @@ class BagPlayer(Node):
             msg_type = get_message(topic_info.type)
             pub = self.create_publisher(msg_type, topic_info.name, 10)
             self._topic_publishers[topic_info.name] = (pub, msg_type)
+
+        self.get_logger().info("Bag topics and message types:")
+        for topic_info in sorted(topic_infos, key=lambda t: t.name):
+            self.get_logger().info(f"  {topic_info.name} -> {topic_info.type}")
 
         # /clock publisher (for use_sim_time)
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
@@ -674,17 +669,23 @@ class BuildMapNode(Node):
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
+
+        # Flush and close writable DB first, then reopen DB for occupancy generation.
+        self.db.close()
+        occupancy_db = TinyNavDB(self.map_save_path, is_scratch=False)
+
         # Generate occupancy map
-        occupancy_resolution = 0.05
+        occupancy_resolution = 0.1
         occupancy_step = 10
-        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
+        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
+            self.pose_graph_used_pose, occupancy_db, self.K, self.baseline, occupancy_resolution, occupancy_step
+        )
+        occupancy_db.close()
         occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
         np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
         np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
-
-        self.db.close()
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
