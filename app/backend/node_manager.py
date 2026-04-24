@@ -438,7 +438,8 @@ class BackendNode(Ros2NodeManager):
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
-                'global_path': None,  # filled after TF transform
+                'global_path': None,  # filled after TF transform (odom frame)
+                'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
             }

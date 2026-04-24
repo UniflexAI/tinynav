@@ -151,6 +151,7 @@ class PlanningState {
   final Uint8List? obstacleImage;
   final List<TrajPoint> trajectory;
   final List<TrajPoint> globalPath;
+  final List<TrajPoint> mapGlobalPath;
   final GridInfo? gridInfo;
   final TrajPoint? navTargetPose;
 
@@ -163,6 +164,7 @@ class PlanningState {
     this.obstacleImage,
     required this.trajectory,
     required this.globalPath,
+    this.mapGlobalPath = const [],
     this.gridInfo,
     this.navTargetPose,
   });
@@ -193,6 +195,7 @@ class PlanningState {
       obstacleImage: decodeImg(j['obstacle_image'] as String?),
       trajectory: parsePath('trajectory'),
       globalPath: parsePath('global_path'),
+      mapGlobalPath: parsePath('map_global_path'),
       gridInfo: j['grid_info'] != null
           ? GridInfo.fromJson(j['grid_info'] as Map<String, dynamic>)
           : null,

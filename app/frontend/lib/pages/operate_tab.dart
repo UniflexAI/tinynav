@@ -73,7 +73,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   Future<void> _emergencyStop() async {
     _linearX = 0; _linearY = 0; _angularZ = 0;
     _sendVelocity();
-    try { await ref.read(dioProvider).post('/nav/restart'); } catch (_) {}
+    try { await ref.read(dioProvider).post('/nav/nodes/disable'); } catch (_) {}
   }
 
   @override
@@ -1016,7 +1016,7 @@ class _MapPip extends StatelessWidget {
               painter: MapOverlayPainter(
                 mapInfo: mapInfo,
                 pose: planning.mapPose,
-                globalPath: planning.globalPath,
+                globalPath: planning.mapGlobalPath,
                 showGlobalPath: true,
               ),
             ),
