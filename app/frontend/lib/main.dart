@@ -32,8 +32,41 @@ class TinyNavApp extends ConsumerWidget {
       title: 'TinyNav',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1565C0)),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF45C95A),
+          primary: const Color(0xFF45C95A),
+        ),
         useMaterial3: true,
+        fontFamily: 'RobotoLocal',
+        scaffoldBackgroundColor: const Color(0xFFF2F3F5),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.white,
+          foregroundColor: Color(0xFF2B3A42),
+          elevation: 0,
+          surfaceTintColor: Colors.transparent,
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF45C95A),
+            foregroundColor: Colors.white,
+            shape: const StadiumBorder(),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFF2B3A42),
+            side: const BorderSide(color: Color(0xFF2B3A42)),
+            shape: const StadiumBorder(),
+          ),
+        ),
+        cardTheme: CardThemeData(
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+        ),
       ),
       // Switches automatically when deviceIpProvider changes.
       home: ip == null ? const SetupPage() : const HomePage(),

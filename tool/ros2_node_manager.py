@@ -6,8 +6,6 @@ import subprocess
 import os
 import shutil
 import threading
-import random
-
 class Ros2NodeManager(Node):
     def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
         super().__init__('ros2_node_manager')
@@ -17,9 +15,6 @@ class Ros2NodeManager(Node):
         self.bag_path = os.path.join(tinynav_db_path, 'bag')
         self.map_path = os.path.join(tinynav_db_path, 'map')
         self.nav_out_path = os.path.join(tinynav_db_path, 'nav_out')
-        self.ros_domain_id = str(random.randint(1, 100))
-        self.get_logger().info(f'Using randomized ROS_DOMAIN_ID={self.ros_domain_id}')
-        
         self.state_pub = self.create_publisher(String, '/service/state', 10)
         self.create_subscription(String, '/service/command', self._cmd_cb, 10)
         
@@ -66,51 +61,26 @@ class Ros2NodeManager(Node):
     def _start_realsense_bag_record(self):
         if os.path.exists(self.bag_path):
             shutil.rmtree(self.bag_path)
-        
-        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
-        
-        topics = [
-            '/camera/camera/infra1/camera_info',
-            '/camera/camera/infra1/image_rect_raw',
-            '/camera/camera/infra1/metadata',
-            '/camera/camera/infra2/camera_info',
-            '/camera/camera/infra2/image_rect_raw',
-            '/camera/camera/infra2/metadata',
-            '/camera/camera/extrinsics/depth_to_infra1',
-            '/camera/camera/extrinsics/depth_to_infra2',
-            '/camera/camera/accel/sample',
-            '/camera/camera/gyro/sample',
-            '/camera/camera/color/image_raw',
-            '/camera/camera/color/camera_info',
-            '/camera/camera/color/image_rect_raw/compressed',
-            '/camera/camera/imu',
-            '/tf_static',
-            '/cmd_vel',
-            '/mapping/global_plan',
-            '/mapping/poi',
-            '/mapping/poi_change',
-            '/planning/trajectory_path',
-            '/planning/occupied_voxels'
-        ]
-        cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', self.bag_path] + topics
-        self.processes['bag_record'] = self._spawn(cmd_bag)
+
+        # Reuse the same topic list as scripts/run_rosbag_record.sh
+        script = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'run_rosbag_record.sh')
+        cmd = ['bash', script, '--output', self.bag_path]
+        self.processes['bag_record'] = self._spawn(cmd)
     
     def _start_rosbag_build_map(self):
         bag_file = os.path.join(self.bag_path, 'bag_0.db3')
         if not os.path.exists(bag_file):
             self.get_logger().warn(f'Bag file not found: {bag_file}')
             return
-        domain_env = {'ROS_DOMAIN_ID': self.ros_domain_id} if self.ros_domain_id is not None else {}
-        
         cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
-        self.processes['perception'] = self._spawn(cmd_perception, extra_env=domain_env)
-        
+        self.processes['perception'] = self._spawn(cmd_perception)
+
         cmd_build = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
             '--map_save_path', self.map_path,
             '--bag_file', bag_file
         ]
-        self.processes['build_map'] = self._spawn(cmd_build, extra_env=domain_env)
+        self.processes['build_map'] = self._spawn(cmd_build)
         
         def wait_and_convert():
             proc_build = self.processes.get('build_map')
@@ -162,7 +132,6 @@ class Ros2NodeManager(Node):
     
     def _spawn(self, cmd, extra_env=None):
         env = os.environ.copy()
-        env['ROS_DOMAIN_ID'] = self.ros_domain_id
         if extra_env:
             env.update(extra_env)
         return subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)

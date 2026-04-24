@@ -4,6 +4,8 @@ WebSocket endpoints:
   WS /ws/pose        — pushes pose whenever a new Odometry arrives
   WS /ws/map-update  — pushes a notification when map files change
   WS /ws/preview     — streams JPEG frames for a given image topic
+  WS /ws/planning    — polls planning snapshot at 5 fps
+  WS /ws/teleop      — receives cmd_vel commands from the client
 """
 from __future__ import annotations
 
@@ -19,6 +21,16 @@ from .state import runner
 router = APIRouter(tags=['ws'])
 
 
+def _safe_put(queue: asyncio.Queue, item):
+    """Put item onto queue, dropping the oldest entry if full."""
+    if queue.full():
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+    queue.put_nowait(item)
+
+
 # --------------------------------------------------------------------------- #
 # /ws/status  — polls node state every 1 s and broadcasts                     #
 # --------------------------------------------------------------------------- #
@@ -30,7 +42,7 @@ async def ws_status(ws: WebSocket):
         while True:
             node = runner.node
             if node is not None:
-                payload = json.dumps(node.get_status())
+                payload = json.dumps({'online': True, **node.get_status()})
             else:
                 payload = json.dumps({'online': False})
             await ws.send_text(payload)
@@ -51,11 +63,8 @@ async def ws_pose(ws: WebSocket):
     loop = asyncio.get_event_loop()
 
     def _on_pose(pose: dict):
-        # Called from rclpy spin thread — schedule safely onto the event loop.
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, pose)
-        except Exception:
-            pass
+        # Called from rclpy spin thread — schedule onto event loop.
+        loop.call_soon_threadsafe(lambda: _safe_put(queue, pose))
 
     node = runner.node
     if node is None:
@@ -110,6 +119,26 @@ async def ws_map_update(ws: WebSocket):
 
 
 # --------------------------------------------------------------------------- #
+# /ws/planning  — polls planning snapshot at 5 fps                            #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/planning')
+async def ws_planning(ws: WebSocket):
+    await ws.accept()
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+    try:
+        while True:
+            payload = json.dumps(node.get_planning_snapshot())
+            await ws.send_text(payload)
+            await asyncio.sleep(0.2)
+    except WebSocketDisconnect:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # /ws/preview  — streams JPEG frames for a given image topic                  #
 # --------------------------------------------------------------------------- #
 
@@ -126,12 +155,12 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
     loop = asyncio.get_event_loop()
 
     def _on_frame(frame: bytes):
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, frame)
-        except Exception:
-            pass
+        # Drop oldest frame if full — always keep the latest.
+        loop.call_soon_threadsafe(lambda: _safe_put(queue, frame))
 
-    node.preview_callbacks[topic].append(_on_frame)
+    if not node.add_preview_callback(topic, _on_frame):
+        await ws.close(code=1013)
+        return
     try:
         while True:
             frame = await queue.get()
@@ -139,7 +168,33 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
     except WebSocketDisconnect:
         pass
     finally:
+        node.remove_preview_callback(topic, _on_frame)
+
+
+# --------------------------------------------------------------------------- #
+# /ws/teleop  — receives velocity commands and publishes to /cmd_vel          #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/teleop')
+async def ws_teleop(ws: WebSocket):
+    await ws.accept()
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+    try:
+        while True:
+            data = await ws.receive_text()
+            msg = json.loads(data)
+            node.publish_cmd_vel(
+                float(msg.get('linear_x', 0.0)),
+                float(msg.get('linear_y', 0.0)),
+                float(msg.get('angular_z', 0.0)),
+            )
+    except WebSocketDisconnect:
+        pass
+    finally:
         try:
-            node.preview_callbacks[topic].remove(_on_frame)
-        except ValueError:
+            node.publish_cmd_vel(0.0, 0.0, 0.0)
+        except Exception:
             pass

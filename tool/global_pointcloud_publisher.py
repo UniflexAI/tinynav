@@ -235,18 +235,21 @@ class GlobalPointCloudPublisher(Node):
         self.cloud_pub = self.create_publisher(PointCloud2, "/slam/global_cloud", 10)
         self.path_pub = self.create_publisher(Path, "/slam/global_cloud_path", 10)
 
-        self.depth_log_sub = self.create_subscription(Image, "/camera/camera/depth/image_rect_raw", self.depth_log_callback, self.sensor_qos)
+        self.depth_log_sub = self.create_subscription(Image, args.depth_topic, self.depth_log_callback, self.sensor_qos)
         self.pose_log_sub = self.create_subscription(PoseStamped, args.pose_topic, self.pose_log_callback, 10)
         image_msg_type = CompressedImage if args.image_mode == "color" else Image
         self.image_log_sub = self.create_subscription(image_msg_type, self.image_topic, self.image_log_callback, self.sensor_qos)
 
-        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
+        self.depth_sub = message_filters.Subscriber(self, Image, args.depth_topic, qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, args.pose_topic)
         self.image_sub = message_filters.Subscriber(self, image_msg_type, self.image_topic, qos_profile=self.sensor_qos)
         self.sync = message_filters.ApproximateTimeSynchronizer([self.depth_sub, self.pose_sub, self.image_sub], queue_size=20, slop=0.08)
         self.sync.registerCallback(self.sync_callback)
 
-        self.get_logger().info(f"Publishing global cloud on /slam/global_cloud from /camera/camera/depth/image_rect_raw + {args.pose_topic} + {self.image_topic} ({args.image_mode})")
+        self.get_logger().info(
+            f"Publishing global cloud on /slam/global_cloud from {args.depth_topic} + "
+            f"{args.pose_topic} + {self.image_topic} ({args.image_mode})"
+        )
 
     def camera_info_callback(self, msg: CameraInfo):
         self.depth_frame_id = msg.header.frame_id or self.depth_frame_id
@@ -263,7 +266,7 @@ class GlobalPointCloudPublisher(Node):
         self.try_update_frame_transforms()
 
     def depth_log_callback(self, msg: Image):
-        self.get_logger().info("Received first depth frame on /camera/camera/depth/image_rect_raw.", once=True)
+        self.get_logger().info(f"Received first depth frame on {self.args.depth_topic}.", once=True)
 
     def pose_log_callback(self, msg: PoseStamped):
         self.get_logger().info(f"Received first pose frame on {self.args.pose_topic}.", once=True)
@@ -456,7 +459,7 @@ class GlobalPointCloudPublisher(Node):
             return
         sample_u_grid, sample_v_grid = self.get_sample_grid(depth.shape)
 
-        # `/insight/vio_pose` provides T_w_i, where the world frame is z-up.
+        # `/insight/vio_20hz` provides T_w_i, where the world frame is z-up.
         # Depth backprojection yields points in the camera optical frame, so we
         # first map them into the IMU/depth rig frame before applying T_w_i.
         T_w_i = pose_msg2np(pose_msg)
@@ -487,6 +490,13 @@ class GlobalPointCloudPublisher(Node):
                     ]
                 )
             self.get_logger().info(f"{self.args.image_mode.capitalize()} sample points: {sample_text}", throttle_duration_sec=1.0)
+
+        # Filter out camera-frame points below the configured floor in Y.
+        if cloud_camera.size != 0:
+            keep_cam_mask = cloud_camera[:, 1] >= -1.0
+            cloud_camera = cloud_camera[keep_cam_mask]
+            cloud_colors = cloud_colors[keep_cam_mask]
+
         cloud_world = transform_points(cloud_camera, T_world_camera)
         keep_mask = crop_mask(cloud_world, current_position, 100.0)
         cloud_world = cloud_world[keep_mask]
@@ -527,7 +537,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Project SLAM depth into a global world-frame point cloud."
     )
-    parser.add_argument("--pose-topic", default="/insight/vio_pose")
+    parser.add_argument("--pose-topic", default="/insight/vio_20hz")
+    parser.add_argument("--depth-topic", default="/camera/camera/depth/image_rect_raw")
     parser.add_argument("--image-mode", choices=("grayscale", "color"), default="color")
     return parser
 
