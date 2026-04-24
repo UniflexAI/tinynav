@@ -61,29 +61,11 @@ class Ros2NodeManager(Node):
     def _start_realsense_bag_record(self):
         if os.path.exists(self.bag_path):
             shutil.rmtree(self.bag_path)
-        
-        #self.processes['realsense'] = self._spawn(self._get_realsense_cmd())
-        
-        topics = [
-            '/camera/camera/infra1/camera_info',
-            '/camera/camera/infra1/image_rect_raw',
-            '/camera/camera/infra1/metadata',
-            '/camera/camera/infra2/camera_info',
-            '/camera/camera/infra2/image_rect_raw',
-            '/camera/camera/infra2/metadata',
-            '/camera/camera/extrinsics/depth_to_infra1',
-            '/camera/camera/extrinsics/depth_to_infra2',
-            '/camera/camera/accel/sample',
-            '/camera/camera/gyro/sample',
-            '/camera/camera/color/image_raw',
-            '/camera/camera/color/camera_info',
-            '/camera/camera/color/image_rect_raw/compressed',
-            '/camera/camera/imu',
-            '/tf_static',
-            '/tf'
-        ]
-        cmd_bag = ['ros2', 'bag', 'record', '--max-cache-size', '2147483648', '-o', self.bag_path] + topics
-        self.processes['bag_record'] = self._spawn(cmd_bag)
+
+        # Reuse the same topic list as scripts/run_rosbag_record.sh
+        script = os.path.join(os.path.dirname(__file__), '..', 'scripts', 'run_rosbag_record.sh')
+        cmd = ['bash', script, '--output', self.bag_path]
+        self.processes['bag_record'] = self._spawn(cmd)
     
     def _start_rosbag_build_map(self):
         bag_file = os.path.join(self.bag_path, 'bag_0.db3')

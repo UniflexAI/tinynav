@@ -95,10 +95,8 @@ class Ros2UnitreeManagerNode(Node):
 
 
 def main(args=None):
-    import os
     rclpy.init(args=args)
-    interface = os.environ.get('UNITREE_NETWORK_INTERFACE', 'enP8p1s0')
-    node = Ros2UnitreeManagerNode(interface)
+    node = Ros2UnitreeManagerNode("enP8p1s0")
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

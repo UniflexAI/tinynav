@@ -22,22 +22,7 @@ banner() {
   echo -e "${RESET}"
 }
 
-spinner() {
-  local pid=$1 msg=$2
-  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  local i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    printf "\r${CYAN}  ${frames[$((i % 10))]}  ${RESET}${DIM}%s${RESET}" "$msg"
-    sleep 0.1
-    ((i++))
-  done
-  printf "\r\033[K"
-}
-
 # ── Config ────────────────────────────────────────────────────────────────────
-FLUTTER_INSTALL_DIR="$HOME/flutter"
-FLUTTER_GIT="https://github.com/flutter/flutter.git"
-
 TINYNAV_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FRONTEND_DIR="$TINYNAV_ROOT/app/frontend"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
@@ -45,19 +30,22 @@ FRONTEND_PORT="${FRONTEND_PORT:-8080}"
 
 banner
 
-# ── Flags ─────────────────────────────────────────────────────────────────────
-NO_BUILD=0
+# ── Help ──────────────────────────────────────────────────────────────────────
 for arg in "$@"; do
   case "$arg" in
-    --no-build|-n) NO_BUILD=1 ;;
     --help|-h)
-      echo "Usage: $0 [--no-build|-n]"
-      echo "  --no-build  Skip Flutter install + build; serve existing build/web"
+      echo "Usage: $0"
+      echo "  Serves the pre-built frontend from app/frontend/build/web."
+      echo "  Build it first with: cd app/frontend && flutter build web --release"
       exit 0 ;;
   esac
 done
 
-# ── Port check ────────────────────────────────────────────────────────────────
+# ── Pre-check ─────────────────────────────────────────────────────────────────
+if [ ! -f "$FRONTEND_DIR/build/web/index.html" ]; then
+  die "No frontend build found at app/frontend/build/web — run 'flutter build web --release' first."
+fi
+
 for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   if lsof -iTCP:"$port" -sTCP:LISTEN -t &>/dev/null 2>&1 || \
      ss -tlnp "sport = :$port" 2>/dev/null | grep -q ":$port"; then
@@ -65,53 +53,12 @@ for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
   fi
 done
 
-# ── 1 & 2. Flutter + Build web ────────────────────────────────────────────────
-if [ "$NO_BUILD" -eq 1 ] || [ -f "$FRONTEND_DIR/build/web/index.html" ]; then
-  step "Skip Build"
-  [ -f "$FRONTEND_DIR/build/web/index.html" ] \
-    || die "No existing build found at app/frontend/build/web — run without --no-build first."
-  ok "Using existing build/web"
-else
-  # Suppress git "dubious ownership" errors when Flutter SDK is owned by another user (common in Docker)
-  git config --global --add safe.directory '*' 2>/dev/null || true
-
-  step "Flutter"
-  if command -v flutter &>/dev/null; then
-    ok "Flutter found: $(command -v flutter)"
-  elif [ -x "$FLUTTER_INSTALL_DIR/bin/flutter" ]; then
-    export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
-    ok "Flutter found: $FLUTTER_INSTALL_DIR"
-  else
-    info "Cloning Flutter stable branch..."
-    git clone --depth 1 -b stable "$FLUTTER_GIT" "$FLUTTER_INSTALL_DIR" \
-      || die "Failed to clone Flutter from $FLUTTER_GIT"
-    export PATH="$FLUTTER_INSTALL_DIR/bin:$PATH"
-    info "flutter doctor"
-    flutter doctor --suppress-analytics -v 2>&1 | grep -E '^\[|✓|✗|!|•' || true
-    ok "Flutter installed at $FLUTTER_INSTALL_DIR"
-  fi
-  echo -e "  ${DIM}$(flutter --version 2>&1 | head -1)${RESET}"
-
-  step "Build Flutter Web"
-  cd "$FRONTEND_DIR"
-  info "flutter pub get"
-  flutter pub get --suppress-analytics
-
-  info "flutter build web --release"
-  flutter build web --release --suppress-analytics 2>&1 | \
-    grep -v "^$" | sed "s/^/  ${DIM}/" | sed "s/$/${RESET}/" || true
-  ok "Build complete → app/frontend/build/web"
-fi
-
-# ── 3. Backend ────────────────────────────────────────────────────────────────
+# ── 1. Backend ────────────────────────────────────────────────────────────────
 step "Start Backend"
 cd "$TINYNAV_ROOT"
 [ -f /opt/ros/humble/setup.bash ] && source /opt/ros/humble/setup.bash
 export TINYNAV_DB_PATH="${TINYNAV_DB_PATH:-$TINYNAV_ROOT/tinynav_db}"
 info "TINYNAV_DB_PATH=$TINYNAV_DB_PATH"
-
-export UNITREE_NETWORK_INTERFACE="${UNITREE_NETWORK_INTERFACE:-enP8p1s0}"
-info "UNITREE_NETWORK_INTERFACE=$UNITREE_NETWORK_INTERFACE"
 
 uv run uvicorn app.backend.main:app \
   --host 0.0.0.0 --port "$BACKEND_PORT" \
@@ -131,7 +78,7 @@ for i in $(seq 1 20); do
   [ "$i" -eq 20 ] && warn "Backend may still be starting up..."
 done
 
-# ── 4. Frontend ───────────────────────────────────────────────────────────────
+# ── 2. Frontend ───────────────────────────────────────────────────────────────
 # Flutter CanvasKit (WASM) requires Cross-Origin-Opener-Policy + Cross-Origin-Embedder-Policy
 # headers for SharedArrayBuffer support — python3 -m http.server doesn't set them,
 # which causes a white screen on mobile browsers.
