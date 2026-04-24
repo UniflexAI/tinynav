@@ -100,7 +100,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100):
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100):
     """
         Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -121,6 +121,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
     global_grid_shape = np.ceil(
         (odom_pose_max_position - odom_pose_min_position) / resolution + np.array(raycast_shape)
     ).astype(np.int32)
+    print(f"global_grid_shape : {global_grid_shape}")
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
 
