@@ -73,7 +73,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   Future<void> _emergencyStop() async {
     _linearX = 0; _linearY = 0; _angularZ = 0;
     _sendVelocity();
-    try { await ref.read(dioProvider).post('/nav/cancel'); } catch (_) {}
+    try { await ref.read(dioProvider).post('/nav/restart'); } catch (_) {}
   }
 
   @override

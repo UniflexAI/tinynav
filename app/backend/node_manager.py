@@ -620,6 +620,42 @@ class BackendNode(Ros2NodeManager):
             self._global_path = []
         self.get_logger().info('Nav nodes stopped')
 
+    def cmd_restart_nav_nodes(self):
+        self._kill_proc(self._map_node_proc)
+        self._kill_proc(self._planning_proc)
+        self._kill_proc(self._cmd_vel_proc)
+        self._map_node_proc = None
+        self._planning_proc = None
+        self._cmd_vel_proc = None
+
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+
+        self._planning_proc = self._launch_proc(
+            'planning',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            env=_env,
+        )
+        self._map_node_proc = self._launch_proc(
+            'map_node',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+             '--tinynav_map_path', self.map_path],
+            env=_env,
+        )
+        self._cmd_vel_proc = self._launch_proc(
+            'cmd_vel_control',
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            env=_env,
+        )
+        with self._lock:
+            self._nav_nodes_running = True
+            self._localized = False
+            self._map_pose = None
+            self._global_path = []
+        self.state = 'idle'
+        self._pub_state()
+        self.get_logger().info('Nav nodes restarted (emergency stop)')
+
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
             self._stop_sensor_procs()

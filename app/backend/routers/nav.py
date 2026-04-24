@@ -54,6 +54,15 @@ def nav_nodes_enable():
     return {'ok': True}
 
 
+@router.post('/restart')
+def nav_restart():
+    node = _require_node()
+    if not node._nav_nodes_running:
+        raise HTTPException(409, 'Nav nodes not running')
+    node.cmd_restart_nav_nodes()
+    return {'ok': True}
+
+
 @router.post('/nodes/disable')
 def nav_nodes_disable():
     node = _require_node()
