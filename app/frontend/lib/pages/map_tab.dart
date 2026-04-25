@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,6 +13,11 @@ class MapTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(deviceStatusProvider);
+    final mapAsync = ref.watch(mapInfoProvider);
+    final poisAsync = ref.watch(poisProvider);
+    final poseAsync = ref.watch(poseStreamProvider);
+    final baseUrl = ref.watch(baseUrlProvider);
+    final planning = ref.watch(planningStreamProvider).valueOrNull;
 
     return Column(
       children: [
@@ -383,37 +390,12 @@ class _LocalizationChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // ── Bag recording ───────────────────────────────────────────────
-          statusAsync.when(
-            data: (s) => _BagRecordCard(status: s),
-            loading: () => const _LoadingCard(),
-            error: (e, _) => _ErrorCard('$e'),
+          Icon(Icons.circle, size: 8, color: dotColor),
+          const SizedBox(width: 6),
+          Text(
+            localized ? 'Localized' : 'Not localized',
+            style: const TextStyle(color: Colors.white, fontSize: 12),
           ),
-          const SizedBox(height: 12),
-          _BagFileListCard(
-            onRefresh: () => ref.invalidate(bagFilesProvider),
-          ),
-          const SizedBox(height: 20),
-          // ── Map building ────────────────────────────────────────────────
-          statusAsync.when(
-            data: (s) => _MapBuildCard(status: s),
-            loading: () => const _LoadingCard(),
-            error: (_, __) => const SizedBox.shrink(),
-          ),
-          const SizedBox(height: 12),
-          _FileListCard(
-            title: 'Map Files',
-            icon: Icons.map_outlined,
-            provider: mapFilesProvider,
-            onRefresh: () => ref.invalidate(mapFilesProvider),
-            onTapFile: (f) => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => MapPreviewPage(mapName: f.name),
-              ),
-            ),
-          ),
-          const SizedBox(height: 24),
         ],
       ),
     );
@@ -877,12 +859,22 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
   }
 }
 
-// ── POI list ─────────────────────────────────────────────────────────────────
+// ── Generic file list card ────────────────────────────────────────────────────
 
-class _PoiCard extends ConsumerStatefulWidget {
-  final AsyncValue<List<Poi>> poisAsync;
-  final Pose? pose;
-  const _PoiFloatingButton({required this.poisAsync, this.pose});
+class _FileListCard extends ConsumerWidget {
+  final String title;
+  final IconData icon;
+  final ProviderListenable<AsyncValue<List<FileEntry>>> provider;
+  final VoidCallback onRefresh;
+  final void Function(FileEntry)? onTapFile;
+
+  const _FileListCard({
+    required this.title,
+    required this.icon,
+    required this.provider,
+    required this.onRefresh,
+    this.onTapFile,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -917,6 +909,147 @@ class _PoiCard extends ConsumerStatefulWidget {
           child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
         ),
         error: (e, _) => Text('$e', style: const TextStyle(color: Colors.red, fontSize: 12)),
+      ),
+    );
+  }
+}
+
+// ── POI floating button ───────────────────────────────────────────────────────
+
+class _PoiFloatingButton extends ConsumerStatefulWidget {
+  final AsyncValue<List<Poi>> poisAsync;
+  final Pose? pose;
+
+  const _PoiFloatingButton({required this.poisAsync, this.pose});
+
+  @override
+  ConsumerState<_PoiFloatingButton> createState() => _PoiFloatingButtonState();
+}
+
+class _PoiFloatingButtonState extends ConsumerState<_PoiFloatingButton> {
+  Future<void> _addPoi() async {
+    final pose = widget.pose;
+    if (pose == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No pose — robot must be localized first')),
+      );
+      return;
+    }
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('New POI'),
+        content: TextField(
+          controller: ctrl,
+          decoration: const InputDecoration(labelText: 'Name', hintText: 'e.g. Entrance'),
+          autofocus: true,
+          textCapitalization: TextCapitalization.sentences,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Create')),
+        ],
+      ),
+    );
+    if (ok != true || ctrl.text.trim().isEmpty) return;
+    try {
+      await ref.read(dioProvider).post('/map/pois', data: {
+        'name': ctrl.text.trim(),
+        'position': [pose.x, pose.y, 0.0],
+      });
+      ref.invalidate(poisProvider);
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _deletePoi(Poi poi) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete POI'),
+        content: Text('Delete "${poi.name}"?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ref.read(dioProvider).delete('/poi/${poi.id}');
+      ref.invalidate(poisProvider);
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.place_outlined, size: 20),
+            const SizedBox(width: 8),
+            const Text('POIs', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: _addPoi,
+              icon: const Icon(Icons.add_location_alt_outlined, size: 18),
+              label: const Text('Add at current pose'),
+            ),
+          ]),
+          const Divider(height: 20),
+          widget.poisAsync.when(
+            data: (pois) => pois.isEmpty
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('No POIs yet', style: TextStyle(color: Colors.grey)),
+                    ),
+                  )
+                : Column(
+                    children: pois
+                        .map((poi) => ListTile(
+                              leading: const Icon(Icons.place, color: Colors.amber),
+                              title: Text(poi.name),
+                              subtitle: Text(
+                                '(${poi.x.toStringAsFixed(2)}, ${poi.y.toStringAsFixed(2)})',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(Icons.delete_outline, color: Colors.red),
+                                onPressed: () => _deletePoi(poi),
+                              ),
+                              dense: true,
+                            ))
+                        .toList(),
+                  ),
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (e, _) => Text('$e', style: const TextStyle(color: Colors.red)),
+          ),
+        ]),
       ),
     );
   }
