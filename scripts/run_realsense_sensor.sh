@@ -8,9 +8,16 @@ if ! command -v rs-enumerate-devices >/dev/null 2>&1; then
 	exit 1
 fi
 
-FW_VERSION="$(rs-enumerate-devices | awk -F: '/Firmware Version/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
+RS_ENUM_OUTPUT="$(rs-enumerate-devices 2>&1)" || {
+	echo "Could not enumerate RealSense devices."
+	echo "$RS_ENUM_OUTPUT"
+	exit 1
+}
+
+FW_VERSION="$(awk -F: '/Firmware Version/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' <<<"$RS_ENUM_OUTPUT")"
 if [[ -z "$FW_VERSION" ]]; then
 	echo "Could not detect RealSense firmware version."
+	echo "$RS_ENUM_OUTPUT"
 	exit 1
 fi
 
