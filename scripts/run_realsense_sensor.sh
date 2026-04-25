@@ -1,4 +1,26 @@
 #!/bin/bash
+set -euo pipefail
+
+MIN_FW_VERSION="5.17"
+
+if ! command -v rs-enumerate-devices >/dev/null 2>&1; then
+	echo "rs-enumerate-devices is not installed; cannot check RealSense firmware."
+	exit 1
+fi
+
+FW_VERSION="$(rs-enumerate-devices | awk -F: '/Firmware Version/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
+if [[ -z "$FW_VERSION" ]]; then
+	echo "Could not detect RealSense firmware version."
+	exit 1
+fi
+
+if [[ "$(printf '%s\n%s\n' "$MIN_FW_VERSION" "$FW_VERSION" | sort -V | head -n1)" != "$MIN_FW_VERSION" ]]; then
+	echo "RealSense firmware $FW_VERSION is too old; expected at least $MIN_FW_VERSION."
+	exit 1
+fi
+
+echo "RealSense firmware $FW_VERSION detected."
+
 ros2 launch realsense2_camera rs_launch.py \
 	initial_reset:=true \
 	depth_module.auto_exposure_limit:=1000 \
