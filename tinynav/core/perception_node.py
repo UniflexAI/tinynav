@@ -80,6 +80,7 @@ class Keyframe:
     bias: gtsam.imuBias.ConstantBias
     preintegrated_imu: gtsam.PreintegratedCombinedMeasurements
     latest_imu_timestamp: float
+    imu_measurement_count: int = 0
 
 class PerceptionNode(Node):
     def __init__(self, verbose_timer: bool = True):
@@ -292,6 +293,7 @@ class PerceptionNode(Node):
 
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt) #todo
             self.keyframe_queue[-1].latest_imu_timestamp = timestamp
+            self.keyframe_queue[-1].imu_measurement_count += 1
 
             self.imu_measurements.popleft()
         # specially process the last imu
@@ -299,6 +301,7 @@ class PerceptionNode(Node):
             timestamp, accel, gyro = self.imu_measurements[0]
             dt = current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt)
+            self.keyframe_queue[-1].imu_measurement_count += 1
 
         with Timer(name="[PnP]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
         # do simple pose estimation between last keyframe and current frame
@@ -357,9 +360,17 @@ class PerceptionNode(Node):
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
+                        if keyframe.imu_measurement_count < 26:
+                            self.logger.warning(
+                                f"keyframe {i} at {keyframe.timestamp} only used "
+                                f"{keyframe.imu_measurement_count} imu measurements; expected at least 26"
+                            )
                         imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
                         graph.add(imu_factor)
-                    self.logger.debug(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
+                    self.logger.debug(
+                        f"for frame {i} at {keyframe.timestamp}, added imufactor up to "
+                        f"{keyframe.latest_imu_timestamp} using {keyframe.imu_measurement_count} imu measurements"
+                    )
 
             #with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             #    self.frame_diff_t = []
