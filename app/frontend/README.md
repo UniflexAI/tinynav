@@ -4,14 +4,6 @@ Flutter Web / Android / iOS app for controlling the TinyNav visual navigation mo
 
 ## Quick start
 
-The easiest way is the top-level script (auto-installs Flutter if needed):
-
-```bash
-bash /tinynav/scripts/run_web_app.sh
-```
-
-Or build and serve manually inside the container:
-
 ```bash
 cd /tinynav/app/frontend
 flutter pub get

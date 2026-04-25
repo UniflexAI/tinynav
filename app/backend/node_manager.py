@@ -302,26 +302,15 @@ class BackendNode(Ros2NodeManager):
             )
             if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
-                self.get_logger().info('Sensor mode: looper — launching looper bridge')
+                self.get_logger().info('Sensor mode: looper — launching looper bridge + planning')
             else:
                 self._sensor_mode = 'realsense'
-                self.get_logger().info('Sensor mode: realsense — launching driver and perception')
+                self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
 
             if self._sensor_mode in ('looper', 'realsense'):
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-                lf = self._make_log('perception')
-                self._perception_proc = subprocess.Popen(
-                    ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
-                    preexec_fn=os.setsid, cwd='/tinynav', env=_env,
-                    stdout=lf, stderr=subprocess.STDOUT,
-                )
-                self._perception_proc = subprocess.Popen(
-                    ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                lf.close()
+                self._launch_sensor_procs(_env)
         except Exception as e:
             self.get_logger().warn(f'Sensor detection failed: {e}')
             self._sensor_mode = 'unknown'

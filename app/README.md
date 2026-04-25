@@ -4,19 +4,22 @@ Mobile / web control interface for the TinyNav visual navigation module.
 
 ## Quick start
 
-The fastest way to build and run everything is the provided shell script:
+### Backend
 
 ```bash
-bash /tinynav/scripts/run_web_app.sh
+cd /tinynav
+TINYNAV_DB_PATH=/tinynav/tinynav_db uv run uvicorn app.backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-What it does:
+### Frontend
 
-1. **Starts the backend** — launches FastAPI/uvicorn on port `8000` (sources ROS 2 Humble if available).
-2. **Serves the frontend** — serves `app/frontend/build/web/` on port `8080` with COOP/COEP headers for SharedArrayBuffer support.
-3. **Prints the device IP** and waits; `Ctrl+C` shuts both processes down cleanly.
-
-> **Note:** You must build the frontend first: `cd app/frontend && flutter build web --release`
+```bash
+cd /tinynav/app/frontend
+flutter pub get
+flutter build web --release
+# Then serve build/web/ on your preferred port, e.g.:
+cd build/web && python3 -m http.server 8080
+```
 
 ### Environment variables
 
@@ -25,12 +28,6 @@ What it does:
 | `TINYNAV_DB_PATH` | `<repo>/tinynav_db` | Root path for bag, map, and nav data |
 | `BACKEND_PORT`   | `8000` | Override the backend port |
 | `FRONTEND_PORT`  | `8080` | Override the frontend port |
-
-Example with overrides:
-
-```bash
-TINYNAV_DB_PATH=/data/mydb FRONTEND_PORT=9090 bash /tinynav/scripts/run_web_app.sh
-```
 
 ---
 
