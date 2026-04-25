@@ -18,7 +18,7 @@ cd /tinynav/app/frontend
 flutter pub get
 flutter build web --release
 # Then serve build/web/ on your preferred port, e.g.:
-cd build/web && python3 -m http.server 8080
+cd build/web && uv run python -m http.server 8080
 ```
 
 ### Environment variables
