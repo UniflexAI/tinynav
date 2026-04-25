@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
+import 'map_painter.dart';
 import 'map_preview_page.dart';
+import 'planning_painter.dart';
 
 class MapTab extends ConsumerWidget {
   const MapTab({super.key});
