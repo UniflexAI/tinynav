@@ -23,7 +23,6 @@ from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.action_executor import execute_poi_actions
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
-import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
