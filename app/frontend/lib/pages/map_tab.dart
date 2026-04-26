@@ -15,95 +15,48 @@ class MapTab extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(deviceStatusProvider);
-    final mapAsync = ref.watch(mapInfoProvider);
-    final poisAsync = ref.watch(poisProvider);
-    final poseAsync = ref.watch(poseStreamProvider);
-    final baseUrl = ref.watch(baseUrlProvider);
-    final planning = ref.watch(planningStreamProvider).valueOrNull;
 
-    return Column(
-      children: [
-        RefreshIndicator(
-          onRefresh: () async {
-            ref.invalidate(mapInfoProvider);
-            ref.invalidate(poisProvider);
-            ref.invalidate(bagFilesProvider);
-            ref.invalidate(mapFilesProvider);
-          },
-          child: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              mapAsync.when(
-                data: (mapInfo) => mapInfo == null
-                    ? _LocalPlanningView(planning: planning)
-                    : _MapView(
-                        mapInfo: mapInfo,
-                        imageUrl: '${baseUrl!}${mapInfo.imageUrl}',
-                        pose: poseAsync.valueOrNull,
-                        pois: poisAsync.valueOrNull ?? [],
-                        planning: planning,
-                      ),
-                loading: () => const Card(
-                  child: Padding(padding: EdgeInsets.all(48), child: Center(child: CircularProgressIndicator())),
-                ),
-                error: (e, _) => Card(
-                  color: Colors.red.shade50,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Text('$e', style: const TextStyle(color: Colors.red)),
-                  ),
-                ),
-              ),
-              if (planning != null)
-                Positioned(
-                  top: 8,
-                  left: 8,
-                  child: _LocalizationChip(localized: planning.localized),
-                ),
-              Positioned(
-                bottom: 12,
-                left: 12,
-                child: _PoiFloatingButton(
-                  poisAsync: poisAsync,
-                  pose: poseAsync.valueOrNull,
-                ),
-              ),
-              const SizedBox(height: 12),
-              // ── Bag recording ──────────────────────────────────────────
-              statusAsync.when(
-                data: (s) => _BagRecordCard(status: s),
-                loading: () => const _LoadingCard(),
-                error: (e, _) => _ErrorCard('$e'),
-              ),
-              const SizedBox(height: 12),
-              _BagFileListCard(
-                onRefresh: () => ref.invalidate(bagFilesProvider),
-              ),
-              const SizedBox(height: 20),
-              // ── Map building ───────────────────────────────────────────
-              statusAsync.when(
-                data: (s) => _MapBuildCard(status: s),
-                loading: () => const _LoadingCard(),
-                error: (_, __) => const SizedBox.shrink(),
-              ),
-              const SizedBox(height: 12),
-              _FileListCard(
-                title: 'Map Files',
-                icon: Icons.map_outlined,
-                provider: mapFilesProvider,
-                onRefresh: () => ref.invalidate(mapFilesProvider),
-                onTapFile: (f) => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => MapPreviewPage(mapName: f.name),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-            ],
+    return RefreshIndicator(
+      onRefresh: () async {
+        ref.invalidate(bagFilesProvider);
+        ref.invalidate(mapFilesProvider);
+      },
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          // ── Bag recording ─────────────────────────────────────────────
+          statusAsync.when(
+            data: (s) => _BagRecordCard(status: s),
+            loading: () => const _LoadingCard(),
+            error: (e, _) => _ErrorCard('$e'),
           ),
-        ),
-      ],
+          const SizedBox(height: 12),
+          _BagFileListCard(
+            onRefresh: () => ref.invalidate(bagFilesProvider),
+          ),
+          const SizedBox(height: 20),
+          // ── Map building ──────────────────────────────────────────────
+          statusAsync.when(
+            data: (s) => _MapBuildCard(status: s),
+            loading: () => const _LoadingCard(),
+            error: (_, __) => const SizedBox.shrink(),
+          ),
+          const SizedBox(height: 12),
+          _FileListCard(
+            title: 'Map Files',
+            icon: Icons.map_outlined,
+            provider: mapFilesProvider,
+            onRefresh: () => ref.invalidate(mapFilesProvider),
+            onTapFile: (f) => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => MapPreviewPage(mapName: f.name),
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+        ],
+      ),
     );
   }
 }
