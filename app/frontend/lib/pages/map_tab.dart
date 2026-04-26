@@ -27,6 +27,8 @@ class MapTab extends ConsumerWidget {
           onRefresh: () async {
             ref.invalidate(mapInfoProvider);
             ref.invalidate(poisProvider);
+            ref.invalidate(bagFilesProvider);
+            ref.invalidate(mapFilesProvider);
           },
           child: ListView(
             padding: const EdgeInsets.all(16),
@@ -66,6 +68,38 @@ class MapTab extends ConsumerWidget {
                   pose: poseAsync.valueOrNull,
                 ),
               ),
+              const SizedBox(height: 12),
+              // ── Bag recording ──────────────────────────────────────────
+              statusAsync.when(
+                data: (s) => _BagRecordCard(status: s),
+                loading: () => const _LoadingCard(),
+                error: (e, _) => _ErrorCard('$e'),
+              ),
+              const SizedBox(height: 12),
+              _BagFileListCard(
+                onRefresh: () => ref.invalidate(bagFilesProvider),
+              ),
+              const SizedBox(height: 20),
+              // ── Map building ───────────────────────────────────────────
+              statusAsync.when(
+                data: (s) => _MapBuildCard(status: s),
+                loading: () => const _LoadingCard(),
+                error: (_, __) => const SizedBox.shrink(),
+              ),
+              const SizedBox(height: 12),
+              _FileListCard(
+                title: 'Map Files',
+                icon: Icons.map_outlined,
+                provider: mapFilesProvider,
+                onRefresh: () => ref.invalidate(mapFilesProvider),
+                onTapFile: (f) => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => MapPreviewPage(mapName: f.name),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
             ],
           ),
         ),
