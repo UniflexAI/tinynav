@@ -15,9 +15,12 @@ from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
+import asyncio
 import argparse
+import threading
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
+from tinynav.core.action_executor import execute_poi_actions
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
 import asyncio
@@ -217,7 +220,11 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
 
         self.pois = {}
+        self.pois_data = {}          # index → full POI dict (position + actions)
         self.poi_index = -1
+        self.latest_pose_in_map = None
+        self._action_executing = False
+        self._action_pub = self.create_publisher(String, '/service/command', 10)
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -233,19 +240,42 @@ class MapNode(Node):
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
         try:
-            self.pois = json.loads(msg.data)
-
+            raw = json.loads(msg.data)
             pois_dict = {}
-            keys = sorted([int (key) for key in self.pois.keys()])
+            pois_data = {}
+            keys = sorted([int(key) for key in raw.keys()])
             for index, key in enumerate(keys):
-                pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                poi = raw[str(key)]
+                pois_dict[index] = np.array(poi["position"])
+                pois_data[index] = poi
             self.pois = pois_dict
-
+            self.pois_data = pois_data
             self.poi_index = min(0, len(self.pois) - 1)
+            self._action_executing = False
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
+            self.pois_data = {}
+
+    def _advance_poi(self, timestamp: int) -> None:
+        self.poi_index += 1
+        dummy_pose = np.eye(4)
+        stamp_msg = self.get_clock().now().to_msg()
+        stamp_msg.sec = int(timestamp / 1e9)
+        stamp_msg.nanosec = int(timestamp % 1e9)
+        self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
+
+    def _run_poi_actions(self, poi_idx: int, actions: list) -> None:
+        """Run in a daemon thread; advances poi_index when done."""
+        self.get_logger().info(f"[action] starting {len(actions)} action(s) for POI {poi_idx}")
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(execute_poi_actions(actions, self))
+        loop.close()
+        self.get_logger().info(f"[action] done for POI {poi_idx}, advancing")
+        self._action_executing = False
+        # Use a dummy timestamp; poi_change only signals planning_node to clear target.
+        self._advance_poi(int(self.get_clock().now().nanoseconds))
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -556,19 +586,28 @@ class MapNode(Node):
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
+        self.latest_pose_in_map = pose_in_map
+
+        # If arrival actions are running, hold position and wait.
+        if self._action_executing:
+            return
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
             if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
-                self.poi_index += 1
-                dummy_pose = np.eye(4)
-
-                stamp_msg = self.get_clock().now().to_msg()
-                stamp_msg.sec = int(timestamp / 1e9)
-                stamp_msg.nanosec = int(timestamp % 1e9)
-                self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
+                actions = self.pois_data.get(self.poi_index, {}).get("actions", [])
+                if actions:
+                    self._action_executing = True
+                    thread = threading.Thread(
+                        target=self._run_poi_actions,
+                        args=(self.poi_index, actions),
+                        daemon=True,
+                    )
+                    thread.start()
+                    return
+                self._advance_poi(timestamp)
                 continue
             else:
                 break

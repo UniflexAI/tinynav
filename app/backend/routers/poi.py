@@ -2,7 +2,21 @@
 POI management — reads/writes pois.json in the map directory.
 
 pois.json schema:
-  { "<id_str>": {"id": int, "name": str, "position": [x, y, z]} }
+  {
+    "<id_str>": {
+      "id": int,
+      "name": str,
+      "position": [x, y, z],
+      "actions": [                          # optional; omit or [] for no-op
+        {"type": "lookat", "params": {"target": [x, y, z]}},
+        {"type": "wait",   "params": {"seconds": 3}},
+        {"type": "photo",  "params": {"save_path": "/data/photos"}},
+        {"type": "custom", "params": {"command": "bark"}}
+      ]
+    }
+  }
+
+Supported action types are defined in tinynav/core/action_executor.py.
 """
 from __future__ import annotations
 
