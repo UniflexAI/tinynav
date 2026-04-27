@@ -494,51 +494,11 @@ class _PoiSheet extends ConsumerStatefulWidget {
 
 class _PoiSheetState extends ConsumerState<_PoiSheet> {
   bool _canceling = false;
-
-  Future<void> _addPoi() async {
-    final pose = widget.pose;
-    if (pose == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No pose — robot must be localized first')),
-      );
-      return;
-    }
-    final ctrl = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('New POI'),
-        content: TextField(
-          controller: ctrl,
-          decoration: const InputDecoration(labelText: 'Name', hintText: 'e.g. Entrance'),
-          autofocus: true,
-          textCapitalization: TextCapitalization.sentences,
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Create')),
-        ],
-      ),
-    );
-    if (ok != true || ctrl.text.trim().isEmpty) return;
-    try {
-      await ref.read(dioProvider).post('/map/pois', data: {
-        'name': ctrl.text.trim(),
-        'position': [pose.x, pose.y, 0.0],
-      });
-      ref.invalidate(poisProvider);
-    } on DioException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
-          backgroundColor: Colors.red,
-        ));
-      }
-    }
-  }
+  final Set<int> _checkedIds = {};
+  List<int> _navQueue = [];
 
   Future<void> _cancelNav() async {
-    setState(() => _canceling = true);
+    setState(() { _canceling = true; _navQueue = []; });
     try {
       await ref.read(dioProvider).post('/nav/cancel');
     } on DioException catch (e) {
@@ -572,9 +532,36 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
     if (ok != true) return;
     try {
       await ref.read(dioProvider).delete('/poi/${poi.id}');
+      setState(() => _checkedIds.remove(poi.id));
       ref.invalidate(poisProvider);
     } on DioException catch (e) {
       if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
+  Future<void> _startNav(List<Poi> pois) async {
+    final queue = pois
+        .where((p) => _checkedIds.contains(p.id))
+        .map((p) => p.id)
+        .toList();
+    if (queue.isEmpty) return;
+    setState(() => _navQueue = queue);
+    await _goToNext();
+  }
+
+  Future<void> _goToNext() async {
+    if (_navQueue.isEmpty) return;
+    final nextId = _navQueue.removeAt(0);
+    try {
+      await ref.read(dioProvider).post('/nav/go-to-poi', data: {'poi_id': nextId});
+    } on DioException catch (e) {
+      if (mounted) {
+        setState(() => _navQueue = []);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
@@ -590,6 +577,15 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
     final status = statusAsync.valueOrNull;
     final isNavigating = status?.rawState == 'navigation';
     final canGo = status != null && status.online && status.rawState == 'idle';
+
+    // Auto-advance to next POI in queue when navigation completes.
+    ref.listen<AsyncValue<DeviceStatus>>(deviceStatusProvider, (prev, next) {
+      final wasNav = prev?.valueOrNull?.rawState == 'navigation';
+      final isNowIdle = next.valueOrNull?.rawState == 'idle';
+      if (wasNav && isNowIdle && _navQueue.isNotEmpty) {
+        _goToNext();
+      }
+    });
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
@@ -624,10 +620,16 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
                 label: const Text('Cancel Nav'),
               )
             else
-              TextButton.icon(
-                onPressed: _addPoi,
-                icon: const Icon(Icons.add_location_alt_outlined, size: 18),
-                label: const Text('Add here'),
+              FilledButton.icon(
+                onPressed: (canGo && _checkedIds.isNotEmpty)
+                    ? () => poisAsync.whenData((pois) => _startNav(pois))
+                    : null,
+                icon: const Icon(Icons.navigation_rounded, size: 16),
+                label: const Text('Nav'),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  minimumSize: Size.zero,
+                ),
               ),
           ]),
           const Divider(height: 20),
@@ -644,7 +646,11 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
                     children: pois
                         .map((poi) => _PoiTile(
                               poi: poi,
-                              canGo: canGo,
+                              checked: _checkedIds.contains(poi.id),
+                              onChecked: (v) => setState(() {
+                                if (v) _checkedIds.add(poi.id);
+                                else _checkedIds.remove(poi.id);
+                              }),
                               onDelete: () => _deletePoi(poi),
                             ))
                         .toList(),
@@ -658,66 +664,36 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   }
 }
 
-class _PoiTile extends ConsumerStatefulWidget {
+class _PoiTile extends StatelessWidget {
   final Poi poi;
-  final bool canGo;
+  final bool checked;
+  final ValueChanged<bool> onChecked;
   final VoidCallback onDelete;
 
-  const _PoiTile({required this.poi, required this.canGo, required this.onDelete});
-
-  @override
-  ConsumerState<_PoiTile> createState() => _PoiTileState();
-}
-
-class _PoiTileState extends ConsumerState<_PoiTile> {
-  bool _loading = false;
-
-  Future<void> _go() async {
-    setState(() => _loading = true);
-    try {
-      await ref.read(dioProvider).post('/nav/go-to-poi', data: {'poi_id': widget.poi.id});
-    } on DioException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
-          backgroundColor: Colors.red,
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
+  const _PoiTile({
+    required this.poi,
+    required this.checked,
+    required this.onChecked,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
     return ListTile(
-      leading: const Icon(Icons.place, color: Colors.amber),
-      title: Text(widget.poi.name),
+      leading: Checkbox(
+        value: checked,
+        onChanged: (v) => onChecked(v ?? false),
+      ),
+      title: Text(poi.name),
       subtitle: Text(
-        '(${widget.poi.x.toStringAsFixed(2)}, ${widget.poi.y.toStringAsFixed(2)})',
+        '(${poi.x.toStringAsFixed(2)}, ${poi.y.toStringAsFixed(2)})',
         style: const TextStyle(fontSize: 12),
       ),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _loading
-              ? const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2))
-              : FilledButton(
-                  onPressed: widget.canGo ? _go : null,
-                  style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    minimumSize: Size.zero,
-                  ),
-                  child: const Text('Go', style: TextStyle(fontSize: 12)),
-                ),
-          const SizedBox(width: 4),
-          IconButton(
-            icon: const Icon(Icons.delete_outline, color: Colors.red, size: 18),
-            onPressed: widget.onDelete,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-          ),
-        ],
+      trailing: IconButton(
+        icon: const Icon(Icons.delete_outline, color: Colors.red, size: 18),
+        onPressed: onDelete,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(),
       ),
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
