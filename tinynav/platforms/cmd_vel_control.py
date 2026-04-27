@@ -90,9 +90,8 @@ class CmdVelControlNode(Node):
         # Snap to min effective speed only when starting from standstill — avoids locking at min speed while decelerating.
         if abs(out.linear.x) < 0.05:
             out.linear.x = 0.0
-        elif 0 < out.linear.x < self.min_effective_linear_speed:
-            if self.prev_cmd.linear.x < 0.05:
-                out.linear.x = self.min_effective_linear_speed
+        elif 0 < out.linear.x < self.min_effective_linear_speed and self.prev_cmd.linear.x < 0.05:
+            out.linear.x = self.min_effective_linear_speed
         if abs(out.angular.z) < 0.05:
             out.angular.z = 0.0
 
