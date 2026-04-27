@@ -135,7 +135,7 @@ class CmdVelControlNode(Node):
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.3)
+        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
         if vx < 0.0:
             vx = -self.fixed_reverse_speed
         vy = 0.0
