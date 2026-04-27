@@ -15,12 +15,12 @@ from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
-import asyncio
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
+import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
@@ -234,13 +234,14 @@ class MapNode(Node):
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
         try:
-            raw = json.loads(msg.data)
+            self.pois = json.loads(msg.data)
+
             pois_dict = {}
-            keys = sorted([int(key) for key in raw.keys()])
+            keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
-                poi = raw[str(key)]
-                pois_dict[index] = np.array(poi["position"])
+                pois_dict[index] = np.array(self.pois[str(key)]["position"])
             self.pois = pois_dict
+
             self.poi_index = min(0, len(self.pois) - 1)
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
@@ -547,6 +548,7 @@ class MapNode(Node):
             return
 
         poi = self.pois[self.poi_index]
+        print(f"poi: {poi}")
         poi_pose = np.eye(4)
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -556,17 +558,17 @@ class MapNode(Node):
 
         pose_in_map_position = pose_in_map[:3, 3]
 
-        # Check if arrived at current POI
+        # Check arrival at current POI
+        poi = self.pois[self.poi_index]
         diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
         diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
         if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
             self.get_logger().info(f"Arrived at POI {self.poi_index}!")
-            msg = String()
-            msg.data = json.dumps({"poi_index": self.poi_index, "position": poi.tolist()})
-            self.poi_arrived_pub.publish(msg)
-            # Stop navigating — wait for next /mapping/cmd_pois to set new target
+            arrived_msg = String()
+            arrived_msg.data = json.dumps({"poi_index": self.poi_index, "position": poi.tolist()})
+            self.poi_arrived_pub.publish(arrived_msg)
+            # Stop — wait for next /mapping/cmd_pois
             self.poi_index = -1
-            # Signal planning_node to clear current trajectory
             dummy_pose = np.eye(4)
             stamp_msg = self.get_clock().now().to_msg()
             stamp_msg.sec = int(timestamp / 1e9)
