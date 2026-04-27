@@ -591,6 +591,78 @@ class PlanningNode(Node):
             path = Path()
             path.header = depth_msg.header
             path.header.frame_id = "world"
+
+            # Goal-reached: publish empty path so cmd_vel stops.
+            # target_pose is a camera-frame position (POI was recorded as camera pose),
+            # so compare directly against camera position T[:3, 3].
+            if self.target_pose is not None:
+                dist_to_goal = float(np.linalg.norm(T[:3, 3][:2] - self.target_pose[:2]))
+                if dist_to_goal < 0.3:
+                    self.get_logger().info(f'Goal reached (dist={dist_to_goal:.2f}m), stopping path.')
+                    self.path_pub.publish(path)
+                    return
+
+            if self.target_pose is None and not self.poi_changed:
+                self.path_pub.publish(path)  # empty path — no active nav target
+                return
+
+            # Obstacle recovery: if robot is within 0.3m of an obstacle, normal planning
+            # cannot escape. Back up if the rear is clear, otherwise stop.
+            robot_pos = T[:3, 3]
+            rx = int((robot_pos[0] - self.origin[0]) / self.resolution)
+            ry = int((robot_pos[1] - self.origin[1]) / self.resolution)
+            if 0 <= rx < ESDF_map.shape[0] and 0 <= ry < ESDF_map.shape[1]:
+                robot_clearance = float(ESDF_map[rx, ry])
+            else:
+                robot_clearance = float('inf')
+
+            if robot_clearance < 0.3:
+                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])  # camera +Z = forward
+                back_sample = robot_pos - forward * 0.5
+                bx = int((back_sample[0] - self.origin[0]) / self.resolution)
+                by = int((back_sample[1] - self.origin[1]) / self.resolution)
+                if 0 <= bx < ESDF_map.shape[0] and 0 <= by < ESDF_map.shape[1]:
+                    back_clearance = float(ESDF_map[bx, by])
+                else:
+                    back_clearance = float('inf')
+
+                if back_clearance > 0.3:
+                    # Rear is clear: publish a 2-pose backward path.
+                    # cmd_vel_control will compute negative vx from the backward displacement.
+                    q = odom_msg.pose.pose.orientation
+                    back_target = robot_pos - forward * 0.5
+
+                    def _make_pose(pos):
+                        ps = PoseStamped()
+                        ps.header = depth_msg.header
+                        ps.pose.position.x = float(pos[0])
+                        ps.pose.position.y = float(pos[1])
+                        ps.pose.position.z = float(pos[2])
+                        ps.pose.orientation = q
+                        return ps
+
+                    recovery_path = Path()
+                    recovery_path.header = depth_msg.header
+                    recovery_path.header.frame_id = 'world'
+                    recovery_path.poses = [_make_pose(robot_pos), _make_pose(back_target)]
+                    self.get_logger().info(
+                        f'Recovery: backing up (robot_clearance={robot_clearance:.2f}m, back={back_clearance:.2f}m)'
+                    )
+                    self.path_pub.publish(recovery_path)
+                else:
+                    self.get_logger().info(
+                        f'Recovery: stuck, both sides blocked (robot={robot_clearance:.2f}m, back={back_clearance:.2f}m), stopping'
+                    )
+                    self.path_pub.publish(path)  # empty path
+                return
+
+            # If every trajectory is in collision, stop rather than picking an arbitrary one.
+            if all(s == float('inf') for s in scores):
+                self.get_logger().info('All trajectories in collision, stopping path.')
+                self.path_pub.publish(path)
+                return
+
+
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
