@@ -4,7 +4,6 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Bool, Float32
 import numpy as np
-from numba import njit, prange
 
 from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Header
@@ -29,12 +28,12 @@ import shelve
 from tqdm import tqdm
 import einops
 from tf2_msgs.msg import TFMessage
-from typing import Tuple, Dict
-import json
+from typing import Dict
 
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped,Point
 from scipy.spatial.transform import Rotation as R
+from scipy.ndimage import distance_transform_edt
 
 from rclpy.executors import SingleThreadedExecutor
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
@@ -62,38 +61,6 @@ def z_value_to_color(z, z_min, z_max):
         color.r = 1.0
         color.g = 1.0 - (normalized_z - 0.75) * 4.0
     return color
-
-def convert_nerf_format(output_dir: str, infra1_poses: dict, rgb_intrinscis:np.ndarray, image_size: Tuple[int, int], T_rgb_to_infra1:np.ndarray):
-    camera_model = "PINHOLE"
-    fl_x = rgb_intrinscis[0, 0]
-    fl_y = rgb_intrinscis[1, 1]
-    cx = rgb_intrinscis[0, 2]
-    cy = rgb_intrinscis[1, 2]
-    w = image_size[1]
-    h = image_size[0]
-    frames = []
-    opencv_to_opengl_convention = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-    for timestmap, camera_to_world_pose in infra1_poses.items():
-        camera_to_world_opengl = camera_to_world_pose @ T_rgb_to_infra1 @ opencv_to_opengl_convention
-        frame = {
-            "file_path": f"images/image_{timestmap}.png",
-            "transform_matrix": camera_to_world_opengl.tolist(),
-        }
-        frames.append(frame)
-
-    data = {
-        "camera_model": camera_model,
-        "fl_x": fl_x,
-        "fl_y": fl_y,
-        "cx": cx,
-        "cy": cy,
-        "w": w,
-        "h": h,
-        "frames": frames
-    }
-
-    with open(f"{output_dir}/transforms.json", "w") as f:
-        json.dump(data, f, indent=4)
 
 def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, local_grid:np.ndarray, local_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -133,28 +100,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-@njit(cache=True, parallel=True)
-def sdf_min_dist_parallel(position_grid, positions, sdf_map):
-    """Parallel over grid points: each voxel gets min distance to all positions."""
-    ni, nj, nk = position_grid.shape[0], position_grid.shape[1], position_grid.shape[2]
-    n_pos = positions.shape[0]
-    for i in prange(ni):
-        for j in range(nj):
-            for k in range(nk):
-                gx = position_grid[i, j, k, 0]
-                gy = position_grid[i, j, k, 1]
-                gz = position_grid[i, j, k, 2]
-                min_d = np.inf
-                for p in range(n_pos):
-                    dx = gx - positions[p, 0]
-                    dy = gy - positions[p, 1]
-                    dz = gz - positions[p, 2]
-                    d = np.sqrt(dx * dx + dy * dy + dz * dz)
-                    if d < min_d:
-                        min_d = d
-                sdf_map[i, j, k] = min_d
-
-def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100):
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100):
     """
         Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -164,15 +110,18 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
     """
     raycast_shape = (100, 100, 20)
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    odom_pose_min_position = np.array([np.inf, np.inf, np.inf])
-    odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf])
+    odom_pose_min_position = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+    odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
     for timestamp, odom_pose in poses.items():
         odom_translation = odom_pose[:3, 3]
         odom_pose_min_position = np.minimum(odom_pose_min_position, odom_translation)
         odom_pose_max_position = np.maximum(odom_pose_max_position, odom_translation)
     odom_pose_min_position = np.floor(odom_pose_min_position / resolution) * resolution
     odom_pose_max_position = np.ceil(odom_pose_max_position / resolution) * resolution
-    global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
+    global_grid_shape = np.ceil(
+        (odom_pose_max_position - odom_pose_min_position) / resolution + np.array(raycast_shape)
+    ).astype(np.int32)
+    print(f"global_grid_shape : {global_grid_shape}")
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
 
@@ -186,15 +135,25 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
         odom_position = odom_pose[:3, 3]
         odom_positions.append(odom_position)
 
-    sdf_map = np.full_like(global_grid, np.inf, dtype=np.float32)
-    # compute the sdf w.r.t odom_position: odom_sdf_map[i,j,k] = || (i,j,k)*resolution + origin - odom_position ||
-    ix = np.arange(global_grid_shape[0], dtype=np.float32)
-    iy = np.arange(global_grid_shape[1], dtype=np.float32)
-    iz = np.arange(global_grid_shape[2], dtype=np.float32)
-    xx, yy, zz = np.meshgrid(ix, iy, iz, indexing="ij")
-    grid_positions = global_origin + resolution * np.stack([xx, yy, zz], axis=-1)
-    with Timer(name="sdf_min_dist_baseline", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        sdf_min_dist_parallel(grid_positions, np.array(odom_positions), sdf_map)
+    voxels = int(np.prod(global_grid_shape))
+    print(
+        "[generate_occupancy_map] SDF stage params: "
+        f"resolution={resolution}, step={step}, "
+        f"num_poses={len(odom_positions)}, global_grid_shape={tuple(global_grid_shape.tolist())}, "
+        f"global_origin={global_origin.tolist()}, voxels={voxels}"
+    )
+
+    # Compute SDF as voxel distance to nearest odom seed using SciPy EDT.
+    with Timer(name="sdf_distance_transform_edt", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        if len(odom_positions) == 0:
+            sdf_map = np.full(global_grid_shape, np.inf, dtype=np.float32)
+        else:
+            seed_mask = np.ones(global_grid_shape, dtype=np.uint8)
+            odom_positions_np = np.asarray(odom_positions, dtype=np.float32)
+            seed_indices = np.rint((odom_positions_np - global_origin) / resolution).astype(np.int32)
+            seed_indices = np.clip(seed_indices, 0, global_grid_shape - 1)
+            seed_mask[seed_indices[:, 0], seed_indices[:, 1], seed_indices[:, 2]] = 0
+            sdf_map = distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
 
     # 0 is the unknown.
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
@@ -362,6 +321,10 @@ class BagPlayer(Node):
             pub = self.create_publisher(msg_type, topic_info.name, 10)
             self._topic_publishers[topic_info.name] = (pub, msg_type)
 
+        self.get_logger().info("Bag topics and message types:")
+        for topic_info in sorted(topic_infos, key=lambda t: t.name):
+            self.get_logger().info(f"  {topic_info.name} -> {topic_info.type}")
+
         # /clock publisher (for use_sim_time)
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
         self._mapping_percent_pub = self.create_publisher(Float32, "/mapping/percent", 10)
@@ -468,7 +431,8 @@ class BuildMapNode(Node):
         # Add stop signal subscription and save finished publisher
         self.mapping_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.mapping_stop_callback, 10)
         self.mapping_save_finished_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
-        self.ts = ApproximateTimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000, 0.02)
+        # Keep sync queue bounded to reduce memory spikes/OOM risk on Jetson during map building.
+        self.ts = ApproximateTimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 200, 0.02)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
@@ -498,15 +462,18 @@ class BuildMapNode(Node):
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
 
-        self.edges = set()
-
     def tf_callback(self, msg:TFMessage):
         T_infra1_to_link = None
         T_infra1_optical_to_infra1 = None
         T_rgb_to_link = None
         T_rgb_optical_to_rgb = None
+        tf_messages: Dict[int, Dict[str, np.ndarray]] = {}
         for t in msg.transforms:
             frame_id, child_frame_id, T = tf2np(t)
+            timestamp_ns = int(t.header.stamp.sec * 1e9) + int(t.header.stamp.nanosec)
+            if timestamp_ns not in tf_messages:
+                tf_messages[timestamp_ns] = {}
+            tf_messages[timestamp_ns][f"{frame_id}->{child_frame_id}"] = T
             if frame_id == "camera_link" and child_frame_id == "camera_infra1_frame":
                 T_infra1_to_link = T
             if frame_id == "camera_infra1_frame" and child_frame_id == "camera_infra1_optical_frame":
@@ -522,6 +489,15 @@ class BuildMapNode(Node):
 
         if T_infra1_optical_to_infra1 is not None and T_rgb_optical_to_rgb is not None and T_infra1_to_link is not None and T_rgb_to_link is not None:
             self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
+        if tf_messages and self.T_rgb_to_infra1 is not None:
+            np.save(f"{self.map_save_path}/tf_messages.npy", tf_messages, allow_pickle=True)
+            if self.tf_sub is not None:
+                self.destroy_subscription(self.tf_sub.sub)
+                self.tf_sub = None
+            if self.tf_static_sub is not None:
+                self.destroy_subscription(self.tf_static_sub.sub)
+                self.tf_static_sub = None
+            self.get_logger().info("Saved tf_messages.npy and unsubscribed from /tf and /tf_static")
 
     def rgb_camera_info_callback(self, msg:CameraInfo):
         if self.rgb_camera_K is None:
@@ -597,7 +573,6 @@ class BuildMapNode(Node):
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
                 T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
                 self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
-                self.edges.add((self.last_keyframe_timestamp, keyframe_image_timestamp))
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
                 self.odom[keyframe_image_timestamp] = odom
 
@@ -621,7 +596,6 @@ class BuildMapNode(Node):
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                                self.edges.add((prev_timestamp, curr_timestamp))
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
                 find_loop_and_pose_graph(keyframe_image_timestamp)
@@ -696,27 +670,23 @@ class BuildMapNode(Node):
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
-        np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
+
+        # Flush and close writable DB first, then reopen DB for occupancy generation.
+        self.db.close()
+        occupancy_db = TinyNavDB(self.map_save_path, is_scratch=False)
 
         # Generate occupancy map
-        occupancy_resolution = 0.05
+        occupancy_resolution = 0.1
         occupancy_step = 10
-        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
+        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
+            self.pose_graph_used_pose, occupancy_db, self.K, self.baseline, occupancy_resolution, occupancy_step
+        )
+        occupancy_db.close()
         occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
         np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
         np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
         np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
         cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
-
-        image_size = None
-        os.makedirs(f"{self.map_save_path}/images", exist_ok=True)
-        for timestamp, infra1_pose in self.pose_graph_used_pose.items():
-            _, _, _, rgb_image, _ = self.db.get_depth_embedding_features_images(timestamp)
-            if image_size is None:
-                image_size = rgb_image.shape[:2]
-            cv2.imwrite(f"{self.map_save_path}/images/image_{timestamp}.png", rgb_image)
-        convert_nerf_format(self.map_save_path, self.pose_graph_used_pose, self.rgb_camera_K, image_size, self.T_rgb_to_infra1)
-        self.db.close()
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")

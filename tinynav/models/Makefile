@@ -13,6 +13,7 @@ DINO_ONNX        := dinov2_base_224x224_fp16.onnx
 SUPERPOINT_ONNX  := superpoint_fp16_dynamic.onnx
 LIGHTGLUE_ONNX   := lightglue_fp16.onnx
 RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
+FOUNDATION_STEREO_ONNX := foundation_stereo.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -23,10 +24,11 @@ LIGHTGLUE_ENGINE  := $(basename $(LIGHTGLUE_ONNX))_$(ARCH).plan
 # - Retinify: one profile, min/max shapes for RealSense (480x848) and Looper (640x544).
 SUPERPOINT_ENGINE := $(basename $(SUPERPOINT_ONNX))_$(ARCH).plan
 RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
+FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
 
 ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE)
 
-.PHONY: all dinov2 superpoint lightglue retinify clean help
+.PHONY: all dinov2 superpoint lightglue retinify foundation_stereo clean help
 
 all: $(ENGINES)
 
@@ -34,6 +36,7 @@ dinov2: $(DINO_ENGINE)
 superpoint: $(SUPERPOINT_ENGINE)
 lightglue: $(LIGHTGLUE_ENGINE)
 retinify: $(RETINIFY_ENGINE)
+foundation_stereo: $(FOUNDATION_STEREO_ENGINE)
 
 help:
     @echo "Targets:"
@@ -42,6 +45,7 @@ help:
 	@echo "  make superpoint   # Build SuperPoint"
 	@echo "  make lightglue    # Build LightGlue"
 	@echo "  make retinify     # Build Retinify (dynamic, RealSense+Looper)"
+	@echo "  make foundation_stereo # Build foundation stereo"
 	@echo "  make clean        # Remove *_$(ARCH).plan"
 
 $(DINO_ENGINE): $(DINO_ONNX)
@@ -72,6 +76,12 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
         --precisionConstraints=obey \
         --layerPrecisions='/cost_volume/Unsqueeze:fp16,/cost_volume/post_process/conv_block3/conv_block3.0/BatchNormalization:fp32,/cost_volume/post_process/norm/norm.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block3/disp_block3.2/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.9/bn/block/block.1/Relu:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.0/BatchNormalization:fp32,/disparity_refinement/disp_block5/disp_block5.10/block/block.1/Relu:fp32,/disparity_refinement/upsample2_conv/upsample2_conv.0/BatchNormalization:fp32' \
         --fp16
+
+# foundation_stereo.onnx export settings:
+#   --valid_iters 8
+#   --max_disp 192
+$(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
 
 
 clean:

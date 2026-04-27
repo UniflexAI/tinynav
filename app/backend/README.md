@@ -82,6 +82,15 @@ The interactive API docs are available at `http://<host>:8000/docs`.
 | `/ws/status` | ~1 s | Full device status JSON |
 | `/ws/pose` | On every odometry message | `{x, y, z, yaw, timestamp, source}` |
 | `/ws/map-update` | On map file change | `{event: "map_updated", timestamp}` |
+| `/ws/preview?topic=<topic>` | ~5 fps | Raw JPEG bytes for the selected camera topic |
+| `/ws/planning` | ~5 fps | `{localized, odom_pose, map_pose, esdf_image, obstacle_image, trajectory, grid_info}` |
+
+### Sensor / camera
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/sensor/mode` | Detected sensor mode: `looper`, `realsense`, or `unknown` |
+| `GET` | `/sensor/image-topics` | List of available camera topics |
 
 ## File structure
 

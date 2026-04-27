@@ -368,3 +368,5 @@ Thanks to our sponsor(s) for supporting the development of this project:
 
 **DeepMirror** - https://www.deepmirror.com/
 
+**Looper Robotics** - https://looper-robotics.com/
+

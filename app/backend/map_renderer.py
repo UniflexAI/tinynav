@@ -43,8 +43,10 @@ def render_map(map_path: str) -> tuple[bytes, dict]:
     img[free_2d] = [210, 210, 210]
     img[occupied_2d] = [35, 35, 35]
 
-    # Image row 0 = world-Y max (flip so +Y is up on screen)
-    img = np.flipud(img.transpose(1, 0, 2))  # (Ny, Nx, 3) with Y-flip
+    # Grid is (Nx, Ny, Nz): axis-0=X, axis-1=Y.
+    # Transpose (1,0,2) → (Ny, Nx, 3): rows=Y, cols=X.
+    # flipud → row 0 = max Y, so Y increases upward (matches painter: X=right, Y=up).
+    img = np.flipud(img.transpose(1, 0, 2))
 
     pil_img = Image.fromarray(img, mode='RGB')
     buf = io.BytesIO()
@@ -54,6 +56,6 @@ def render_map(map_path: str) -> tuple[bytes, dict]:
         'origin_x': origin_x,
         'origin_y': origin_y,
         'resolution': resolution,
-        'width': ny,    # image columns ↔ world-X
-        'height': nx,   # image rows    ↔ world-Y
+        'width': nx,    # image cols (Nx) ↔ world-X (horizontal)
+        'height': ny,   # image rows (Ny) ↔ world-Y (vertical, inverted)
     }

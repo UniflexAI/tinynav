@@ -15,6 +15,7 @@ import  viser.transforms as vtf
 import viser
 from viser import transforms as tf
 import json
+import cv2
 from rclpy.node import Node
 import rclpy
 import os
@@ -336,9 +337,10 @@ def main(
             )
             create_poi_ui(server, poi_list_container,poi_id, poi_points, sphere_handle)
     
-    # Load and visualize occupancy grid
+    # Load and visualize occupancy grid as 2D XY projection (same as build_map_node).
     occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
     occupancy_meta_path = tinynav_map_path / "occupancy_meta.npy"
+    sdf_map_path = tinynav_map_path / "sdf_map.npy"
     
     if occupancy_grid_path.exists() and occupancy_meta_path.exists():
         print(f"Loading occupancy grid from {tinynav_map_path}")
@@ -353,62 +355,194 @@ def main(
         print(f"Origin: ({origin[0]:.3f}, {origin[1]:.3f}, {origin[2]:.3f})")
         print(f"Resolution: {resolution:.3f} m")
         
-        # Convert occupancy grid to point cloud
-        # Values follow build_map_node.generate_occupancy_map:
-        #   0 = Unknown, 1 = Free, 2 = Occupied
-        free_indices = np.argwhere(occupancy_grid == 1)  # Free
-        occupied_indices = np.argwhere(occupancy_grid == 2)  # Occupied
-        
-        # Convert voxel indices to world coordinates
-        origin_np = np.array(origin)
-        free_points = origin_np + free_indices * resolution if len(free_indices) > 0 else np.array([]).reshape(0, 3)
-        occupied_points = origin_np + occupied_indices * resolution if len(occupied_indices) > 0 else np.array([]).reshape(0, 3)
+        # build_map_node projection:
+        # x_y_plane = np.max(grid_type, axis=2), where 0=unknown, 1=free, 2=occupied.
+        x_y_plane = np.max(occupancy_grid, axis=2)
+        unknown_indices = np.argwhere(x_y_plane == 0)
+        free_indices = np.argwhere(x_y_plane == 1)
+        occupied_indices = np.argwhere(x_y_plane == 2)
+        esdf_max_dist = 1.0
 
-        # Create colors: Free = green, Occupied = red
+        # Project to one Z plane in world coordinates.
+        z_plane = float(origin[2])
+
+        def _xy_to_world_points(xy_indices: np.ndarray) -> np.ndarray:
+            if len(xy_indices) == 0:
+                return np.array([]).reshape(0, 3)
+            points = np.zeros((len(xy_indices), 3), dtype=np.float32)
+            points[:, 0] = float(origin[0]) + xy_indices[:, 0] * float(resolution)
+            points[:, 1] = float(origin[1]) + xy_indices[:, 1] * float(resolution)
+            points[:, 2] = z_plane
+            return points
+
+        unknown_points = _xy_to_world_points(unknown_indices)
+        free_points = _xy_to_world_points(free_indices)
+        occupied_points = _xy_to_world_points(occupied_indices)
+
+        def _xyz_to_world_points(xyz_indices: np.ndarray) -> np.ndarray:
+            if len(xyz_indices) == 0:
+                return np.array([]).reshape(0, 3)
+            points = np.zeros((len(xyz_indices), 3), dtype=np.float32)
+            points[:, 0] = float(origin[0]) + xyz_indices[:, 0] * float(resolution)
+            points[:, 1] = float(origin[1]) + xyz_indices[:, 1] * float(resolution)
+            points[:, 2] = float(origin[2]) + xyz_indices[:, 2] * float(resolution)
+            return points
+
+        # 2D map color semantics: occupied=gray tall columns, free=blue, unknown=black.
+        unknown_handle = None
         free_handle = None
         occupied_handle = None
+        sdf_search_handle = None
+        sdf_3d_handle = None
+        if len(unknown_points) > 0:
+            unknown_colors = np.zeros((len(unknown_points), 3), dtype=np.float32)
+            print(f"Adding {len(unknown_points)} unknown 2D cells (black)")
+            unknown_handle = server.scene.add_point_cloud(
+                "/occupancy_2d/unknown",
+                points=unknown_points,
+                colors=unknown_colors,
+                point_size=resolution * 0.8,
+                point_shape="rounded",
+            )
+
         if len(free_points) > 0:
-            free_colors = np.zeros((len(free_points), 3), dtype=np.float32)
-            free_colors[:, 1] = 1.0  # Green for free space
-            print(f"Adding {len(free_points)} free space points (green)")
-            
-            # Add free space point cloud
+            free_colors = np.tile(np.array([[0.2, 0.4, 1.0]], dtype=np.float32), (len(free_points), 1))
+            print(f"Adding {len(free_points)} free 2D cells")
             free_handle = server.scene.add_point_cloud(
-                "/occupancy_grid/free",
+                "/occupancy_2d/free",
                 points=free_points,
                 colors=free_colors,
-                point_size=resolution * 0.8,  # Slightly smaller than voxel size
+                point_size=resolution * 0.8,
                 point_shape="rounded",
             )
+
+        # Load and visualize true 3D SDF voxels (no 2D fallback).
+        if sdf_map_path.exists():
+            sdf_map = np.load(sdf_map_path).astype(np.float32)
+            if sdf_map.shape == occupancy_grid.shape:
+                traversable_mask = occupancy_grid != 2
+                sdf_valid_mask = np.logical_and(traversable_mask, np.isfinite(sdf_map))
+                sdf_indices_all = np.argwhere(sdf_valid_mask)
+                max_points = 400_000
+                if len(sdf_indices_all) > max_points:
+                    stride = int(np.ceil(len(sdf_indices_all) / max_points))
+                    sdf_indices = sdf_indices_all[::stride]
+                else:
+                    sdf_indices = sdf_indices_all
+                sdf_points = _xyz_to_world_points(sdf_indices)
+                sdf_values = np.clip(
+                    sdf_map[sdf_indices[:, 0], sdf_indices[:, 1], sdf_indices[:, 2]],
+                    0.0,
+                    esdf_max_dist,
+                )
+                v = np.uint8((1.0 - sdf_values / esdf_max_dist) * 255.0)
+                sdf_colors_bgr = cv2.applyColorMap(v.reshape(-1, 1), cv2.COLORMAP_JET).reshape(-1, 3)
+                sdf_colors = sdf_colors_bgr[:, ::-1].astype(np.float32) / 255.0
+                print(f"Adding {len(sdf_points)} sampled 3D SDF voxels")
+                sdf_3d_handle = server.scene.add_point_cloud(
+                    "/occupancy_3d/sdf",
+                    points=sdf_points,
+                    colors=sdf_colors,
+                    point_size=resolution * 0.7,
+                    point_shape="rounded",
+                )
+
+                sdf_search_threshold = 0.2
+                sdf_search_mask = np.logical_and(sdf_valid_mask, sdf_map < sdf_search_threshold)
+                sdf_search_indices_all = np.argwhere(sdf_search_mask)
+                max_search_points = 300_000
+                if len(sdf_search_indices_all) > max_search_points:
+                    stride = int(np.ceil(len(sdf_search_indices_all) / max_search_points))
+                    sdf_search_indices = sdf_search_indices_all[::stride]
+                else:
+                    sdf_search_indices = sdf_search_indices_all
+                sdf_search_points = _xyz_to_world_points(sdf_search_indices)
+                if len(sdf_search_points) > 0:
+                    sdf_search_colors = np.tile(
+                        np.array([[1.0, 0.0, 1.0]], dtype=np.float32), (len(sdf_search_points), 1)
+                    )
+                    print(
+                        f"Adding {len(sdf_search_points)} sampled SDF search voxels "
+                        f"(sdf < {sdf_search_threshold:.2f} m, magenta)"
+                    )
+                    sdf_search_handle = server.scene.add_point_cloud(
+                        "/occupancy_3d/sdf_search_region",
+                        points=sdf_search_points,
+                        colors=sdf_search_colors,
+                        point_size=resolution * 0.8,
+                        point_shape="rounded",
+                    )
+            else:
+                print(
+                    f"Warning: sdf_map shape mismatch, expected {occupancy_grid.shape}, got {sdf_map.shape}. "
+                    "Skip SDF visualization."
+                )
+        else:
+            print(f"Warning: Missing {sdf_map_path}. Skip SDF visualization.")
         
         if len(occupied_points) > 0:
-            occupied_colors = np.zeros((len(occupied_points), 3), dtype=np.float32)
-            occupied_colors[:, 0] = 1.0  # Red for occupied
-            print(f"Adding {len(occupied_points)} occupied points (red)")
-            # Add occupied space point cloud
+            occupied_column_height = 0.8  # meters
+            z_levels = np.arange(
+                z_plane + float(resolution) * 0.5,
+                z_plane + occupied_column_height,
+                float(resolution),
+                dtype=np.float32,
+            )
+            occupied_column_points = np.repeat(occupied_points, len(z_levels), axis=0)
+            occupied_column_points[:, 2] = np.tile(z_levels, len(occupied_points))
+            # Occupied color = ESDF zero color in the same JET colormap.
+            wall_zero_bgr = cv2.applyColorMap(np.array([[255]], dtype=np.uint8), cv2.COLORMAP_JET)[0, 0]
+            wall_zero_rgb = wall_zero_bgr[::-1].astype(np.float32) / 255.0
+            wall_light_rgb = np.clip(0.55 * wall_zero_rgb + 0.45 * np.ones(3, dtype=np.float32), 0.0, 1.0)
+            occupied_colors = np.tile(wall_light_rgb[None, :], (len(occupied_column_points), 1))
+            print(
+                f"Adding {len(occupied_points)} occupied cells as "
+                f"{len(occupied_column_points)} ESDF-zero-color column points"
+            )
             occupied_handle = server.scene.add_point_cloud(
-                "/occupancy_grid/occupied",
-                points=occupied_points,
+                "/occupancy_2d/occupied",
+                points=occupied_column_points,
                 colors=occupied_colors,
-                point_size=resolution * 0.8,  # Slightly smaller than voxel size
+                point_size=resolution * 0.8,
                 point_shape="rounded",
             )
         
-        # Add UI controls for occupancy grid
-        if free_handle is not None or occupied_handle is not None:
-            # Default: show occupied, hide free
+        if (
+            unknown_handle is not None
+            or free_handle is not None
+            or occupied_handle is not None
+            or sdf_3d_handle is not None
+            or sdf_search_handle is not None
+        ):
+            # Default visibility for projected 2D occupancy.
+            if unknown_handle is not None:
+                unknown_handle.visible = False
             if free_handle is not None:
-                free_handle.visible = False
+                free_handle.visible = True
             if occupied_handle is not None:
                 occupied_handle.visible = True
+            if sdf_3d_handle is not None:
+                sdf_3d_handle.visible = False
+            if sdf_search_handle is not None:
+                sdf_search_handle.visible = False
 
-            with server.gui.add_folder("Occupancy Grid") as _:
-                show_free = server.gui.add_checkbox("Show Free Space", initial_value=False)
+            point_size_init = float(resolution * 0.8)
+            point_size_max = max(0.1, point_size_init)
+            with server.gui.add_folder("Occupancy 2D Map") as _:
+                show_unknown = server.gui.add_checkbox("Show Unknown", initial_value=False)
+                show_free = server.gui.add_checkbox("Show Free", initial_value=True)
                 show_occupied = server.gui.add_checkbox("Show Occupied", initial_value=True)
+                show_sdf_3d = server.gui.add_checkbox("Show SDF 3D", initial_value=False)
+                show_sdf_search_region = server.gui.add_checkbox("Show SDF<0.2m Region", initial_value=False)
                 point_size_slider = server.gui.add_slider(
-                    "Point Size", min=0.001, max=0.1, step=0.001, initial_value=float(resolution * 0.8)
+                    "Point Size", min=0.001, max=point_size_max, step=0.001, initial_value=point_size_init
                 )
                 
+                @show_unknown.on_update
+                def _(_) -> None:
+                    if unknown_handle is not None:
+                        unknown_handle.visible = show_unknown.value
+
                 @show_free.on_update
                 def _(_) -> None:
                     if free_handle is not None:
@@ -418,13 +552,29 @@ def main(
                 def _(_) -> None:
                     if occupied_handle is not None:
                         occupied_handle.visible = show_occupied.value
+
+                @show_sdf_3d.on_update
+                def _(_) -> None:
+                    if sdf_3d_handle is not None:
+                        sdf_3d_handle.visible = show_sdf_3d.value
+
+                @show_sdf_search_region.on_update
+                def _(_) -> None:
+                    if sdf_search_handle is not None:
+                        sdf_search_handle.visible = show_sdf_search_region.value
                 
                 @point_size_slider.on_update
                 def _(_) -> None:
+                    if unknown_handle is not None:
+                        unknown_handle.point_size = point_size_slider.value
                     if free_handle is not None:
                         free_handle.point_size = point_size_slider.value
                     if occupied_handle is not None:
                         occupied_handle.point_size = point_size_slider.value
+                    if sdf_3d_handle is not None:
+                        sdf_3d_handle.point_size = point_size_slider.value
+                    if sdf_search_handle is not None:
+                        sdf_search_handle.point_size = point_size_slider.value
     else:
         print(f"Warning: Occupancy grid files not found in {tinynav_map_path}")
         if not occupancy_grid_path.exists():
@@ -433,19 +583,19 @@ def main(
             print(f"  Missing: {occupancy_meta_path}")
     
     poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
-    rgb_camera_K = np.load(tinynav_map_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
-    rgb_images = shelve.open(f"{tinynav_map_path}/rgb_images")
-    T_rgb_to_infra1 = np.load(tinynav_map_path / "T_rgb_to_infra1.npy", allow_pickle=True)
+    if (tinynav_map_path / "intrinsics.npy").exists():
+        camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
+    elif (tinynav_map_path / "rgb_camera_intrinsics.npy").exists():
+        camera_K = np.load(tinynav_map_path / "rgb_camera_intrinsics.npy", allow_pickle=True)
+    else:
+        raise FileNotFoundError("Neither intrinsics.npy nor rgb_camera_intrinsics.npy exists.")
 
-    fx, _, cx, cy = rgb_camera_K[0, 0], rgb_camera_K[1, 1], rgb_camera_K[0, 2], rgb_camera_K[1, 2]
+    fx, _, cx, cy = camera_K[0, 0], camera_K[1, 1], camera_K[0, 2], camera_K[1, 2]
     with server.gui.add_folder("cameras") as _:
-        for timestamp, rgb_pose in poses.items():
-            rgb_pose = rgb_pose @ T_rgb_to_infra1 
-            rgb_image = rgb_images[str(timestamp)]
-            _ = rgb_image.shape[:2]
-            R = vtf.SO3.from_matrix(rgb_pose[:3, :3])
-            t = rgb_pose[:3, 3]
-            camera_frustum = server.scene.add_camera_frustum(
+        for timestamp, camera_pose in poses.items():
+            R = vtf.SO3.from_matrix(camera_pose[:3, :3])
+            t = camera_pose[:3, 3]
+            _ = server.scene.add_camera_frustum(
                 name=f"/cameras/camera_{timestamp}",
                 fov=float(2 * np.arctan((cx / fx))),
                 scale=0.01,
@@ -527,4 +677,3 @@ def main(
 
 if __name__ == "__main__":
     tyro.cli(main)
-
