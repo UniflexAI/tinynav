@@ -15,12 +15,9 @@ from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
-import asyncio
 import argparse
-import threading
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.action_executor import execute_poi_actions
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
 from tf2_ros import TransformBroadcaster
@@ -218,15 +215,19 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
 
-        self.pois = {}
-        self.pois_data = {}          # index → full POI dict (position + actions)
-        self.poi_index = -1
+        self.pois = {}                          # poi_id → position (np.array)
+        self.current_target_poi_id = None        # currently navigating to this POI id
+        self.current_target_position = None      # position of current target
         self.latest_pose_in_map = None
-        self._action_executing = False
-        self._action_pub = self.create_publisher(String, '/service/command', 10)
+
+        # Navigation target interface: receive a POI id/name to navigate to
+        self.create_subscription(String, '/nav/target_poi', self._on_target_poi, 10)
+        # Arrival signal: published when robot reaches the target POI
+        self.poi_arrived_pub = self.create_publisher(String, '/poi_arrived', 10)
+        # POI change signal: tells planning_node to reset trajectory
+        self.poi_change_pub = self.create_publisher(Odometry, '/mapping/poi_change', 10)
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
-        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
@@ -236,45 +237,46 @@ class MapNode(Node):
 
         self._save_completed = False
 
+    def _on_target_poi(self, msg: String) -> None:
+        """Receive a POI id/name and start navigating to it."""
+        poi_id = msg.data.strip()
+        self.get_logger().info(f"Received target POI: {poi_id}")
+
+        # Look up position from loaded POIs
+        poi_pos = self.pois.get(poi_id)
+        if poi_pos is None:
+            self.get_logger().error(f"POI '{poi_id}' not found in loaded POIs, ignoring")
+            return
+
+        self.current_target_poi_id = poi_id
+        self.current_target_position = poi_pos
+        self.get_logger().info(f"Navigating to POI '{poi_id}' at {poi_pos}")
+        # Signal planning_node to reset its trajectory for the new target
+        self._publish_poi_change()
+
+    def _publish_poi_change(self) -> None:
+        """Publish a /mapping/poi_change signal so planning_node resets its trajectory."""
+        stamp_msg = self.get_clock().now().to_msg()
+        self.poi_change_pub.publish(np2msg(np.eye(4), stamp_msg, "world", "map"))
+
     def pois_callback(self, msg: String):
+        """Load POIs from /mapping/cmd_pois. Stores poi_id → position mapping."""
         self.get_logger().info("Received POIs from planner: " + msg.data)
         try:
             raw = json.loads(msg.data)
             pois_dict = {}
-            pois_data = {}
-            keys = sorted([int(key) for key in raw.keys()])
-            for index, key in enumerate(keys):
-                poi = raw[str(key)]
-                pois_dict[index] = np.array(poi["position"])
-                pois_data[index] = poi
+            for key, poi in raw.items():
+                poi_id = str(poi.get("id", key))
+                pois_dict[poi_id] = np.array(poi["position"])
+                # Also allow lookup by name
+                name = poi.get("name")
+                if name and name != poi_id:
+                    pois_dict[name] = np.array(poi["position"])
             self.pois = pois_dict
-            self.pois_data = pois_data
-            self.poi_index = min(0, len(self.pois) - 1)
-            self._action_executing = False
-            self.get_logger().info(f"Parsed POIs: {self.pois}")
+            self.get_logger().info(f"Loaded {len(raw)} POIs, {len(pois_dict)} lookup keys")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
-            self.pois_data = {}
-
-    def _advance_poi(self, timestamp: int) -> None:
-        self.poi_index += 1
-        dummy_pose = np.eye(4)
-        stamp_msg = self.get_clock().now().to_msg()
-        stamp_msg.sec = int(timestamp / 1e9)
-        stamp_msg.nanosec = int(timestamp % 1e9)
-        self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
-
-    def _run_poi_actions(self, poi_idx: int, actions: list) -> None:
-        """Run in a daemon thread; advances poi_index when done."""
-        self.get_logger().info(f"[action] starting {len(actions)} action(s) for POI {poi_idx}")
-        loop = asyncio.new_event_loop()
-        loop.run_until_complete(execute_poi_actions(actions, self))
-        loop.close()
-        self.get_logger().info(f"[action] done for POI {poi_idx}, advancing")
-        self._action_executing = False
-        # Use a dummy timestamp; poi_change only signals planning_node to clear target.
-        self._advance_poi(int(self.get_clock().now().nanoseconds))
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -567,55 +569,38 @@ class MapNode(Node):
             self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
             return
 
-        if self.poi_index == -1:
-            self.get_logger().info("No POI found, skip publishing nav path")
+        if self.current_target_poi_id is None or self.current_target_position is None:
+            # No target set — stay put
             return
 
-        if self.poi_index >= len(self.pois):
-            self.get_logger().info("All POIs have been visited, skip publishing nav path")
-            return
-
-        poi = self.pois[self.poi_index]
-        print(f"poi: {poi}")
+        # Publish current target POI for visualization
         poi_pose = np.eye(4)
-        poi_pose[:3, 3] = poi
+        poi_pose[:3, 3] = self.current_target_position
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
-        # get the pose from the map to the odom
+
+        # Compute current pose in map frame
         pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
         self.latest_pose_in_map = pose_in_map
 
-        # If arrival actions are running, hold position and wait.
-        if self._action_executing:
+        # Check if we have arrived at the target POI
+        diff_position_norm_xy = np.linalg.norm(self.current_target_position[:2] - pose_in_map_position[:2])
+        diff_position_norm_z = np.linalg.norm(self.current_target_position[2] - pose_in_map_position[2])
+        if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+            self.get_logger().info(f"Arrived at POI '{self.current_target_poi_id}'!")
+            msg = String()
+            msg.data = json.dumps({"poi_id": self.current_target_poi_id, "position": self.current_target_position.tolist()})
+            self.poi_arrived_pub.publish(msg)
+            # Signal planning_node to stop current trajectory
+            self._publish_poi_change()
+            # Clear target — stop navigating until next /nav/target_poi
+            self.current_target_poi_id = None
+            self.current_target_position = None
             return
 
-        while self.poi_index < len(self.pois):
-            poi = self.pois[self.poi_index]
-            diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
-            diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
-                actions = self.pois_data.get(self.poi_index, {}).get("actions", [])
-                if actions:
-                    self._action_executing = True
-                    thread = threading.Thread(
-                        target=self._run_poi_actions,
-                        args=(self.poi_index, actions),
-                        daemon=True,
-                    )
-                    thread.start()
-                    return
-                self._advance_poi(timestamp)
-                continue
-            else:
-                break
-
-        if self.poi_index >= len(self.pois):
-            self.get_logger().info("All POIs have been visited, skip publishing nav path")
-            return
-
-        target_poi = self.pois[self.poi_index]
+        target_poi = self.current_target_position
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
 

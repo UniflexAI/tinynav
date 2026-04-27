@@ -16,7 +16,7 @@ pois.json schema:
     }
   }
 
-Supported action types are defined in tinynav/core/action_executor.py.
+Supported action types are implemented as blocking skills in tinynav/skills/.
 """
 from __future__ import annotations
 

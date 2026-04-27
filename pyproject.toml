@@ -34,6 +34,12 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
+[project.scripts]
+go = "tinynav.skills.go:main"
+lookat = "tinynav.skills.lookat:main"
+wait = "tinynav.skills.wait:main"
+photo = "tinynav.skills.photo:main"
+
 [tool.scikit-build]
 cmake.source-dir = "tinynav/cpp"
 wheel.install-dir = "tinynav"
