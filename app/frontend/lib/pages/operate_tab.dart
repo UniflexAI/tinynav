@@ -495,10 +495,9 @@ class _PoiSheet extends ConsumerStatefulWidget {
 class _PoiSheetState extends ConsumerState<_PoiSheet> {
   bool _canceling = false;
   final Set<int> _checkedIds = {};
-  List<int> _navQueue = [];
 
   Future<void> _cancelNav() async {
-    setState(() { _canceling = true; _navQueue = []; });
+    setState(() => _canceling = true);
     try {
       await ref.read(dioProvider).post('/nav/cancel');
     } on DioException catch (e) {
@@ -545,23 +544,15 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   }
 
   Future<void> _startNav(List<Poi> pois) async {
-    final queue = pois
+    final ids = pois
         .where((p) => _checkedIds.contains(p.id))
         .map((p) => p.id)
         .toList();
-    if (queue.isEmpty) return;
-    setState(() => _navQueue = queue);
-    await _goToNext();
-  }
-
-  Future<void> _goToNext() async {
-    if (_navQueue.isEmpty) return;
-    final nextId = _navQueue.removeAt(0);
+    if (ids.isEmpty) return;
     try {
-      await ref.read(dioProvider).post('/nav/go-to-poi', data: {'poi_id': nextId});
+      await ref.read(dioProvider).post('/nav/go-to-poi', data: {'poi_id': ids.first});
     } on DioException catch (e) {
       if (mounted) {
-        setState(() => _navQueue = []);
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
           backgroundColor: Colors.red,
@@ -577,15 +568,6 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
     final status = statusAsync.valueOrNull;
     final isNavigating = status?.rawState == 'navigation';
     final canGo = status != null && status.online && status.rawState == 'idle';
-
-    // Auto-advance to next POI in queue when navigation completes.
-    ref.listen<AsyncValue<DeviceStatus>>(deviceStatusProvider, (prev, next) {
-      final wasNav = prev?.valueOrNull?.rawState == 'navigation';
-      final isNowIdle = next.valueOrNull?.rawState == 'idle';
-      if (wasNav && isNowIdle && _navQueue.isNotEmpty) {
-        _goToNext();
-      }
-    });
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
