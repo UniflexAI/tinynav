@@ -141,6 +141,14 @@ class _OperateTabState extends ConsumerState<OperateTab> {
               ),
               Positioned(
                 bottom: 10,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: _PauseButton(statusAsync: ref.watch(deviceStatusProvider)),
+                ),
+              ),
+              Positioned(
+                bottom: 10,
                 right: 10,
                 child: _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
               ),
@@ -441,7 +449,7 @@ class _LocalizationChip extends StatelessWidget {
 
 // ── POI button + bottom sheet ─────────────────────────────────────────────────
 
-class _PoiButton extends ConsumerWidget {
+class _PoiButton extends ConsumerStatefulWidget {
   final AsyncValue<List<Poi>> poisAsync;
   final AsyncValue<DeviceStatus> statusAsync;
   final Pose? pose;
@@ -453,48 +461,11 @@ class _PoiButton extends ConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final count = poisAsync.valueOrNull?.length ?? 0;
-    final isNavigating = statusAsync.valueOrNull?.rawState == 'navigation';
-
-    return FilledButton.icon(
-      onPressed: () => showModalBottomSheet(
-        context: context,
-        isScrollControlled: true,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        builder: (_) => _PoiSheet(pose: pose),
-      ),
-      style: FilledButton.styleFrom(
-        backgroundColor: isNavigating
-            ? const Color(0xFF34C759).withOpacity(0.9)
-            : Colors.black87,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      ),
-      icon: Icon(
-        isNavigating ? Icons.navigation_rounded : Icons.place_outlined,
-        size: 16,
-      ),
-      label: Text(isNavigating
-          ? 'Navigating'
-          : 'POIs${count > 0 ? ' ($count)' : ''}'),
-    );
-  }
+  ConsumerState<_PoiButton> createState() => _PoiButtonState();
 }
 
-class _PoiSheet extends ConsumerStatefulWidget {
-  final Pose? pose;
-  const _PoiSheet({this.pose});
-
-  @override
-  ConsumerState<_PoiSheet> createState() => _PoiSheetState();
-}
-
-class _PoiSheetState extends ConsumerState<_PoiSheet> {
+class _PoiButtonState extends ConsumerState<_PoiButton> {
   bool _canceling = false;
-  final Set<int> _checkedIds = {};
 
   Future<void> _cancelNav() async {
     setState(() => _canceling = true);
@@ -511,6 +482,57 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
       if (mounted) setState(() => _canceling = false);
     }
   }
+
+  @override
+  Widget build(BuildContext context) {
+    final count = widget.poisAsync.valueOrNull?.length ?? 0;
+    final isNavigating = widget.statusAsync.valueOrNull?.rawState == 'navigation';
+
+    if (isNavigating) {
+      return FilledButton.icon(
+        onPressed: _canceling ? null : _cancelNav,
+        style: FilledButton.styleFrom(
+          backgroundColor: Colors.red.withOpacity(0.85),
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        ),
+        icon: _canceling
+            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+            : const Icon(Icons.cancel_outlined, size: 16),
+        label: const Text('Cancel'),
+      );
+    }
+
+    return FilledButton.icon(
+      onPressed: () => showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (_) => _PoiSheet(pose: widget.pose),
+      ),
+      style: FilledButton.styleFrom(
+        backgroundColor: Colors.black87,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+      icon: const Icon(Icons.place_outlined, size: 16),
+      label: Text('POIs${count > 0 ? ' ($count)' : ''}'),
+    );
+  }
+}
+
+class _PoiSheet extends ConsumerStatefulWidget {
+  final Pose? pose;
+  const _PoiSheet({this.pose});
+
+  @override
+  ConsumerState<_PoiSheet> createState() => _PoiSheetState();
+}
+
+class _PoiSheetState extends ConsumerState<_PoiSheet> {
+  final Set<int> _checkedIds = {};
 
   Future<void> _deletePoi(Poi poi) async {
     final ok = await showDialog<bool>(
@@ -550,7 +572,7 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
         .toList();
     if (ids.isEmpty) return;
     try {
-      await ref.read(dioProvider).post('/nav/go-to-poi', data: {'poi_id': ids.first});
+      await ref.read(dioProvider).post('/nav/send-pois', data: {'poi_ids': ids});
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -564,10 +586,9 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   @override
   Widget build(BuildContext context) {
     final poisAsync = ref.watch(poisProvider);
-    final statusAsync = ref.watch(deviceStatusProvider);
-    final status = statusAsync.valueOrNull;
-    final isNavigating = status?.rawState == 'navigation';
-    final canGo = status != null && status.online && status.rawState == 'idle';
+    final status = ref.watch(deviceStatusProvider).valueOrNull;
+    final localized = ref.watch(planningStreamProvider).valueOrNull?.localized ?? false;
+    final canGo = status != null && status.online && localized;
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
@@ -592,27 +613,17 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
             const SizedBox(width: 8),
             const Text('POIs', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
             const Spacer(),
-            if (isNavigating)
-              OutlinedButton.icon(
-                onPressed: _canceling ? null : _cancelNav,
-                style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
-                icon: _canceling
-                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.cancel_outlined, size: 16),
-                label: const Text('Cancel Nav'),
-              )
-            else
-              FilledButton.icon(
-                onPressed: (canGo && _checkedIds.isNotEmpty)
-                    ? () => poisAsync.whenData((pois) => _startNav(pois))
-                    : null,
-                icon: const Icon(Icons.navigation_rounded, size: 16),
-                label: const Text('Nav'),
-                style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  minimumSize: Size.zero,
-                ),
+            FilledButton.icon(
+              onPressed: (canGo && _checkedIds.isNotEmpty)
+                  ? () => poisAsync.whenData((pois) => _startNav(pois))
+                  : null,
+              icon: const Icon(Icons.navigation_rounded, size: 16),
+              label: const Text('Go'),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                minimumSize: Size.zero,
               ),
+            ),
           ]),
           const Divider(height: 20),
           // ── POI list ────────────────────────────────────────────────
@@ -739,6 +750,59 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
               size: 16,
             ),
       label: Text(running ? 'Nav ON' : 'Nav'),
+    );
+  }
+}
+
+// ── Pause / Continue button ───────────────────────────────────────────────────
+
+class _PauseButton extends ConsumerStatefulWidget {
+  final AsyncValue<DeviceStatus> statusAsync;
+  const _PauseButton({required this.statusAsync});
+
+  @override
+  ConsumerState<_PauseButton> createState() => _PauseButtonState();
+}
+
+class _PauseButtonState extends ConsumerState<_PauseButton> {
+  bool _loading = false;
+
+  Future<void> _toggle(bool paused) async {
+    setState(() => _loading = true);
+    try {
+      await ref.read(dioProvider).post(paused ? '/nav/resume' : '/nav/pause');
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.statusAsync.valueOrNull;
+    final running = status?.navNodesRunning ?? false;
+    if (!running) return const SizedBox.shrink();
+
+    final paused = status?.navPaused ?? false;
+    return FilledButton.icon(
+      onPressed: _loading ? null : () => _toggle(paused),
+      style: FilledButton.styleFrom(
+        backgroundColor: paused
+            ? const Color(0xFFFF9800).withOpacity(0.9)
+            : Colors.black54,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+      icon: _loading
+          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+          : Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 16),
+      label: Text(paused ? 'Continue' : 'Pause'),
     );
   }
 }
