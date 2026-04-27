@@ -564,8 +564,7 @@ class PlanningNode(Node):
             trajectories, params = generate_trajectory_library_3d(
                 init_p=init_p, init_v=init_v, init_q=init_q
             )
-            # Backward recovery trajectories: fewer samples, fixed slow reverse speed.
-            # Scored together with forward; penalised in cost so forward is always preferred.
+            # Penalised in cost so forward is always preferred when unblocked.
             back_trajs, back_params = generate_trajectory_library_3d(
                 num_samples=5, init_p=init_p, init_v=-v_dir * 0.15, init_q=init_q
             )
@@ -601,9 +600,7 @@ class PlanningNode(Node):
             path.header = depth_msg.header
             path.header.frame_id = "world"
 
-            # Goal-reached: publish empty path so cmd_vel stops.
-            # target_pose is a camera-frame position (POI was recorded as camera pose),
-            # so compare directly against camera position T[:3, 3].
+            # target_pose is camera-frame (POI recorded as camera pose); compare against T[:3, 3] directly.
             if self.target_pose is not None:
                 dist_to_goal = float(np.linalg.norm(T[:3, 3][:2] - self.target_pose[:2]))
                 if dist_to_goal < 0.3:
@@ -612,10 +609,9 @@ class PlanningNode(Node):
                     return
 
             if self.target_pose is None and not self.poi_changed:
-                self.path_pub.publish(path)  # empty path — no active nav target
+                self.path_pub.publish(path)
                 return
 
-            # If every trajectory is in collision (forward and backward), stop.
             if all(s == float('inf') for s in scores):
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 self.path_pub.publish(path)

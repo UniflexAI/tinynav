@@ -766,7 +766,6 @@ class BackendNode(Ros2NodeManager):
         threading.Thread(target=self._on_build_map_done, daemon=True).start()
 
     def _start_percent_bridge(self):
-        """Spawn a subprocess on domain 231 that forwards /mapping/percent to self.mapping_percent."""
         bridge_env = os.environ.copy()
         bridge_env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
         bridge_env['PYTHONPATH'] = _VENV_SITE + ':' + bridge_env.get('PYTHONPATH', '')
