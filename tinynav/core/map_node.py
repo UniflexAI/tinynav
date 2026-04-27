@@ -218,7 +218,6 @@ class MapNode(Node):
 
         self.pois = {}
         self.poi_index = -1
-        self.latest_pose_in_map = None
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -556,7 +555,6 @@ class MapNode(Node):
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
-        self.latest_pose_in_map = pose_in_map
 
         # Check if arrived at current POI
         diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
