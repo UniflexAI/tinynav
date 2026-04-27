@@ -817,10 +817,13 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
 
     // Auto-select color topic on first load
     ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
-      if (next.valueOrNull != null &&
-          ref.read(selectedPreviewTopicProvider) == null) {
-        const colorTopic = '/camera/camera/color/image_raw';
-        if (next.value!.contains(colorTopic)) {
+      final topics = next.valueOrNull;
+      if (topics != null && ref.read(selectedPreviewTopicProvider) == null) {
+        final colorTopic = topics.firstWhere(
+          (t) => t.contains('color'),
+          orElse: () => '',
+        );
+        if (colorTopic.isNotEmpty) {
           ref.read(selectedPreviewTopicProvider.notifier).state = colorTopic;
         }
       }

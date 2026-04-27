@@ -25,7 +25,7 @@ import rclpy.time
 import tf2_ros
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
