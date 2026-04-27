@@ -34,6 +34,23 @@ _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
 _MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic collision during map build
 
+# Minimal ROS node that subscribes to /mapping/percent on domain 231 and writes
+# float values line-by-line to stdout so the parent process can read them via pipe.
+_PERCENT_BRIDGE_SCRIPT = """\
+import os, rclpy
+from rclpy.node import Node
+from std_msgs.msg import Float32
+
+class _B(Node):
+    def __init__(self):
+        super().__init__('_map_pct_bridge')
+        self.create_subscription(Float32, '/mapping/percent',
+                                 lambda m: print(m.data, flush=True), 10)
+
+rclpy.init()
+rclpy.spin(_B())
+"""
+
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
 
@@ -123,6 +140,7 @@ class BackendNode(Ros2NodeManager):
         self._perception_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
         self._unitree_proc: subprocess.Popen | None = None
+        self._percent_bridge_proc: subprocess.Popen | None = None
 
         # Battery level from /battery topic (published by unitree_control)
         self._battery: float | None = None
@@ -742,7 +760,36 @@ class BackendNode(Ros2NodeManager):
             env=_env,
         )
 
+        if self._sensor_mode == 'looper':
+            self._start_percent_bridge()
+
         threading.Thread(target=self._on_build_map_done, daemon=True).start()
+
+    def _start_percent_bridge(self):
+        """Spawn a subprocess on domain 231 that forwards /mapping/percent to self.mapping_percent."""
+        bridge_env = os.environ.copy()
+        bridge_env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
+        bridge_env['PYTHONPATH'] = _VENV_SITE + ':' + bridge_env.get('PYTHONPATH', '')
+        self._percent_bridge_proc = subprocess.Popen(
+            ['python3', '-c', _PERCENT_BRIDGE_SCRIPT],
+            env=bridge_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
+        )
+        threading.Thread(target=self._read_percent_bridge, daemon=True).start()
+
+    def _read_percent_bridge(self):
+        proc = self._percent_bridge_proc
+        if proc is None or proc.stdout is None:
+            return
+        for line in proc.stdout:
+            try:
+                pct = float(line.strip())
+                with self._lock:
+                    self.mapping_percent = pct
+            except (ValueError, AttributeError):
+                pass
 
     def _on_build_map_done(self):
         """Wait for build_map to finish, then convert, archive, and restart."""
@@ -775,6 +822,8 @@ class BackendNode(Ros2NodeManager):
                 )
             self.get_logger().info('Auto-created home POI at (0,0,0)')
 
+        self._kill_proc(self._percent_bridge_proc)
+        self._percent_bridge_proc = None
         self._stop_all()
         self.state = 'idle'
         self._pub_state()
@@ -882,7 +931,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._percent_bridge_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)
