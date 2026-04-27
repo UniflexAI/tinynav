@@ -585,11 +585,22 @@ class PlanningNode(Node):
             path.header = depth_msg.header
             path.header.frame_id = "world"
 
+            # Goal-reached: publish empty path so cmd_vel stops.
+            if self.target_pose is not None:
+                robot_center = self.camera_to_robot_center(T)
+                dist_to_goal = float(np.linalg.norm(robot_center[:2] - self.target_pose[:2]))
+                if dist_to_goal < 0.3:
+                    self.get_logger().info(f'Goal reached (dist={dist_to_goal:.2f}m), stopping path.', once=False)
+                    self.path_pub.publish(path)
+                    return
+
             if self.target_pose is None:
+                self.path_pub.publish(path)
                 return
 
             if all(s == float('inf') for s in scores):
                 self.get_logger().info('All trajectories in collision, stopping path.')
+                self.path_pub.publish(path)
                 return
 
             for i in top_indices:
