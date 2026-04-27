@@ -51,7 +51,7 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.7, width=0.3,
+    length=0.4, width=0.3,
     camera_x=0.35, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
@@ -155,7 +155,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.5
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.4
-    dilation_cells: int = 3
+    dilation_cells: int = 1
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -559,11 +559,19 @@ class PlanningNode(Node):
             v_dir = T[:3, :3] @ np.array([0, 0, 1])
             magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
             init_v = v_dir * float(magnitude)
+            init_p = self.camera_to_robot_center(T)
+            init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectory_library_3d(
-                init_p = self.camera_to_robot_center(T),
-                init_v = init_v,
-                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+                init_p=init_p, init_v=init_v, init_q=init_q
             )
+            # Backward recovery trajectories: fewer samples, fixed slow reverse speed.
+            # Scored together with forward; penalised in cost so forward is always preferred.
+            back_trajs, back_params = generate_trajectory_library_3d(
+                num_samples=5, init_p=init_p, init_v=-v_dir * 0.15, init_q=init_q
+            )
+            is_backward = np.array([False] * len(trajectories) + [True] * len(back_trajs))
+            trajectories = np.concatenate([trajectories, back_trajs], axis=0)
+            params = np.concatenate([params, back_params], axis=0)
             self.last_T = T
             self.last_stamp = stamp
 
@@ -574,14 +582,15 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            def cost_function(traj, param, score, target_pose):
+            def cost_function(traj, param, score, target_pose, backward):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+                backward_penalty = 10000.0 if backward else 0.0
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + backward_penalty
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose, bool(is_backward[i])) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             if self.poi_changed and (depth_msg.header.stamp.sec - self.poi_change_timestamp_sec) > 3.0:
@@ -606,57 +615,7 @@ class PlanningNode(Node):
                 self.path_pub.publish(path)  # empty path — no active nav target
                 return
 
-            # Obstacle recovery: if robot is within 0.3m of an obstacle, normal planning
-            # cannot escape. Back up if the rear is clear, otherwise stop.
-            robot_pos = T[:3, 3]
-            rx = int((robot_pos[0] - self.origin[0]) / self.resolution)
-            ry = int((robot_pos[1] - self.origin[1]) / self.resolution)
-            if 0 <= rx < ESDF_map.shape[0] and 0 <= ry < ESDF_map.shape[1]:
-                robot_clearance = float(ESDF_map[rx, ry])
-            else:
-                robot_clearance = float('inf')
-
-            if robot_clearance < 0.3:
-                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])  # camera +Z = forward
-                back_sample = robot_pos - forward * 0.5
-                bx = int((back_sample[0] - self.origin[0]) / self.resolution)
-                by = int((back_sample[1] - self.origin[1]) / self.resolution)
-                if 0 <= bx < ESDF_map.shape[0] and 0 <= by < ESDF_map.shape[1]:
-                    back_clearance = float(ESDF_map[bx, by])
-                else:
-                    back_clearance = float('inf')
-
-                if back_clearance > 0.3:
-                    # Rear is clear: publish a 2-pose backward path.
-                    # cmd_vel_control will compute negative vx from the backward displacement.
-                    q = odom_msg.pose.pose.orientation
-                    back_target = robot_pos - forward * 0.5
-
-                    def _make_pose(pos):
-                        ps = PoseStamped()
-                        ps.header = depth_msg.header
-                        ps.pose.position.x = float(pos[0])
-                        ps.pose.position.y = float(pos[1])
-                        ps.pose.position.z = float(pos[2])
-                        ps.pose.orientation = q
-                        return ps
-
-                    recovery_path = Path()
-                    recovery_path.header = depth_msg.header
-                    recovery_path.header.frame_id = 'world'
-                    recovery_path.poses = [_make_pose(robot_pos), _make_pose(back_target)]
-                    self.get_logger().info(
-                        f'Recovery: backing up (robot_clearance={robot_clearance:.2f}m, back={back_clearance:.2f}m)'
-                    )
-                    self.path_pub.publish(recovery_path)
-                else:
-                    self.get_logger().info(
-                        f'Recovery: stuck, both sides blocked (robot={robot_clearance:.2f}m, back={back_clearance:.2f}m), stopping'
-                    )
-                    self.path_pub.publish(path)  # empty path
-                return
-
-            # If every trajectory is in collision, stop rather than picking an arbitrary one.
+            # If every trajectory is in collision (forward and backward), stop.
             if all(s == float('inf') for s in scores):
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 self.path_pub.publish(path)
