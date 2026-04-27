@@ -58,6 +58,9 @@ class LooperBridgeNode(Node):
         self.sync.registerCallback(self.sync_callback)
 
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
+        self.odom_visual_pub = self.create_publisher(
+            Odometry, "/slam/odometry_visual", 10
+        )
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, "/slam/disparity_vis", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
@@ -195,6 +198,7 @@ class LooperBridgeNode(Node):
         stamp = pose_msg.header.stamp
 
         odom_msg = self.build_odom(T_world_camera, stamp)
+        self.odom_visual_pub.publish(odom_msg)
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
         disparity_vis_msg = self.build_disparity_vis(depth_m, stamp)
