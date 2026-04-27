@@ -87,17 +87,13 @@ class CmdVelControlNode(Node):
         out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
-        # Dead-band: suppress noise below engage threshold.
-        if abs(out.linear.x) < 0.1:
+        # Dead-band: < 0.05 → 0; 0.05~0.2 → snap to min effective speed.
+        if abs(out.linear.x) < 0.05:
             out.linear.x = 0.0
+        elif abs(out.linear.x) < self.min_effective_linear_speed:
+            out.linear.x = float(np.sign(out.linear.x) * self.min_effective_linear_speed)
         if abs(out.angular.z) < 0.05:
             out.angular.z = 0.0
-        # Keep a minimum forward speed when planner requests motion and path is fresh.
-        elif (
-            age <= stale_slow_s
-            and abs(out.linear.x) < self.min_effective_linear_speed
-        ):
-            out.linear.x = float(np.sign(out.linear.x) * self.min_effective_linear_speed)
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
