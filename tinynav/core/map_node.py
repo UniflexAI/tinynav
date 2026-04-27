@@ -241,6 +241,14 @@ class MapNode(Node):
                 pois_dict[index] = np.array(self.pois[str(key)]["position"])
             self.pois = pois_dict
 
+            if not self.pois:
+                self.poi_index = -1
+                # Signal planning_node to clear target_pose so it stops publishing paths
+                dummy_pose = np.eye(4)
+                self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
+                self.get_logger().info("POIs cleared, navigation cancelled")
+                return
+
             self.poi_index = min(0, len(self.pois) - 1)
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:

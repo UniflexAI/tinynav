@@ -16,6 +16,19 @@ class GoToPoiRequest(BaseModel):
     poi_id: int
 
 
+class SendPoisRequest(BaseModel):
+    poi_ids: list[int]
+
+
+@router.post('/send-pois')
+def nav_send_pois(req: SendPoisRequest):
+    node = _require_node()
+    if not node._localized:
+        raise HTTPException(409, 'Not localized')
+    node.cmd_send_pois(req.poi_ids)
+    return {'ok': True}
+
+
 @router.post('/go-to-poi')
 def nav_go_to_poi(req: GoToPoiRequest):
     node = _require_node()
@@ -60,6 +73,20 @@ def nav_restart():
     if not node._nav_nodes_running:
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_restart_nav_nodes()
+    return {'ok': True}
+
+
+@router.post('/pause')
+def nav_pause():
+    node = _require_node()
+    node.cmd_nav_pause()
+    return {'ok': True}
+
+
+@router.post('/resume')
+def nav_resume():
+    node = _require_node()
+    node.cmd_nav_resume()
     return {'ok': True}
 
 
