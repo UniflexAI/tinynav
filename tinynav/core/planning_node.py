@@ -276,13 +276,17 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
         elif min_dist_for_traj != float('inf'):
-            if min_dist_for_traj > safety_radius:
-                scores.append(0.0)
+            max_steps = len(traj)
+            decay_factor = (max_steps - closest_step_for_traj) / max_steps
+            # Continuous ESDF penalty: still penalize near-obstacle trajectories even
+            # outside safety_radius, but with much lower weight than inside radius.
+            base = 1.0 / (min_dist_for_traj + 0.05)
+            if min_dist_for_traj <= safety_radius:
+                violation = (safety_radius - min_dist_for_traj) / max(safety_radius, 1e-3)
+                scale = 1.0 + 2.0 * violation
             else:
-                max_steps = len(traj)
-                decay_factor = (max_steps - closest_step_for_traj) / max_steps
-                base_score = 1.0 / (min_dist_for_traj + 1e-3)
-                scores.append(decay_factor * base_score)
+                scale = 0.2
+            scores.append(decay_factor * base * scale)
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
@@ -614,15 +618,16 @@ class PlanningNode(Node):
                         heading_err = abs(np.arctan2(cross, dot))
                         heading_penalty = 700.0 * heading_err
 
+                # Keep each term in a comparable range to avoid one term dominating.
                 return (
-                    score * 100000
-                    + 100 * dist
-                    + 10 * abs(self.last_param[0] - param[0])
-                    + 10 * abs(self.last_param[1] - param[1])
-                    + backward_penalty
-                    + front_block_forward_penalty
-                    + rotate_first_penalty
-                    + heading_penalty
+                    1.2 * score
+                    + 1.0 * dist
+                    + 0.2 * abs(self.last_param[0] - param[0])
+                    + 0.2 * abs(self.last_param[1] - param[1])
+                    + 0.001 * backward_penalty
+                    + 0.001 * front_block_forward_penalty
+                    + 0.001 * rotate_first_penalty
+                    + 0.001 * heading_penalty
                 )
 
             costs = np.array([
