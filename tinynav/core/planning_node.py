@@ -12,7 +12,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Float32
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -373,6 +373,8 @@ class PlanningNode(Node):
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
 
+        self.clearance_pub = self.create_publisher(Float32, '/planning/robot_clearance', 10)
+
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
@@ -420,6 +422,26 @@ class PlanningNode(Node):
         msg.header.frame_id = "world"
         msg.points = points
         self.footprint_pub.publish(msg)
+
+    def _robot_clearance(self, T, ESDF_map):
+        """Min ESDF clearance over the robot footprint at the current pose."""
+        center = self.camera_to_robot_center(T)
+        x_w, y_w = center[0], center[1]
+        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
+        fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
+        lx, ly = -fy, fx
+        fl, rl, hw = self.robot.footprint_from_control()
+        check_xs = (x_w, x_w + fx*fl + lx*hw, x_w + fx*fl - lx*hw, x_w - fx*rl + lx*hw, x_w - fx*rl - lx*hw)
+        check_ys = (y_w, y_w + fy*fl + ly*hw, y_w + fy*fl - ly*hw, y_w - fy*rl + ly*hw, y_w - fy*rl - ly*hw)
+        rows, cols = ESDF_map.shape
+        min_dist = 999.0
+        for k in range(5):
+            xi = int((check_xs[k] - self.origin[0]) / self.resolution)
+            yi = int((check_ys[k] - self.origin[1]) / self.resolution)
+            if 0 <= xi < rows and 0 <= yi < cols:
+                min_dist = min(min_dist, float(ESDF_map[xi, yi]))
+        return min_dist
 
     def publish_obstacle_mask(self, mask, stamp):
         msg = OccupancyGrid()
@@ -543,6 +565,7 @@ class PlanningNode(Node):
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
+            self.clearance_pub.publish(Float32(data=self._robot_clearance(T, ESDF_map)))
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
