@@ -595,7 +595,7 @@ class PlanningNode(Node):
 
             # target_pose is camera-frame (POI recorded as camera pose); compare against T[:3, 3] directly.
             dist_to_goal = float(np.linalg.norm(T[:3, 3][:2] - self.target_pose[:2])) if self.target_pose is not None else float('inf')
-            if dist_to_goal < 0.3:
+            if dist_to_goal < 0.5:
                 self.get_logger().info(f'Goal reached (dist={dist_to_goal:.2f}m), stopping path.')
                 self.path_pub.publish(path)
                 return
