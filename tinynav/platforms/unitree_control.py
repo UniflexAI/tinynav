@@ -31,6 +31,9 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client.StandUp()
         self.sport_client.BalanceStand()
         self._robot_status = RobotStatus.STANDUP
+        self.battery = 0.0
+        self.last_twist_time = None
+        self.logger = logging.getLogger(__name__)
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -43,10 +46,7 @@ class Ros2UnitreeManagerNode(Node):
         
         self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
-        self.battery = 0.0
-        self.last_twist_time = None
 
-        self.logger = logging.getLogger(__name__)
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
 
     # twist message handler
