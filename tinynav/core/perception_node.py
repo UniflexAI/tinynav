@@ -130,6 +130,7 @@ class PerceptionNode(Node):
         self.input_aligner_seen_imu = False
         self.input_aligner_seen_stereo = False
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
+        self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
@@ -550,6 +551,7 @@ class PerceptionNode(Node):
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
             # publish odometry
             self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
+            self.odom_visual_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
 
