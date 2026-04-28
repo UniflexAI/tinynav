@@ -184,57 +184,38 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
-    num_samples=11, duration=2.0, dt=0.1,
-    acc_std=0.00001, omega_y_std_deg=20.0,
-    init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    vx_min=-0.2, vx_max=0.5, n_vx=5,
+    omega_min=-0.6, omega_max=0.6, n_omega=11,
+    duration=2.0, dt=0.1,
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
     num_steps = int(duration / dt) + 1
-
-    max_acc = 0.5
-    acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
-    max_omega = np.pi / 4
-    omega_y_samples = np.linspace(-max_omega, max_omega, num_samples)
-
-    num_samples = len(acc_samples) * len(omega_y_samples)
-
-    trajectories = np.empty((num_samples, num_steps, 7))
-    params = np.empty((num_samples, 2))
-
-    k = -1
-    for i_acc in range(len(acc_samples)):
-        for i_omega in range(len(omega_y_samples)):
-            k += 1
-            dv = acc_samples[i_acc]
-            omega_y = omega_y_samples[i_omega]
+    num_trajs = n_vx * n_omega
+    trajectories = np.empty((num_trajs, num_steps, 7))
+    params = np.empty((num_trajs, 2))
+    vx_step = (vx_max - vx_min) / (n_vx - 1) if n_vx > 1 else 0.0
+    omega_step = (omega_max - omega_min) / (n_omega - 1) if n_omega > 1 else 0.0
+    k = 0
+    for i_vx in range(n_vx):
+        vx = vx_min + i_vx * vx_step
+        for i_omega in range(n_omega):
+            omega = omega_min + i_omega * omega_step
             p = init_p.copy()
-            v_world = init_v.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
             for i in range(num_steps):
-                dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
-                v_world = (q @ dq) @ q.T @ v_world
+                v_world = q @ np.array([0.0, 0.0, vx])
+                p = p + v_world * dt
+                dq = rotvec_to_matrix(np.array([0.0, omega * dt, 0.0]))
                 q = q @ dq
-
-                acc_body = q.T @ v_world
-                norm_val = np.linalg.norm(acc_body)
-                if norm_val > 1e-3:
-                    acc_body = acc_body / norm_val
-                else:
-                    acc_body = np.array([0.0, 0.0, 1.0])  # body +Z forward; dv<0 gives backward
-                acc_body = acc_body * dv
-
-                acc_world = q @ acc_body
-                v_world += acc_world * dt
-                v_world = np.clip(v_world, -0.5, 0.5)
-                p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
-            #hack
             for i in range(num_steps):
                 traj[i, 2] = traj[0, 2]
             trajectories[k] = traj
-            params[k, 0] = dv
-            params[k, 1] = omega_y
+            params[k, 0] = vx
+            params[k, 1] = omega
+            k += 1
     return trajectories, params
 
 @njit(cache=True)
@@ -555,21 +536,10 @@ class PlanningNode(Node):
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            v_dir = T[:3, :3] @ np.array([0, 0, 1])
-            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
-            init_v = v_dir * float(magnitude)
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(
-                init_p=init_p, init_v=init_v, init_q=init_q
-            )
-            # Penalised in cost so forward is always preferred when unblocked.
-            back_trajs, back_params = generate_trajectory_library_3d(
-                num_samples=5, init_p=init_p, init_v=-v_dir * 0.2, init_q=init_q
-            )
-            is_backward = np.array([False] * len(trajectories) + [True] * len(back_trajs))
-            trajectories = np.concatenate([trajectories, back_trajs], axis=0)
-            params = np.concatenate([params, back_params], axis=0)
+            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
+            is_backward = params[:, 0] < 0
             self.last_T = T
             self.last_stamp = stamp
 
