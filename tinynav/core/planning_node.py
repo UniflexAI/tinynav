@@ -220,7 +220,7 @@ def generate_trajectory_library_3d(
                 if norm_val > 1e-3:
                     acc_body = acc_body / norm_val
                 else:
-                    acc_body = np.array([0.0, 0.0, 0.0])
+                    acc_body = np.array([0.0, 0.0, 1.0])  # body +Z forward; dv<0 gives backward
                 acc_body = acc_body * dv
 
                 acc_world = q @ acc_body
