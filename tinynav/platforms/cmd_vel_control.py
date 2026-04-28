@@ -39,7 +39,7 @@ class CmdVelControlNode(Node):
         self.path_stale_slow_factor = 3.5
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
-        self.max_angular_acc = 0.8  # rad/s^2
+        self.max_angular_acc = 1.2  # rad/s^2
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -109,7 +109,7 @@ class CmdVelControlNode(Node):
             out.linear.x = 0.0
         elif 0 < out.linear.x < self.min_effective_linear_speed and self.prev_cmd.linear.x < 0.05:
             out.linear.x = self.min_effective_linear_speed
-        if abs(out.angular.z) < 0.05:
+        if abs(out.angular.z) < 0.02:
             out.angular.z = 0.0
 
         self.cmd_pub.publish(out)
