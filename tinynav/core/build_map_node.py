@@ -361,6 +361,10 @@ class BagPlayer(Node):
         msg = Float32()
         msg.data = float(percent)
         self._mapping_percent_pub.publish(msg)
+        # Also emit to stdout so the parent process can read progress without
+        # a separate bridge node.  The prefix makes it easy to filter from
+        # regular log output.
+        print(f"MAPPING_PERCENT:{percent:.1f}", flush=True)
 
     def _publish_percent_from_timestamp(self, timestamp_ns: int) -> None:
         percent = 100.0 * (timestamp_ns - self.start_timestamp_ns) / (self.end_timestamp_ns - self.start_timestamp_ns)

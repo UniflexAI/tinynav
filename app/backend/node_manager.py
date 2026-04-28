@@ -34,22 +34,9 @@ _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
 _MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic collision during map build
 
-# Minimal ROS node that subscribes to /mapping/percent on domain 231 and writes
-# float values line-by-line to stdout so the parent process can read them via pipe.
-_PERCENT_BRIDGE_SCRIPT = """\
-import os, rclpy
-from rclpy.node import Node
-from std_msgs.msg import Float32
-
-class _B(Node):
-    def __init__(self):
-        super().__init__('_map_pct_bridge')
-        self.create_subscription(Float32, '/mapping/percent',
-                                 lambda m: print(m.data, flush=True), 10)
-
-rclpy.init()
-rclpy.spin(_B())
-"""
+# build_map_node.py emits "MAPPING_PERCENT:<float>" lines on stdout so the
+# parent process can track progress without a separate bridge subprocess.
+_MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
 
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
@@ -140,7 +127,6 @@ class BackendNode(Ros2NodeManager):
         self._perception_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
         self._unitree_proc: subprocess.Popen | None = None
-        self._percent_bridge_proc: subprocess.Popen | None = None
 
         # Battery level from /battery topic (published by unitree_control)
         self._battery: float | None = None
@@ -750,7 +736,7 @@ class BackendNode(Ros2NodeManager):
             ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
             env=_env,
         )
-        self.processes['build_map'] = self._launch_proc(
+        self.processes['build_map'] = self._launch_proc_tee(
             'build_map_node',
             [
                 'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
@@ -760,36 +746,42 @@ class BackendNode(Ros2NodeManager):
             env=_env,
         )
 
-        if self._sensor_mode == 'looper':
-            self._start_percent_bridge()
-
         threading.Thread(target=self._on_build_map_done, daemon=True).start()
 
-    def _start_percent_bridge(self):
-        """Spawn a subprocess on domain 231 that forwards /mapping/percent to self.mapping_percent."""
-        bridge_env = os.environ.copy()
-        bridge_env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
-        bridge_env['PYTHONPATH'] = _VENV_SITE + ':' + bridge_env.get('PYTHONPATH', '')
-        self._percent_bridge_proc = subprocess.Popen(
-            ['python3', '-c', _PERCENT_BRIDGE_SCRIPT],
-            env=bridge_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            preexec_fn=os.setsid,
+    def _launch_proc_tee(self, name: str, cmd: list[str], env: dict | None = None,
+                          cwd: str = '/tinynav') -> subprocess.Popen:
+        """Like _launch_proc, but also tees stdout to a pipe so the caller can
+        scan for MAPPING_PERCENT: lines while still logging everything to file."""
+        lf = self._make_log(name)
+        proc = subprocess.Popen(
+            cmd, preexec_fn=os.setsid, cwd=cwd,
+            env=env or os.environ.copy(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
-        threading.Thread(target=self._read_percent_bridge, daemon=True).start()
+        threading.Thread(
+            target=self._tee_and_read_percent,
+            args=(proc, lf),
+            daemon=True,
+        ).start()
+        return proc
 
-    def _read_percent_bridge(self):
-        proc = self._percent_bridge_proc
-        if proc is None or proc.stdout is None:
-            return
-        for line in proc.stdout:
-            try:
-                pct = float(line.strip())
-                with self._lock:
-                    self.mapping_percent = pct
-            except (ValueError, AttributeError):
-                pass
+    def _tee_and_read_percent(self, proc: subprocess.Popen, log_file):
+        """Read lines from proc.stdout, write to log_file, and extract
+        MAPPING_PERCENT:<float> values into self.mapping_percent."""
+        try:
+            for raw in proc.stdout:
+                line = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
+                log_file.write(line)
+                log_file.flush()
+                if line.startswith(_MAPPING_PERCENT_PREFIX):
+                    try:
+                        pct = float(line[len(_MAPPING_PERCENT_PREFIX):].strip())
+                        with self._lock:
+                            self.mapping_percent = pct
+                    except (ValueError, AttributeError):
+                        pass
+        finally:
+            log_file.close()
 
     def _on_build_map_done(self):
         """Wait for build_map to finish, then convert, archive, and restart."""
@@ -822,8 +814,6 @@ class BackendNode(Ros2NodeManager):
                 )
             self.get_logger().info('Auto-created home POI at (0,0,0)')
 
-        self._kill_proc(self._percent_bridge_proc)
-        self._percent_bridge_proc = None
         self._stop_all()
         self.state = 'idle'
         self._pub_state()
@@ -931,7 +921,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._percent_bridge_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)
