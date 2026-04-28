@@ -56,20 +56,18 @@ class CmdVelControlNode(Node):
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
-        # Forced-backward reflex: override path when physically too close to obstacle.
-        self.force_reverse_enter = 0.10  # m — start forcing backward below this
-        self.force_reverse_exit  = 0.30  # m — stop forcing backward once clearance reaches this
-        self._force_reversing = False
-        self.robot_clearance = 999.0
-        self.last_clearance_time = None
-        self.create_subscription(Float32, '/planning/robot_clearance', self._on_clearance, 10)
+        # Forced-backward reflex: reverse when forward obstacle is within this distance.
+        self.front_clear_dist = 0.30
+        self.front_dist = 999.0
+        self.last_front_time = None
+        self.create_subscription(Float32, '/planning/front_dist', self._on_front_dist, 10)
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
         
-    def _on_clearance(self, msg: Float32):
-        self.robot_clearance = msg.data
-        self.last_clearance_time = time.monotonic()
+    def _on_front_dist(self, msg: Float32):
+        self.front_dist = msg.data
+        self.last_front_time = time.monotonic()
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
@@ -122,18 +120,11 @@ class CmdVelControlNode(Node):
         if abs(out.angular.z) < 0.05:
             out.angular.z = 0.0
 
-        clearance_age = float('inf') if self.last_clearance_time is None else (now - self.last_clearance_time)
-        if clearance_age < 0.5:
-            if self.robot_clearance < self.force_reverse_enter:
-                self._force_reversing = True
-            elif self.robot_clearance >= self.force_reverse_exit:
-                self._force_reversing = False
-        else:
-            self._force_reversing = False
-        if self._force_reversing:
+        front_age = float('inf') if self.last_front_time is None else (now - self.last_front_time)
+        if front_age < 0.5 and self.front_dist < self.front_clear_dist:
             out = Twist()
             out.linear.x = -self.fixed_reverse_speed
-            self.logger.warn(f"Forced backward: clearance={self.robot_clearance:.3f}m")
+            self.logger.warn(f"Forced backward: front obstacle at {self.front_dist:.2f}m")
             self.cmd_pub.publish(out)
             self.prev_cmd = out
             return

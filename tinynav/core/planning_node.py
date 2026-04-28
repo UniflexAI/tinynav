@@ -373,7 +373,7 @@ class PlanningNode(Node):
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
 
-        self.clearance_pub = self.create_publisher(Float32, '/planning/robot_clearance', 10)
+        self.front_dist_pub = self.create_publisher(Float32, '/planning/front_dist', 10)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -423,25 +423,24 @@ class PlanningNode(Node):
         msg.points = points
         self.footprint_pub.publish(msg)
 
-    def _robot_clearance(self, T, ESDF_map):
-        """Min ESDF clearance over the robot footprint at the current pose."""
+    def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
+        """Distance to the nearest obstacle in the forward corridor (robot width), up to max_dist."""
         center = self.camera_to_robot_center(T)
-        x_w, y_w = center[0], center[1]
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        fl, rl, hw = self.robot.footprint_from_control()
-        check_xs = (x_w, x_w + fx*fl + lx*hw, x_w + fx*fl - lx*hw, x_w - fx*rl + lx*hw, x_w - fx*rl - lx*hw)
-        check_ys = (y_w, y_w + fy*fl + ly*hw, y_w + fy*fl - ly*hw, y_w - fy*rl + ly*hw, y_w - fy*rl - ly*hw)
-        rows, cols = ESDF_map.shape
-        min_dist = 999.0
-        for k in range(5):
-            xi = int((check_xs[k] - self.origin[0]) / self.resolution)
-            yi = int((check_ys[k] - self.origin[1]) / self.resolution)
-            if 0 <= xi < rows and 0 <= yi < cols:
-                min_dist = min(min_dist, float(ESDF_map[xi, yi]))
-        return min_dist
+        _, _, hw = self.robot.footprint_from_control()
+        rows, cols = obstacle_mask.shape
+        steps = int(max_dist / self.resolution) + 1
+        for step in range(steps):
+            d = step * self.resolution
+            for w in (-hw, 0.0, hw):
+                xi = int((center[0] + fx * d + lx * w - self.origin[0]) / self.resolution)
+                yi = int((center[1] + fy * d + ly * w - self.origin[1]) / self.resolution)
+                if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
+                    return d
+        return max_dist + 1.0
 
     def publish_obstacle_mask(self, mask, stamp):
         msg = OccupancyGrid()
@@ -565,7 +564,7 @@ class PlanningNode(Node):
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
-            self.clearance_pub.publish(Float32(data=self._robot_clearance(T, ESDF_map)))
+            self.front_dist_pub.publish(Float32(data=self._front_obstacle_dist(T, obstacle_mask)))
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
