@@ -30,7 +30,7 @@ class RobotConfig:
     camera_y: float = 0.0
     control_x: float = 0.0
     control_y: float = 0.0
-    safety_radius: float = 0.3
+    safety_radius: float = 0.2
 
     @property
     def cam_offset_3d(self):
@@ -51,10 +51,10 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.7, width=0.4,
+    length=0.5, width=0.3,
     camera_x=0.35, camera_y=0.0,
     control_x=0.35, control_y=0.0,
-    safety_radius=0.3,
+    safety_radius=0.2,
 )
 
 B2_CONFIG = RobotConfig(
@@ -62,7 +62,7 @@ B2_CONFIG = RobotConfig(
     length=1.0, width=0.5,
     camera_x=0.5, camera_y=0.0,
     control_x=-0.5, control_y=0.0,
-    safety_radius=0.3,
+    safety_radius=0.2,
 )
 
 # === Helper functions ===
@@ -220,7 +220,7 @@ def generate_trajectory_library_3d(
     return trajectories, params
 
 @njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.3,
+def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.2,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
     """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
     scores = []
