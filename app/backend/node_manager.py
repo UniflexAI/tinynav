@@ -773,9 +773,9 @@ class BackendNode(Ros2NodeManager):
                 line = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
                 log_file.write(line)
                 log_file.flush()
-                if line.startswith(_MAPPING_PERCENT_PREFIX):
+                if _MAPPING_PERCENT_PREFIX in line:
                     try:
-                        pct = float(line[len(_MAPPING_PERCENT_PREFIX):].strip())
+                        pct = float(line.split(_MAPPING_PERCENT_PREFIX, 1)[1].strip())
                         with self._lock:
                             self.mapping_percent = pct
                     except (ValueError, AttributeError):
