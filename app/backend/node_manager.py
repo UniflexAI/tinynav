@@ -744,6 +744,31 @@ class BackendNode(Ros2NodeManager):
 
         threading.Thread(target=self._on_build_map_done, daemon=True).start()
 
+    def _start_percent_bridge(self):
+        bridge_env = os.environ.copy()
+        bridge_env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
+        bridge_env['PYTHONPATH'] = _VENV_SITE + ':' + bridge_env.get('PYTHONPATH', '')
+        self._percent_bridge_proc = subprocess.Popen(
+            ['python3', '-c', _PERCENT_BRIDGE_SCRIPT],
+            env=bridge_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid,
+        )
+        threading.Thread(target=self._read_percent_bridge, daemon=True).start()
+
+    def _read_percent_bridge(self):
+        proc = self._percent_bridge_proc
+        if proc is None or proc.stdout is None:
+            return
+        for line in proc.stdout:
+            try:
+                pct = float(line.strip())
+                with self._lock:
+                    self.mapping_percent = pct
+            except (ValueError, AttributeError):
+                pass
+
     def _on_build_map_done(self):
         """Wait for build_map to finish, then convert, archive, and restart."""
         import shutil
