@@ -3,6 +3,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
@@ -53,8 +55,17 @@ class CmdVelControlNode(Node):
         self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
+        self._paused = False
+        _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-        
+
+    def _on_paused(self, msg: Bool):
+        self._paused = msg.data
+        if not self._paused:
+            # Reset prev_cmd so resume starts from zero cleanly
+            self.prev_cmd = Twist()
+
     def pose_callback(self, msg):
         self.pose = msg
 
