@@ -193,11 +193,12 @@ def generate_trajectory_library_3d(
     num_trajs = n_vx * n_omega
     trajectories = np.empty((num_trajs, num_steps, 7))
     params = np.empty((num_trajs, 2))
-    vx_step = (vx_max - vx_min) / (n_vx - 1) if n_vx > 1 else 0.0
+    # index 0 = single backward sample (vx_min); indices 1..n_vx-1 = forward [0, vx_max]
+    fwd_step = vx_max / (n_vx - 2) if n_vx > 2 else vx_max
     omega_step = (omega_max - omega_min) / (n_omega - 1) if n_omega > 1 else 0.0
     k = 0
     for i_vx in range(n_vx):
-        vx = vx_min + i_vx * vx_step
+        vx = vx_min if i_vx == 0 else (i_vx - 1) * fwd_step
         for i_omega in range(n_omega):
             omega = omega_min + i_omega * omega_step
             p = init_p.copy()
