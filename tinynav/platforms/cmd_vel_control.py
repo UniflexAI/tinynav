@@ -57,7 +57,7 @@ class CmdVelControlNode(Node):
         self.last_path_time = 0.0
         self.pose = None
         self.path = None
-        self.path_dt = 0.1  # Planning node trajectory time step.
+        self.path_dt_fallback = 0.1  # Fallback if path per-pose timestamps are invalid.
         self.path_start_time = None
         self.path_duration = 0.0
         self.path_pos_spline = None
@@ -78,13 +78,20 @@ class CmdVelControlNode(Node):
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
-        self.last_cmd_pub_time = time.monotonic()
+        self.last_odom_time = None
         self.last_path_update_time = None
-        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
         
     def pose_callback(self, msg):
         self.pose = msg
+        now = time.monotonic()
+        if self.last_odom_time is None:
+            dt = 1.0 / self.cmd_rate_hz
+        else:
+            dt = max(1e-3, now - self.last_odom_time)
+        self.last_odom_time = now
+
         self._publish_pid_target_pose(msg.header.stamp)
+        self._publish_cmd_on_odom(now, dt)
 
     def _publish_pid_target_pose(self, stamp):
         if self.path_start_time is None or self.path_duration <= 0.0:
@@ -137,7 +144,20 @@ class CmdVelControlNode(Node):
         if count < 2:
             return False
 
-        times = np.arange(count, dtype=np.float64) * self.path_dt
+        stamp_times = np.array(
+            [
+                float(pose_stamped.header.stamp.sec)
+                + float(pose_stamped.header.stamp.nanosec) * 1e-9
+                for pose_stamped in poses
+            ],
+            dtype=np.float64,
+        )
+        if np.all(np.diff(stamp_times) > 0):
+            times = stamp_times - stamp_times[0]
+        else:
+            # Fallback for missing/invalid stamps.
+            times = np.arange(count, dtype=np.float64) * self.path_dt_fallback
+
         positions = np.empty((count, 3), dtype=np.float64)
         quats = np.empty((count, 4), dtype=np.float64)
         for i, pose_stamped in enumerate(poses):
@@ -227,26 +247,15 @@ class CmdVelControlNode(Node):
         wz_correction = self.yaw_pid.update(yaw_err, dt) + self.cross_track_gain * pos_err_lateral
         return vx_correction, wz_correction
 
-    def cmd_timer_callback(self):
-        now = time.monotonic()
-        dt = max(1e-3, now - self.last_cmd_pub_time)
-        self.last_cmd_pub_time = now
-
-        ff_vx = 0.0
-        ff_wz = 0.0
-        linear_velocity_vec, angular_velocity_vec = self._compute_cmd_from_sampled_path(now)
-        if linear_velocity_vec is not None:
-            ff_vx = float(linear_velocity_vec[0])
-            ff_wz = float(angular_velocity_vec[2])
-
+    def _publish_cmd_on_odom(self, now: float, dt: float):
         pid_vx = 0.0
         pid_wz = 0.0
         pid_cmd = self._compute_tracking_pid_cmd(now, dt)
         if pid_cmd[0] is not None:
             pid_vx, pid_wz = pid_cmd
 
-        vx = np.clip(ff_vx + pid_vx, -0.1, 0.3)
-        vyaw = np.clip(ff_wz + pid_wz, -0.8, 0.8)
+        vx = np.clip(pid_vx, -0.1, 0.3)
+        vyaw = np.clip(pid_wz, -0.8, 0.8)
         self.latest_cmd.linear.x = float(vx)
         self.latest_cmd.linear.y = 0.0
         self.latest_cmd.angular.z = float(vyaw)
