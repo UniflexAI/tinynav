@@ -185,7 +185,8 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 @njit(cache=True)
 def generate_trajectory_library_3d(
     vx_min=-0.2, vx_max=0.5, n_vx=5,
-    omega_min=-0.6, omega_max=0.6, n_omega=11,
+    # With duration=2.0s, ±pi/4 rad/s corresponds to about ±90 deg total yaw change.
+    omega_min=-np.pi / 4, omega_max=np.pi / 4, n_omega=11,
     duration=2.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
