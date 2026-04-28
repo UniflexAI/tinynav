@@ -251,7 +251,7 @@ RUN flutter config --enable-web \
     && flutter precache --web \
     && cd /tinynav/app/frontend \
     && flutter pub get \
-    && flutter build web --release --suppress-analytics
+    && flutter build web --release --suppress-analytics --no-web-resources-cdn
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
