@@ -65,12 +65,12 @@ class ImuPropagatorNode(Node):
             return
 
         timestamp = self._stamp_to_sec(imu_msg.header.stamp)
-        print("imu: ", timestamp)
+        #print("imu: ", timestamp)
         self.imu_buffer.append((timestamp, imu_msg))
         if len(self.imu_buffer) > 2000:
             self.imu_buffer.pop(0)
 
-        if self.imu_buffer[-1][0] <= self.odom_100hz_buffer[-1][0] + 0.050:
+        if self.imu_buffer[-1][0] <= self.odom_100hz_buffer[-1][0] + 0.010:
             return
 
         start_idx = None
