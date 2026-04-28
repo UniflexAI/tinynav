@@ -424,22 +424,24 @@ class PlanningNode(Node):
         self.footprint_pub.publish(msg)
 
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
-        """Distance to the nearest obstacle in the forward corridor (robot width), up to max_dist."""
+        """Distance from the robot's front face to the nearest obstacle in the forward corridor.
+        Scans start at the front face so the returned value matches physical clearance."""
         center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        _, _, hw = self.robot.footprint_from_control()
+        fl, _, hw = self.robot.footprint_from_control()
         rows, cols = obstacle_mask.shape
         steps = int(max_dist / self.resolution) + 1
         for step in range(steps):
-            d = step * self.resolution
+            d_from_face = step * self.resolution
+            d_from_center = fl + d_from_face
             for w in (-hw, 0.0, hw):
-                xi = int((center[0] + fx * d + lx * w - self.origin[0]) / self.resolution)
-                yi = int((center[1] + fy * d + ly * w - self.origin[1]) / self.resolution)
+                xi = int((center[0] + fx * d_from_center + lx * w - self.origin[0]) / self.resolution)
+                yi = int((center[1] + fy * d_from_center + ly * w - self.origin[1]) / self.resolution)
                 if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
-                    return d
+                    return d_from_face
         return max_dist + 1.0
 
     def publish_obstacle_mask(self, mask, stamp):
