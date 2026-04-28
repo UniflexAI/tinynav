@@ -57,7 +57,6 @@ class CmdVelControlNode(Node):
         self.last_path_time = 0.0
         self.pose = None
         self.path = None
-        self.path_dt_fallback = 0.1  # Fallback if path per-pose timestamps are invalid.
         self.path_start_time = None
         self.path_duration = 0.0
         self.path_pos_spline = None
@@ -152,11 +151,10 @@ class CmdVelControlNode(Node):
             ],
             dtype=np.float64,
         )
-        if np.all(np.diff(stamp_times) > 0):
-            times = stamp_times - stamp_times[0]
-        else:
-            # Fallback for missing/invalid stamps.
-            times = np.arange(count, dtype=np.float64) * self.path_dt_fallback
+        if not np.all(np.diff(stamp_times) > 0):
+            self.logger.warning("Path timestamps are invalid (non-monotonic); skip this path update.")
+            return False
+        times = stamp_times - stamp_times[0]
 
         positions = np.empty((count, 3), dtype=np.float64)
         quats = np.empty((count, 4), dtype=np.float64)
