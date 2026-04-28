@@ -602,15 +602,16 @@ class PlanningNode(Node):
                     self.path_pub.publish(path)
                     return
 
+            if self.target_pose is None and not self.poi_changed:
+                self.path_pub.publish(path)  # empty path — no active nav target
+                return
+
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
-                    if self.poi_changed or self.target_pose is None:
+                    if self.poi_changed:
                         x,y,z,qx,qy,qz,qw = trajectories[i][0]
-                        if self.poi_changed:
-                            self.get_logger().info(f"poi changed, using first point, wait {(depth_msg.header.stamp.sec - self.poi_change_timestamp_sec)} seconds")
-                        if self.target_pose is None:
-                            self.get_logger().info("target pose is None, using first point")
+                        self.get_logger().info(f"poi changed, using first point, wait {(depth_msg.header.stamp.sec - self.poi_change_timestamp_sec)} seconds")
 
                     pose = PoseStamped()
                     pose.header = depth_msg.header
