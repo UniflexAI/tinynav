@@ -23,10 +23,10 @@ class RobotConfig:
     """Robot geometry. Body frame: +x forward, +y left."""
     name: str = 'go2'
     shape: str = 'square'
-    length: float = 0.7
+    length: float = 0.5
     width: float = 0.3
-    radius: float = 0.3
-    camera_x: float = 0.35
+    radius: float = 0.15
+    camera_x: float = 0.25
     camera_y: float = 0.0
     control_x: float = 0.0
     control_y: float = 0.0
