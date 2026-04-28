@@ -3,6 +3,8 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
@@ -47,14 +49,23 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = 0.2
         self.linear_engage_threshold = 0.04
-        self.fixed_reverse_speed = 0.1
+        self.fixed_reverse_speed = 0.2
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
+        self._paused = False
+        _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
         
+    def _on_paused(self, msg: Bool):
+        self._paused = msg.data
+        if not self._paused:
+            # Reset prev_cmd so resume starts from zero cleanly
+            self.prev_cmd = Twist()
+
     def pose_callback(self, msg):
         self.pose = msg
 
@@ -65,6 +76,11 @@ class CmdVelControlNode(Node):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
+
+        if self._paused:
+            self.cmd_pub.publish(Twist())
+            self.prev_cmd = Twist()
+            return
 
         # Stale-path protection: slow down, then stop if planner has not refreshed.
         age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
@@ -87,13 +103,13 @@ class CmdVelControlNode(Node):
         out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
-        # Keep a minimum forward speed when planner requests motion and path is fresh.
-        if (
-            age <= stale_slow_s
-            and abs(target_cmd.linear.x) >= self.linear_engage_threshold
-            and abs(out.linear.x) < self.min_effective_linear_speed
-        ):
-            out.linear.x = float(np.sign(target_cmd.linear.x) * self.min_effective_linear_speed)
+        # Dead-band: < 0.05 → 0; small positive → snap to min effective speed.
+        if abs(out.linear.x) < 0.05:
+            out.linear.x = 0.0
+        elif 0 < out.linear.x < self.min_effective_linear_speed:
+            out.linear.x = self.min_effective_linear_speed
+        if abs(out.angular.z) < 0.05:
+            out.angular.z = 0.0
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
@@ -135,7 +151,7 @@ class CmdVelControlNode(Node):
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.3)
+        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
         if vx < 0.0:
             vx = -self.fixed_reverse_speed
         vy = 0.0

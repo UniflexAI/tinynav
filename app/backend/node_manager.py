@@ -23,10 +23,11 @@ import base64
 import rclpy
 import rclpy.time
 import tf2_ros
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
 
@@ -110,6 +111,11 @@ class BackendNode(Ros2NodeManager):
 
         # Publisher for POI nav target consumed by map_node via /mapping/cmd_pois
         self._cmd_pois_pub = self.create_publisher(String, '/mapping/cmd_pois', 10)
+
+        # Latched publisher — new subscribers (cmd_vel_control) get current state immediately on connect
+        _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._pause_pub = self.create_publisher(Bool, '/nav/paused', _latched_qos)
+        self._nav_paused = False
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -486,6 +492,7 @@ class BackendNode(Ros2NodeManager):
             pct = self.mapping_percent
             battery = self._battery
             nav_nodes = self._nav_nodes_running
+            nav_paused = self._nav_paused
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -497,6 +504,7 @@ class BackendNode(Ros2NodeManager):
             'navStatus': 'navigating' if raw == 'navigation' else 'idle',
             'rawState': raw,
             'navNodesRunning': nav_nodes,
+            'navPaused': nav_paused,
         }
 
     @staticmethod
@@ -621,6 +629,7 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
+            self._nav_paused = False
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
@@ -845,6 +854,28 @@ class BackendNode(Ros2NodeManager):
         payload = {'0': pois[key]}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
 
+    def cmd_send_pois(self, poi_ids: list[int]):
+        """Publish selected POIs to map_node and transition to navigation state."""
+        if not poi_ids:
+            self._cmd_pois_pub.publish(String(data='{}'))
+        else:
+            pois_file = os.path.join(self.map_path, 'pois.json')
+            if not os.path.exists(pois_file):
+                self.get_logger().warn('No pois.json found, cannot publish cmd_pois')
+                return
+            with open(pois_file) as f:
+                all_pois = json.load(f)
+            payload = {str(pid): all_pois[str(pid)] for pid in poi_ids if str(pid) in all_pois}
+            self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
+        with self._lock:
+            nav_running = self._nav_nodes_running
+        if nav_running:
+            self.state = 'navigation'
+            self._pub_state()
+        else:
+            self._stop_all()
+            self._start('navigation')
+
     def cmd_nav_start(self, poi_id: str | None = None):
         if poi_id is not None:
             self._publish_cmd_pois(int(poi_id))
@@ -870,6 +901,16 @@ class BackendNode(Ros2NodeManager):
             self._pub_state()
         else:
             self._stop_all()
+
+    def cmd_nav_pause(self):
+        with self._lock:
+            self._nav_paused = True
+        self._pause_pub.publish(Bool(data=True))
+
+    def cmd_nav_resume(self):
+        with self._lock:
+            self._nav_paused = False
+        self._pause_pub.publish(Bool(data=False))
 
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))
