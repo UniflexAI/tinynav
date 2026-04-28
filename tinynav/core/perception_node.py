@@ -1,7 +1,10 @@
 import argparse
 import json
 import logging
+import pickle
 import sys
+import os
+from datetime import datetime
 import time
 import cv2
 from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
@@ -11,7 +14,6 @@ from codetiming import Timer
 from cv_bridge import CvBridge
 from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Vector3Stamped
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from std_msgs.msg import String
@@ -27,7 +29,6 @@ from collections import deque
 from dataclasses import dataclass
 
 from gtsam.symbol_shorthand import X, B, V
-from tinynav.core.imu_propagator_node import ImuPropagatorNode
 
 _N = 5
 _M = 1000
@@ -106,7 +107,7 @@ class PerceptionNode(Node):
 
         self.T_body_last = None
         self.V_last = None
-        self.B_last = gtsam.imuBias.ConstantBias()
+        self.B_last = None
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -133,8 +134,6 @@ class PerceptionNode(Node):
         self.input_aligner_seen_imu = False
         self.input_aligner_seen_stereo = False
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
-        self.bias_acc_pub = self.create_publisher(Vector3Stamped, "/slam/imu_bias_accel", 10)
-        self.bias_gyro_pub = self.create_publisher(Vector3Stamped, "/slam/imu_bias_gyro", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
@@ -174,6 +173,9 @@ class PerceptionNode(Node):
         self.keyframe_queue = []
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
+        self.debug_folder = f"debug/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(self.debug_folder, exist_ok=True)
+
 
     def info_callback(self, msg):
         if self.K is None:
@@ -227,30 +229,6 @@ class PerceptionNode(Node):
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
 
-    def _publish_bias_topics(self, stamp, bias: gtsam.imuBias.ConstantBias):
-        try:
-            b_acc = np.asarray(bias.accelerometer(), dtype=float).reshape(3)
-            b_gyro = np.asarray(bias.gyroscope(), dtype=float).reshape(3)
-        except Exception:
-            b = np.asarray(bias.vector(), dtype=float).reshape(-1)
-            b_acc = b[:3]
-            b_gyro = b[3:6]
-        accel_msg = Vector3Stamped()
-        accel_msg.header.stamp = stamp
-        accel_msg.header.frame_id = "world"
-        accel_msg.vector.x = float(b_acc[0])
-        accel_msg.vector.y = float(b_acc[1])
-        accel_msg.vector.z = float(b_acc[2])
-        self.bias_acc_pub.publish(accel_msg)
-
-        gyro_msg = Vector3Stamped()
-        gyro_msg.header.stamp = stamp
-        gyro_msg.header.frame_id = "world"
-        gyro_msg.vector.x = float(b_gyro[0])
-        gyro_msg.vector.y = float(b_gyro[1])
-        gyro_msg.vector.z = float(b_gyro[2])
-        self.bias_gyro_pub.publish(gyro_msg)
-
     def imu_callback(self, imu_msg):
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
@@ -285,8 +263,8 @@ class PerceptionNode(Node):
                     depth=depth,
                     pose=self.T_body_last,
                     velocity=np.zeros(3),
-                    bias=self.B_last,
-                    preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, self.B_last),
+                    bias=gtsam.imuBias.ConstantBias(),
+                    preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
                     latest_imu_timestamp=current_timestamp,
                     K=self.K,
                 )
@@ -352,7 +330,6 @@ class PerceptionNode(Node):
             )
             self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
         # for new frame, we first add it as keyframe, if not, we pop it later
-        prev_bias = self.keyframe_queue[-1].bias
         self.keyframe_queue.append(
             Keyframe(
                 timestamp=current_timestamp,
@@ -362,8 +339,8 @@ class PerceptionNode(Node):
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
                 velocity=self.keyframe_queue[-1].velocity,
-                bias=prev_bias,
-                preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, prev_bias),
+                bias=gtsam.imuBias.ConstantBias(),
+                preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
                 latest_imu_timestamp=current_timestamp,
                 K=self.K,
             )
@@ -378,7 +355,8 @@ class PerceptionNode(Node):
                 # process previous keyframes' factors
                 for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                     # per pose -- bias
-                    initial_estimate.insert(B(i), keyframe.bias)
+                    initial_estimate.insert(B(i), gtsam.imuBias.ConstantBias())
+                    graph.add(gtsam.PriorFactorConstantBias(B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
 
                     initial_estimate.insert(V(i), keyframe.velocity)
                     initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(keyframe.pose))
@@ -388,8 +366,6 @@ class PerceptionNode(Node):
 
                         # per pose -- pose, could only be applied to the first keyframe
                         graph.add(gtsam.PriorFactorPose3(X(i), Matrix4x4ToGtsamPose3(keyframe.pose), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1]))))
-                        # bias prior anchors the window without forcing all biases to zero.
-                        graph.add(gtsam.PriorFactorConstantBias(B(i), keyframe.bias, gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
@@ -421,6 +397,14 @@ class PerceptionNode(Node):
                 uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
+
+            # serialized self.keyframe_queue using pickle, to debug/{process_cnt}_keyframe_queue.pkl, and log the size of the serialized data
+            # create debug folder, using current datetime
+            pickle_keyframe_queue = pickle.dumps(self.keyframe_queue)
+            self.logger.debug(f"Serialized keyframe queue size: {len(pickle_keyframe_queue)} bytes")
+
+            #with open(f"{self.debug_folder}/{self.process_cnt:04d}_keyframe_queue.pkl", "wb") as f:
+            #    f.write(pickle_keyframe_queue)
             
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
             # match by LightGlue, filter by geometric consistency (pose estimation), 
@@ -496,6 +480,12 @@ class PerceptionNode(Node):
                 tracks = uf_all_sets_list(uf, min_component_size=2)
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
+            #match_img = np.zeros((left_img.shape[0] * 2, left_img.shape[1] * 2, 3), dtype=np.uint8)
+            #match_img[:left_img.shape[0], :left_img.shape[1]] = cv2.cvtColor(kf_prev.image, cv2.COLOR_GRAY2BGR)
+            #match_img[left_img.shape[0]:, left_img.shape[1]:] = cv2.cvtColor(kf_curr.image, cv2.COLOR_GRAY2BGR)
+            #match_img[:left_img.shape[0], left_img.shape[1]:] = cv2.cvtColor(kf_curr.right_image, cv2.COLOR_GRAY2BGR)
+            #match_img[left_img.shape[0]:, :left_img.shape[1]] = cv2.cvtColor(kf_prev.right_image, cv2.COLOR_GRAY2BGR)
+
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 for landmark in tracks[::1]:
                     # Build a smart factor per track (no explicit landmark variable)
@@ -538,6 +528,7 @@ class PerceptionNode(Node):
             params.setVerbosityLM("DEBUG")
             lm = gtsam.LevenbergMarquardtOptimizer(graph, initial_estimate, params)
             result = lm.optimize()
+            #result = initial_estimate
 
             self.logger.info(f"ISAM optimization done with {graph.size()} factors and {initial_estimate.size()} variables.")
             self.logger.info(f"Initial error: {graph.error(initial_estimate):.4f}, Final error: {graph.error(result):.4f}")
@@ -546,9 +537,8 @@ class PerceptionNode(Node):
                 T_i = result.atPose3(X(i)).matrix()
                 keyframe.pose = T_i
                 keyframe.velocity = result.atVector(V(i))
-                keyframe.bias = result.atConstantBias(B(i))
                 self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
-                self.logger.debug(f"Bias {i} updated:\n{keyframe.bias}")
+                self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
         with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -574,10 +564,8 @@ class PerceptionNode(Node):
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
-            self.B_last = result.atConstantBias(B(len(self.keyframe_queue) - 1))
             # publish odometry
             self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
-            self._publish_bias_topics(left_msg.header.stamp, self.B_last)
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
 
@@ -606,18 +594,31 @@ class PerceptionNode(Node):
 
 
 def main(args=None):
+
     rclpy.init(args=args)
-    parser = argparse.ArgumentParser(description='Run TinyNav perception node.')
-    parser.add_argument('--verbose_timer', action='store_true', help='Print timing for key pipeline stages.')
-    parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
+    parser = argparse.ArgumentParser()
+    parser.set_defaults(verbose_timer=True)
+    parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
+    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument("--log_file", type=str, default="odom.log", help="Path to the log file")
+    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+    print(f"Verbose timer: {parsed_args.verbose_timer}")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
+    )
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
+
     executor = rclpy.executors.SingleThreadedExecutor()
     executor.add_node(perception_node)
     executor.spin()
     perception_node.destroy_node()
-    rclpy.shutdown()
+    executor.shutdown()
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+
+if __name__ == "__main__":
     main()
