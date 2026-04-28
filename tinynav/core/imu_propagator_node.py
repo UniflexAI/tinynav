@@ -2,7 +2,6 @@ import logging
 
 import numpy as np
 import rclpy
-from codetiming import Timer
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -63,39 +62,34 @@ class ImuPropagatorNode(Node):
         self.odom_100hz_buffer = []
 
     def imu_callback(self, imu_msg: Imu):
-        with Timer(
-            name="ImuPropagatorNode.imu_callback",
-            text="[{name}] Elapsed time: {milliseconds:.2f} ms",
-            logger=self.get_logger().info,
-        ):
-            if len(self.odom_100hz_buffer) == 0:
-                return
+        if len(self.odom_100hz_buffer) == 0:
+            return
 
-            timestamp = self._stamp_to_sec(imu_msg.header.stamp)
-            print("imu: ", timestamp)
-            self.imu_buffer.append((timestamp, imu_msg))
-            if len(self.imu_buffer) > 2000:
-                self.imu_buffer.pop(0)
+        timestamp = self._stamp_to_sec(imu_msg.header.stamp)
+        print("imu: ", timestamp)
+        self.imu_buffer.append((timestamp, imu_msg))
+        if len(self.imu_buffer) > 2000:
+            self.imu_buffer.pop(0)
 
-            if self.imu_buffer[-1][0] <= self.odom_100hz_buffer[-1][0] + 0.008:
-                return
+        if self.imu_buffer[-1][0] <= self.odom_100hz_buffer[-1][0] + 0.050:
+            return
 
-            start_idx = None
-            for i in range(len(self.imu_buffer)):
-                if self.imu_buffer[-(i + 1)][0] > self.odom_100hz_buffer[-1][0]:
-                    start_idx = -(i + 1)
-                else:
-                    break
+        start_idx = None
+        for i in range(len(self.imu_buffer)):
+            if self.imu_buffer[-(i + 1)][0] > self.odom_100hz_buffer[-1][0]:
+                start_idx = -(i + 1)
+            else:
+                break
 
-            if start_idx is None:
-                return
+        if start_idx is None:
+            return
 
-            for i in range(start_idx, 0):
-                self.odom_100hz_buffer.append(integrate(self.odom_100hz_buffer[-1], self.imu_buffer[i]))
-                if len(self.odom_100hz_buffer) > 1000:
-                    self.odom_100hz_buffer.pop(0)
+        for i in range(start_idx, 0):
+            self.odom_100hz_buffer.append(integrate(self.odom_100hz_buffer[-1], self.imu_buffer[i]))
+            if len(self.odom_100hz_buffer) > 1000:
+                self.odom_100hz_buffer.pop(0)
 
-            self.odom_pub.publish(self.odom_100hz_buffer[-1][1])
+        self.odom_pub.publish(self.odom_100hz_buffer[-1][1])
 
     def odom_callback(self, msg: Odometry):
         timestamp = self._stamp_to_sec(msg.header.stamp)

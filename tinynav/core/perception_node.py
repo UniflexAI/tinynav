@@ -26,6 +26,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from gtsam.symbol_shorthand import X, B, V
+from tinynav.core.imu_propagator_node import ImuPropagatorNode
 
 _N = 5
 _M = 1000
@@ -130,7 +131,6 @@ class PerceptionNode(Node):
         self.input_aligner_seen_imu = False
         self.input_aligner_seen_stereo = False
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
-        self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
@@ -551,7 +551,6 @@ class PerceptionNode(Node):
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
             # publish odometry
             self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
-            self.odom_visual_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
             self.tf_broadcaster.sendTransform(np2tf(self.T_body_last, left_msg.header.stamp, "world", "camera"))
 
@@ -586,10 +585,14 @@ def main(args=None):
     parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
+    imu_propagator_node = ImuPropagatorNode()
+
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(perception_node)
+    executor.add_node(imu_propagator_node)
     executor.spin()
     perception_node.destroy_node()
+    imu_propagator_node.destroy_node()
     rclpy.shutdown()
 
 if __name__ == '__main__':
