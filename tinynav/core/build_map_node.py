@@ -365,9 +365,11 @@ class BagPlayer(Node):
         self._mapping_percent_pub.publish(msg)
         # Emit a throttled log line so the parent process can read progress
         # from stdout without needing a separate bridge node.
+        # Always emit 100% (completion signal) regardless of throttle.
         now = self.get_clock().now()
-        if not hasattr(self, '_last_percent_log_time') or \
-                (now - self._last_percent_log_time).nanoseconds / 1e9 >= self._PERCENT_LOG_INTERVAL_S:
+        elapsed = ((now - self._last_percent_log_time).nanoseconds / 1e9
+                   if hasattr(self, '_last_percent_log_time') else float('inf'))
+        if percent >= 100.0 or elapsed >= self._PERCENT_LOG_INTERVAL_S:
             self.get_logger().info(f"MAPPING_PERCENT:{percent:.1f}")
             self._last_percent_log_time = now
 
