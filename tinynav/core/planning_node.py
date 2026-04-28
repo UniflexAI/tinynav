@@ -547,7 +547,8 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            # Reverse is generally discouraged, but should be selectable for front-obstacle escape.
+            # Reverse is mildly discouraged by default. If all forward trajectories are invalid,
+            # fallback picks the best feasible reverse trajectory for escape.
             fl_r, rl_r, hw_r = self.robot.footprint_from_control()
             rc = self.camera_to_robot_center(T)
             fwd_r = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
@@ -583,10 +584,7 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                if backward:
-                    backward_penalty = -800.0 if front_blocked else 1800.0 * front_penalty_scale
-                else:
-                    backward_penalty = 0.0
+                backward_penalty = 1200.0 * front_penalty_scale if backward else 0.0
                 # When front is blocked, discourage positive vx so reverse can be chosen.
                 front_block_forward_penalty = 2500.0 * max(0.0, param[0]) if front_blocked and not backward else 0.0
 
@@ -627,8 +625,29 @@ class PlanningNode(Node):
                     + heading_penalty
                 )
 
-            top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose, bool(is_backward[i])) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            costs = np.array([
+                cost_function(trajectories[i], params[i], scores[i], self.target_pose, bool(is_backward[i]))
+                for i in range(len(trajectories))
+            ], dtype=np.float64)
+
+            # Escape fallback: if forward set is fully invalid, choose best feasible reverse.
+            forward_feasible = [
+                i for i in range(len(scores))
+                if (not bool(is_backward[i])) and np.isfinite(scores[i])
+            ]
+            if len(forward_feasible) == 0:
+                backward_feasible = [
+                    i for i in range(len(scores))
+                    if bool(is_backward[i]) and np.isfinite(scores[i])
+                ]
+                if len(backward_feasible) > 0:
+                    top_idx = min(backward_feasible, key=lambda i: costs[i])
+                    top_indices = np.array([top_idx], dtype=np.int64)
+                    self.get_logger().info('Forward trajectories blocked, using reverse escape trajectory.')
+                else:
+                    top_indices = np.argsort(costs, kind='stable')[:1]
+            else:
+                top_indices = np.argsort(costs, kind='stable')[:1]
             self.last_param = params[top_indices[0]]
 
             # path
