@@ -547,36 +547,85 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            # Adaptive backward penalty: linearly scales from 10000 (far) to 0 (in contact).
+            # Reverse is generally discouraged, but should be selectable for front-obstacle escape.
             fl_r, rl_r, hw_r = self.robot.footprint_from_control()
             rc = self.camera_to_robot_center(T)
             fwd_r = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
             nr = (fwd_r[0]**2 + fwd_r[1]**2)**0.5
             frx, fry = (fwd_r[0]/nr, fwd_r[1]/nr) if nr > 1e-6 else (1.0, 0.0)
             llx, lly = -fry, frx
-            rc_pts = [
-                (rc[0], rc[1]),
+            Er, Ec = ESDF_map.shape
+
+            front_pts = [
+                (rc[0] + frx*fl_r, rc[1] + fry*fl_r),
                 (rc[0] + frx*fl_r + llx*hw_r, rc[1] + fry*fl_r + lly*hw_r),
                 (rc[0] + frx*fl_r - llx*hw_r, rc[1] + fry*fl_r - lly*hw_r),
-                (rc[0] - frx*rl_r + llx*hw_r, rc[1] - fry*rl_r + lly*hw_r),
-                (rc[0] - frx*rl_r - llx*hw_r, rc[1] - fry*rl_r - lly*hw_r),
             ]
-            Er, Ec = ESDF_map.shape
-            robot_clearance = 999.0
-            for px_, py_ in rc_pts:
+            front_clearance = 999.0
+            for px_, py_ in front_pts:
                 xi_ = int((px_ - self.origin[0]) / self.resolution)
                 yi_ = int((py_ - self.origin[1]) / self.resolution)
                 if 0 <= xi_ < Er and 0 <= yi_ < Ec:
-                    robot_clearance = min(robot_clearance, float(ESDF_map[xi_, yi_]))
-            # Penalty drops to 0 when robot is at safety_radius; full penalty beyond 0.3m.
-            penalty_scale = float(np.clip(robot_clearance / 0.3, 0.0, 1.0))
+                    front_clearance = min(front_clearance, float(ESDF_map[xi_, yi_]))
+
+            front_escape_threshold = self.robot.safety_radius + 0.12
+            front_blocked = front_clearance < front_escape_threshold
+            # Mild reverse discouragement when front is clear.
+            front_penalty_scale = float(np.clip(front_clearance / 0.25, 0.0, 1.0))
+
+            target_behind = False
+            if self.target_pose is not None:
+                to_goal_xy = self.target_pose[:2] - rc[:2]
+                forward_proj = float(to_goal_xy[0] * frx + to_goal_xy[1] * fry)
+                target_behind = forward_proj < -0.15
 
             def cost_function(traj, param, score, target_pose, backward):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                backward_penalty = 10000.0 * penalty_scale if backward else 0.0
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + backward_penalty
+                if backward:
+                    backward_penalty = -800.0 if front_blocked else 1800.0 * front_penalty_scale
+                else:
+                    backward_penalty = 0.0
+                # When front is blocked, discourage positive vx so reverse can be chosen.
+                front_block_forward_penalty = 2500.0 * max(0.0, param[0]) if front_blocked and not backward else 0.0
+
+                # If goal is behind robot, prefer rotate-first behavior.
+                rotate_first_penalty = 0.0
+                heading_penalty = 0.0
+                if target_behind and target_pose is not None:
+                    rotate_first_penalty = 4000.0 * abs(param[0])
+
+                    qx, qy, qz, qw = traj[-1, 3], traj[-1, 4], traj[-1, 5], traj[-1, 6]
+                    tf_x = 2.0 * (qx * qz + qw * qy)
+                    tf_y = 2.0 * (qy * qz - qw * qx)
+                    n_tf = (tf_x * tf_x + tf_y * tf_y) ** 0.5
+                    if n_tf > 1e-6:
+                        tf_x /= n_tf
+                        tf_y /= n_tf
+                    else:
+                        tf_x, tf_y = 1.0, 0.0
+                    gx = target_end[0] - traj_end[0]
+                    gy = target_end[1] - traj_end[1]
+                    n_g = (gx * gx + gy * gy) ** 0.5
+                    if n_g > 1e-6:
+                        gx /= n_g
+                        gy /= n_g
+                        cross = tf_x * gy - tf_y * gx
+                        dot = tf_x * gx + tf_y * gy
+                        heading_err = abs(np.arctan2(cross, dot))
+                        heading_penalty = 700.0 * heading_err
+
+                return (
+                    score * 100000
+                    + 100 * dist
+                    + 10 * abs(self.last_param[0] - param[0])
+                    + 10 * abs(self.last_param[1] - param[1])
+                    + backward_penalty
+                    + front_block_forward_penalty
+                    + rotate_first_penalty
+                    + heading_penalty
+                )
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose, bool(is_backward[i])) for i in range(len(trajectories))]), kind='stable')[:top_k]
