@@ -9,6 +9,7 @@ from scipy.interpolate import CubicSpline
 import numpy as np
 import logging
 import time
+from tinynav.core.math_utils import np2msg
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class CmdVelControlNode(Node):
         super().__init__('cmd_vel_control_node')
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.target_pose_pub = self.create_publisher(Odometry, '/control/target_pose_pid', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
         self.T_robot_to_camera = np.array([
@@ -68,25 +70,11 @@ class CmdVelControlNode(Node):
         self.cross_track_gain = 1.2
 
         # === Control loop (ported from planning_node_compare style) ===
-        # Planner input is typically 7-10 Hz; over-driving cmd publish rate amplifies jitter.
-        self.cmd_rate_hz = 12.0
-        # Use minima; actual stale thresholds are scaled by observed planner period.
-        self.path_stale_slow_s = 0.35
-        self.path_stale_stop_s = 0.8
-        self.path_stale_slow_factor = 3.5
-        self.path_stale_stop_factor = 5.0
-        self.max_linear_acc = 0.6   # m/s^2
+        self.cmd_rate_hz = 20.0
+        self.path_stale_slow_s = 0.3
+        self.path_stale_stop_s = 0.6
+        self.max_linear_acc = 0.4   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
-        self.planner_dt = 0.1       # trajectory dt in planning_node
-        # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
-        self.path_pose_stride = 10
-        self.path_period_ema = 0.12
-        self.path_filter_tau = 0.30
-        self.lookahead_steps = 1
-        # Static-friction compensation: very small vx often cannot move the robot.
-        self.min_effective_linear_speed = 0.2
-        self.linear_engage_threshold = 0.04
-        self.fixed_reverse_speed = 0.1
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -96,6 +84,19 @@ class CmdVelControlNode(Node):
         
     def pose_callback(self, msg):
         self.pose = msg
+        self._publish_pid_target_pose(msg.header.stamp)
+
+    def _publish_pid_target_pose(self, stamp):
+        if self.path_start_time is None or self.path_duration <= 0.0:
+            return
+        now_mono = time.monotonic()
+        t_ref = now_mono - self.path_start_time
+        ref_pos, ref_quat = self._sample_pose_at(t_ref)
+        if ref_pos is None:
+            return
+        T_robot_ref = self._world_from_pose_quat(ref_pos, ref_quat)
+        target_msg = np2msg(T_robot_ref, stamp, "world", "camera_target")
+        self.target_pose_pub.publish(target_msg)
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
@@ -252,15 +253,13 @@ class CmdVelControlNode(Node):
 
         # Stale-path protection: slow down, then stop if planner has not refreshed.
         age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
-        stale_slow_s = max(self.path_stale_slow_s, self.path_period_ema * self.path_stale_slow_factor)
-        stale_stop_s = max(self.path_stale_stop_s, self.path_period_ema * self.path_stale_stop_factor)
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
         target_cmd.angular.z = self.latest_cmd.angular.z
-        if age > stale_stop_s:
+        if age > self.path_stale_stop_s:
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
-        elif age > stale_slow_s:
+        elif age > self.path_stale_slow_s:
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
 
@@ -271,13 +270,6 @@ class CmdVelControlNode(Node):
         out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
-        # Keep a minimum forward speed when planner requests motion and path is fresh.
-        if (
-            age <= stale_slow_s
-            and abs(target_cmd.linear.x) >= self.linear_engage_threshold
-            and abs(out.linear.x) < self.min_effective_linear_speed
-        ):
-            out.linear.x = float(np.sign(target_cmd.linear.x) * self.min_effective_linear_speed)
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
