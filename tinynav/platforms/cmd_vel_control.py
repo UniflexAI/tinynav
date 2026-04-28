@@ -50,6 +50,7 @@ class CmdVelControlNode(Node):
         self.min_effective_linear_speed = 0.2
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
+        self.max_forward_speed = 0.3
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -151,7 +152,7 @@ class CmdVelControlNode(Node):
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
+        vx = np.clip(linear_velocity_vec[0], -0.1, self.max_forward_speed)
         if vx < 0.0:
             vx = -self.fixed_reverse_speed
         vy = 0.0
