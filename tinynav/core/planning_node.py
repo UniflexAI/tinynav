@@ -190,9 +190,9 @@ def generate_trajectory_library_3d(
 ):
     num_steps = int(duration / dt) + 1
 
-    max_acc = 0.2
+    max_acc = 0.5
     acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
-    max_omega = np.pi / 8
+    max_omega = np.pi / 4
     omega_y_samples = np.linspace(-max_omega, max_omega, num_samples)
 
     num_samples = len(acc_samples) * len(omega_y_samples)
