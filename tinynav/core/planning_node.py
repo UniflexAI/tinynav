@@ -607,7 +607,6 @@ class PlanningNode(Node):
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
-
                     pose = PoseStamped()
                     pose.header = depth_msg.header
                     pose.pose.position.x = x
