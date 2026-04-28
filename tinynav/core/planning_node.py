@@ -250,7 +250,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
 
-        for i in range(len(traj)):
+        for i in range(1, len(traj)):  # skip step-0 (robot's current position) to avoid score contamination
             x_world, y_world = traj[i, 0], traj[i, 1]
             qx, qy, qz, qw = traj[i, 3], traj[i, 4], traj[i, 5], traj[i, 6]
 
@@ -547,7 +547,6 @@ class PlanningNode(Node):
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
-
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
@@ -566,7 +565,7 @@ class PlanningNode(Node):
             )
             # Penalised in cost so forward is always preferred when unblocked.
             back_trajs, back_params = generate_trajectory_library_3d(
-                num_samples=5, init_p=init_p, init_v=-v_dir * 0.15, init_q=init_q
+                num_samples=5, init_p=init_p, init_v=-v_dir * 0.2, init_q=init_q
             )
             is_backward = np.array([False] * len(trajectories) + [True] * len(back_trajs))
             trajectories = np.concatenate([trajectories, back_trajs], axis=0)
@@ -581,11 +580,35 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # Adaptive backward penalty: linearly scales from 10000 (far) to 0 (in contact).
+            fl_r, rl_r, hw_r = self.robot.footprint_from_control()
+            rc = self.camera_to_robot_center(T)
+            fwd_r = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+            nr = (fwd_r[0]**2 + fwd_r[1]**2)**0.5
+            frx, fry = (fwd_r[0]/nr, fwd_r[1]/nr) if nr > 1e-6 else (1.0, 0.0)
+            llx, lly = -fry, frx
+            rc_pts = [
+                (rc[0], rc[1]),
+                (rc[0] + frx*fl_r + llx*hw_r, rc[1] + fry*fl_r + lly*hw_r),
+                (rc[0] + frx*fl_r - llx*hw_r, rc[1] + fry*fl_r - lly*hw_r),
+                (rc[0] - frx*rl_r + llx*hw_r, rc[1] - fry*rl_r + lly*hw_r),
+                (rc[0] - frx*rl_r - llx*hw_r, rc[1] - fry*rl_r - lly*hw_r),
+            ]
+            Er, Ec = ESDF_map.shape
+            robot_clearance = 999.0
+            for px_, py_ in rc_pts:
+                xi_ = int((px_ - self.origin[0]) / self.resolution)
+                yi_ = int((py_ - self.origin[1]) / self.resolution)
+                if 0 <= xi_ < Er and 0 <= yi_ < Ec:
+                    robot_clearance = min(robot_clearance, float(ESDF_map[xi_, yi_]))
+            # Penalty drops to 0 when robot is at safety_radius; full penalty beyond 0.3m.
+            penalty_scale = float(np.clip(robot_clearance / 0.3, 0.0, 1.0))
+
             def cost_function(traj, param, score, target_pose, backward):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                backward_penalty = 10000.0 if backward else 0.0
+                backward_penalty = 10000.0 * penalty_scale if backward else 0.0
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + backward_penalty
 
             top_k = 1
