@@ -12,7 +12,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header, Float32
+from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -250,7 +250,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
 
-        for i in range(len(traj)):
+        for i in range(1, len(traj)):  # skip step-0 (robot's current position) to avoid score contamination
             x_world, y_world = traj[i, 0], traj[i, 1]
             qx, qy, qz, qw = traj[i, 3], traj[i, 4], traj[i, 5], traj[i, 6]
 
@@ -373,8 +373,6 @@ class PlanningNode(Node):
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
 
-        self.front_dist_pub = self.create_publisher(Float32, '/planning/front_dist', 10)
-
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
@@ -422,27 +420,6 @@ class PlanningNode(Node):
         msg.header.frame_id = "world"
         msg.points = points
         self.footprint_pub.publish(msg)
-
-    def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
-        """Distance from the robot's front face to the nearest obstacle in the forward corridor.
-        Scans start at the front face so the returned value matches physical clearance."""
-        center = self.camera_to_robot_center(T)
-        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-        n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
-        fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
-        lx, ly = -fy, fx
-        fl, _, hw = self.robot.footprint_from_control()
-        rows, cols = obstacle_mask.shape
-        steps = int(max_dist / self.resolution) + 1
-        for step in range(steps):
-            d_from_face = step * self.resolution
-            d_from_center = fl + d_from_face
-            for w in (-hw, 0.0, hw):
-                xi = int((center[0] + fx * d_from_center + lx * w - self.origin[0]) / self.resolution)
-                yi = int((center[1] + fy * d_from_center + ly * w - self.origin[1]) / self.resolution)
-                if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
-                    return d_from_face
-        return max_dist + 1.0
 
     def publish_obstacle_mask(self, mask, stamp):
         msg = OccupancyGrid()
@@ -566,8 +543,6 @@ class PlanningNode(Node):
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
-            self.front_dist_pub.publish(Float32(data=self._front_obstacle_dist(T, obstacle_mask)))
-
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
@@ -586,7 +561,7 @@ class PlanningNode(Node):
             )
             # Penalised in cost so forward is always preferred when unblocked.
             back_trajs, back_params = generate_trajectory_library_3d(
-                num_samples=5, init_p=init_p, init_v=-v_dir * 0.15, init_q=init_q
+                num_samples=5, init_p=init_p, init_v=-v_dir * 0.2, init_q=init_q
             )
             is_backward = np.array([False] * len(trajectories) + [True] * len(back_trajs))
             trajectories = np.concatenate([trajectories, back_trajs], axis=0)
@@ -601,11 +576,35 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # Adaptive backward penalty: linearly scales from 10000 (far) to 0 (in contact).
+            fl_r, rl_r, hw_r = self.robot.footprint_from_control()
+            rc = self.camera_to_robot_center(T)
+            fwd_r = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+            nr = (fwd_r[0]**2 + fwd_r[1]**2)**0.5
+            frx, fry = (fwd_r[0]/nr, fwd_r[1]/nr) if nr > 1e-6 else (1.0, 0.0)
+            llx, lly = -fry, frx
+            rc_pts = [
+                (rc[0], rc[1]),
+                (rc[0] + frx*fl_r + llx*hw_r, rc[1] + fry*fl_r + lly*hw_r),
+                (rc[0] + frx*fl_r - llx*hw_r, rc[1] + fry*fl_r - lly*hw_r),
+                (rc[0] - frx*rl_r + llx*hw_r, rc[1] - fry*rl_r + lly*hw_r),
+                (rc[0] - frx*rl_r - llx*hw_r, rc[1] - fry*rl_r - lly*hw_r),
+            ]
+            Er, Ec = ESDF_map.shape
+            robot_clearance = 999.0
+            for px_, py_ in rc_pts:
+                xi_ = int((px_ - self.origin[0]) / self.resolution)
+                yi_ = int((py_ - self.origin[1]) / self.resolution)
+                if 0 <= xi_ < Er and 0 <= yi_ < Ec:
+                    robot_clearance = min(robot_clearance, float(ESDF_map[xi_, yi_]))
+            # Penalty drops to 0 when robot is at safety_radius; full penalty beyond 0.3m.
+            penalty_scale = float(np.clip(robot_clearance / 0.3, 0.0, 1.0))
+
             def cost_function(traj, param, score, target_pose, backward):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                backward_penalty = 10000.0 if backward else 0.0
+                backward_penalty = 10000.0 * penalty_scale if backward else 0.0
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + backward_penalty
 
             top_k = 1
