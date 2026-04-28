@@ -374,12 +374,8 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
-        self.poi_changed = False
-        self.poi_change_timestamp_sec = 0.0
 
     def poi_change_callback(self, msg):
-        self.poi_changed = True
-        self.poi_change_timestamp_sec = msg.header.stamp.sec
         self.target_pose = None
 
     def target_pose_callback(self, msg):
@@ -584,9 +580,6 @@ class PlanningNode(Node):
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
-            if self.poi_changed and (depth_msg.header.stamp.sec - self.poi_change_timestamp_sec) > 3.0:
-                self.poi_changed = False
-
             # path
             path = Path()
             path.header = depth_msg.header
@@ -602,16 +595,18 @@ class PlanningNode(Node):
                     self.path_pub.publish(path)
                     return
 
-            if self.target_pose is None and not self.poi_changed:
-                self.path_pub.publish(path)  # empty path — no active nav target
+            if self.target_pose is None:
+                self.path_pub.publish(path)
+                return
+
+            if all(s == float('inf') for s in scores):
+                self.get_logger().info('All trajectories in collision, stopping path.')
+                self.path_pub.publish(path)
                 return
 
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
-                    if self.poi_changed:
-                        x,y,z,qx,qy,qz,qw = trajectories[i][0]
-                        self.get_logger().info(f"poi changed, using first point, wait {(depth_msg.header.stamp.sec - self.poi_change_timestamp_sec)} seconds")
 
                     pose = PoseStamped()
                     pose.header = depth_msg.header
