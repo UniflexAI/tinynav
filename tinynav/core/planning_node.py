@@ -51,9 +51,9 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.4, width=0.3,
+    length=0.7, width=0.4,
     camera_x=0.35, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
+    control_x=0.35, control_y=0.0,
     safety_radius=0.1,
 )
 
