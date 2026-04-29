@@ -3,6 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
+<<<<<<< HEAD
 from std_msgs.msg import Bool
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
@@ -59,7 +60,7 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-        
+
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
         if not self._paused:
@@ -103,12 +104,12 @@ class CmdVelControlNode(Node):
         out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
-        # Dead-band: < 0.05 → 0; small positive → snap to min effective speed.
-        if abs(out.linear.x) < 0.05:
+        # Snap to min effective speed only when starting from standstill — avoids locking at min speed while decelerating.
+        if abs(out.linear.x) < 0.01:
             out.linear.x = 0.0
-        elif 0 < out.linear.x < self.min_effective_linear_speed:
+        elif 0 < out.linear.x < self.min_effective_linear_speed and self.prev_cmd.linear.x < 0.05:
             out.linear.x = self.min_effective_linear_speed
-        if abs(out.angular.z) < 0.05:
+        if abs(out.angular.z) < 0.01:
             out.angular.z = 0.0
 
         self.cmd_pub.publish(out)
@@ -145,6 +146,7 @@ class CmdVelControlNode(Node):
         T_robot_2 = T2 @ self.T_robot_to_camera
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
         p = T_robot_2_to_1[:3, 3]
+        heading_err = float(np.arctan2(p[1], p[0]))
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
@@ -156,6 +158,13 @@ class CmdVelControlNode(Node):
             vx = -self.fixed_reverse_speed
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
+        if vx < 0.0:
+            vyaw = 0.0
+
+        # Minimal rotate-first gate: apply only for forward motion.
+        if vx > 0.0 and abs(heading_err) > 0.45:
+            vx = 0.0
+            vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 
         # Filter planner updates to reduce visible jitter from 7-10 Hz updates.
         alpha = np.clip(self.path_period_ema / (self.path_filter_tau + self.path_period_ema), 0.15, 0.75)
