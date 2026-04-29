@@ -48,13 +48,6 @@ class RobotConfig:
         hl, hw = self.half_size
         return float(hl - self.control_x), float(hl + self.control_x), float(hw)
 
-TestOBJ_CONFIG = RobotConfig(
-    name='testobj', shape='square',
-    length=0.2, width=0.2,
-    camera_x=0.0, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
-    safety_radius=0.1,
-)
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
@@ -329,7 +322,7 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
-        self.robot = TestOBJ_CONFIG
+        self.robot = GO2_CONFIG
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
