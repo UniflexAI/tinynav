@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path, Odometry
-from scipy.spatial.transform import Rotation as R
+from tinynav.core.math_utils import msg2np, pose_msg2np
 
 
 class CmdVelControlNode(Node):
@@ -27,21 +27,14 @@ class CmdVelControlNode(Node):
         self._track_idx = 0
         self._last_traj_update_sec = None
 
-        # === ROS Interfaces ===
         self.create_subscription(Odometry, "/slam/odometry_100hz", self._odom_cb, 10)
         self.create_subscription(Path, "/planning/trajectory_path", self._traj_cb, 10)
-
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
-    # =========================
-    # ODOM
-    # =========================
     def _odom_cb(self, msg: Odometry):
-        p = msg.pose.pose.position
-        q = msg.pose.pose.orientation
-
-        measured_position = np.array([p.x, p.y, p.z], dtype=np.float64)
-        measured_rotation = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+        measured_pose, _ = msg2np(msg)
+        measured_position = measured_pose[:3, 3]
+        measured_rotation = measured_pose[:3, :3]
 
         if not self._odom_pose_initialized:
             self.position = measured_position
@@ -55,9 +48,6 @@ class CmdVelControlNode(Node):
         self._odom_stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self._control_loop()
 
-    # =========================
-    # PATH
-    # =========================
     def _traj_cb(self, msg: Path):
         now = self._now_sec()
         if (
@@ -80,13 +70,11 @@ class CmdVelControlNode(Node):
         t = np.zeros(n, dtype=np.float64)
         last_yaw = 0.0
         for i, pose in enumerate(path_msg.poses):
-            xy_yaw[i, 0] = pose.pose.position.x
-            xy_yaw[i, 1] = pose.pose.position.y
+            pose_np = pose_msg2np(pose)
+            xy_yaw[i, :2] = pose_np[:2, 3]
             t[i] = pose.header.stamp.sec + pose.header.stamp.nanosec * 1e-9
 
-            q = pose.pose.orientation
-            rot = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-            forward = rot @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            forward = pose_np[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
             if np.linalg.norm(forward[:2]) > 1e-6:
                 last_yaw = math.atan2(float(forward[1]), float(forward[0]))
             xy_yaw[i, 2] = last_yaw
@@ -96,7 +84,8 @@ class CmdVelControlNode(Node):
         if n > 1:
             t = t - t[0]
             if np.min(np.diff(t)) <= 0.0:
-                t = np.arange(n, dtype=np.float64) * 0.2  # Path generation publishes every 0.2 seconds.
+                # Planner publishes every other 0.1s trajectory sample.
+                t = np.arange(n, dtype=np.float64) * 0.2
 
             yaw_u = np.unwrap(xy_yaw[:, 2])
             for i in range(n - 1):
@@ -110,27 +99,22 @@ class CmdVelControlNode(Node):
         self._path_ref = path_ref
         self._track_idx = 0
 
-    # =========================
-    # CONTROL LOOP
-    # =========================
     def _control_loop(self):
         if self._path_ref is None:
             self._publish_zero()
             return
 
-        # Match planning_node.camera_to_robot_center() and its +Z forward convention.
+        # Keep this consistent with planning_node.camera_to_robot_center().
         camera_offset = np.array([0.0, 0.0, 0.35], dtype=np.float64)  # GO2 control center to camera.
         robot_pos = self.position - self.rotation @ camera_offset
         forward = self.rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
         robot_yaw = math.atan2(forward[1], forward[0])
 
-        # Select the reference point to track.
         target = self._find_tracking_target(robot_pos, robot_yaw)
         if target is None:
             self._publish_zero()
             return
 
-        # Convert tracking error into the robot frame.
         tx, ty, heading_err = self._target_error(robot_pos, robot_yaw, target)
         v_ref = float(target[3])
         w_ref = float(target[4])
@@ -151,7 +135,6 @@ class CmdVelControlNode(Node):
             self._publish_zero()
             return
 
-        # Publish command.
         cmd = Twist()
         cmd.linear.x = v
         cmd.angular.z = wz
@@ -159,9 +142,6 @@ class CmdVelControlNode(Node):
 
         self.logger.info("cmd v=%.3f wz=%.3f", v, wz)
 
-    # =========================
-    # Tracking core
-    # =========================
     def _find_tracking_target(self, robot_pos, robot_yaw):
         if self._path_ref is None or len(self._path_ref) == 0:
             return None
@@ -203,9 +183,6 @@ class CmdVelControlNode(Node):
             return 1.0
         return math.sin(a) / a
 
-    # =========================
-    # Utils
-    # =========================
     def _publish_zero(self):
         cmd = Twist()
         self.cmd_pub.publish(cmd)
