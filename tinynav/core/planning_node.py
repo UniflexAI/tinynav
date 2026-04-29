@@ -586,12 +586,10 @@ class PlanningNode(Node):
             path.header.frame_id = "world"
 
             if self.target_pose is None:
-                self.path_pub.publish(path)
                 return
 
             if all(s == float('inf') for s in scores):
                 self.get_logger().info('All trajectories in collision, stopping path.')
-                self.path_pub.publish(path)
                 return
 
             for i in top_indices:
