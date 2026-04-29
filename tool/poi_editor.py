@@ -20,6 +20,7 @@ from rclpy.node import Node
 import rclpy
 import os
 from math_utils import msg2np, matrix_to_quat
+from std_msgs.msg import String
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -187,6 +188,7 @@ class RelocalizationPose(Node):
     def __init__(self, viser_server: viser.ViserServer):
         super().__init__('relocalization_pose')
         self.viser_server = viser_server
+        self.cmd_pois_pub = self.create_publisher(String, "/mapping/cmd_pois", 10)
         self.relocalization_pose_sub = self.create_subscription(Odometry, '/map/relocalization', self.relocalization_pose_callback, 10)
         self.global_plan_sub = self.create_subscription(nav_msgs.msg.Path, '/mapping/global_plan', self.global_plan_callback, 10)
         self.planning_path_sub = self.create_subscription(nav_msgs.msg.Path, '/planning/trajectory_path', self.planning_path_callback, 10)
@@ -195,6 +197,12 @@ class RelocalizationPose(Node):
         self.current_pose_in_map_sub = self.create_subscription(
             Odometry, "/mapping/current_pose_in_map", self.current_pose_in_map_callback, 10
         )
+
+    def publish_pois_to_map_node(self, payload: dict) -> None:
+        msg = String()
+        msg.data = json.dumps(payload, separators=(",", ":"))
+        self.cmd_pois_pub.publish(msg)
+        self.get_logger().info(f"Published {len(payload)} POIs to /mapping/cmd_pois")
 
     def relocalization_pose_callback(self, msg: Odometry):
         position = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -280,6 +288,7 @@ def main(
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
+    ros_bridge: dict[str, RelocalizationPose | None] = {"node": None}
     
     # POI management
     poi_points = {}
@@ -298,11 +307,27 @@ def main(
     with server.gui.add_folder("Points of Interest (POI)") as _:
         add_poi_button = server.gui.add_button("Add POI Point")
         add_save_poi_button = server.gui.add_button("Save POI")
+        add_send_poi_button = server.gui.add_button("Send POI to map_node")
 
         @add_save_poi_button.on_click
         def _(_) -> None:
             with open(f"{tinynav_map_path}/pois.json", "w") as f:
                 json.dump(poi_points, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+
+        @add_send_poi_button.on_click
+        def _(_) -> None:
+            node = ros_bridge["node"]
+            if node is None:
+                print("ROS node is not ready yet. Cannot send POIs.")
+                return
+            payload = {}
+            for key, poi in poi_points.items():
+                payload[str(int(key))] = {
+                    "id": int(poi.get("id", key)),
+                    "name": str(poi.get("name", f"POI_{key}")),
+                    "position": [float(x) for x in poi["position"]],
+                }
+            node.publish_pois_to_map_node(payload)
 
 
         poi_list_container = server.gui.add_folder("POI List")
@@ -667,6 +692,7 @@ def main(
 
     rclpy.init()
     relocalization_pose_node = RelocalizationPose(server)
+    ros_bridge["node"] = relocalization_pose_node
     try:
         rclpy.spin(relocalization_pose_node)
         relocalization_pose_node.destroy_node()
