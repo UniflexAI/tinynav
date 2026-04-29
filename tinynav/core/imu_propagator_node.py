@@ -60,27 +60,12 @@ class ImuPropagatorNode(Node):
         self.imu_buffer = []
         self.odom_10hz_buffer = []
         self.odom_100hz_buffer = []
-        self.imu_log_counter = 0
 
     def imu_callback(self, imu_msg: Imu):
         if len(self.odom_100hz_buffer) == 0:
             return
 
         timestamp = self._stamp_to_sec(imu_msg.header.stamp)
-        self.imu_log_counter += 1
-        if self.imu_log_counter % 20 == 0:
-            self.get_logger().info(
-                "imu t=%.6f gyro=(%.4f, %.4f, %.4f) accel=(%.4f, %.4f, %.4f)"
-                % (
-                    timestamp,
-                    imu_msg.angular_velocity.x,
-                    imu_msg.angular_velocity.y,
-                    imu_msg.angular_velocity.z,
-                    imu_msg.linear_acceleration.x,
-                    imu_msg.linear_acceleration.y,
-                    imu_msg.linear_acceleration.z,
-                )
-            )
         self.imu_buffer.append((timestamp, imu_msg))
         if len(self.imu_buffer) > 2000:
             self.imu_buffer.pop(0)
