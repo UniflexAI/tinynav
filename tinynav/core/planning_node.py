@@ -225,7 +225,7 @@ def generate_trajectory_library_3d(
     return trajectories, params
 
 
-def generate_prefined_trajectory_vocabularies(
+def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
@@ -595,7 +595,7 @@ class PlanningNode(Node):
             trajectories, params = generate_trajectory_library_3d(
                 init_p=init_p, init_q=init_q
             )
-            vocab_trajs, vocab_params = generate_prefined_trajectory_vocabularies(
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
                 init_p=init_p, init_q=init_q
             )
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
@@ -614,7 +614,7 @@ class PlanningNode(Node):
             enter_threshold = 0.30
 
             def cost_function(traj, param, score, target_pose):
-                # prefined backward trajectory penalty
+                # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
                 should_reverse = front_clearance <= enter_threshold
                 reverse_gate_penalty = 0.0
