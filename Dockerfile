@@ -196,13 +196,6 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 # To use lekiwi instead, replace --extra unitree with --extra lekiwi.
 RUN /root/.local/bin/uv sync --python /opt/venv/bin/python --extra unitree
 
-# unitree_sdk2_python does not ship b2 in the installed package; copy it manually
-RUN git clone https://github.com/unitreerobotics/unitree_sdk2_python.git /tmp/unitree_sdk2_python \
-    && cd /tmp/unitree_sdk2_python \
-    && git checkout 404fe44d76f705c002c97e773276f2a8fefb57e4 \
-    && cp -r unitree_sdk2py/b2 /opt/venv/lib/python3.10/site-packages/unitree_sdk2py/ \
-    && rm -rf /tmp/unitree_sdk2_python
-
 # Write entrypoint.sh (model build prompt only)
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
 #!/usr/bin/env bash

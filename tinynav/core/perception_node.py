@@ -26,6 +26,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from gtsam.symbol_shorthand import X, B, V
+from tinynav.core.imu_propagator_node import ImuPropagatorNode
 
 _N = 5
 _M = 1000
@@ -145,8 +146,8 @@ class PerceptionNode(Node):
 
         # Noise model (continuous-time)
         # for Realsense D435i
-        accel_noise_density = 0.25     # [m/s^2/√Hz]
-        gyro_noise_density = 0.00005 # [rad/s/√Hz]
+        accel_noise_density = 0.50     # [m/s^2/√Hz]
+        gyro_noise_density = 0.50 # [rad/s/√Hz]
         bias_acc_rw_sigma = 0.001
         bias_gyro_rw_sigma = 0.0001
         self.pre_integration_params = gtsam.PreintegrationCombinedParams.MakeSharedU()
@@ -578,31 +579,22 @@ class PerceptionNode(Node):
 
 
 def main(args=None):
-
     rclpy.init(args=args)
-    parser = argparse.ArgumentParser()
-    parser.set_defaults(verbose_timer=True)
-    parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
-    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
-    parser.add_argument("--log_file", type=str, default="odom.log", help="Path to the log file")
-    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
-    print(f"Verbose timer: {parsed_args.verbose_timer}")
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
-    )
+    parser = argparse.ArgumentParser(description='Run TinyNav perception node.')
+    parser.add_argument('--verbose_timer', action='store_true', help='Print timing for key pipeline stages.')
+    parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
+    imu_propagator_node = ImuPropagatorNode()
 
-    executor = rclpy.executors.SingleThreadedExecutor()
+    executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(perception_node)
+    executor.add_node(imu_propagator_node)
     executor.spin()
     perception_node.destroy_node()
-    executor.shutdown()
+    imu_propagator_node.destroy_node()
+    rclpy.shutdown()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     main()
