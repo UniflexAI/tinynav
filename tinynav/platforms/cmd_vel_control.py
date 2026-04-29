@@ -3,7 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
@@ -56,18 +56,9 @@ class CmdVelControlNode(Node):
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
-        # Forced-backward reflex: reverse when forward obstacle is within this distance.
-        self.front_clear_dist = 0.30
-        self.front_dist = 999.0
-        self.last_front_time = None
-        self.create_subscription(Float32, '/planning/front_dist', self._on_front_dist, 10)
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-        
-    def _on_front_dist(self, msg: Float32):
-        self.front_dist = msg.data
-        self.last_front_time = time.monotonic()
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
@@ -113,21 +104,12 @@ class CmdVelControlNode(Node):
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
         # Snap to min effective speed only when starting from standstill — avoids locking at min speed while decelerating.
-        if abs(out.linear.x) < 0.05:
+        if abs(out.linear.x) < 0.01:
             out.linear.x = 0.0
         elif 0 < out.linear.x < self.min_effective_linear_speed and self.prev_cmd.linear.x < 0.05:
             out.linear.x = self.min_effective_linear_speed
-        if abs(out.angular.z) < 0.05:
+        if abs(out.angular.z) < 0.01:
             out.angular.z = 0.0
-
-        front_age = float('inf') if self.last_front_time is None else (now - self.last_front_time)
-        if front_age < 0.5 and self.front_dist < self.front_clear_dist:
-            out = Twist()
-            out.linear.x = -self.fixed_reverse_speed
-            self.logger.warn(f"Forced backward: front obstacle at {self.front_dist:.2f}m")
-            self.cmd_pub.publish(out)
-            self.prev_cmd = out
-            return
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
@@ -175,9 +157,12 @@ class CmdVelControlNode(Node):
             vx = -self.fixed_reverse_speed
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
+        if vx < 0.0:
+            vyaw = 0.0
 
-        # Minimal rotate-first gate: if heading error is large, turn in place.
-        if abs(heading_err) > 0.45:
+        # Minimal rotate-first gate: apply only for forward motion.
+        # Do not block reverse escape commands from planner.
+        if vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 
