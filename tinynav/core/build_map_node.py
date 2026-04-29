@@ -374,16 +374,17 @@ class TinyNavDB():
         if features is not None:
             self.features[key] = features
 
-    def get_depth_embedding_features_images(self, key:int):
+    def get_depth_embedding_features_images(self, key:int, load_images: bool = False):
         rgb_image = None
         infra1_image = None
         key_int = int(key)
-        if key_int in self.rgb_ts_to_idx:
-            idx = self.rgb_ts_to_idx[key_int]
-            rgb_image = self._decode_frame_by_index(self.rgb_mp4_path, idx, as_gray=False)
-        if key_int in self.infra1_ts_to_idx:
-            idx = self.infra1_ts_to_idx[key_int]
-            infra1_image = self._decode_frame_by_index(self.infra1_mp4_path, idx, as_gray=True)
+        if load_images:
+            if key_int in self.rgb_ts_to_idx:
+                idx = self.rgb_ts_to_idx[key_int]
+                rgb_image = self._decode_frame_by_index(self.rgb_mp4_path, idx, as_gray=False)
+            if key_int in self.infra1_ts_to_idx:
+                idx = self.infra1_ts_to_idx[key_int]
+                infra1_image = self._decode_frame_by_index(self.infra1_mp4_path, idx, as_gray=True)
         return self.depths[key], self.embeddings[key], self.features[key], rgb_image, infra1_image
 
     def get_embedding(self, key:int):
