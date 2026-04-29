@@ -12,7 +12,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header, Float32
+from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -189,8 +189,13 @@ def generate_trajectory_library_3d(
 ):
     num_steps = int(duration / dt) + 1
 
-    vx_max = 0.5
-    vx_samples = np.linspace(0.0, vx_max, max(2, int(num_samples / 2)))
+    vx_min, vx_max = -0.2, 0.5
+    n_vx = max(3, int(num_samples / 2))
+    # Keep exactly one reverse sample; others are forward candidates.
+    vx_samples = np.empty(n_vx, dtype=np.float64)
+    vx_samples[0] = vx_min
+    if n_vx > 1:
+        vx_samples[1:] = np.linspace(0.0, vx_max, n_vx - 1)
     omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
 
     num_samples = len(vx_samples) * len(omega_y_samples)
@@ -357,8 +362,6 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
-
-        self.front_dist_pub = self.create_publisher(Float32, '/planning/front_dist', 10)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -551,7 +554,6 @@ class PlanningNode(Node):
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
-            self.front_dist_pub.publish(Float32(data=self._front_obstacle_dist(T, obstacle_mask)))
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
@@ -579,11 +581,23 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
+            enter_threshold = 0.30
+
             def cost_function(traj, param, score, target_pose):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+                is_backward = param[0] < 0.0
+                reverse_gate_penalty = 0.0
+                # No state machine: direct per-frame decision.
+                if front_clearance < enter_threshold:
+                    if not is_backward:
+                        reverse_gate_penalty = 1e9
+                else:
+                    if is_backward:
+                        reverse_gate_penalty = 1e9
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
