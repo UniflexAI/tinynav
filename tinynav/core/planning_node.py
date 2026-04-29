@@ -231,17 +231,13 @@ def generate_prefined_trajectory_vocabularies(
 ):
     """
     Predefined trajectory vocabularies.
-
-    Current vocabulary items:
-    - constant reverse: vx = -0.2 m/s, omega = 0
-
-    Future predefined behaviors can be appended to this function without
-    changing the regular sampled lattice generation.
     """
     num_steps = int(duration / dt) + 1
     trajectories = []
     params = []
 
+    # constant reverse trajectory
+    # vx = -0.2 m/s, omega = 0
     reverse_speed = 0.2
     p = init_p.copy()
     q = quat_to_matrix(init_q)
@@ -618,18 +614,20 @@ class PlanningNode(Node):
             enter_threshold = 0.30
 
             def cost_function(traj, param, score, target_pose):
+                # prefined backward trajectory penalty
+                is_backward_traj = param[0] < 0.0
+                should_reverse = front_clearance <= enter_threshold
+                reverse_gate_penalty = 0.0
+                if should_reverse and not is_backward_traj:
+                        reverse_gate_penalty = 1e9
+                elif not should_reverse and is_backward_traj:
+                        reverse_gate_penalty = 1e9
+
+                # regular trajectory penalty
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                is_backward = param[0] < 0.0
-                reverse_gate_penalty = 0.0
-                # No state machine: direct per-frame decision.
-                if front_clearance < enter_threshold:
-                    if not is_backward:
-                        reverse_gate_penalty = 1e9
-                else:
-                    if is_backward:
-                        reverse_gate_penalty = 1e9
+
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
