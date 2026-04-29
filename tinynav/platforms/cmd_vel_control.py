@@ -50,8 +50,7 @@ class CmdVelControlNode(Node):
         else:
             alpha = 0.35  # First-order odom low-pass filter; smaller is smoother but laggier.
             self.position = (1.0 - alpha) * self.position + alpha * measured_position
-            delta_rot = R.from_matrix(self.rotation.T @ measured_rotation)
-            self.rotation = self.rotation @ R.from_rotvec(alpha * delta_rot.as_rotvec()).as_matrix()
+            self.rotation = measured_rotation
 
         self._odom_stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self._control_loop()
@@ -97,7 +96,7 @@ class CmdVelControlNode(Node):
         if n > 1:
             t = t - t[0]
             if np.min(np.diff(t)) <= 0.0:
-                t = np.arange(n, dtype=np.float64) * 0.2#time step is 0.2 seconds of path generation
+                t = np.arange(n, dtype=np.float64) * 0.2  # Path generation publishes every 0.2 seconds.
 
             yaw_u = np.unwrap(xy_yaw[:, 2])
             for i in range(n - 1):
@@ -126,7 +125,7 @@ class CmdVelControlNode(Node):
         robot_yaw = math.atan2(forward[1], forward[0])
 
         # Select the reference point to track.
-        target = self._find_tracking_target(robot_pos)
+        target = self._find_tracking_target(robot_pos, robot_yaw)
         if target is None:
             self._publish_zero()
             return
@@ -135,10 +134,14 @@ class CmdVelControlNode(Node):
         tx, ty, heading_err = self._target_error(robot_pos, robot_yaw, target)
         v_ref = float(target[3])
         w_ref = float(target[4])
-        
-        # DWA reference command + control law
-        v = float(np.clip(v_ref + 1.0 * tx, -0.2, 0.6))  # forward kp, min_v, max_v
-        wz = float(np.clip(w_ref + 1.2 * heading_err + 1.5 * ty, -0.8, 0.8))  # heading/lateral kp, max_w
+
+        b = 2.0
+        zeta = 0.7
+        k = 2.0 * zeta * math.sqrt(w_ref * w_ref + b * v_ref * v_ref)
+        v = v_ref * math.cos(heading_err) + k * tx
+        wz = w_ref + k * heading_err + b * v_ref * self._sinc(heading_err) * ty
+        v = float(np.clip(v, -0.2, 0.6))
+        wz = float(np.clip(wz, -0.8, 0.8))
 
         heading_to_goal = self._wrap_angle(float(self._path_ref[-1, 2]) - robot_yaw)
         if (
@@ -159,14 +162,20 @@ class CmdVelControlNode(Node):
     # =========================
     # Tracking core
     # =========================
-    def _find_tracking_target(self, robot_pos):
+    def _find_tracking_target(self, robot_pos, robot_yaw):
         if self._path_ref is None or len(self._path_ref) == 0:
             return None
 
         start_idx = int(np.clip(self._track_idx, 0, len(self._path_ref) - 1))
         delta = self._path_ref[start_idx:, :2] - robot_pos[:2]
         dist = np.linalg.norm(delta, axis=1)
-        nearest_idx = start_idx + int(np.argmin(dist))
+
+        if float(np.max(dist)) < 0.05:
+            yaw_err = np.abs([self._wrap_angle(float(yaw) - robot_yaw) for yaw in self._path_ref[start_idx:, 2]])
+            nearest_idx = start_idx + int(np.argmin(yaw_err))
+        else:
+            nearest_idx = start_idx + int(np.argmin(dist))
+
         target_idx = min(nearest_idx + 1, len(self._path_ref) - 1)  # Track one point ahead for stability.
         self._track_idx = nearest_idx
         return self._path_ref[target_idx]
@@ -187,6 +196,12 @@ class CmdVelControlNode(Node):
     @staticmethod
     def _wrap_angle(a):
         return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    @staticmethod
+    def _sinc(a):
+        if abs(a) < 1e-6:
+            return 1.0
+        return math.sin(a) / a
 
     # =========================
     # Utils
