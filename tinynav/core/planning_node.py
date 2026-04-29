@@ -12,7 +12,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Float32
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -23,14 +23,14 @@ class RobotConfig:
     """Robot geometry. Body frame: +x forward, +y left."""
     name: str = 'go2'
     shape: str = 'square'
-    length: float = 0.5
+    length: float = 0.7
     width: float = 0.3
-    radius: float = 0.15
-    camera_x: float = 0.25
+    radius: float = 0.3
+    camera_x: float = 0.35
     camera_y: float = 0.0
     control_x: float = 0.0
     control_y: float = 0.0
-    safety_radius: float = 0.2
+    safety_radius: float = 0.1
 
     @property
     def cam_offset_3d(self):
@@ -51,10 +51,10 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.4, width=0.2,
-    camera_x=0.2, camera_y=0.0,
-    control_x=0.2, control_y=0.0,
-    safety_radius=0.1,
+    length=0.4, width=0.3,
+    camera_x=0.35, camera_y=0.0,
+    control_x=0.0, control_y=0.0,
+    safety_radius=0.2,
 )
 
 B2_CONFIG = RobotConfig(
@@ -62,7 +62,7 @@ B2_CONFIG = RobotConfig(
     length=1.0, width=0.5,
     camera_x=0.5, camera_y=0.0,
     control_x=-0.5, control_y=0.0,
-    safety_radius=0.2,
+    safety_radius=0.1,
 )
 
 # === Helper functions ===
@@ -151,11 +151,11 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.2
-    robot_z_top: float = 0.5
+    robot_z_bottom: float = -0.4
+    robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.4
-    dilation_cells: int = 1
+    min_wall_span_m: float = 0.2
+    dilation_cells: int = 2
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -184,44 +184,46 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
-    vx_min=-0.2, vx_max=0.5, n_vx=5,
-    # With duration=2.0s, ±pi/4 rad/s corresponds to about ±90 deg total yaw change.
-    omega_min=-np.pi / 4, omega_max=np.pi / 4, n_omega=11,
-    duration=2.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    num_samples=15, duration=3.0, dt=0.1,
+    init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
     num_steps = int(duration / dt) + 1
-    num_trajs = n_vx * n_omega
-    trajectories = np.empty((num_trajs, num_steps, 7))
-    params = np.empty((num_trajs, 2))
-    # index 0 = single backward sample (vx_min); indices 1..n_vx-1 = forward [0, vx_max]
-    fwd_step = vx_max / (n_vx - 2) if n_vx > 2 else vx_max
-    omega_step = (omega_max - omega_min) / (n_omega - 1) if n_omega > 1 else 0.0
-    k = 0
-    for i_vx in range(n_vx):
-        vx = vx_min if i_vx == 0 else (i_vx - 1) * fwd_step
-        for i_omega in range(n_omega):
-            omega = omega_min + i_omega * omega_step
+
+    vx_max = 0.5
+    vx_samples = np.linspace(0.0, vx_max, max(2, int(num_samples / 2)))
+    omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
+
+    num_samples = len(vx_samples) * len(omega_y_samples)
+
+    trajectories = np.empty((num_samples, num_steps, 7))
+    params = np.empty((num_samples, 2))
+
+    k = -1
+    for i_vx in range(len(vx_samples)):
+        for i_omega in range(len(omega_y_samples)):
+            k += 1
+            vx = vx_samples[i_vx]
+            omega_y = omega_y_samples[i_omega]
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
             for i in range(num_steps):
-                v_world = q @ np.array([0.0, 0.0, vx])
-                p = p + v_world * dt
-                dq = rotvec_to_matrix(np.array([0.0, omega * dt, 0.0]))
+                dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
                 q = q @ dq
+                v_world = q @ np.array([0.0, 0.0, vx])
+                p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
+            #hack
             for i in range(num_steps):
                 traj[i, 2] = traj[0, 2]
             trajectories[k] = traj
             params[k, 0] = vx
-            params[k, 1] = omega
-            k += 1
+            params[k, 1] = omega_y
     return trajectories, params
 
 @njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.2,
+def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
     """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
     scores = []
@@ -233,7 +235,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
 
-        for i in range(1, len(traj)):  # skip step-0 (robot's current position) to avoid score contamination
+        for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
             qx, qy, qz, qw = traj[i, 3], traj[i, 4], traj[i, 5], traj[i, 6]
 
@@ -277,17 +279,13 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
         elif min_dist_for_traj != float('inf'):
-            max_steps = len(traj)
-            decay_factor = (max_steps - closest_step_for_traj) / max_steps
-            # Continuous ESDF penalty: still penalize near-obstacle trajectories even
-            # outside safety_radius, but with much lower weight than inside radius.
-            base = 1.0 / (min_dist_for_traj + 0.05)
-            if min_dist_for_traj <= safety_radius:
-                violation = (safety_radius - min_dist_for_traj) / max(safety_radius, 1e-3)
-                scale = 1.0 + 2.0 * violation
+            if min_dist_for_traj > safety_radius:
+                scores.append(0.0)
             else:
-                scale = 0.2
-            scores.append(decay_factor * base * scale)
+                max_steps = len(traj)
+                decay_factor = (max_steps - closest_step_for_traj) / max_steps
+                base_score = 1.0 / (min_dist_for_traj + 1e-3)
+                scores.append(decay_factor * base_score)
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
@@ -360,6 +358,8 @@ class PlanningNode(Node):
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
 
+        self.front_dist_pub = self.create_publisher(Float32, '/planning/front_dist', 10)
+
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
@@ -407,6 +407,27 @@ class PlanningNode(Node):
         msg.header.frame_id = "world"
         msg.points = points
         self.footprint_pub.publish(msg)
+
+    def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
+        """Distance from the robot's front face to the nearest obstacle in the forward corridor.
+        Scans start at the front face so the returned value matches physical clearance."""
+        center = self.camera_to_robot_center(T)
+        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
+        fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
+        lx, ly = -fy, fx
+        fl, _, hw = self.robot.footprint_from_control()
+        rows, cols = obstacle_mask.shape
+        steps = int(max_dist / self.resolution) + 1
+        for step in range(steps):
+            d_from_face = step * self.resolution
+            d_from_center = fl + d_from_face
+            for w in (-hw, 0.0, hw):
+                xi = int((center[0] + fx * d_from_center + lx * w - self.origin[0]) / self.resolution)
+                yi = int((center[1] + fy * d_from_center + ly * w - self.origin[1]) / self.resolution)
+                if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
+                    return d_from_face
+        return max_dist + 1.0
 
     def publish_obstacle_mask(self, mask, stamp):
         msg = OccupancyGrid()
@@ -530,6 +551,8 @@ class PlanningNode(Node):
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
+            self.front_dist_pub.publish(Float32(data=self._front_obstacle_dist(T, obstacle_mask)))
+
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
@@ -538,10 +561,14 @@ class PlanningNode(Node):
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            v_dir = T[:3, :3] @ np.array([0, 0, 1])
+            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
+            init_v = v_dir * float(magnitude)
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
-            is_backward = params[:, 0] < 0
+            trajectories, params = generate_trajectory_library_3d(
+                init_p=init_p, init_v=init_v, init_q=init_q
+            )
             self.last_T = T
             self.last_stamp = stamp
 
@@ -552,108 +579,14 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            # Reverse is mildly discouraged by default. If all forward trajectories are invalid,
-            # fallback picks the best feasible reverse trajectory for escape.
-            fl_r, rl_r, hw_r = self.robot.footprint_from_control()
-            rc = self.camera_to_robot_center(T)
-            fwd_r = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-            nr = (fwd_r[0]**2 + fwd_r[1]**2)**0.5
-            frx, fry = (fwd_r[0]/nr, fwd_r[1]/nr) if nr > 1e-6 else (1.0, 0.0)
-            llx, lly = -fry, frx
-            Er, Ec = ESDF_map.shape
-
-            front_pts = [
-                (rc[0] + frx*fl_r, rc[1] + fry*fl_r),
-                (rc[0] + frx*fl_r + llx*hw_r, rc[1] + fry*fl_r + lly*hw_r),
-                (rc[0] + frx*fl_r - llx*hw_r, rc[1] + fry*fl_r - lly*hw_r),
-            ]
-            front_clearance = 999.0
-            for px_, py_ in front_pts:
-                xi_ = int((px_ - self.origin[0]) / self.resolution)
-                yi_ = int((py_ - self.origin[1]) / self.resolution)
-                if 0 <= xi_ < Er and 0 <= yi_ < Ec:
-                    front_clearance = min(front_clearance, float(ESDF_map[xi_, yi_]))
-
-            front_escape_threshold = self.robot.safety_radius + 0.12
-            front_blocked = front_clearance < front_escape_threshold
-            # Mild reverse discouragement when front is clear.
-            front_penalty_scale = float(np.clip(front_clearance / 0.25, 0.0, 1.0))
-
-            target_behind = False
-            if self.target_pose is not None:
-                to_goal_xy = self.target_pose[:2] - rc[:2]
-                forward_proj = float(to_goal_xy[0] * frx + to_goal_xy[1] * fry)
-                target_behind = forward_proj < -0.15
-
-            def cost_function(traj, param, score, target_pose, backward):
+            def cost_function(traj, param, score, target_pose):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                backward_penalty = 1200.0 * front_penalty_scale if backward else 0.0
-                # When front is blocked, discourage positive vx so reverse can be chosen.
-                front_block_forward_penalty = 2500.0 * max(0.0, param[0]) if front_blocked and not backward else 0.0
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
 
-                # If goal is behind robot, prefer rotate-first behavior.
-                rotate_first_penalty = 0.0
-                heading_penalty = 0.0
-                if target_behind and target_pose is not None:
-                    rotate_first_penalty = 4000.0 * abs(param[0])
-
-                    qx, qy, qz, qw = traj[-1, 3], traj[-1, 4], traj[-1, 5], traj[-1, 6]
-                    tf_x = 2.0 * (qx * qz + qw * qy)
-                    tf_y = 2.0 * (qy * qz - qw * qx)
-                    n_tf = (tf_x * tf_x + tf_y * tf_y) ** 0.5
-                    if n_tf > 1e-6:
-                        tf_x /= n_tf
-                        tf_y /= n_tf
-                    else:
-                        tf_x, tf_y = 1.0, 0.0
-                    gx = target_end[0] - traj_end[0]
-                    gy = target_end[1] - traj_end[1]
-                    n_g = (gx * gx + gy * gy) ** 0.5
-                    if n_g > 1e-6:
-                        gx /= n_g
-                        gy /= n_g
-                        cross = tf_x * gy - tf_y * gx
-                        dot = tf_x * gx + tf_y * gy
-                        heading_err = abs(np.arctan2(cross, dot))
-                        heading_penalty = 700.0 * heading_err
-
-                # Keep each term in a comparable range to avoid one term dominating.
-                return (
-                    1.2 * score
-                    + 1.0 * dist
-                    + 0.2 * abs(self.last_param[0] - param[0])
-                    + 0.2 * abs(self.last_param[1] - param[1])
-                    + 0.001 * backward_penalty
-                    + 0.001 * front_block_forward_penalty
-                    + 0.001 * rotate_first_penalty
-                    + 0.001 * heading_penalty
-                )
-
-            costs = np.array([
-                cost_function(trajectories[i], params[i], scores[i], self.target_pose, bool(is_backward[i]))
-                for i in range(len(trajectories))
-            ], dtype=np.float64)
-
-            # Escape fallback: if forward set is fully invalid, choose best feasible reverse.
-            forward_feasible = [
-                i for i in range(len(scores))
-                if (not bool(is_backward[i])) and np.isfinite(scores[i])
-            ]
-            if len(forward_feasible) == 0:
-                backward_feasible = [
-                    i for i in range(len(scores))
-                    if bool(is_backward[i]) and np.isfinite(scores[i])
-                ]
-                if len(backward_feasible) > 0:
-                    top_idx = min(backward_feasible, key=lambda i: costs[i])
-                    top_indices = np.array([top_idx], dtype=np.int64)
-                    self.get_logger().info('Forward trajectories blocked, using reverse escape trajectory.')
-                else:
-                    top_indices = np.argsort(costs, kind='stable')[:1]
-            else:
-                top_indices = np.argsort(costs, kind='stable')[:1]
+            top_k = 1
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path

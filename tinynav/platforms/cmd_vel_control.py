@@ -3,7 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
@@ -39,7 +39,7 @@ class CmdVelControlNode(Node):
         self.path_stale_slow_factor = 3.5
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
-        self.max_angular_acc = 1.2  # rad/s^2
+        self.max_angular_acc = 0.8  # rad/s^2
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -50,17 +50,25 @@ class CmdVelControlNode(Node):
         self.min_effective_linear_speed = 0.2
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
-        self.max_forward_speed = 0.3
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
+        # Forced-backward reflex: reverse when forward obstacle is within this distance.
+        self.front_clear_dist = 0.30
+        self.front_dist = 999.0
+        self.last_front_time = None
+        self.create_subscription(Float32, '/planning/front_dist', self._on_front_dist, 10)
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
         
+    def _on_front_dist(self, msg: Float32):
+        self.front_dist = msg.data
+        self.last_front_time = time.monotonic()
+
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
         if not self._paused:
@@ -109,8 +117,17 @@ class CmdVelControlNode(Node):
             out.linear.x = 0.0
         elif 0 < out.linear.x < self.min_effective_linear_speed and self.prev_cmd.linear.x < 0.05:
             out.linear.x = self.min_effective_linear_speed
-        if abs(out.angular.z) < 0.02:
+        if abs(out.angular.z) < 0.05:
             out.angular.z = 0.0
+
+        front_age = float('inf') if self.last_front_time is None else (now - self.last_front_time)
+        if front_age < 0.5 and self.front_dist < self.front_clear_dist:
+            out = Twist()
+            out.linear.x = -self.fixed_reverse_speed
+            self.logger.warn(f"Forced backward: front obstacle at {self.front_dist:.2f}m")
+            self.cmd_pub.publish(out)
+            self.prev_cmd = out
+            return
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
@@ -146,17 +163,23 @@ class CmdVelControlNode(Node):
         T_robot_2 = T2 @ self.T_robot_to_camera
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
         p = T_robot_2_to_1[:3, 3]
+        heading_err = float(np.arctan2(p[1], p[0]))
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, self.max_forward_speed)
+        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
         if vx < 0.0:
             vx = -self.fixed_reverse_speed
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
+
+        # Minimal rotate-first gate: if heading error is large, turn in place.
+        if abs(heading_err) > 0.45:
+            vx = 0.0
+            vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 
         # Filter planner updates to reduce visible jitter from 7-10 Hz updates.
         alpha = np.clip(self.path_period_ema / (self.path_filter_tau + self.path_period_ema), 0.15, 0.75)
