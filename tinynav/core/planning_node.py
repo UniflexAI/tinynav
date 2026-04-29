@@ -185,17 +185,14 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
+    """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
-    vx_min, vx_max = -0.2, 0.5
+    vx_max = 0.5
     n_vx = max(3, int(num_samples / 2))
-    # Keep exactly one reverse sample; others are forward candidates.
-    vx_samples = np.empty(n_vx, dtype=np.float64)
-    vx_samples[0] = vx_min
-    if n_vx > 1:
-        vx_samples[1:] = np.linspace(0.0, vx_max, n_vx - 1)
+    vx_samples = np.linspace(0.0, vx_max, n_vx)
     omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
 
     num_samples = len(vx_samples) * len(omega_y_samples)
@@ -226,6 +223,40 @@ def generate_trajectory_library_3d(
             params[k, 0] = vx
             params[k, 1] = omega_y
     return trajectories, params
+
+
+def generate_prefined_trajectory_vocabularies(
+    duration=3.0, dt=0.1,
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+):
+    """
+    Predefined trajectory vocabularies.
+
+    Current vocabulary items:
+    - constant reverse: vx = -0.2 m/s, omega = 0
+
+    Future predefined behaviors can be appended to this function without
+    changing the regular sampled lattice generation.
+    """
+    num_steps = int(duration / dt) + 1
+    trajectories = []
+    params = []
+
+    reverse_speed = 0.2
+    p = init_p.copy()
+    q = quat_to_matrix(init_q)
+    traj = np.empty((num_steps, 7), dtype=np.float64)
+    for i in range(num_steps):
+        v_world = q @ np.array([0.0, 0.0, -reverse_speed])
+        p += v_world * dt
+        traj[i, :3] = p
+        traj[i, 3:] = matrix_to_quat(q)
+    for i in range(num_steps):
+        traj[i, 2] = traj[0, 2]
+    trajectories.append(traj)
+    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
+
+    return np.asarray(trajectories), np.asarray(params)
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
@@ -563,14 +594,16 @@ class PlanningNode(Node):
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            v_dir = T[:3, :3] @ np.array([0, 0, 1])
-            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
-            init_v = v_dir * float(magnitude)
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectory_library_3d(
-                init_p=init_p, init_v=init_v, init_q=init_q
+                init_p=init_p, init_q=init_q
             )
+            vocab_trajs, vocab_params = generate_prefined_trajectory_vocabularies(
+                init_p=init_p, init_q=init_q
+            )
+            trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+            params = np.concatenate([params, vocab_params], axis=0)
             self.last_T = T
             self.last_stamp = stamp
 
@@ -608,20 +641,11 @@ class PlanningNode(Node):
             path.header = depth_msg.header
             path.header.frame_id = "world"
 
-            # target_pose is camera-frame (POI recorded as camera pose); compare against T[:3, 3] directly.
-            dist_to_goal = float(np.linalg.norm(T[:3, 3][:2] - self.target_pose[:2])) if self.target_pose is not None else float('inf')
-            if dist_to_goal < 0.5:
-                self.get_logger().info(f'Goal reached (dist={dist_to_goal:.2f}m), stopping path.')
-                self.path_pub.publish(path)
-                return
-
             if self.target_pose is None:
-                self.path_pub.publish(path)
                 return
 
             if all(s == float('inf') for s in scores):
                 self.get_logger().info('All trajectories in collision, stopping path.')
-                self.path_pub.publish(path)
                 return
 
             for i in top_indices:
