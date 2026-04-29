@@ -51,10 +51,10 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.7, width=0.3,
+    length=0.4, width=0.3,
     camera_x=0.35, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.1,
+    safety_radius=0.2,
 )
 
 B2_CONFIG = RobotConfig(
@@ -151,11 +151,11 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.2
-    robot_z_top: float = 0.5
+    robot_z_bottom: float = -0.4
+    robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.4
-    dilation_cells: int = 3
+    min_wall_span_m: float = 0.2
+    dilation_cells: int = 2
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -184,48 +184,35 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
-    num_samples=11, duration=2.0, dt=0.1,
-    acc_std=0.00001, omega_y_std_deg=20.0,
-    init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    num_samples=15, duration=3.0, dt=0.1,
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
+    """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
-    max_acc = 0.2
-    acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
-    max_omega = np.pi / 8
-    omega_y_samples = np.linspace(-max_omega, max_omega, num_samples)
+    vx_max = 0.5
+    n_vx = max(3, int(num_samples / 2))
+    vx_samples = np.linspace(0.0, vx_max, n_vx)
+    omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
 
-    num_samples = len(acc_samples) * len(omega_y_samples)
+    num_samples = len(vx_samples) * len(omega_y_samples)
 
     trajectories = np.empty((num_samples, num_steps, 7))
     params = np.empty((num_samples, 2))
 
     k = -1
-    for i_acc in range(len(acc_samples)):
+    for i_vx in range(len(vx_samples)):
         for i_omega in range(len(omega_y_samples)):
             k += 1
-            dv = acc_samples[i_acc]
+            vx = vx_samples[i_vx]
             omega_y = omega_y_samples[i_omega]
             p = init_p.copy()
-            v_world = init_v.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
             for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
-                v_world = (q @ dq) @ q.T @ v_world
                 q = q @ dq
-
-                acc_body = q.T @ v_world
-                norm_val = np.linalg.norm(acc_body)
-                if norm_val > 1e-3:
-                    acc_body = acc_body / norm_val
-                else:
-                    acc_body = np.array([0.0, 0.0, 0.0])
-                acc_body = acc_body * dv
-
-                acc_world = q @ acc_body
-                v_world += acc_world * dt
-                v_world = np.clip(v_world, -0.5, 0.5)
+                v_world = q @ np.array([0.0, 0.0, vx])
                 p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
@@ -233,9 +220,39 @@ def generate_trajectory_library_3d(
             for i in range(num_steps):
                 traj[i, 2] = traj[0, 2]
             trajectories[k] = traj
-            params[k, 0] = dv
+            params[k, 0] = vx
             params[k, 1] = omega_y
     return trajectories, params
+
+
+def generate_predefined_trajectory_vocabularies(
+    duration=3.0, dt=0.1,
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+):
+    """
+    Predefined trajectory vocabularies.
+    """
+    num_steps = int(duration / dt) + 1
+    trajectories = []
+    params = []
+
+    # constant reverse trajectory
+    # vx = -0.2 m/s, omega = 0
+    reverse_speed = 0.2
+    p = init_p.copy()
+    q = quat_to_matrix(init_q)
+    traj = np.empty((num_steps, 7), dtype=np.float64)
+    for i in range(num_steps):
+        v_world = q @ np.array([0.0, 0.0, -reverse_speed])
+        p += v_world * dt
+        traj[i, :3] = p
+        traj[i, 3:] = matrix_to_quat(q)
+    for i in range(num_steps):
+        traj[i, 2] = traj[0, 2]
+    trajectories.append(traj)
+    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
+
+    return np.asarray(trajectories), np.asarray(params)
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
@@ -421,6 +438,27 @@ class PlanningNode(Node):
         msg.points = points
         self.footprint_pub.publish(msg)
 
+    def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
+        """Distance from the robot's front face to the nearest obstacle in the forward corridor.
+        Scans start at the front face so the returned value matches physical clearance."""
+        center = self.camera_to_robot_center(T)
+        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
+        fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
+        lx, ly = -fy, fx
+        fl, _, hw = self.robot.footprint_from_control()
+        rows, cols = obstacle_mask.shape
+        steps = int(max_dist / self.resolution) + 1
+        for step in range(steps):
+            d_from_face = step * self.resolution
+            d_from_center = fl + d_from_face
+            for w in (-hw, 0.0, hw):
+                xi = int((center[0] + fx * d_from_center + lx * w - self.origin[0]) / self.resolution)
+                yi = int((center[1] + fy * d_from_center + ly * w - self.origin[1]) / self.resolution)
+                if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
+                    return d_from_face
+        return max_dist + 1.0
+
     def publish_obstacle_mask(self, mask, stamp):
         msg = OccupancyGrid()
         msg.header = Header()
@@ -552,14 +590,16 @@ class PlanningNode(Node):
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            v_dir = T[:3, :3] @ np.array([0, 0, 1])
-            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
-            init_v = v_dir * float(magnitude)
+            init_p = self.camera_to_robot_center(T)
+            init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectory_library_3d(
-                init_p = self.camera_to_robot_center(T),
-                init_v = init_v,
-                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+                init_p=init_p, init_q=init_q
             )
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
+                init_p=init_p, init_q=init_q
+            )
+            trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+            params = np.concatenate([params, vocab_params], axis=0)
             self.last_T = T
             self.last_stamp = stamp
 
@@ -570,11 +610,25 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
+            enter_threshold = 0.30
+
             def cost_function(traj, param, score, target_pose):
+                # predefined backward trajectory penalty
+                is_backward_traj = param[0] < 0.0
+                should_reverse = front_clearance <= enter_threshold
+                reverse_gate_penalty = 0.0
+                if should_reverse and not is_backward_traj:
+                        reverse_gate_penalty = 1e9
+                elif not should_reverse and is_backward_traj:
+                        reverse_gate_penalty = 1e9
+
+                # regular trajectory penalty
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
@@ -595,7 +649,6 @@ class PlanningNode(Node):
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
-
                     pose = PoseStamped()
                     pose.header = depth_msg.header
                     pose.pose.position.x = x
