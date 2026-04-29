@@ -25,6 +25,7 @@ from tinynav.core.planning_node import run_raycasting_loopy
 import logging
 import asyncio
 import shelve
+import json
 import base64
 import zlib
 import av
@@ -374,18 +375,26 @@ class TinyNavDB():
         if features is not None:
             self.features[key] = features
 
-    def get_depth_embedding_features_images(self, key:int, load_images: bool = False):
-        rgb_image = None
-        infra1_image = None
+    def get_depth_embedding_features_images(self, key:int):
         key_int = int(key)
-        if load_images:
-            if key_int in self.rgb_ts_to_idx:
-                idx = self.rgb_ts_to_idx[key_int]
-                rgb_image = self._decode_frame_by_index(self.rgb_mp4_path, idx, as_gray=False)
-            if key_int in self.infra1_ts_to_idx:
-                idx = self.infra1_ts_to_idx[key_int]
-                infra1_image = self._decode_frame_by_index(self.infra1_mp4_path, idx, as_gray=True)
-        return self.depths[key], self.embeddings[key], self.features[key], rgb_image, infra1_image
+
+        def rgb_loader():
+            if self.is_scratch:
+                return None
+            if key_int not in self.rgb_ts_to_idx:
+                return None
+            idx = self.rgb_ts_to_idx[key_int]
+            return self._decode_frame_by_index(self.rgb_mp4_path, idx, as_gray=False)
+
+        def infra1_loader():
+            if self.is_scratch:
+                return None
+            if key_int not in self.infra1_ts_to_idx:
+                return None
+            idx = self.infra1_ts_to_idx[key_int]
+            return self._decode_frame_by_index(self.infra1_mp4_path, idx, as_gray=True)
+
+        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
         return self.embeddings[key]
