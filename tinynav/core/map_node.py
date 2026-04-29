@@ -117,13 +117,35 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    open_heap = [(sdf_map[start] + heuristic(start, goal, resolution), start)]
-    open_heap_set = set()
-    open_heap_set.add(start)
+    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+    def get_queue_index(sdf_value: float) -> int:
+        for idx, threshold in enumerate(sdf_bins):
+            if sdf_value < threshold:
+                return idx
+        return len(sdf_bins)
+
+    open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
+    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
+    start_queue_idx = get_queue_index(float(sdf_map[start]))
+    heapq.heappush(open_heaps[start_queue_idx], (heuristic(start, goal, resolution), start))
+    open_sets[start_queue_idx].add(start)
     parent = {start: start}
     visited = set()
-    while len(open_heap) > 0:
-        current_cost, current = heapq.heappop(open_heap)
+
+    while True:
+        queue_idx = -1
+        for i, q in enumerate(open_heaps):
+            if len(q) > 0:
+                queue_idx = i
+                break
+        if queue_idx == -1:
+            break
+
+        current_cost, current = heapq.heappop(open_heaps[queue_idx])
+        open_sets[queue_idx].remove(current)
+        if current in visited:
+            continue
         visited.add(current)
         if current == goal:
             return reconstruct_path_sdf(parent, current)
@@ -136,9 +158,18 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                     if (0 <= neighbor[0] < sdf_map.shape[0] and
                             0 <= neighbor[1] < sdf_map.shape[1] and
                             0 <= neighbor[2] < sdf_map.shape[2]):
-                        if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2 and sdf_map[neighbor] < 0.2:
-                            open_heap_set.add(neighbor)
-                            heapq.heappush(open_heap, (heuristic(neighbor, goal, resolution) + sdf_map[neighbor], neighbor))
+                        if neighbor in visited or occupancy_map[neighbor] == 2:
+                            continue
+                        neighbor_sdf = float(sdf_map[neighbor])
+                        neighbor_queue_idx = get_queue_index(neighbor_sdf)
+                        if neighbor in open_sets[neighbor_queue_idx]:
+                            continue
+                        open_sets[neighbor_queue_idx].add(neighbor)
+                        heapq.heappush(
+                            open_heaps[neighbor_queue_idx],
+                            (heuristic(neighbor, goal, resolution), neighbor),
+                        )
+                        if neighbor not in parent:
                             parent[neighbor] = current
     return []
 
@@ -672,6 +703,10 @@ class MapNode(Node):
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        if len(path_sdf) == 0:
+            self.get_logger().warning(
+                f"search_within_sdf_map returned empty path: start_idx={tuple(sdf_start_sdf)}, goal_idx={tuple(sdf_goal_sdf)}"
+            )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
@@ -701,4 +736,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
