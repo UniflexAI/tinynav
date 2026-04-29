@@ -13,6 +13,7 @@ dependencies = [
     "scipy",
     "matplotlib",
     "opencv-python",
+    "av",
     "codetiming",
     "numba==0.61.2",
     "fufpy",
