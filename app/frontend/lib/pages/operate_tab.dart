@@ -32,6 +32,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   bool _showEsdf = true;
   bool _showTrajectory = true;
   bool _showGlobalPath = true;
+  bool _showGlobalMap = false;
 
   @override
   void initState() {
@@ -88,6 +89,18 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final poseAsync = ref.watch(poseStreamProvider);
     final planningAsync = ref.watch(planningStreamProvider);
     final planning = planningAsync.valueOrNull;
+    final localized = planning?.localized ?? false;
+    final activeNavPois = ref.watch(activeNavPoisProvider);
+    final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
+    final baseUrl = ref.watch(baseUrlProvider);
+
+    ref.listen<AsyncValue<DeviceStatus>>(deviceStatusProvider, (prev, next) {
+      final prevState = prev?.valueOrNull?.rawState;
+      final nextState = next.valueOrNull?.rawState;
+      if (prevState == 'navigation' && nextState != 'navigation') {
+        ref.read(activeNavPoisProvider.notifier).state = const [];
+      }
+    });
 
     return Column(
       children: [
@@ -100,19 +113,38 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: _LocalPlanningView(
-                  planning: planning,
-                  showObstacle: _showObstacle,
-                  showEsdf: _showEsdf,
-                  showTrajectory: _showTrajectory,
-                  showGlobalPath: _showGlobalPath,
-                ),
+                child: (_showGlobalMap && localized && mapInfo != null && baseUrl != null)
+                    ? _GlobalMapView(
+                        mapInfo: mapInfo,
+                        baseUrl: baseUrl,
+                        planning: planning,
+                        pois: activeNavPois,
+                      )
+                    : _LocalPlanningView(
+                        planning: planning,
+                        showObstacle: _showObstacle,
+                        showEsdf: _showEsdf,
+                        showTrajectory: _showTrajectory,
+                        showGlobalPath: _showGlobalPath,
+                      ),
               ),
               if (planning != null)
                 Positioned(
                   top: 8,
                   left: 8,
-                  child: _LocalizationChip(localized: planning.localized),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _LocalizationChip(localized: localized),
+                      if (localized) ...[
+                        const SizedBox(width: 6),
+                        _MapToggleButton(
+                          showGlobalMap: _showGlobalMap,
+                          onTap: () => setState(() => _showGlobalMap = !_showGlobalMap),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               Positioned(
                 top: 8,
@@ -414,6 +446,46 @@ class _LayerRow extends StatelessWidget {
   }
 }
 
+// ── Map toggle button ─────────────────────────────────────────────────────────
+
+class _MapToggleButton extends StatelessWidget {
+  final bool showGlobalMap;
+  final VoidCallback onTap;
+
+  const _MapToggleButton({required this.showGlobalMap, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: showGlobalMap
+              ? Colors.blueAccent.withOpacity(0.85)
+              : Colors.black54,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              showGlobalMap ? Icons.map_rounded : Icons.grid_view_rounded,
+              color: Colors.white,
+              size: 14,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              showGlobalMap ? 'Global' : 'Local',
+              style: const TextStyle(color: Colors.white, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ── Localization chip ─────────────────────────────────────────────────────────
 
 class _LocalizationChip extends StatelessWidget {
@@ -566,14 +638,15 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   }
 
   Future<void> _startNav(List<Poi> pois) async {
-    final ids = pois
-        .where((p) => _checkedIds.contains(p.id))
-        .map((p) => p.id)
-        .toList();
-    if (ids.isEmpty) return;
+    final selectedPois = pois.where((p) => _checkedIds.contains(p.id)).toList();
+    if (selectedPois.isEmpty) return;
     final navigator = Navigator.of(context);
     try {
-      await ref.read(dioProvider).post('/nav/send-pois', data: {'poi_ids': ids});
+      await ref.read(dioProvider).post(
+        '/nav/send-pois',
+        data: {'poi_ids': selectedPois.map((p) => p.id).toList()},
+      );
+      ref.read(activeNavPoisProvider.notifier).state = selectedPois;
       navigator.pop();
     } on DioException catch (e) {
       if (mounted) {

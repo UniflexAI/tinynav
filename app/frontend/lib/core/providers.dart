@@ -98,6 +98,9 @@ final imageTopicsProvider = FutureProvider.autoDispose<List<String>>((ref) async
 /// Currently selected bag name for map building (null = use last verified).
 final selectedBagProvider = StateProvider<String?>((ref) => null);
 
+/// POIs currently being navigated (set when Go is pressed, cleared when nav done).
+final activeNavPoisProvider = StateProvider<List<Poi>>((ref) => const []);
+
 /// Currently selected preview topic (null = preview closed).
 final selectedPreviewTopicProvider = StateProvider<String?>((ref) => null);
 

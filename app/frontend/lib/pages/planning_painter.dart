@@ -14,6 +14,7 @@ class LocalPlanningPainter extends CustomPainter {
   final Pose? odomPose;
   final bool showTrajectory;
   final bool showGlobalPath;
+  final bool showFootprint;
   final TrajPoint? navTargetPose;
 
   const LocalPlanningPainter({
@@ -23,6 +24,7 @@ class LocalPlanningPainter extends CustomPainter {
     this.odomPose,
     this.showTrajectory = true,
     this.showGlobalPath = true,
+    this.showFootprint = true,
     this.navTargetPose,
   });
 
@@ -46,6 +48,8 @@ class LocalPlanningPainter extends CustomPainter {
 
     if (navTargetPose != null && pose != null)
       _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
+
+    if (showFootprint) _drawFootprint(canvas, Offset(cx, cy), pose?.yaw ?? 0.0, scaleX);
 
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
   }
@@ -144,6 +148,46 @@ class LocalPlanningPainter extends CustomPainter {
     canvas.drawLine(Offset(px, py + r - arm), Offset(px, py + r + arm), cross);
   }
 
+  /// Draws the Go2 robot footprint rectangle (0.7 m × 0.3 m) centered on the robot.
+  /// Mirrors /planning/footprint topic data — front_len=0.35, rear_len=0.35, half_w=0.15.
+  void _drawFootprint(Canvas canvas, Offset center, double yaw, double scale) {
+    const fl = 0.35;  // front from control center (m)
+    const rl = 0.35;  // rear from control center (m)
+    const hw = 0.15;  // half-width (m)
+
+    final cosY = math.cos(yaw);
+    final sinY = math.sin(yaw);
+
+    Offset toCanvas(double fwdM, double latM) => Offset(
+      center.dx + (fwdM * cosY - latM * sinY) * scale,
+      center.dy - (fwdM * sinY + latM * cosY) * scale,
+    );
+
+    final corners = [
+      toCanvas(fl, hw),
+      toCanvas(fl, -hw),
+      toCanvas(-rl, -hw),
+      toCanvas(-rl, hw),
+    ];
+
+    final path = Path()
+      ..moveTo(corners[0].dx, corners[0].dy)
+      ..lineTo(corners[1].dx, corners[1].dy)
+      ..lineTo(corners[2].dx, corners[2].dy)
+      ..lineTo(corners[3].dx, corners[3].dy)
+      ..close();
+
+    canvas.drawPath(path,
+        Paint()
+          ..color = Colors.yellowAccent.withOpacity(0.15)
+          ..style = PaintingStyle.fill);
+    canvas.drawPath(path,
+        Paint()
+          ..color = Colors.yellowAccent.withOpacity(0.75)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5);
+  }
+
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
@@ -173,5 +217,6 @@ class LocalPlanningPainter extends CustomPainter {
       odomPose != old.odomPose ||
       showTrajectory != old.showTrajectory ||
       showGlobalPath != old.showGlobalPath ||
+      showFootprint != old.showFootprint ||
       navTargetPose != old.navTargetPose;
 }
