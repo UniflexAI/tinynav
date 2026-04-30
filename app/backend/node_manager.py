@@ -192,7 +192,9 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def _on_relocalization(self, msg: Odometry):
+        pose = self._odom_to_dict(msg, source='map')
         with self._lock:
+            self._map_pose = pose
             self._localized = True
 
     def _on_nav_target_pose(self, msg: Odometry):
