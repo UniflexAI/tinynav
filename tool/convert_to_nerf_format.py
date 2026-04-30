@@ -13,8 +13,8 @@ from typing import Dict, Tuple
 
 import cv2
 import numpy as np
-import shelve
 from tqdm import tqdm
+from tool.video_db import VideoDB
 
 
 def convert_nerf_format(
@@ -82,15 +82,18 @@ def export_rgb_images(
 ) -> Tuple[int, int]:
     images_dir.mkdir(parents=True, exist_ok=True)
     image_size = None
-    with shelve.open(str(map_dir / "rgb_images")) as rgb_db:
+    rgb_db_dir = map_dir / "rgb_images_db"
+    rgb_video_db = VideoDB(dir_path=str(rgb_db_dir), mode="read")
+    try:
         for timestamp in tqdm(timestamps, desc="Exporting RGB images", unit="img"):
-            key = str(timestamp)
-            if key not in rgb_db:
-                raise KeyError(f"Missing rgb image for timestamp {timestamp} in {map_dir / 'rgb_images'}")
-            rgb_image = rgb_db[key]
+            rgb_image = rgb_video_db.read(timestamp)
+            if rgb_image is None:
+                raise KeyError(f"Missing rgb image timestamp {timestamp} in {rgb_db_dir / 'meta.json'}")
             if image_size is None:
                 image_size = rgb_image.shape[:2]
             cv2.imwrite(str(images_dir / f"image_{timestamp}.png"), rgb_image)
+    finally:
+        rgb_video_db.close()
 
     if image_size is None:
         raise RuntimeError("No RGB images exported; poses may be empty")
@@ -153,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reuse-existing-images",
         action="store_true",
-        help="Do not export from rgb_images shelve; reuse existing image_*.png files",
+        help="Do not export from rgb_images_db/video.mp4; reuse existing image_*.png files",
     )
     return parser.parse_args()
 

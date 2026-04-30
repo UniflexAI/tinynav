@@ -24,6 +24,7 @@ class VideoDB:
         self.frame_count = 0
         self._stream = None
         self._container = None
+        self._video_reader = None
         self.is_gray = None
         self.write_count = 0
         self.write_total_s = 0.0
@@ -39,6 +40,14 @@ class VideoDB:
             self._container = av.open(self.video_path, mode="w")
         else:
             self.ts_to_idx = self._load_meta()
+            try:
+                import decord
+            except ImportError as e:
+                raise ImportError(
+                    "decord is required for VideoDB.read(). Install decord first."
+                ) from e
+            if os.path.exists(self.video_path):
+                self._video_reader = decord.VideoReader(self.video_path)
 
     def _ensure_writer_stream(self, image: np.ndarray):
         h, w = image.shape[:2]
@@ -96,45 +105,22 @@ class VideoDB:
         ts_to_idx = data["ts_to_idx"]
         return {int(k): int(v) for k, v in ts_to_idx.items()}
 
-    def _decode_frame_by_index_linear(self, frame_idx: int):
-        if frame_idx < 0 or not os.path.exists(self.video_path):
-            return None
-        with av.open(self.video_path, mode="r") as c:
-            stream = c.streams.video[0]
-            for i, frame in enumerate(c.decode(stream)):
-                if i == frame_idx:
-                    return frame.to_ndarray(format="gray" if self.is_gray else "bgr24")
-        return None
-
     def _decode_frame_by_index(self, frame_idx: int):
         if frame_idx < 0 or not os.path.exists(self.video_path):
             return None
-        # Near-random access: seek to a nearby keyframe, then decode forward.
-        target_us = int((frame_idx / max(self.fps, 1)) * 1_000_000)
-        decode_format = "gray" if self.is_gray else "bgr24"
-        try:
-            with av.open(self.video_path, mode="r") as c:
-                stream = c.streams.video[0]
-                c.seek(target_us, stream=stream, any_frame=False, backward=True)
-                best_frame = None
-                best_err = None
-                for frame in c.decode(stream):
-                    if frame.pts is None or stream.time_base is None:
-                        continue
-                    sec = float(frame.pts * stream.time_base)
-                    est_idx = int(round(sec * self.fps))
-                    err = abs(est_idx - frame_idx)
-                    if best_err is None or err < best_err:
-                        best_err = err
-                        best_frame = frame
-                    if est_idx >= frame_idx:
-                        return frame.to_ndarray(format=decode_format)
-                if best_frame is not None:
-                    return best_frame.to_ndarray(format=decode_format)
-        except Exception:
-            pass
-        # Fallback for robustness.
-        return self._decode_frame_by_index_linear(frame_idx)
+        if self._video_reader is None:
+            return None
+        if frame_idx >= len(self._video_reader):
+            return None
+        frame = self._video_reader[frame_idx].asnumpy()
+        if self.is_gray:
+            if frame.ndim == 3:
+                frame = frame[..., 0]
+            return frame
+        # decord returns RGB; convert to BGR to keep OpenCV-style behavior.
+        if frame.ndim == 3:
+            return frame[..., ::-1]
+        return frame
 
     def read(self, timestamp: int):
         if self.mode != "read":
