@@ -15,7 +15,6 @@ class LocalPlanningPainter extends CustomPainter {
   final Pose? odomPose;
   final bool showTrajectory;
   final bool showGlobalPath;
-  final bool showFootprint;
   final TrajPoint? navTargetPose;
 
   const LocalPlanningPainter({
@@ -26,7 +25,6 @@ class LocalPlanningPainter extends CustomPainter {
     this.odomPose,
     this.showTrajectory = true,
     this.showGlobalPath = true,
-    this.showFootprint = true,
     this.navTargetPose,
   });
 
@@ -53,7 +51,7 @@ class LocalPlanningPainter extends CustomPainter {
 
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
 
-    if (showFootprint && footprint.isNotEmpty && pose != null)
+    if (footprint.isNotEmpty && pose != null)
       _drawFootprint(canvas, cx, cy, scaleX, scaleY, pose);
   }
 
@@ -202,6 +200,5 @@ class LocalPlanningPainter extends CustomPainter {
       odomPose != old.odomPose ||
       showTrajectory != old.showTrajectory ||
       showGlobalPath != old.showGlobalPath ||
-      showFootprint != old.showFootprint ||
       navTargetPose != old.navTargetPose;
 }

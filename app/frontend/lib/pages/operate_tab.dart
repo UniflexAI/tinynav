@@ -86,7 +86,6 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   @override
   Widget build(BuildContext context) {
     final poisAsync = ref.watch(poisProvider);
-    final poseAsync = ref.watch(poseStreamProvider);
     final planningAsync = ref.watch(planningStreamProvider);
     final planning = planningAsync.valueOrNull;
     final localized = planning?.localized ?? false;
@@ -146,29 +145,29 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                     ],
                   ),
                 ),
-              Positioned(
-                top: 8,
-                right: 8,
-                child: _LayerTogglePanel(
-                  showObstacle: _showObstacle,
-                  showEsdf: _showEsdf,
-                  showTrajectory: _showTrajectory,
-                  showGlobalPath: _showGlobalPath,
-                  onChanged: (obs, esdf, traj, gp) => setState(() {
-                    _showObstacle = obs;
-                    _showEsdf = esdf;
-                    _showTrajectory = traj;
-                    _showGlobalPath = gp;
-                  }),
+              if (!_showGlobalMap)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: _LayerTogglePanel(
+                    showObstacle: _showObstacle,
+                    showEsdf: _showEsdf,
+                    showTrajectory: _showTrajectory,
+                    showGlobalPath: _showGlobalPath,
+                    onChanged: (obs, esdf, traj, gp) => setState(() {
+                      _showObstacle = obs;
+                      _showEsdf = esdf;
+                      _showTrajectory = traj;
+                      _showGlobalPath = gp;
+                    }),
+                  ),
                 ),
-              ),
               Positioned(
                 bottom: 10,
                 left: 10,
                 child: _PoiButton(
                   poisAsync: poisAsync,
                   statusAsync: ref.watch(deviceStatusProvider),
-                  pose: poseAsync.valueOrNull,
                 ),
               ),
               Positioned(
@@ -525,12 +524,10 @@ class _LocalizationChip extends StatelessWidget {
 class _PoiButton extends ConsumerStatefulWidget {
   final AsyncValue<List<Poi>> poisAsync;
   final AsyncValue<DeviceStatus> statusAsync;
-  final Pose? pose;
 
   const _PoiButton({
     required this.poisAsync,
     required this.statusAsync,
-    this.pose,
   });
 
   @override
@@ -583,7 +580,7 @@ class _PoiButtonState extends ConsumerState<_PoiButton> {
         shape: const RoundedRectangleBorder(
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         ),
-        builder: (_) => _PoiSheet(pose: widget.pose),
+        builder: (_) => const _PoiSheet(),
       ),
       style: FilledButton.styleFrom(
         backgroundColor: Colors.black87,
@@ -597,8 +594,7 @@ class _PoiButtonState extends ConsumerState<_PoiButton> {
 }
 
 class _PoiSheet extends ConsumerStatefulWidget {
-  final Pose? pose;
-  const _PoiSheet({this.pose});
+  const _PoiSheet();
 
   @override
   ConsumerState<_PoiSheet> createState() => _PoiSheetState();
