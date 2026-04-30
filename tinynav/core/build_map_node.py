@@ -26,9 +26,8 @@ import logging
 import asyncio
 import shelve
 import json
-import base64
-import zlib
 import av
+import time
 from tqdm import tqdm
 import einops
 from tf2_msgs.msg import TFMessage
@@ -247,127 +246,168 @@ class OdomPoseRecorder:
         self.poses.clear()
 
 
-class TinyNavDB():
-    def __init__(self, map_save_path:str, is_scratch:bool = True):
-        self.map_save_path = map_save_path
-        self.is_scratch = is_scratch
-        self.meta_prefix = "TinyNav:"
-        self.infra1_mp4_path = f"{map_save_path}/infra1_images.mp4"
-        self.rgb_mp4_path = f"{map_save_path}/rgb_images.mp4"
-        self.infra1_ts_to_idx = {}
-        self.rgb_ts_to_idx = {}
-        self.infra1_frame_count = 0
-        self.rgb_frame_count = 0
-        self._infra1_stream = None
-        self._rgb_stream = None
-        self._infra1_container = None
-        self._rgb_container = None
+class VideoDB:
+    def __init__(
+        self,
+        dir_path: str,
+        mode: str,
+        fps: int = 30,
+    ):
+        if mode not in {"read", "write"}:
+            raise ValueError(f"Invalid mode: {mode}")
+        self.dir_path = dir_path
+        self.video_path = os.path.join(dir_path, "video.mp4")
+        self.meta_path = os.path.join(dir_path, "meta.json")
+        self.mode = mode
+        self.fps = fps
+        self.ts_to_idx = {}
+        self.frame_count = 0
+        self._stream = None
+        self._container = None
+        self.is_gray = None
+        self.write_count = 0
+        self.write_total_s = 0.0
+        self.read_count = 0
+        self.read_total_s = 0.0
 
-        if is_scratch:
-            if os.path.exists(f"{map_save_path}/features.db"):
-                os.remove(f"{map_save_path}/features.db")
-            if os.path.exists(f"{map_save_path}/infra1_images.db"):
-                os.remove(f"{map_save_path}/infra1_images.db")
-            if os.path.exists(f"{map_save_path}/depths.db"):
-                os.remove(f"{map_save_path}/depths.db")
-            if os.path.exists(f"{map_save_path}/rgb_images.db"):
-                os.remove(f"{map_save_path}/rgb_images.db")
-            if os.path.exists(f"{map_save_path}/embeddings.db"):
-                os.remove(f"{map_save_path}/embeddings.db")
-            if os.path.exists(self.infra1_mp4_path):
-                os.remove(self.infra1_mp4_path)
-            if os.path.exists(self.rgb_mp4_path):
-                os.remove(self.rgb_mp4_path)
+        if self.mode == "write":
+            os.makedirs(self.dir_path, exist_ok=True)
+            if os.path.exists(self.video_path):
+                os.remove(self.video_path)
+            if os.path.exists(self.meta_path):
+                os.remove(self.meta_path)
+            self._container = av.open(self.video_path, mode="w")
+        else:
+            self.ts_to_idx = self._load_meta()
 
-            self._init_mp4_writers()
-
-        self.features = IntKeyShelf(f"{map_save_path}/features")
-        self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
-        self.depths = IntKeyShelf(f"{map_save_path}/depths")
-        if not is_scratch:
-            self.infra1_ts_to_idx = self._load_ts_index_from_metadata(self.infra1_mp4_path)
-            self.rgb_ts_to_idx = self._load_ts_index_from_metadata(self.rgb_mp4_path)
-
-    def _init_mp4_writers(self):
-        self._infra1_container = av.open(self.infra1_mp4_path, mode="w")
-        self._rgb_container = av.open(self.rgb_mp4_path, mode="w")
-
-    def _ensure_writer_stream(self, image: np.ndarray, is_rgb: bool):
+    def _ensure_writer_stream(self, image: np.ndarray):
         h, w = image.shape[:2]
-        container = self._rgb_container if is_rgb else self._infra1_container
-        stream = self._rgb_stream if is_rgb else self._infra1_stream
+        container = self._container
+        stream = self._stream
         if stream is not None:
             return stream
-        stream = container.add_stream("libx264", rate=30)
+        stream = container.add_stream("libx264", rate=self.fps)
         stream.width = int(w)
         stream.height = int(h)
         stream.pix_fmt = "yuv420p"
         stream.options = {"preset": "veryfast", "crf": "18", "tune": "zerolatency", "bf": "0"}
-        if is_rgb:
-            self._rgb_stream = stream
-        else:
-            self._infra1_stream = stream
+        self._stream = stream
         return stream
 
-    def _append_rgb_image_mp4(self, key: int, image: np.ndarray):
-        if not self.is_scratch:
-            return
+    def write(self, timestamp: int, image: np.ndarray):
+        if self.mode != "write":
+            raise RuntimeError("VideoDB write() requires mode='write'")
+        t0 = time.perf_counter()
         frame_np = np.asarray(image)
-        if frame_np.ndim == 2:
-            frame_np = cv2.cvtColor(frame_np, cv2.COLOR_GRAY2BGR)
-        frame = av.VideoFrame.from_ndarray(frame_np, format="bgr24")
-        stream = self._ensure_writer_stream(frame_np, is_rgb=True)
-        frame.pts = self.rgb_frame_count
-        self.rgb_ts_to_idx[int(key)] = int(self.rgb_frame_count)
-        self.rgb_frame_count += 1
-        for pkt in stream.encode(frame):
-            self._rgb_container.mux(pkt)
-
-    def _append_infra1_image_mp4(self, key: int, image: np.ndarray):
-        if not self.is_scratch:
-            return
-        frame_np = np.asarray(image)
-        if frame_np.ndim == 3:
+        curr_is_gray = frame_np.ndim == 2
+        if self.is_gray is None:
+            self.is_gray = curr_is_gray
+        elif self.is_gray and frame_np.ndim == 3:
             frame_np = cv2.cvtColor(frame_np, cv2.COLOR_BGR2GRAY)
-        frame = av.VideoFrame.from_ndarray(frame_np, format="gray")
-        stream = self._ensure_writer_stream(frame_np, is_rgb=False)
-        frame.pts = self.infra1_frame_count
-        self.infra1_ts_to_idx[int(key)] = int(self.infra1_frame_count)
-        self.infra1_frame_count += 1
+        elif not self.is_gray and frame_np.ndim == 2:
+            frame_np = cv2.cvtColor(frame_np, cv2.COLOR_GRAY2BGR)
+        frame_format = "gray" if self.is_gray else "bgr24"
+        frame = av.VideoFrame.from_ndarray(frame_np, format=frame_format)
+        stream = self._ensure_writer_stream(frame_np)
+        frame.pts = self.frame_count
+        self.ts_to_idx[int(timestamp)] = int(self.frame_count)
+        self.frame_count += 1
         for pkt in stream.encode(frame):
-            self._infra1_container.mux(pkt)
+            self._container.mux(pkt)
+        self.write_count += 1
+        self.write_total_s += time.perf_counter() - t0
 
-    def _write_ts_index_to_metadata(self, container, mapping: dict):
-        payload = json.dumps({str(k): int(v) for k, v in mapping.items()}, separators=(",", ":"))
-        payload = base64.b64encode(zlib.compress(payload.encode("utf-8"), level=9)).decode("ascii")
-        container.metadata["comment"] = self.meta_prefix + payload
+    def _write_meta(self):
+        payload = {
+            "ts_to_idx": {str(k): int(v) for k, v in self.ts_to_idx.items()},
+            "is_gray": bool(self.is_gray) if self.is_gray is not None else False,
+        }
+        with open(self.meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, separators=(",", ":"))
 
-    def _load_ts_index_from_metadata(self, mp4_path: str) -> dict:
-        if not os.path.exists(mp4_path):
+    def _load_meta(self) -> dict:
+        if not os.path.exists(self.meta_path):
             return {}
-        with av.open(mp4_path, mode="r") as c:
-            comment = c.metadata.get("comment", "")
-        if not comment.startswith(self.meta_prefix):
+        with open(self.meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "ts_to_idx" not in data:
             return {}
-        payload = comment[len(self.meta_prefix):]
-        data = json.loads(zlib.decompress(base64.b64decode(payload)).decode("utf-8"))
-        return {int(k): int(v) for k, v in data.items()}
+        self.is_gray = bool(data.get("is_gray", False))
+        ts_to_idx = data["ts_to_idx"]
+        return {int(k): int(v) for k, v in ts_to_idx.items()}
 
-    def _decode_frame_by_index(self, mp4_path: str, frame_idx: int, as_gray: bool):
-        if frame_idx < 0 or not os.path.exists(mp4_path):
+    def _decode_frame_by_index(self, frame_idx: int):
+        if frame_idx < 0 or not os.path.exists(self.video_path):
             return None
-        with av.open(mp4_path, mode="r") as c:
+        with av.open(self.video_path, mode="r") as c:
             stream = c.streams.video[0]
             for i, frame in enumerate(c.decode(stream)):
                 if i == frame_idx:
-                    return frame.to_ndarray(format="gray" if as_gray else "bgr24")
+                    return frame.to_ndarray(format="gray" if self.is_gray else "bgr24")
         return None
+
+    def read(self, timestamp: int):
+        if self.mode != "read":
+            raise RuntimeError("VideoDB read() requires mode='read'")
+        t0 = time.perf_counter()
+        key = int(timestamp)
+        if key not in self.ts_to_idx:
+            self.read_count += 1
+            self.read_total_s += time.perf_counter() - t0
+            return None
+        image = self._decode_frame_by_index(self.ts_to_idx[key])
+        self.read_count += 1
+        self.read_total_s += time.perf_counter() - t0
+        return image
+
+    def close(self):
+        if self.mode == "write":
+            if self._stream is not None:
+                for pkt in self._stream.encode(None):
+                    self._container.mux(pkt)
+            if self._container is not None:
+                self._container.close()
+            self._write_meta()
+        write_avg_ms = (self.write_total_s / self.write_count * 1000.0) if self.write_count > 0 else 0.0
+        read_avg_ms = (self.read_total_s / self.read_count * 1000.0) if self.read_count > 0 else 0.0
+        print(
+            f"[VideoDB] dir={self.dir_path} mode={self.mode} "
+            f"write_count={self.write_count} write_avg_ms={write_avg_ms:.3f} "
+            f"read_count={self.read_count} read_avg_ms={read_avg_ms:.3f}"
+        )
+
+
+class TinyNavDB():
+    def __init__(self, map_save_path:str, is_scratch:bool = True):
+        self.map_save_path = map_save_path
+        self.is_scratch = is_scratch
+        mode = "write" if is_scratch else "read"
+        self.infra1_video_db = VideoDB(
+            dir_path=f"{map_save_path}/infra1_images_db",
+            mode=mode,
+            fps=30,
+        )
+        self.rgb_video_db = VideoDB(
+            dir_path=f"{map_save_path}/rgb_images_db",
+            mode=mode,
+            fps=30,
+        )
+        if is_scratch:
+            if os.path.exists(f"{map_save_path}/features.db"):
+                os.remove(f"{map_save_path}/features.db")
+            if os.path.exists(f"{map_save_path}/depths.db"):
+                os.remove(f"{map_save_path}/depths.db")
+            if os.path.exists(f"{map_save_path}/embeddings.db"):
+                os.remove(f"{map_save_path}/embeddings.db")
+        self.features = IntKeyShelf(f"{map_save_path}/features")
+        self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
+        self.depths = IntKeyShelf(f"{map_save_path}/depths")
 
     def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
-            self._append_infra1_image_mp4(key, infra1_image)
+            self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
-            self._append_rgb_image_mp4(key, rgb_image)
+            self.rgb_video_db.write(key, rgb_image)
         if depth is not None:
             self.depths[key] = depth
         if embedding is not None:
@@ -377,22 +417,15 @@ class TinyNavDB():
 
     def get_depth_embedding_features_images(self, key:int):
         key_int = int(key)
-
         def rgb_loader():
             if self.is_scratch:
                 return None
-            if key_int not in self.rgb_ts_to_idx:
-                return None
-            idx = self.rgb_ts_to_idx[key_int]
-            return self._decode_frame_by_index(self.rgb_mp4_path, idx, as_gray=False)
+            return self.rgb_video_db.read(key_int)
 
         def infra1_loader():
             if self.is_scratch:
                 return None
-            if key_int not in self.infra1_ts_to_idx:
-                return None
-            idx = self.infra1_ts_to_idx[key_int]
-            return self._decode_frame_by_index(self.infra1_mp4_path, idx, as_gray=True)
+            return self.infra1_video_db.read(key_int)
 
         return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
 
@@ -403,19 +436,8 @@ class TinyNavDB():
         self.features.close()
         self.embeddings.close()
         self.depths.close()
-        if self.is_scratch:
-            if self._infra1_stream is not None:
-                for pkt in self._infra1_stream.encode(None):
-                    self._infra1_container.mux(pkt)
-            if self._rgb_stream is not None:
-                for pkt in self._rgb_stream.encode(None):
-                    self._rgb_container.mux(pkt)
-            if self._infra1_container is not None:
-                self._write_ts_index_to_metadata(self._infra1_container, self.infra1_ts_to_idx)
-                self._infra1_container.close()
-            if self._rgb_container is not None:
-                self._write_ts_index_to_metadata(self._rgb_container, self.rgb_ts_to_idx)
-                self._rgb_container.close()
+        self.infra1_video_db.close()
+        self.rgb_video_db.close()
 
 class BagPlayer(Node):
     def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
