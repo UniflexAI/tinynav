@@ -302,10 +302,11 @@ class VideoDB:
         curr_is_gray = frame_np.ndim == 2
         if self.is_gray is None:
             self.is_gray = curr_is_gray
-        elif self.is_gray and frame_np.ndim == 3:
-            frame_np = cv2.cvtColor(frame_np, cv2.COLOR_BGR2GRAY)
-        elif not self.is_gray and frame_np.ndim == 2:
-            frame_np = cv2.cvtColor(frame_np, cv2.COLOR_GRAY2BGR)
+        elif self.is_gray != curr_is_gray:
+            raise ValueError(
+                f"Inconsistent image ndim for {self.dir_path}: expected "
+                f"{'gray(2D)' if self.is_gray else 'color(3D)'}, got ndim={frame_np.ndim}"
+            )
         frame_format = "gray" if self.is_gray else "bgr24"
         frame = av.VideoFrame.from_ndarray(frame_np, format=frame_format)
         stream = self._ensure_writer_stream(frame_np)
