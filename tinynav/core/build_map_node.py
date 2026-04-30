@@ -298,7 +298,7 @@ class TinyNavDB():
         stream = self._rgb_stream if is_rgb else self._infra1_stream
         if stream is not None:
             return stream
-        stream = container.add_stream("libx264", rate=13)
+        stream = container.add_stream("libx264", rate=30)
         stream.width = int(w)
         stream.height = int(h)
         stream.pix_fmt = "yuv420p"
