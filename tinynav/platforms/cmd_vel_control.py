@@ -1,172 +1,193 @@
+import math
+import logging
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Path
-from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
-from rclpy.qos import DurabilityPolicy, QoSProfile
-from scipy.spatial.transform import Rotation as R
-import numpy as np
-import logging
-import time
+from nav_msgs.msg import Path, Odometry
+from tinynav.core.math_utils import msg2np, pose_msg2np
 
-# Module-level logger for cases where self.get_logger() is not available
-logger = logging.getLogger(__name__)
 
 class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
         self.logger = self.get_logger()  # Use ROS2 logger
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
-        self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
-        self.T_robot_to_camera = np.array([
-            [0, -1, 0, 0],
-            [0, 0, -1, 0],
-            [1, 0, 0, 0],
-            [0, 0, 0, 1]]
-        )
-        self.last_path_time = 0.0
-        self.pose = None
-        self.path = None
 
-        # === Control loop (ported from planning_node_compare style) ===
-        # Planner input is typically 7-10 Hz; over-driving cmd publish rate amplifies jitter.
-        self.cmd_rate_hz = 12.0
-        # Use minima; actual stale thresholds are scaled by observed planner period.
-        self.path_stale_slow_s = 0.35
-        self.path_stale_stop_s = 0.8
-        self.path_stale_slow_factor = 3.5
-        self.path_stale_stop_factor = 5.0
-        self.max_linear_acc = 0.6   # m/s^2
-        self.max_angular_acc = 0.8  # rad/s^2
-        self.planner_dt = 0.1       # trajectory dt in planning_node
-        # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
-        self.path_pose_stride = 10
-        self.path_period_ema = 0.12
-        self.path_filter_tau = 0.30
-        self.lookahead_steps = 1
-        # Static-friction compensation: very small vx often cannot move the robot.
-        self.min_effective_linear_speed = 0.2
-        self.linear_engage_threshold = 0.04
-        self.fixed_reverse_speed = 0.2
+        self.position = np.zeros(3)
+        self.rotation = np.eye(3)
+        self._odom_pose_initialized = False
 
-        self.latest_cmd = Twist()
-        self.prev_cmd = Twist()
-        self.last_cmd_pub_time = time.monotonic()
-        self.last_path_update_time = None
-        self._paused = False
-        _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
-        self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-        
-    def _on_paused(self, msg: Bool):
-        self._paused = msg.data
-        if not self._paused:
-            # Reset prev_cmd so resume starts from zero cleanly
-            self.prev_cmd = Twist()
+        self._odom_stamp_sec = None
 
-    def pose_callback(self, msg):
-        self.pose = msg
+        # columns: x, y, yaw, v_ref, w_ref
+        self._path_ref = None
+        self._track_idx = 0
+        self._last_traj_update_sec = None
 
-    def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
-        return float(np.clip(target - current, -max_delta, max_delta) + current)
+        self.create_subscription(Odometry, "/slam/odometry_100hz", self._odom_cb, 10)
+        self.create_subscription(Path, "/planning/trajectory_path", self._traj_cb, 10)
+        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
-    def cmd_timer_callback(self):
-        now = time.monotonic()
-        dt = max(1e-3, now - self.last_cmd_pub_time)
-        self.last_cmd_pub_time = now
+    def _odom_cb(self, msg: Odometry):
+        measured_pose, _ = msg2np(msg)
+        measured_position = measured_pose[:3, 3]
+        measured_rotation = measured_pose[:3, :3]
 
-        if self._paused:
-            self.cmd_pub.publish(Twist())
-            self.prev_cmd = Twist()
+        if not self._odom_pose_initialized:
+            self.position = measured_position
+            self.rotation = measured_rotation
+            self._odom_pose_initialized = True
+        else:
+            alpha = 0.35  # First-order odom low-pass filter; smaller is smoother but laggier.
+            self.position = (1.0 - alpha) * self.position + alpha * measured_position
+            self.rotation = measured_rotation
+
+        self._odom_stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._control_loop()
+
+    def _traj_cb(self, msg: Path):
+        now = self._now_sec()
+        if (
+            self._last_traj_update_sec is not None
+            and now - self._last_traj_update_sec < 0.2  # Drop path updates faster than 5 Hz.
+        ):
             return
 
-        # Stale-path protection: slow down, then stop if planner has not refreshed.
-        age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
-        stale_slow_s = max(self.path_stale_slow_s, self.path_period_ema * self.path_stale_slow_factor)
-        stale_stop_s = max(self.path_stale_stop_s, self.path_period_ema * self.path_stale_stop_factor)
-        target_cmd = Twist()
-        target_cmd.linear.x = self.latest_cmd.linear.x
-        target_cmd.angular.z = self.latest_cmd.angular.z
-        if age > stale_stop_s:
-            target_cmd.linear.x = 0.0
-            target_cmd.angular.z = 0.0
-        elif age > stale_slow_s:
-            target_cmd.linear.x *= 0.3
-            target_cmd.angular.z *= 0.5
+        self._rebuild_path(msg)
+        self._last_traj_update_sec = now
 
-        # Acceleration limiting for smoother control.
-        max_dv = self.max_linear_acc * dt
-        max_dw = self.max_angular_acc * dt
-        out = Twist()
-        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
-        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
-        out.linear.y = 0.0
-        # Dead-band: < 0.05 → 0; small positive → snap to min effective speed.
-        if abs(out.linear.x) < 0.05:
-            out.linear.x = 0.0
-        elif 0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed
-        if abs(out.angular.z) < 0.05:
-            out.angular.z = 0.0
-
-        self.cmd_pub.publish(out)
-        self.prev_cmd = out
-        
-    def path_callback(self, msg):
-        if msg is None or self.pose is None:
+    def _rebuild_path(self, path_msg: Path):
+        n = len(path_msg.poses)
+        if n == 0:
+            self._path_ref = None
+            self._track_idx = 0
             return
-        if len(msg.poses) < 2:
+
+        xy_yaw = np.zeros((n, 3), dtype=np.float64)
+        t = np.zeros(n, dtype=np.float64)
+        last_yaw = 0.0
+        for i, pose in enumerate(path_msg.poses):
+            pose_np = pose_msg2np(pose)
+            xy_yaw[i, :2] = pose_np[:2, 3]
+            t[i] = pose.header.stamp.sec + pose.header.stamp.nanosec * 1e-9
+
+            forward = pose_np[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            if np.linalg.norm(forward[:2]) > 1e-6:
+                last_yaw = math.atan2(float(forward[1]), float(forward[0]))
+            xy_yaw[i, 2] = last_yaw
+
+        path_ref = np.zeros((n, 5), dtype=np.float64)
+        path_ref[:, :3] = xy_yaw
+        if n > 1:
+            t = t - t[0]
+            if np.min(np.diff(t)) <= 0.0:
+                # Planner publishes every other 0.1s trajectory sample.
+                t = np.arange(n, dtype=np.float64) * 0.2
+
+            yaw_u = np.unwrap(xy_yaw[:, 2])
+            for i in range(n - 1):
+                dt = max(1e-3, float(t[i + 1] - t[i]))
+                ds = float(np.linalg.norm(xy_yaw[i + 1, :2] - xy_yaw[i, :2]))
+                path_ref[i, 3] = ds / dt
+                path_ref[i, 4] = (yaw_u[i + 1] - yaw_u[i]) / dt
+            path_ref[-1, 3] = path_ref[-2, 3]
+            path_ref[-1, 4] = path_ref[-2, 4]
+
+        self._path_ref = path_ref
+        self._track_idx = 0
+
+    def _control_loop(self):
+        if self._path_ref is None:
+            self._publish_zero()
             return
-        self.path = msg
 
-        ros_now = self.get_clock().now().to_msg()
-        self.last_path_time = ros_now.sec + ros_now.nanosec * 1e-9
-        now_mono = time.monotonic()
-        if self.last_path_update_time is not None:
-            period = np.clip(now_mono - self.last_path_update_time, 0.05, 0.5)
-            self.path_period_ema = 0.85 * self.path_period_ema + 0.15 * float(period)
-        self.last_path_update_time = now_mono
+        # Keep this consistent with planning_node.camera_to_robot_center().
+        camera_offset = np.array([0.0, 0.0, 0.35], dtype=np.float64)  # GO2 control center to camera.
+        robot_pos = self.position - self.rotation @ camera_offset
+        forward = self.rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        robot_yaw = math.atan2(forward[1], forward[0])
 
-        def msg2np(msg):
-            T = np.eye(4)
-            position = msg.pose.position
-            rot = msg.pose.orientation
-            quat = [rot.x, rot.y, rot.z, rot.w]
-            T[:3, :3] = R.from_quat(quat).as_matrix()
-            T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
-            return T
-        
-        T1 = msg2np(self.path.poses[0])
-        step_idx = int(min(self.lookahead_steps, len(self.path.poses) - 1))
-        T2 = msg2np(self.path.poses[step_idx])
-        T_robot_1 = T1 @ self.T_robot_to_camera
-        T_robot_2 = T2 @ self.T_robot_to_camera
-        T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
-        p = T_robot_2_to_1[:3, 3]
-        # dt must match actual spacing between published Path poses, not raw trajectory dt.
-        dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
-        linear_velocity_vec = p / dt
-        r = R.from_matrix(T_robot_2_to_1[:3, :3])
-        angular_velocity_vec = r.as_rotvec() / dt
+        target = self._find_tracking_target(robot_pos, robot_yaw)
+        if target is None:
+            self._publish_zero()
+            return
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
-        if vx < 0.0:
-            vx = -self.fixed_reverse_speed
-        vy = 0.0
-        vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
+        tx, ty, heading_err = self._target_error(robot_pos, robot_yaw, target)
+        v_ref = float(target[3])
+        w_ref = float(target[4])
 
-        # Filter planner updates to reduce visible jitter from 7-10 Hz updates.
-        alpha = np.clip(self.path_period_ema / (self.path_filter_tau + self.path_period_ema), 0.15, 0.75)
-        self.latest_cmd.linear.x = float((1.0 - alpha) * self.latest_cmd.linear.x + alpha * vx)
-        self.latest_cmd.linear.y = float(vy)
-        self.latest_cmd.angular.z = float((1.0 - alpha) * self.latest_cmd.angular.z + alpha * vyaw)
-        age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
-        self.logger.debug(
-            f"cmd vx={self.latest_cmd.linear.x:.3f} vyaw={self.latest_cmd.angular.z:.3f} "
-            f"path_age={age:.2f}s path_dt_ema={self.path_period_ema:.2f}s lookahead={step_idx}"
-        )
+        b = 2.0
+        zeta = 0.7
+        k = 2.0 * zeta * math.sqrt(w_ref * w_ref + b * v_ref * v_ref)
+        v = v_ref * math.cos(heading_err) + k * tx
+        wz = w_ref + k * heading_err + b * v_ref * self._sinc(heading_err) * ty
+        v = float(np.clip(v, -0.2, 0.6))
+        wz = float(np.clip(wz, -0.8, 0.8))
+
+        heading_to_goal = self._wrap_angle(float(self._path_ref[-1, 2]) - robot_yaw)
+        if (
+            np.linalg.norm(robot_pos[:2] - self._path_ref[-1, :2]) < 0.1
+            and abs(heading_to_goal) < 0.1
+        ):
+            self._publish_zero()
+            return
+
+        cmd = Twist()
+        cmd.linear.x = v
+        cmd.angular.z = wz
+        self.cmd_pub.publish(cmd)
+
+        self.logger.info("cmd v=%.3f wz=%.3f", v, wz)
+
+    def _find_tracking_target(self, robot_pos, robot_yaw):
+        if self._path_ref is None or len(self._path_ref) == 0:
+            return None
+
+        start_idx = int(np.clip(self._track_idx, 0, len(self._path_ref) - 1))
+        delta = self._path_ref[start_idx:, :2] - robot_pos[:2]
+        dist = np.linalg.norm(delta, axis=1)
+
+        if float(np.max(dist)) < 0.05:
+            yaw_err = np.abs([self._wrap_angle(float(yaw) - robot_yaw) for yaw in self._path_ref[start_idx:, 2]])
+            nearest_idx = start_idx + int(np.argmin(yaw_err))
+        else:
+            nearest_idx = start_idx + int(np.argmin(dist))
+
+        target_idx = min(nearest_idx + 1, len(self._path_ref) - 1)  # Track one point ahead for stability.
+        self._track_idx = nearest_idx
+        return self._path_ref[target_idx]
+
+    def _target_error(self, robot_pos, robot_yaw, target):
+        dx = target[0] - robot_pos[0]
+        dy = target[1] - robot_pos[1]
+
+        cy = math.cos(robot_yaw)
+        sy = math.sin(robot_yaw)
+
+        tx = cy * dx + sy * dy
+        ty = -sy * dx + cy * dy
+        heading_err = self._wrap_angle(float(target[2]) - robot_yaw)
+
+        return tx, ty, heading_err
+
+    @staticmethod
+    def _wrap_angle(a):
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    @staticmethod
+    def _sinc(a):
+        if abs(a) < 1e-6:
+            return 1.0
+        return math.sin(a) / a
+
+    def _publish_zero(self):
+        cmd = Twist()
+        self.cmd_pub.publish(cmd)
+
+    def _now_sec(self):
+        if self._odom_stamp_sec is not None:
+            return self._odom_stamp_sec
+        return self.get_clock().now().nanoseconds * 1e-9
 
     def destroy_node(self):
         self.logger.info("Destroying cmd_vel_control connection.")
