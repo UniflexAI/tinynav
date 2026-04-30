@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from numba import njit
 import message_filters
 from rclpy.time import Time
+from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
@@ -349,7 +350,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
@@ -369,6 +370,7 @@ class PlanningNode(Node):
         self.current_pose = None  # Store the latest pose from odometry
 
         self.smoothed_velocity = 0.0
+        self.dt = 0.1
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -562,7 +564,8 @@ class PlanningNode(Node):
             trajectories, params = generate_trajectory_library_3d(
                 init_p = self.camera_to_robot_center(T),
                 init_v = init_v,
-                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w]),
+                dt = self.dt
             )
             self.last_T = T
             self.last_stamp = stamp
@@ -591,8 +594,9 @@ class PlanningNode(Node):
             path = Path()
             path.header = depth_msg.header
             path.header.frame_id = "world"
+            base_time = Time.from_msg(depth_msg.header.stamp)
             for i in top_indices:
-                for j in range(0, len(trajectories[i]), 10):
+                for j in range(0, len(trajectories[i]), 2):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
                     if self.poi_changed or self.target_pose is None:
                         x,y,z,qx,qy,qz,qw = trajectories[i][0]
@@ -603,6 +607,7 @@ class PlanningNode(Node):
 
                     pose = PoseStamped()
                     pose.header = depth_msg.header
+                    pose.header.stamp = (base_time + Duration(seconds=float(j) * self.dt)).to_msg()
                     pose.pose.position.x = x
                     pose.pose.position.y = y
                     pose.pose.position.z = z
