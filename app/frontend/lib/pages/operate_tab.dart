@@ -905,6 +905,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     final baseUrl = ref.watch(baseUrlProvider);
     final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
     final planning = ref.watch(planningStreamProvider).valueOrNull;
+    final activeNavPois = ref.watch(activeNavPoisProvider);
 
     // Auto-select color topic on first load
     ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
@@ -960,7 +961,12 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
               planning.localized && baseUrl != null)
             Positioned(
               top: 8, left: 8,
-              child: _MapPip(mapInfo: mapInfo, planning: planning, baseUrl: baseUrl),
+              child: _MapPip(
+                mapInfo: mapInfo,
+                planning: planning,
+                baseUrl: baseUrl,
+                pois: activeNavPois,
+              ),
             ),
           // ── Topic selector ───────────────────────────────────────────
           Positioned(
@@ -1081,8 +1087,14 @@ class _MapPip extends StatelessWidget {
   final MapInfo mapInfo;
   final PlanningState planning;
   final String baseUrl;
+  final List<Poi> pois;
 
-  const _MapPip({required this.mapInfo, required this.planning, required this.baseUrl});
+  const _MapPip({
+    required this.mapInfo,
+    required this.planning,
+    required this.baseUrl,
+    this.pois = const [],
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1110,6 +1122,7 @@ class _MapPip extends StatelessWidget {
               painter: MapOverlayPainter(
                 mapInfo: mapInfo,
                 pose: planning.mapPose,
+                pois: pois,
                 globalPath: planning.mapGlobalPath,
                 showGlobalPath: true,
               ),
