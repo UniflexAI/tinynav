@@ -83,7 +83,6 @@ class ImuPropagatorNode(Node):
             return
 
         timestamp = self._stamp_to_sec(imu_msg.header.stamp)
-        print("imu: ", timestamp)
         self.imu_buffer.append((timestamp, imu_msg))
         if len(self.imu_buffer) > 2000:
             self.imu_buffer.pop(0)

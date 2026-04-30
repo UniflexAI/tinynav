@@ -3958,6 +3958,7 @@ version = "0.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "async-lru" },
+    { name = "av" },
     { name = "codetiming" },
     { name = "cuda-python", version = "12.2.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64'" },
     { name = "cuda-python", version = "12.6.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'aarch64'" },
@@ -4007,6 +4008,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "async-lru" },
+    { name = "av" },
     { name = "codetiming" },
     { name = "cuda-python", marker = "platform_machine == 'aarch64'", specifier = "==12.6.0" },
     { name = "cuda-python", marker = "platform_machine == 'x86_64'", specifier = "==12.2.0" },
