@@ -196,6 +196,17 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 # To use lekiwi instead, replace --extra unitree with --extra lekiwi.
 RUN /root/.local/bin/uv sync --python /opt/venv/bin/python --extra unitree
 
+# build decord from source
+RUN git clone --recursive https://github.com/dmlc/decord.git /tmp/decord \
+    && cd /tmp/decord \
+    && mkdir -p build \
+    && cd build \
+    && cmake .. -DUSE_CUDA=0 -DCMAKE_BUILD_TYPE=Release \
+    && make -j"$(nproc)" \
+    && cd ../python \
+    && /opt/venv/bin/python setup.py install \
+    && rm -rf /tmp/decord
+
 # unitree_sdk2_python does not ship b2 in the installed package; copy it manually
 RUN git clone https://github.com/unitreerobotics/unitree_sdk2_python.git /tmp/unitree_sdk2_python \
     && cd /tmp/unitree_sdk2_python \
