@@ -148,27 +148,24 @@ class LocalPlanningPainter extends CustomPainter {
     canvas.drawLine(Offset(px, py + r - arm), Offset(px, py + r + arm), cross);
   }
 
-  /// Draws the Go2 robot footprint rectangle (0.7 m × 0.3 m) centered on the robot.
-  /// Mirrors /planning/footprint topic data — front_len=0.35, rear_len=0.35, half_w=0.15.
+  /// Draws the Go2 robot footprint rectangle around the robot arrow.
+  /// Uses pixel coords (like the arrow) so it's always visible regardless of zoom.
+  /// Proportions match Go2 config: length=0.7m, width=0.3m (front:rear = 1:1).
   void _drawFootprint(Canvas canvas, Offset center, double yaw, double scale) {
-    const fl = 0.35;  // front from control center (m)
-    const rl = 0.35;  // rear from control center (m)
-    const hw = 0.15;  // half-width (m)
+    // Arrow tip=14px, base=5px, half-w=6px. Make footprint clearly surround it.
+    final fl = math.max(0.35 * scale, 22.0);   // forward px
+    final rl = math.max(0.35 * scale, 18.0);   // rear px
+    final hw = math.max(0.15 * scale, 12.0);   // half-width px
 
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
 
-    Offset toCanvas(double fwdM, double latM) => Offset(
-      center.dx + (fwdM * cosY - latM * sinY) * scale,
-      center.dy - (fwdM * sinY + latM * cosY) * scale,
+    Offset pt(double fwd, double lat) => Offset(
+      center.dx + fwd * cosY - lat * sinY,
+      center.dy - fwd * sinY - lat * cosY,
     );
 
-    final corners = [
-      toCanvas(fl, hw),
-      toCanvas(fl, -hw),
-      toCanvas(-rl, -hw),
-      toCanvas(-rl, hw),
-    ];
+    final corners = [pt(fl, hw), pt(fl, -hw), pt(-rl, -hw), pt(-rl, hw)];
 
     final path = Path()
       ..moveTo(corners[0].dx, corners[0].dy)
@@ -181,7 +178,7 @@ class LocalPlanningPainter extends CustomPainter {
         Paint()
           ..color = Colors.yellowAccent
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.5);
+          ..strokeWidth = 2.0);
   }
 
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
