@@ -176,7 +176,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   bottom: 52,
                   left: 10,
                   right: 10,
-                  child: _NavProgressOverlay(np: np, arrived: _navArrived),
+                  child: _NavProgressOverlay(np: np, arrived: _navArrived, pois: activeNavPois),
                 ),
               Positioned(
                 bottom: 10,
@@ -1419,8 +1419,9 @@ class _JoystickPainter extends CustomPainter {
 class _NavProgressOverlay extends StatelessWidget {
   final NavProgress? np;
   final bool arrived;
+  final List<Poi> pois;
 
-  const _NavProgressOverlay({this.np, required this.arrived});
+  const _NavProgressOverlay({this.np, required this.arrived, this.pois = const []});
 
   @override
   Widget build(BuildContext context) {
@@ -1430,14 +1431,14 @@ class _NavProgressOverlay extends StatelessWidget {
 
     if (arrived) {
       value = 1.0;
-      label = 'Arrived!  100%';
+      label = 'Arrived';
     } else if (np != null) {
       value = (np!.percent / 100.0).clamp(0.0, 1.0);
+      final name = (np!.poiIndex < pois.length) ? pois[np!.poiIndex].name : 'POI ${np!.poiIndex + 1}';
       final dist = '${np!.pathRemainingM.toStringAsFixed(1)}m';
-      final eta = np!.estimatedRemainingS >= 0
-          ? '~${np!.estimatedRemainingS.toStringAsFixed(0)}s'
-          : '--';
-      label = 'POI #${np!.poiIndex + 1}  ·  $dist  ·  $eta  ·  ${np!.percent.toStringAsFixed(1)}%';
+      final eta = np!.estimatedRemainingS >= 0 ? '~${np!.estimatedRemainingS.toStringAsFixed(0)}s' : '--';
+      final pct = '${np!.percent.toStringAsFixed(0)}%';
+      label = '→ $name  $pct · $dist · $eta';
     } else {
       value = 0.0;
       label = 'Navigating...';
