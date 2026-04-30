@@ -182,12 +182,14 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
           ]),
           if (active) ...[
             const SizedBox(height: 10),
-            LinearProgressIndicator(
-              value: progressValue,
-              color: progressColor,
-              backgroundColor: progressColor.withOpacity(0.15),
-              minHeight: 6,
+            ClipRRect(
               borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: progressValue,
+                color: progressColor,
+                backgroundColor: progressColor.withOpacity(0.15),
+                minHeight: 6,
+              ),
             ),
             const SizedBox(height: 4),
             Align(
