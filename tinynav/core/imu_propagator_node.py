@@ -2,7 +2,6 @@ import logging
 
 import numpy as np
 import rclpy
-from message_filters import ApproximateTimeSynchronizer, Subscriber
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -19,29 +18,43 @@ def integrate(odom_prev, imu, gravity_world=np.array([0.0, 0.0, -9.80])):
     translation_prev = pose_prev[:3, 3]
 
     t1, imu_msg = imu
-    gyro = np.array([
-        imu_msg.angular_velocity.x,
-        imu_msg.angular_velocity.y,
-        imu_msg.angular_velocity.z,
-    ], dtype=float)
-    accel = np.array([
-        imu_msg.linear_acceleration.x,
-        imu_msg.linear_acceleration.y,
-        imu_msg.linear_acceleration.z,
-    ], dtype=float)
+    gyro = np.array(
+        [
+            imu_msg.angular_velocity.x,
+            imu_msg.angular_velocity.y,
+            imu_msg.angular_velocity.z,
+        ],
+        dtype=float,
+    )
+    accel = np.array(
+        [
+            imu_msg.linear_acceleration.x,
+            imu_msg.linear_acceleration.y,
+            imu_msg.linear_acceleration.z,
+        ],
+        dtype=float,
+    )
 
     dt = t1 - t0
     delta_rotation = R.from_rotvec(gyro * dt).as_matrix()
     rotation_new = rotation_prev @ delta_rotation
     accel_world = rotation_prev @ accel + gravity_world
     velocity_new = velocity_prev + accel_world * dt
-    translation_new = translation_prev + velocity_prev * dt + 0.5 * accel_world * dt * dt
+    translation_new = (
+        translation_prev + velocity_prev * dt + 0.5 * accel_world * dt * dt
+    )
 
     pose_new = np.eye(4)
     pose_new[:3, :3] = rotation_new
     pose_new[:3, 3] = translation_new
 
-    odom_new = np2msg(pose_new, imu_msg.header.stamp, odom_msg.header.frame_id, odom_msg.child_frame_id, velocity_new)
+    odom_new = np2msg(
+        pose_new,
+        imu_msg.header.stamp,
+        odom_msg.header.frame_id,
+        odom_msg.child_frame_id,
+        velocity_new,
+    )
     odom_new.twist.twist.angular.x = gyro[0]
     odom_new.twist.twist.angular.y = gyro[1]
     odom_new.twist.twist.angular.z = gyro[2]
@@ -53,8 +66,12 @@ class ImuPropagatorNode(Node):
         super().__init__("imu_propagator_node")
 
         qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=1000)
-        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.imu_callback, qos_profile)
-        self.odom_sub = self.create_subscription(Odometry, "/slam/odometry", self.odom_callback, qos_profile)
+        self.imu_sub = self.create_subscription(
+            Imu, "/camera/camera/imu", self.imu_callback, qos_profile
+        )
+        self.odom_sub = self.create_subscription(
+            Odometry, "/slam/odometry", self.odom_callback, qos_profile
+        )
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry_100hz", 50)
 
         self.imu_buffer = []
@@ -84,7 +101,9 @@ class ImuPropagatorNode(Node):
             return
 
         for i in range(start_idx, 0):
-            self.odom_100hz_buffer.append(integrate(self.odom_100hz_buffer[-1], self.imu_buffer[i]))
+            self.odom_100hz_buffer.append(
+                integrate(self.odom_100hz_buffer[-1], self.imu_buffer[i])
+            )
             if len(self.odom_100hz_buffer) > 1000:
                 self.odom_100hz_buffer.pop(0)
 

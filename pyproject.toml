@@ -49,7 +49,7 @@ lekiwi =[
     "lerobot[lekiwi]==0.3.3",
 ]
 unitree = [
-    "unitree-sdk2py @ git+https://github.com/unitreerobotics/unitree_sdk2_python.git@404fe44d76f705c002c97e773276f2a8fefb57e4",
+    "unitree-sdk2py @ git+https://github.com/junlinp/unitree_sdk2_python.git@800103eab7e045336b1c40186cda5023dbd05821",
 ]
 3dgs = [
     "torch>=2.4,<2.11",

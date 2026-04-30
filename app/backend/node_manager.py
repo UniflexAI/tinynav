@@ -35,6 +35,10 @@ _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
 _MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic collision during map build
 
+# build_map_node.py emits "MAPPING_PERCENT:<float>" lines on stdout so the
+# parent process can track progress without a separate bridge subprocess.
+_MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
+
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
 
@@ -741,7 +745,7 @@ class BackendNode(Ros2NodeManager):
             ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
             env=_env,
         )
-        self.processes['build_map'] = self._launch_proc(
+        self.processes['build_map'] = self._launch_proc_tee(
             'build_map_node',
             [
                 'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
@@ -752,6 +756,41 @@ class BackendNode(Ros2NodeManager):
         )
 
         threading.Thread(target=self._on_build_map_done, daemon=True).start()
+
+    def _launch_proc_tee(self, name: str, cmd: list[str], env: dict | None = None,
+                          cwd: str = '/tinynav') -> subprocess.Popen:
+        """Like _launch_proc, but also tees stdout to a pipe so the caller can
+        scan for MAPPING_PERCENT: lines while still logging everything to file."""
+        lf = self._make_log(name)
+        proc = subprocess.Popen(
+            cmd, preexec_fn=os.setsid, cwd=cwd,
+            env=env or os.environ.copy(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        threading.Thread(
+            target=self._tee_and_read_percent,
+            args=(proc, lf),
+            daemon=True,
+        ).start()
+        return proc
+
+    def _tee_and_read_percent(self, proc: subprocess.Popen, log_file):
+        """Read lines from proc.stdout, write to log_file, and extract
+        MAPPING_PERCENT:<float> values into self.mapping_percent."""
+        try:
+            for raw in proc.stdout:
+                line = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
+                log_file.write(line)
+                log_file.flush()
+                if _MAPPING_PERCENT_PREFIX in line:
+                    try:
+                        pct = float(line.split(_MAPPING_PERCENT_PREFIX, 1)[1].strip())
+                        with self._lock:
+                            self.mapping_percent = pct
+                    except (ValueError, AttributeError):
+                        pass
+        finally:
+            log_file.close()
 
     def _on_build_map_done(self):
         """Wait for build_map to finish, then convert, archive, and restart."""
