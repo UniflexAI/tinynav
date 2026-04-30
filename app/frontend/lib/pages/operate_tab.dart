@@ -33,6 +33,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   bool _showTrajectory = true;
   bool _showGlobalPath = true;
   bool _showGlobalMap = false;
+  bool _navArrived = false;
 
   @override
   void initState() {
@@ -98,8 +99,16 @@ class _OperateTabState extends ConsumerState<OperateTab> {
       final nextState = next.valueOrNull?.rawState;
       if (prevState == 'navigation' && nextState != 'navigation') {
         ref.read(activeNavPoisProvider.notifier).state = const [];
+        setState(() => _navArrived = true);
+        Future.delayed(const Duration(milliseconds: 1200), () {
+          if (mounted) setState(() => _navArrived = false);
+        });
       }
     });
+
+    final status = ref.watch(deviceStatusProvider).valueOrNull;
+    final isNavigating = status?.rawState == 'navigation';
+    final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
 
     return Column(
       children: [
@@ -161,6 +170,13 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                       _showGlobalPath = gp;
                     }),
                   ),
+                ),
+              if (isNavigating || _navArrived)
+                Positioned(
+                  bottom: 52,
+                  left: 10,
+                  right: 10,
+                  child: _NavProgressOverlay(np: np, arrived: _navArrived),
                 ),
               Positioned(
                 bottom: 10,
@@ -1396,4 +1412,60 @@ class _JoystickPainter extends CustomPainter {
   @override
   bool shouldRepaint(_JoystickPainter old) =>
       old.thumbOffset != thumbOffset || old.padRadius != padRadius;
+}
+
+// ── Nav progress overlay ──────────────────────────────────────────────────────
+
+class _NavProgressOverlay extends StatelessWidget {
+  final NavProgress? np;
+  final bool arrived;
+
+  const _NavProgressOverlay({this.np, required this.arrived});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = arrived ? Colors.green : Colors.blue;
+    final double value;
+    final String label;
+
+    if (arrived) {
+      value = 1.0;
+      label = 'Arrived!  100%';
+    } else if (np != null) {
+      value = (np!.percent / 100.0).clamp(0.0, 1.0);
+      final dist = '${np!.pathRemainingM.toStringAsFixed(1)}m';
+      final eta = np!.estimatedRemainingS >= 0
+          ? '~${np!.estimatedRemainingS.toStringAsFixed(0)}s'
+          : '--';
+      label = 'POI #${np!.poiIndex + 1}  ·  $dist  ·  $eta  ·  ${np!.percent.toStringAsFixed(1)}%';
+    } else {
+      value = 0.0;
+      label = 'Navigating...';
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.65),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(label, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w500)),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: value,
+              color: color,
+              backgroundColor: color.withOpacity(0.25),
+              minHeight: 5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
