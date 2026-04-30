@@ -573,6 +573,7 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
     if (ids.isEmpty) return;
     try {
       await ref.read(dioProvider).post('/nav/send-pois', data: {'poi_ids': ids});
+      if (mounted) Navigator.pop(context);
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
