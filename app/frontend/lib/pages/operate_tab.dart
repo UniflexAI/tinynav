@@ -571,9 +571,10 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
         .map((p) => p.id)
         .toList();
     if (ids.isEmpty) return;
+    final navigator = Navigator.of(context);
     try {
       await ref.read(dioProvider).post('/nav/send-pois', data: {'poi_ids': ids});
-      if (mounted) Navigator.pop(context);
+      navigator.pop();
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -616,7 +617,7 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
             const Spacer(),
             FilledButton.icon(
               onPressed: (canGo && _checkedIds.isNotEmpty)
-                  ? () => poisAsync.whenData((pois) => _startNav(pois))
+                  ? () => _startNav(poisAsync.valueOrNull ?? [])
                   : null,
               icon: const Icon(Icons.navigation_rounded, size: 16),
               label: const Text('Go'),
