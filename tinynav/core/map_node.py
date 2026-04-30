@@ -249,9 +249,11 @@ class MapNode(Node):
 
         self.pois = {}
         self.poi_index = -1
+        self._nav_completed = False
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+        self.nav_done_pub = self.create_publisher(Bool, '/mapping/nav_done', 10)
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
@@ -281,6 +283,7 @@ class MapNode(Node):
                 return
 
             self.poi_index = min(0, len(self.pois) - 1)
+            self._nav_completed = False
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
@@ -613,7 +616,10 @@ class MapNode(Node):
                 break
 
         if self.poi_index >= len(self.pois):
-            self.get_logger().info("All POIs have been visited, skip publishing nav path")
+            if not self._nav_completed:
+                self._nav_completed = True
+                self.get_logger().info("All POIs have been visited, nav done")
+                self.nav_done_pub.publish(Bool(data=True))
             return
 
         target_poi = self.pois[self.poi_index]

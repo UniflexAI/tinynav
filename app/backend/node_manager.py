@@ -146,6 +146,7 @@ class BackendNode(Ros2NodeManager):
         self._cmd_vel_proc: subprocess.Popen | None = None
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
+        self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -156,6 +157,11 @@ class BackendNode(Ros2NodeManager):
     def _on_battery(self, msg: Float32):
         with self._lock:
             self._battery = float(msg.data)
+
+    def _on_nav_done(self, msg: Bool):
+        if msg.data and self.state == 'navigation':
+            self.state = 'idle'
+            self._pub_state()
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
