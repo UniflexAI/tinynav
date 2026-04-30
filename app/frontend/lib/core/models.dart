@@ -1,6 +1,30 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+class NavProgress {
+  final int poiIndex;
+  final double percent;
+  final double pathRemainingM;
+  final double pathTotalM;
+  final double estimatedRemainingS;
+
+  const NavProgress({
+    required this.poiIndex,
+    required this.percent,
+    required this.pathRemainingM,
+    required this.pathTotalM,
+    required this.estimatedRemainingS,
+  });
+
+  factory NavProgress.fromJson(Map<String, dynamic> json) => NavProgress(
+        poiIndex: json['poi_index'] as int? ?? 0,
+        percent: (json['percent'] as num?)?.toDouble() ?? 0.0,
+        pathRemainingM: (json['path_remaining_m'] as num?)?.toDouble() ?? 0.0,
+        pathTotalM: (json['path_total_m'] as num?)?.toDouble() ?? 0.0,
+        estimatedRemainingS: (json['estimated_remaining_s'] as num?)?.toDouble() ?? -1.0,
+      );
+}
+
 class DeviceStatus {
   final bool online;
   final double? battery;
