@@ -41,6 +41,19 @@ final deviceStatusProvider = StreamProvider<DeviceStatus>((ref) {
   );
 });
 
+/// Streams NavProgress from WS /ws/nav-progress (pushed on every ROS message).
+final navProgressStreamProvider = StreamProvider<NavProgress>((ref) {
+  final ip = ref.watch(deviceIpProvider);
+  if (ip == null) return const Stream.empty();
+
+  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/nav-progress'));
+  ref.onDispose(() => channel.sink.close());
+
+  return channel.stream.map(
+    (data) => NavProgress.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+  );
+});
+
 /// Streams robot Pose from WS /ws/pose (pushed on every odometry message).
 final poseStreamProvider = StreamProvider<Pose>((ref) {
   final ip = ref.watch(deviceIpProvider);

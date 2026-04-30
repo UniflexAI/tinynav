@@ -146,6 +146,7 @@ class BackendNode(Ros2NodeManager):
         self._cmd_vel_proc: subprocess.Popen | None = None
 
         self._nav_progress: dict | None = None
+        self.nav_progress_callbacks: list = []
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
@@ -171,6 +172,8 @@ class BackendNode(Ros2NodeManager):
             data = json.loads(msg.data)
             with self._lock:
                 self._nav_progress = data
+            for cb in self.nav_progress_callbacks:
+                cb(data)
         except json.JSONDecodeError:
             pass
 
@@ -512,7 +515,6 @@ class BackendNode(Ros2NodeManager):
             battery = self._battery
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
-            nav_progress = self._nav_progress
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -525,7 +527,6 @@ class BackendNode(Ros2NodeManager):
             'rawState': raw,
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
-            'navProgress': nav_progress,
         }
 
     @staticmethod

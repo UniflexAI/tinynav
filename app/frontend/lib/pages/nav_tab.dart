@@ -120,7 +120,7 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
   Widget build(BuildContext context) {
     final s = widget.status;
     final isNavigating = s.rawState == 'navigation';
-    final np = isNavigating ? s.navProgress : null;
+    final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
     final showCompletion = _showCompletion;
 
     String subtitle;
