@@ -907,13 +907,13 @@ class BuildMapNode(Node):
             return
             
         transforms = []        
-        for time, pose_in_world in self.pose_graph_used_pose.items():
+        for timestamp, pose_in_world in self.pose_graph_used_pose.items():
             transform = TransformStamped()
             
             # Set header
             transform.header.stamp = self.get_clock().now().to_msg()
             transform.header.frame_id = 'world'
-            transform.child_frame_id = 'camera_' + str(time)
+            transform.child_frame_id = 'camera_' + str(timestamp)
             
             # Set position
             t = pose_in_world[:3, 3]
