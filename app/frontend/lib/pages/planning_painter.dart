@@ -9,6 +9,7 @@ import '../core/models.dart';
 /// Global path arrives pre-converted to odom frame by the backend.
 class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> trajectory;
+  final List<TrajPoint> footprint;
   final List<TrajPoint> globalPath;
   final GridInfo? gridInfo;
   final Pose? odomPose;
@@ -19,6 +20,7 @@ class LocalPlanningPainter extends CustomPainter {
 
   const LocalPlanningPainter({
     required this.trajectory,
+    this.footprint = const [],
     this.globalPath = const [],
     this.gridInfo,
     this.odomPose,
@@ -51,7 +53,8 @@ class LocalPlanningPainter extends CustomPainter {
 
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
 
-    if (showFootprint) _drawFootprint(canvas, Offset(cx, cy), pose?.yaw ?? 0.0, scaleX);
+    if (showFootprint && footprint.isNotEmpty && pose != null)
+      _drawFootprint(canvas, cx, cy, scaleX, scaleY, pose);
   }
 
   void _drawTrajectory(Canvas canvas, double cx, double cy,
@@ -148,31 +151,19 @@ class LocalPlanningPainter extends CustomPainter {
     canvas.drawLine(Offset(px, py + r - arm), Offset(px, py + r + arm), cross);
   }
 
-  /// Draws the Go2 robot footprint rectangle around the robot arrow.
-  /// Uses pixel coords (like the arrow) so it's always visible regardless of zoom.
-  /// Proportions match Go2 config: length=0.7m, width=0.3m (front:rear = 1:1).
-  void _drawFootprint(Canvas canvas, Offset center, double yaw, double scale) {
-    // Arrow tip=14px, base=5px, half-w=6px. Make footprint clearly surround it.
-    final fl = math.max(0.35 * scale, 22.0);   // forward px
-    final rl = math.max(0.35 * scale, 18.0);   // rear px
-    final hw = math.max(0.15 * scale, 12.0);   // half-width px
-
-    final cosY = math.cos(yaw);
-    final sinY = math.sin(yaw);
-
-    Offset pt(double fwd, double lat) => Offset(
-      center.dx + fwd * cosY - lat * sinY,
-      center.dy - fwd * sinY - lat * cosY,
-    );
-
-    final corners = [pt(fl, hw), pt(fl, -hw), pt(-rl, -hw), pt(-rl, hw)];
-
-    final path = Path()
-      ..moveTo(corners[0].dx, corners[0].dy)
-      ..lineTo(corners[1].dx, corners[1].dy)
-      ..lineTo(corners[2].dx, corners[2].dy)
-      ..lineTo(corners[3].dx, corners[3].dy)
-      ..close();
+  /// Draws robot footprint from actual /planning/footprint PointCloud data.
+  /// Points are in world (odom) frame — same transform as trajectory.
+  void _drawFootprint(Canvas canvas, double cx, double cy,
+      double scaleX, double scaleY, Pose pose) {
+    final path = Path();
+    for (int i = 0; i < footprint.length; i++) {
+      final p = footprint[i];
+      final px = cx + (p.x - pose.x) * scaleX;
+      final py = cy - (p.y - pose.y) * scaleY;
+      if (i == 0) path.moveTo(px, py);
+      else path.lineTo(px, py);
+    }
+    path.close();
 
     canvas.drawPath(path,
         Paint()
@@ -205,6 +196,7 @@ class LocalPlanningPainter extends CustomPainter {
   @override
   bool shouldRepaint(LocalPlanningPainter old) =>
       trajectory != old.trajectory ||
+      footprint != old.footprint ||
       globalPath != old.globalPath ||
       gridInfo != old.gridInfo ||
       odomPose != old.odomPose ||

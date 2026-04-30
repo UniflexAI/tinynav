@@ -308,6 +308,7 @@ class _LocalPlanningView extends StatelessWidget {
                     CustomPaint(
                       painter: LocalPlanningPainter(
                         trajectory: p.trajectory,
+                        footprint: p.footprint,
                         globalPath: p.globalPath,
                         gridInfo: p.gridInfo,
                         odomPose: p.odomPose,
