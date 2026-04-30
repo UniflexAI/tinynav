@@ -84,16 +84,14 @@ def export_rgb_images(
     image_size = None
     rgb_db_dir = map_dir / "rgb_images_db"
     rgb_video_db = VideoDB(dir_path=str(rgb_db_dir), mode="read")
-    try:
-        for timestamp in tqdm(timestamps, desc="Exporting RGB images", unit="img"):
-            rgb_image = rgb_video_db.read(timestamp)
-            if rgb_image is None:
-                raise KeyError(f"Missing rgb image timestamp {timestamp} in {rgb_db_dir / 'meta.json'}")
-            if image_size is None:
-                image_size = rgb_image.shape[:2]
-            cv2.imwrite(str(images_dir / f"image_{timestamp}.png"), rgb_image)
-    finally:
-        rgb_video_db.close()
+    for timestamp in tqdm(timestamps, desc="Exporting RGB images", unit="img"):
+        rgb_image = rgb_video_db.read(timestamp)
+        if rgb_image is None:
+            raise KeyError(f"Missing rgb image timestamp {timestamp} in {rgb_db_dir / 'meta.json'}")
+        if image_size is None:
+            image_size = rgb_image.shape[:2]
+        cv2.imwrite(str(images_dir / f"image_{timestamp}.png"), rgb_image)
+    rgb_video_db.close()
 
     if image_size is None:
         raise RuntimeError("No RGB images exported; poses may be empty")

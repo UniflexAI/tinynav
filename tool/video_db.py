@@ -4,6 +4,7 @@ import time
 
 import av
 import numpy as np
+import decord
 
 
 class VideoDB:
@@ -40,12 +41,6 @@ class VideoDB:
             self._container = av.open(self.video_path, mode="w")
         else:
             self.ts_to_idx = self._load_meta()
-            try:
-                import decord
-            except ImportError as e:
-                raise ImportError(
-                    "decord is required for VideoDB.read(). Install decord first."
-                ) from e
             if os.path.exists(self.video_path):
                 self._video_reader = decord.VideoReader(self.video_path)
 
