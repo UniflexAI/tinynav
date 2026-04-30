@@ -245,7 +245,7 @@ class _GlobalMapView extends StatelessWidget {
                         mapInfo: mapInfo,
                         pose: p.mapPose,
                         pois: pois,
-                        globalPath: p.globalPath,
+                        globalPath: p.mapGlobalPath,
                         showGlobalPath: true,
                       ),
                     ),
