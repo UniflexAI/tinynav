@@ -179,13 +179,13 @@ class LocalPlanningPainter extends CustomPainter {
 
     canvas.drawPath(path,
         Paint()
-          ..color = Colors.yellowAccent.withOpacity(0.15)
+          ..color = Colors.yellowAccent.withOpacity(0.25)
           ..style = PaintingStyle.fill);
     canvas.drawPath(path,
         Paint()
-          ..color = Colors.yellowAccent.withOpacity(0.75)
+          ..color = Colors.yellowAccent
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.5);
+          ..strokeWidth = 2.5);
   }
 
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
