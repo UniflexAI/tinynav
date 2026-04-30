@@ -612,6 +612,16 @@ class MapNode(Node):
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
             if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+                if self._leg_initial_length is not None:
+                    arrived_msg = String()
+                    arrived_msg.data = json.dumps({
+                        "poi_index": self.poi_index,
+                        "percent": 100.0,
+                        "path_remaining_m": 0.0,
+                        "path_total_m": round(self._leg_initial_length, 2),
+                        "estimated_remaining_s": 0.0,
+                    })
+                    self.nav_progress_pub.publish(arrived_msg)
                 self.poi_index += 1
                 self._leg_initial_length = None
                 self._leg_start_time = None

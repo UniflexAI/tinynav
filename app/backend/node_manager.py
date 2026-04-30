@@ -145,8 +145,11 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
 
+        self._nav_progress: dict | None = None
+
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
+        self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -162,6 +165,14 @@ class BackendNode(Ros2NodeManager):
         if msg.data and self.state == 'navigation':
             self.state = 'idle'
             self._pub_state()
+
+    def _on_nav_progress(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            with self._lock:
+                self._nav_progress = data
+        except json.JSONDecodeError:
+            pass
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -501,6 +512,7 @@ class BackendNode(Ros2NodeManager):
             battery = self._battery
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
+            nav_progress = self._nav_progress
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -513,6 +525,7 @@ class BackendNode(Ros2NodeManager):
             'rawState': raw,
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
+            'navProgress': nav_progress,
         }
 
     @staticmethod
