@@ -49,9 +49,9 @@ class LocalPlanningPainter extends CustomPainter {
     if (navTargetPose != null && pose != null)
       _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
 
-    if (showFootprint) _drawFootprint(canvas, Offset(cx, cy), pose?.yaw ?? 0.0, scaleX);
-
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
+
+    if (showFootprint) _drawFootprint(canvas, Offset(cx, cy), pose?.yaw ?? 0.0, scaleX);
   }
 
   void _drawTrajectory(Canvas canvas, double cx, double cy,
@@ -177,10 +177,6 @@ class LocalPlanningPainter extends CustomPainter {
       ..lineTo(corners[3].dx, corners[3].dy)
       ..close();
 
-    canvas.drawPath(path,
-        Paint()
-          ..color = Colors.yellowAccent.withOpacity(0.25)
-          ..style = PaintingStyle.fill);
     canvas.drawPath(path,
         Paint()
           ..color = Colors.yellowAccent
