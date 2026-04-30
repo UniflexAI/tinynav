@@ -26,7 +26,7 @@ import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import CompressedImage, Image, PointCloud
+from sensor_msgs.msg import CompressedImage, Image
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
@@ -85,7 +85,6 @@ class BackendNode(Ros2NodeManager):
         self._global_path: list = []
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
-        self._footprint: list = []
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
         self.create_subscription(Odometry, '/slam/odometry', self._on_slam_odom, 10)
@@ -102,7 +101,6 @@ class BackendNode(Ros2NodeManager):
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
         )
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
-        self.create_subscription(PointCloud, '/planning/footprint', self._on_footprint, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
         self.create_subscription(
             Odometry, '/control/target_pose', self._on_nav_target_pose, 1
@@ -259,11 +257,6 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._global_path = pts
-
-    def _on_footprint(self, msg: PointCloud):
-        pts = [{'x': float(p.x), 'y': float(p.y)} for p in msg.points]
-        with self._lock:
-            self._footprint = pts
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -452,7 +445,6 @@ class BackendNode(Ros2NodeManager):
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
-                'footprint': list(self._footprint),
                 'global_path': None,  # filled after TF transform (odom frame)
                 'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,

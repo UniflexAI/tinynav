@@ -307,7 +307,6 @@ class _LocalPlanningView extends StatelessWidget {
                     CustomPaint(
                       painter: LocalPlanningPainter(
                         trajectory: p.trajectory,
-                        footprint: p.footprint,
                         globalPath: p.globalPath,
                         gridInfo: p.gridInfo,
                         odomPose: p.odomPose,
@@ -637,14 +636,12 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   Future<void> _startNav(List<Poi> pois) async {
     final selectedPois = pois.where((p) => _checkedIds.contains(p.id)).toList();
     if (selectedPois.isEmpty) return;
-    final navigator = Navigator.of(context);
     try {
       await ref.read(dioProvider).post(
         '/nav/send-pois',
         data: {'poi_ids': selectedPois.map((p) => p.id).toList()},
       );
       ref.read(activeNavPoisProvider.notifier).state = selectedPois;
-      navigator.pop();
     } on DioException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(

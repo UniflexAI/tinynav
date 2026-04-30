@@ -9,7 +9,6 @@ import '../core/models.dart';
 /// Global path arrives pre-converted to odom frame by the backend.
 class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> trajectory;
-  final List<TrajPoint> footprint;
   final List<TrajPoint> globalPath;
   final GridInfo? gridInfo;
   final Pose? odomPose;
@@ -19,7 +18,6 @@ class LocalPlanningPainter extends CustomPainter {
 
   const LocalPlanningPainter({
     required this.trajectory,
-    this.footprint = const [],
     this.globalPath = const [],
     this.gridInfo,
     this.odomPose,
@@ -50,9 +48,6 @@ class LocalPlanningPainter extends CustomPainter {
       _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
 
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
-
-    if (footprint.isNotEmpty && pose != null)
-      _drawFootprint(canvas, cx, cy, scaleX, scaleY, pose);
   }
 
   void _drawTrajectory(Canvas canvas, double cx, double cy,
@@ -149,27 +144,6 @@ class LocalPlanningPainter extends CustomPainter {
     canvas.drawLine(Offset(px, py + r - arm), Offset(px, py + r + arm), cross);
   }
 
-  /// Draws robot footprint from actual /planning/footprint PointCloud data.
-  /// Points are in world (odom) frame — same transform as trajectory.
-  void _drawFootprint(Canvas canvas, double cx, double cy,
-      double scaleX, double scaleY, Pose pose) {
-    final path = Path();
-    for (int i = 0; i < footprint.length; i++) {
-      final p = footprint[i];
-      final px = cx + (p.x - pose.x) * scaleX;
-      final py = cy - (p.y - pose.y) * scaleY;
-      if (i == 0) path.moveTo(px, py);
-      else path.lineTo(px, py);
-    }
-    path.close();
-
-    canvas.drawPath(path,
-        Paint()
-          ..color = Colors.yellowAccent
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.0);
-  }
-
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
@@ -194,7 +168,6 @@ class LocalPlanningPainter extends CustomPainter {
   @override
   bool shouldRepaint(LocalPlanningPainter old) =>
       trajectory != old.trajectory ||
-      footprint != old.footprint ||
       globalPath != old.globalPath ||
       gridInfo != old.gridInfo ||
       odomPose != old.odomPose ||
