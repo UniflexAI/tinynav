@@ -195,10 +195,16 @@ class _HeroBanner extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 20),
       child: Column(
         children: [
-          Image.asset(
-            'assets/images/tinynav.png',
-            width: 100,
-            height: 100,
+          ColorFiltered(
+            colorFilter: const ColorFilter.mode(
+              Color(0xFF00E676),
+              BlendMode.srcIn,
+            ),
+            child: Image.asset(
+              'assets/images/tinynav.png',
+              width: 100,
+              height: 100,
+            ),
           ),
           const SizedBox(height: 12),
           const Text(
