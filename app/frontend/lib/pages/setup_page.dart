@@ -4,6 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/providers.dart';
 
+const _bg = Color(0xFF0A0A0A);
+const _green = Color(0xFF00E676);
+const _red = Color(0xFFFF5252);
+const _muted = Color(0xFF616161);
+const _text = Color(0xFFE0E0E0);
+
 class SetupPage extends ConsumerStatefulWidget {
   const SetupPage({super.key});
 
@@ -56,13 +62,13 @@ class _SetupPageState extends ConsumerState<SetupPage> {
     if (ip.isEmpty) return;
     final prefs = ref.read(sharedPreferencesProvider);
     await prefs.setString('device_ip', ip);
-    // Updating this provider switches MaterialApp.home to HomePage automatically.
     ref.read(deviceIpProvider.notifier).state = ip;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: _bg,
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(32),
@@ -71,21 +77,51 @@ class _SetupPageState extends ConsumerState<SetupPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.navigation_outlined, size: 72, color: Color(0xFF1565C0)),
+                Image.asset('assets/images/tinynav.png', width: 80, height: 80),
                 const SizedBox(height: 16),
-                const Text('TinyNav',
-                    style: TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 6),
-                const Text('Enter the device IP address',
-                    style: TextStyle(color: Colors.grey)),
+                const Text('TINYNAV',
+                    style: TextStyle(
+                      fontSize: 24,
+                      fontWeight: FontWeight.w300,
+                      letterSpacing: 4,
+                      color: _text,
+                    )),
+                const SizedBox(height: 4),
+                const Text('DEVICE CONNECT',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 2,
+                      color: _muted,
+                    )),
                 const SizedBox(height: 32),
                 TextField(
                   controller: _ipController,
-                  decoration: const InputDecoration(
-                    labelText: 'Device IP',
+                  style: const TextStyle(
+                    fontFamily: 'RobotoLocal',
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1,
+                    color: _text,
+                  ),
+                  decoration: InputDecoration(
+                    labelText: 'DEVICE IP',
+                    labelStyle: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.5,
+                      color: _muted,
+                    ),
                     hintText: '192.168.1.100',
-                    prefixIcon: Icon(Icons.router_outlined),
-                    border: OutlineInputBorder(),
+                    hintStyle: TextStyle(color: _muted.withOpacity(0.3)),
+                    prefixIcon: const Icon(Icons.router_outlined, color: _muted, size: 18),
+                    enabledBorder: const OutlineInputBorder(
+                      borderSide: BorderSide(color: Color(0xFF2A2A2A), width: 1),
+                      borderRadius: BorderRadius.zero,
+                    ),
+                    focusedBorder: const OutlineInputBorder(
+                      borderSide: BorderSide(color: _green, width: 1),
+                      borderRadius: BorderRadius.zero,
+                    ),
                   ),
                   keyboardType: TextInputType.number,
                   onSubmitted: (_) => _testConnection(),
@@ -97,14 +133,18 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                     child: Row(children: [
                       Icon(
                         _testOk ? Icons.check_circle : Icons.error_outline,
-                        color: _testOk ? Colors.green : Colors.red,
-                        size: 18,
+                        color: _testOk ? _green : _red,
+                        size: 14,
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           _testResult!,
-                          style: TextStyle(color: _testOk ? Colors.green : Colors.red),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: _testOk ? _green : _red,
+                            fontFamily: 'RobotoLocal',
+                          ),
                         ),
                       ),
                     ]),
@@ -115,11 +155,11 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                       onPressed: _testing ? null : _testConnection,
                       child: _testing
                           ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 1.5, color: _green),
                             )
-                          : const Text('Test'),
+                          : const Text('TEST'),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -127,7 +167,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
                     flex: 2,
                     child: FilledButton(
                       onPressed: _connect,
-                      child: const Text('Connect'),
+                      child: const Text('CONNECT'),
                     ),
                   ),
                 ]),

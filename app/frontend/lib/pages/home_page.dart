@@ -7,6 +7,18 @@ import 'device_tab.dart';
 import 'map_tab.dart';
 import 'operate_tab.dart';
 
+// ── HUD style constants ──────────────────────────────────────────────────────
+
+const _bg = Color(0xFF0A0A0A);
+const _surface = Color(0xFF111111);
+const _border = Color(0xFF1A1A1A);
+const _green = Color(0xFF00E676);
+const _cyan = Color(0xFF00BCD4);
+const _blue = Color(0xFF448AFF);
+const _red = Color(0xFFFF5252);
+const _text = Color(0xFFE0E0E0);
+const _muted = Color(0xFF616161);
+
 // ── Top-level menu ────────────────────────────────────────────────────────────
 
 class HomePage extends ConsumerWidget {
@@ -26,51 +38,54 @@ class HomePage extends ConsumerWidget {
     final isOnline = status?.online ?? false;
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF2F3F5),
+      backgroundColor: _bg,
       body: SafeArea(
         child: Column(
           children: [
-            // ── Thin status bar ────────────────────────────────────────────
+            // ── Status bar ────────────────────────────────────────────────
             _StatusBar(ip: ip, isOnline: isOnline, onDisconnect: () => _disconnect(ref)),
-            // ── Menu cards ─────────────────────────────────────────────────
+            // ── Content ───────────────────────────────────────────────────
             Expanded(
               child: ListView(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                 children: [
-                  // ── Hero ─────────────────────────────────────────────────
                   const _HeroBanner(),
-                  const SizedBox(height: 20),
-                  _MenuCard(
+                  const SizedBox(height: 24),
+                  // ── Navigation entries ──────────────────────────────────
+                  _HudEntry(
                     icon: Icons.memory_rounded,
-                    iconColor: const Color(0xFF2B3A42),
-                    title: 'Device',
-                    subtitle: 'Status · Sensor · System info',
+                    accent: _text,
+                    label: 'DEVICE',
+                    detail: 'Status · Sensor · System',
                     badge: status?.rawState == 'realsense_bag_record' ? 'REC' : null,
-                    badgeColor: Colors.red,
+                    badgeColor: _red,
                     onTap: () => _push(context, 'Device', const DeviceTab()),
                   ),
-                  const SizedBox(height: 12),
-                  _MenuCard(
+                  const Divider(height: 1, thickness: 1, color: _border),
+                  _HudEntry(
                     icon: Icons.folder_outlined,
-                    iconColor: const Color(0xFF4A90D9),
-                    title: 'Map',
-                    subtitle: 'Bag recording · Map building · Files',
-                    badge: status?.rawState == 'rosbag_build_map' ? 'Building' : null,
-                    badgeColor: const Color(0xFF4A90D9),
+                    accent: _blue,
+                    label: 'MAP',
+                    detail: 'Record · Build · Files',
+                    badge: status?.rawState == 'rosbag_build_map' ? 'BUILD' : null,
+                    badgeColor: _cyan,
                     onTap: () => _push(context, 'Map', const MapTab()),
                   ),
-                  const SizedBox(height: 12),
-                  _MenuCard(
+                  const Divider(height: 1, thickness: 1, color: _border),
+                  _HudEntry(
                     icon: Icons.sports_esports_outlined,
-                    iconColor: const Color(0xFF45C95A),
-                    title: 'Operate',
-                    subtitle: 'Live map · Camera · Teleop · POI',
-                    badge: status?.rawState == 'navigation' ? 'Navigating' : null,
-                    badgeColor: const Color(0xFF45C95A),
+                    accent: _green,
+                    label: 'OPERATE',
+                    detail: 'Live Map · Teleop · POI',
+                    badge: status?.rawState == 'navigation' ? 'NAV' : null,
+                    badgeColor: _green,
                     onTap: () => _push(context, 'Operate', const OperateTab()),
                   ),
-                  const SizedBox(height: 24),
-                  if (status != null) _QuickStatusCard(status: status),
+                  const Divider(height: 1, thickness: 1, color: _border),
+                  if (status != null) ...[
+                    const SizedBox(height: 24),
+                    _StatusPanel(status: status),
+                  ],
                 ],
               ),
             ),
@@ -100,20 +115,19 @@ class _SubPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF2F3F5),
+      backgroundColor: _bg,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: _bg,
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 18),
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 16, color: _muted),
           onPressed: () => Navigator.pop(context),
         ),
-        title: Text(title,
-            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17)),
+        title: Text(title),
         bottom: const PreferredSize(
           preferredSize: Size.fromHeight(1),
-          child: Divider(height: 1, thickness: 1, color: Color(0xFFEEEEEE)),
+          child: Divider(height: 1, thickness: 1, color: _border),
         ),
       ),
       body: child,
@@ -121,7 +135,7 @@ class _SubPage extends StatelessWidget {
   }
 }
 
-// ── Thin status bar ───────────────────────────────────────────────────────────
+// ── Status bar ────────────────────────────────────────────────────────────────
 
 class _StatusBar extends StatelessWidget {
   final String ip;
@@ -131,31 +145,33 @@ class _StatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const kGreen = Color(0xFF45C95A);
+    final color = isOnline ? _green : _red;
     return Container(
-      color: Colors.white,
+      color: _bg,
       padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
       child: Row(
         children: [
           Container(
-            width: 7, height: 7,
+            width: 6, height: 6,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: isOnline ? kGreen : Colors.red,
+              color: color,
+              boxShadow: [BoxShadow(color: color.withOpacity(0.5), blurRadius: 4)],
             ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 8),
           Text(
-            isOnline ? ip : 'Offline',
+            isOnline ? ip : 'OFFLINE',
             style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              color: isOnline ? kGreen : Colors.red,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
+              color: color,
             ),
           ),
           const Spacer(),
           IconButton(
-            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.black38),
+            icon: const Icon(Icons.logout_rounded, size: 16, color: _muted),
             tooltip: 'Disconnect',
             onPressed: onDisconnect,
             padding: EdgeInsets.zero,
@@ -176,22 +192,32 @@ class _HeroBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 24),
+      padding: const EdgeInsets.symmetric(vertical: 20),
       child: Column(
         children: [
           Image.asset(
             'assets/images/tinynav.png',
-            width: 120,
-            height: 120,
+            width: 100,
+            height: 100,
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
           const Text(
-            'Visual Navigation Module',
+            'TINYNAV',
             style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF2B3A42),
-              letterSpacing: -0.3,
+              fontSize: 22,
+              fontWeight: FontWeight.w300,
+              letterSpacing: 4,
+              color: _text,
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'VISUAL NAVIGATION MODULE',
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 2,
+              color: _muted,
             ),
           ),
         ],
@@ -200,22 +226,22 @@ class _HeroBanner extends StatelessWidget {
   }
 }
 
-// ── Menu card ─────────────────────────────────────────────────────────────────
+// ── HUD menu entry ────────────────────────────────────────────────────────────
 
-class _MenuCard extends StatelessWidget {
+class _HudEntry extends StatelessWidget {
   final IconData icon;
-  final Color iconColor;
-  final String title;
-  final String subtitle;
+  final Color accent;
+  final String label;
+  final String detail;
   final String? badge;
   final Color? badgeColor;
   final VoidCallback onTap;
 
-  const _MenuCard({
+  const _HudEntry({
     required this.icon,
-    required this.iconColor,
-    required this.title,
-    required this.subtitle,
+    required this.accent,
+    required this.label,
+    required this.detail,
     this.badge,
     this.badgeColor,
     required this.onTap,
@@ -224,61 +250,58 @@ class _MenuCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(16),
+      color: _bg,
       child: InkWell(
-        borderRadius: BorderRadius.circular(16),
         onTap: onTap,
+        splashColor: accent.withOpacity(0.08),
+        highlightColor: accent.withOpacity(0.04),
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 16),
           child: Row(
             children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: iconColor.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Icon(icon, color: iconColor, size: 24),
-              ),
+              Icon(icon, color: accent, size: 20),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(children: [
-                      Text(title,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.w700, fontSize: 15)),
+                      Text(label,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                            letterSpacing: 1.5,
+                            color: accent,
+                          )),
                       if (badge != null) ...[
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 10),
                         Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 7, vertical: 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
                           decoration: BoxDecoration(
-                            color: (badgeColor ?? Colors.grey).withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: badgeColor ?? _muted, width: 1),
+                            borderRadius: BorderRadius.circular(2),
                           ),
                           child: Text(badge!,
                               style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: badgeColor ?? Colors.grey)),
+                                fontSize: 9,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 1,
+                                color: badgeColor ?? _muted,
+                              )),
                         ),
                       ],
                     ]),
-                    const SizedBox(height: 3),
-                    Text(subtitle,
+                    const SizedBox(height: 2),
+                    Text(detail,
                         style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF9E9E9E),
-                            fontWeight: FontWeight.w400)),
+                          fontSize: 11,
+                          color: _muted,
+                          letterSpacing: 0.3,
+                        )),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right_rounded,
-                  color: Color(0xFFBDBDBD), size: 22),
+              const Icon(Icons.chevron_right_rounded, color: _muted, size: 16),
             ],
           ),
         ),
@@ -287,46 +310,39 @@ class _MenuCard extends StatelessWidget {
   }
 }
 
-// ── Quick status card ─────────────────────────────────────────────────────────
+// ── Status panel ──────────────────────────────────────────────────────────────
 
-class _QuickStatusCard extends StatelessWidget {
+class _StatusPanel extends StatelessWidget {
   final dynamic status;
-  const _QuickStatusCard({required this.status});
+  const _StatusPanel({required this.status});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        color: _surface,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: _border, width: 1),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Quick Status',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13,
-                  color: Color(0xFF9E9E9E))),
+          const Text('STATUS',
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 10,
+                letterSpacing: 1.5,
+                color: _muted,
+              )),
           const SizedBox(height: 12),
           Row(
             children: [
-              _StatItem(
-                label: 'State',
-                value: status.rawState ?? '—',
-                color: const Color(0xFF2B3A42),
-              ),
-              const SizedBox(width: 12),
-              _StatItem(
-                label: 'Bag',
-                value: status.bagStatus ?? '—',
-                color: const Color(0xFF4A90D9),
-              ),
-              const SizedBox(width: 12),
-              _StatItem(
-                label: 'Map',
-                value: status.mapStatus ?? '—',
-                color: const Color(0xFF45C95A),
-              ),
+              _StatusCell(label: 'STATE', value: status.rawState ?? '—', color: _text),
+              const SizedBox(width: 8),
+              _StatusCell(label: 'BAG', value: status.bagStatus ?? '—', color: _blue),
+              const SizedBox(width: 8),
+              _StatusCell(label: 'MAP', value: status.mapStatus ?? '—', color: _green),
             ],
           ),
         ],
@@ -335,33 +351,41 @@ class _QuickStatusCard extends StatelessWidget {
   }
 }
 
-class _StatItem extends StatelessWidget {
+class _StatusCell extends StatelessWidget {
   final String label;
   final String value;
   final Color color;
-  const _StatItem({required this.label, required this.value, required this.color});
+  const _StatusCell({required this.label, required this.value, required this.color});
 
   @override
   Widget build(BuildContext context) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: color.withOpacity(0.15), width: 1),
+          borderRadius: BorderRadius.circular(2),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(label,
                 style: TextStyle(
-                    fontSize: 10, color: color, fontWeight: FontWeight.w600)),
+                  fontSize: 9,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.2,
+                  color: color.withOpacity(0.6),
+                )),
             const SizedBox(height: 3),
             Text(value,
-                style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600,
-                    overflow: TextOverflow.ellipsis),
-                maxLines: 1),
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: color,
+                  letterSpacing: 0.3,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
           ],
         ),
       ),
