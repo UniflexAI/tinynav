@@ -3,6 +3,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/providers.dart';
 
+const _bg = Color(0xFF0A0A0A);
+const _surface = Color(0xFF111111);
+const _border = Color(0xFF1A1A1A);
+const _green = Color(0xFF00E676);
+const _cyan = Color(0xFF00BCD4);
+const _red = Color(0xFFFF5252);
+const _text = Color(0xFFE0E0E0);
+const _muted = Color(0xFF616161);
+
 class DeviceTab extends ConsumerWidget {
   const DeviceTab({super.key});
 
@@ -14,6 +23,8 @@ class DeviceTab extends ConsumerWidget {
     final ip = ref.watch(deviceIpProvider) ?? '—';
 
     return RefreshIndicator(
+      color: _green,
+      backgroundColor: _surface,
       onRefresh: () async {
         ref.invalidate(deviceStatusProvider);
         ref.invalidate(sensorModeProvider);
@@ -21,26 +32,24 @@ class DeviceTab extends ConsumerWidget {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          // ── Connection ─────────────────────────────────────────────────
           _SectionCard(
             icon: Icons.wifi_rounded,
-            title: 'Connection',
+            title: 'CONNECTION',
             children: statusAsync.when(
               data: (s) => [
                 _InfoRow('Status', s.online ? 'Online' : 'Offline',
-                    valueColor: s.online ? const Color(0xFF34C759) : Colors.red),
+                    valueColor: s.online ? _green : _red),
                 _InfoRow('IP', ip),
                 _InfoRow('State', s.rawState),
               ],
               loading: () => [const _LoadingRow()],
-              error: (e, _) => [_InfoRow('Error', '$e', valueColor: Colors.red)],
+              error: (e, _) => [_InfoRow('Error', '$e', valueColor: _red)],
             ),
           ),
           const SizedBox(height: 12),
-          // ── Sensor ─────────────────────────────────────────────────────
           _SectionCard(
             icon: Icons.sensors_rounded,
-            title: 'Sensor',
+            title: 'SENSOR',
             children: [
               sensorAsync.when(
                 data: (mode) => _InfoRow(
@@ -50,7 +59,7 @@ class DeviceTab extends ConsumerWidget {
                       : mode == 'looper'
                           ? 'Looper'
                           : 'Unknown',
-                  valueColor: mode == 'unknown' ? Colors.grey : null,
+                  valueColor: mode == 'unknown' ? _muted : null,
                 ),
                 loading: () => const _LoadingRow(),
                 error: (_, __) => const _InfoRow('Mode', '—'),
@@ -58,17 +67,16 @@ class DeviceTab extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: 12),
-          // ── System ─────────────────────────────────────────────────────
           _SectionCard(
             icon: Icons.memory_rounded,
-            title: 'System',
+            title: 'SYSTEM',
             children: [
               statusAsync.when(
                 data: (s) => s.battery != null
                     ? _InfoRow(
                         'Battery',
                         '${s.battery!.toStringAsFixed(0)}%',
-                        valueColor: s.battery! < 20 ? Colors.red : null,
+                        valueColor: s.battery! < 20 ? _red : null,
                       )
                     : const _InfoRow('Battery', '—'),
                 loading: () => const _LoadingRow(),
@@ -78,20 +86,20 @@ class DeviceTab extends ConsumerWidget {
                 data: (sys) => Column(
                   children: [
                     _InfoRow('CPU', '${sys.cpuPercent.toStringAsFixed(1)}%',
-                        valueColor: sys.cpuPercent > 85 ? Colors.red : null),
+                        valueColor: sys.cpuPercent > 85 ? _red : null),
                     _InfoRow(
                       'Memory',
                       '${sys.memUsedGb.toStringAsFixed(1)}/${sys.memTotalGb.toStringAsFixed(1)} GB  (${sys.memPercent.toStringAsFixed(0)}%)',
-                      valueColor: sys.memPercent > 85 ? Colors.red : null,
+                      valueColor: sys.memPercent > 85 ? _red : null,
                     ),
                     _InfoRow(
                       'Disk',
                       '${sys.diskUsedGb.toStringAsFixed(1)}/${sys.diskTotalGb.toStringAsFixed(1)} GB  (${sys.diskPercent.toStringAsFixed(0)}%)',
-                      valueColor: sys.diskPercent > 90 ? Colors.red : null,
+                      valueColor: sys.diskPercent > 90 ? _red : null,
                     ),
                     if (sys.gpuPercent != null)
                       _InfoRow('GPU', '${sys.gpuPercent!.toStringAsFixed(1)}%',
-                          valueColor: sys.gpuPercent! > 85 ? Colors.red : null),
+                          valueColor: sys.gpuPercent! > 85 ? _red : null),
                   ],
                 ),
                 loading: () => const _LoadingRow(),
@@ -120,28 +128,30 @@ class _SectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: Colors.grey.shade200),
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: _border, width: 1),
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(children: [
-              Icon(icon, size: 18, color: const Color(0xFF2B3A42)),
-              const SizedBox(width: 8),
-              Text(title,
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w700, fontSize: 14)),
-            ]),
-            const Divider(height: 20),
-            ...children,
-          ],
-        ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(icon, size: 16, color: _cyan),
+            const SizedBox(width: 8),
+            Text(title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 11,
+                  letterSpacing: 1.5,
+                  color: _muted,
+                )),
+          ]),
+          const Divider(height: 20, color: _border),
+          ...children,
+        ],
       ),
     );
   }
@@ -160,21 +170,25 @@ class _InfoRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label,
               style: const TextStyle(
-                  fontSize: 13, color: Color(0xFF9E9E9E))),
+                fontSize: 12,
+                letterSpacing: 0.5,
+                color: _muted,
+              )),
           Text(
             value,
             style: TextStyle(
-              fontSize: 13,
+              fontSize: 12,
               fontWeight: FontWeight.w600,
+              letterSpacing: 0.3,
               color: dimmed
-                  ? Colors.grey.shade400
-                  : (valueColor ?? Colors.black87),
+                  ? _muted
+                  : (valueColor ?? _text),
             ),
           ),
         ],
@@ -190,7 +204,7 @@ class _LoadingRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return const Padding(
       padding: EdgeInsets.symmetric(vertical: 8),
-      child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
+      child: Center(child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.5, color: _green))),
     );
   }
 }
