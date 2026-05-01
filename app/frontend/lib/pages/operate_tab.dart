@@ -29,9 +29,10 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   double _linearX = 0, _linearY = 0, _angularZ = 0;
 
   bool _showObstacle = true;
-  bool _showEsdf = true;
+  bool _showEsdf = false;  // default off — developer-only
   bool _showTrajectory = true;
   bool _showGlobalPath = true;
+  bool _showGrid = true;
 
   @override
   void initState() {
@@ -88,17 +89,19 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final poseAsync = ref.watch(poseStreamProvider);
     final planningAsync = ref.watch(planningStreamProvider);
     final planning = planningAsync.valueOrNull;
+    final statusAsync = ref.watch(deviceStatusProvider);
 
     return Column(
       children: [
-        // ── Camera (1/4) ──────────────────────────────────────────────
+        // ── Camera (2/7) ──────────────────────────────────────────────
         const Expanded(flex: 2, child: _CameraPanel()),
         const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),
-        // ── Map / planning view (3/8) ─────────────────────────────────
+        // ── Map / planning view (3/7) ─────────────────────────────────
         Expanded(
           flex: 3,
           child: Stack(
             children: [
+              // Main view
               Positioned.fill(
                 child: _LocalPlanningView(
                   planning: planning,
@@ -106,57 +109,45 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   showEsdf: _showEsdf,
                   showTrajectory: _showTrajectory,
                   showGlobalPath: _showGlobalPath,
+                  showGrid: _showGrid,
                 ),
               ),
+              // Localization status (top-left)
               if (planning != null)
                 Positioned(
                   top: 8,
                   left: 8,
                   child: _LocalizationChip(localized: planning.localized),
                 ),
+              // ── HUD bottom toolbar ────────────────────────────────────
               Positioned(
-                top: 8,
-                right: 8,
-                child: _LayerTogglePanel(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: _HudToolbar(
+                  poisAsync: poisAsync,
+                  statusAsync: statusAsync,
+                  pose: poseAsync.valueOrNull,
                   showObstacle: _showObstacle,
                   showEsdf: _showEsdf,
                   showTrajectory: _showTrajectory,
                   showGlobalPath: _showGlobalPath,
-                  onChanged: (obs, esdf, traj, gp) => setState(() {
+                  showGrid: _showGrid,
+                  onLayerChanged: (obs, esdf, traj, gp, grid) => setState(() {
                     _showObstacle = obs;
                     _showEsdf = esdf;
                     _showTrajectory = traj;
                     _showGlobalPath = gp;
+                    _showGrid = grid;
                   }),
+                  onStop: _emergencyStop,
                 ),
-              ),
-              Positioned(
-                bottom: 10,
-                left: 10,
-                child: _PoiButton(
-                  poisAsync: poisAsync,
-                  statusAsync: ref.watch(deviceStatusProvider),
-                  pose: poseAsync.valueOrNull,
-                ),
-              ),
-              Positioned(
-                bottom: 10,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: _PauseButton(statusAsync: ref.watch(deviceStatusProvider)),
-                ),
-              ),
-              Positioned(
-                bottom: 10,
-                right: 10,
-                child: _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
               ),
             ],
           ),
         ),
         const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),
-        // ── Joystick panel (1/4) ──────────────────────────────────────
+        // ── Joystick panel (2/7) ──────────────────────────────────────
         Expanded(
           flex: 2,
           child: _JoystickPanel(
@@ -236,236 +227,253 @@ class _LocalPlanningView extends StatelessWidget {
   final bool showEsdf;
   final bool showTrajectory;
   final bool showGlobalPath;
+  final bool showGrid;
 
   const _LocalPlanningView({
     this.planning,
     this.showObstacle = true,
     this.showEsdf = false,
-    this.showTrajectory = false,
+    this.showTrajectory = true,
     this.showGlobalPath = true,
+    this.showGrid = true,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = planning;
+    final gi = p?.gridInfo;
+    // Use grid aspect ratio if available, otherwise fill the space
+    final aspectRatio = (gi != null && gi.width > 0 && gi.height > 0)
+        ? gi.width / gi.height
+        : null;
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        Container(color: const Color(0xFF0D1117)),
-        Center(
-          child: AspectRatio(
-            aspectRatio: 1.0,
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 8.0,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  if (showEsdf && p?.esdfImage != null)
-                    Opacity(
-                      opacity: 0.85,
-                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                    ),
-                  if (showObstacle && p?.obstacleImage != null)
-                    Opacity(
-                      opacity: 0.45,
-                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                    ),
-                  if (p != null)
-                    CustomPaint(
-                      painter: LocalPlanningPainter(
-                        trajectory: p.trajectory,
-                        globalPath: p.globalPath,
-                        gridInfo: p.gridInfo,
-                        odomPose: p.odomPose,
-                        showTrajectory: showTrajectory,
-                        showGlobalPath: showGlobalPath,
-                        navTargetPose: p.navTargetPose,
-                      ),
-                    )
-                  else
-                    const Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.map_outlined, size: 48, color: Colors.white24),
-                          SizedBox(height: 8),
-                          Text('Waiting for planning data…',
-                              style: TextStyle(color: Colors.white38, fontSize: 13)),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
+        // Radial gradient background for depth
+        Container(
+          decoration: const BoxDecoration(
+            gradient: RadialGradient(
+              center: Alignment.center,
+              radius: 0.8,
+              colors: [Color(0xFF1A2233), Color(0xFF0D1117)],
+              stops: [0.0, 1.0],
             ),
           ),
+        ),
+        Center(
+          child: aspectRatio != null
+              ? AspectRatio(
+                  aspectRatio: aspectRatio,
+                  child: _buildContent(p),
+                )
+              : _buildContent(p),
         ),
       ],
     );
   }
+
+  Widget _buildContent(PlanningState? p) {
+    return InteractiveViewer(
+      minScale: 0.5,
+      maxScale: 8.0,
+      boundaryMargin: const EdgeInsets.all(double.infinity),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (showEsdf && p?.esdfImage != null)
+            Opacity(
+              opacity: 0.85,
+              child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+            ),
+          if (showObstacle && p?.obstacleImage != null)
+            Opacity(
+              opacity: 0.45,
+              child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+            ),
+          if (p != null)
+            CustomPaint(
+              painter: LocalPlanningPainter(
+                trajectory: p.trajectory,
+                globalPath: p.globalPath,
+                gridInfo: p.gridInfo,
+                odomPose: p.odomPose,
+                showTrajectory: showTrajectory,
+                showGlobalPath: showGlobalPath,
+                navTargetPose: p.navTargetPose,
+                showGrid: showGrid,
+              ),
+            )
+          else
+            const _WaitingForData(),
+        ],
+      ),
+    );
+  }
 }
 
-class _LayerTogglePanel extends StatefulWidget {
+// ── Animated waiting state ────────────────────────────────────────────────────
+
+class _WaitingForData extends StatefulWidget {
+  const _WaitingForData();
+
+  @override
+  State<_WaitingForData> createState() => _WaitingForDataState();
+}
+
+class _WaitingForDataState extends State<_WaitingForData>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 56,
+                height: 56,
+                child: CustomPaint(
+                  painter: _RadarPainter(_controller.value),
+                ),
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Waiting for planning data…',
+                style: TextStyle(color: Colors.white38, fontSize: 13),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _RadarPainter extends CustomPainter {
+  final double progress;
+  _RadarPainter(this.progress);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2;
+
+    // Background circle
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()..color = const Color(0x15FFFFFF),
+    );
+
+    // Sweep arc
+    final sweepAngle = progress * 2 * pi;
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -pi / 2,
+      sweepAngle,
+      true,
+      Paint()
+        ..color = const Color(0xFF45C95A).withOpacity(0.15)
+        ..style = PaintingStyle.fill,
+    );
+
+    // Sweep line
+    final lineAngle = -pi / 2 + sweepAngle;
+    canvas.drawLine(
+      center,
+      Offset(
+        center.dx + cos(lineAngle) * radius,
+        center.dy + sin(lineAngle) * radius,
+      ),
+      Paint()
+        ..color = const Color(0xFF45C95A).withOpacity(0.6)
+        ..strokeWidth = 1.5
+        ..strokeCap = StrokeCap.round,
+    );
+
+    // Center dot
+    canvas.drawCircle(
+      center,
+      3,
+      Paint()..color = const Color(0xFF45C95A).withOpacity(0.8),
+    );
+
+    // Concentric rings
+    final ringPaint = Paint()
+      ..color = const Color(0x20FFFFFF)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.5;
+    canvas.drawCircle(center, radius * 0.33, ringPaint);
+    canvas.drawCircle(center, radius * 0.66, ringPaint);
+  }
+
+  @override
+  bool shouldRepaint(_RadarPainter old) => old.progress != progress;
+}
+
+// ── HUD Bottom Toolbar ────────────────────────────────────────────────────────
+
+class _HudToolbar extends ConsumerStatefulWidget {
+  final AsyncValue<List<Poi>> poisAsync;
+  final AsyncValue<DeviceStatus> statusAsync;
+  final Pose? pose;
   final bool showObstacle;
   final bool showEsdf;
   final bool showTrajectory;
   final bool showGlobalPath;
-  final void Function(bool obs, bool esdf, bool traj, bool gp) onChanged;
+  final bool showGrid;
+  final void Function(bool obs, bool esdf, bool traj, bool gp, bool grid) onLayerChanged;
+  final Future<void> Function() onStop;
 
-  const _LayerTogglePanel({
+  const _HudToolbar({
+    required this.poisAsync,
+    required this.statusAsync,
+    this.pose,
     required this.showObstacle,
     required this.showEsdf,
     required this.showTrajectory,
     required this.showGlobalPath,
-    required this.onChanged,
+    required this.showGrid,
+    required this.onLayerChanged,
+    required this.onStop,
   });
 
   @override
-  State<_LayerTogglePanel> createState() => _LayerTogglePanelState();
+  ConsumerState<_HudToolbar> createState() => _HudToolbarState();
 }
 
-class _LayerTogglePanelState extends State<_LayerTogglePanel> {
-  bool _expanded = false;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.end,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        GestureDetector(
-          onTap: () => setState(() => _expanded = !_expanded),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.layers_outlined, color: Colors.white70, size: 14),
-                const SizedBox(width: 4),
-                const Text('Layers', style: TextStyle(color: Colors.white70, fontSize: 12)),
-                const SizedBox(width: 4),
-                Icon(_expanded ? Icons.expand_less : Icons.expand_more,
-                    color: Colors.white54, size: 14),
-              ],
-            ),
-          ),
-        ),
-        if (_expanded) ...[
-          const SizedBox(height: 4),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.black87,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _LayerRow('Obstacle', widget.showObstacle,
-                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath)),
-                _LayerRow('ESDF', widget.showEsdf,
-                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath)),
-                _LayerRow('Trajectory', widget.showTrajectory,
-                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath)),
-                _LayerRow('Global Path', widget.showGlobalPath,
-                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v)),
-              ],
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-class _LayerRow extends StatelessWidget {
-  final String label;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-  const _LayerRow(this.label, this.value, this.onChanged);
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          width: 28,
-          height: 28,
-          child: Transform.scale(
-            scale: 0.75,
-            child: Switch(
-              value: value,
-              onChanged: onChanged,
-              activeColor: const Color(0xFF45C95A),
-            ),
-          ),
-        ),
-        const SizedBox(width: 4),
-        Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-      ],
-    );
-  }
-}
-
-// ── Localization chip ─────────────────────────────────────────────────────────
-
-class _LocalizationChip extends StatelessWidget {
-  final bool localized;
-  const _LocalizationChip({required this.localized});
-
-  @override
-  Widget build(BuildContext context) {
-    final dotColor = localized ? const Color(0xFF69F0AE) : Colors.redAccent;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.65),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 7, height: 7,
-            decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            localized ? 'Localized' : 'Not Localized',
-            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ── POI button + bottom sheet ─────────────────────────────────────────────────
-
-class _PoiButton extends ConsumerStatefulWidget {
-  final AsyncValue<List<Poi>> poisAsync;
-  final AsyncValue<DeviceStatus> statusAsync;
-  final Pose? pose;
-
-  const _PoiButton({
-    required this.poisAsync,
-    required this.statusAsync,
-    this.pose,
-  });
-
-  @override
-  ConsumerState<_PoiButton> createState() => _PoiButtonState();
-}
-
-class _PoiButtonState extends ConsumerState<_PoiButton> {
+class _HudToolbarState extends ConsumerState<_HudToolbar> {
   bool _canceling = false;
+  bool _navToggling = false;
+
+  bool get _isNavigating =>
+      widget.statusAsync.valueOrNull?.rawState == 'navigation';
+
+  bool get _navRunning =>
+      widget.statusAsync.valueOrNull?.navNodesRunning ?? false;
+
+  bool get _navPaused =>
+      widget.statusAsync.valueOrNull?.navPaused ?? false;
 
   Future<void> _cancelNav() async {
     setState(() => _canceling = true);
@@ -483,45 +491,373 @@ class _PoiButtonState extends ConsumerState<_PoiButton> {
     }
   }
 
+  Future<void> _toggleNav(bool running) async {
+    setState(() => _navToggling = true);
+    try {
+      await ref.read(dioProvider).post(
+        running ? '/nav/nodes/disable' : '/nav/nodes/enable',
+      );
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _navToggling = false);
+    }
+  }
+
+  Future<void> _togglePause(bool paused) async {
+    try {
+      await ref.read(dioProvider).post(paused ? '/nav/resume' : '/nav/pause');
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final count = widget.poisAsync.valueOrNull?.length ?? 0;
-    final isNavigating = widget.statusAsync.valueOrNull?.rawState == 'navigation';
-
-    if (isNavigating) {
-      return FilledButton.icon(
-        onPressed: _canceling ? null : _cancelNav,
-        style: FilledButton.styleFrom(
-          backgroundColor: Colors.red.withOpacity(0.85),
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        ),
-        icon: _canceling
-            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-            : const Icon(Icons.cancel_outlined, size: 16),
-        label: const Text('Cancel'),
-      );
-    }
-
-    return FilledButton.icon(
-      onPressed: () => showModalBottomSheet(
-        context: context,
-        isScrollControlled: true,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        builder: (_) => _PoiSheet(pose: widget.pose),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.55),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
       ),
-      style: FilledButton.styleFrom(
-        backgroundColor: Colors.black87,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            // POI / Cancel Nav
+            _HudButton(
+              icon: _isNavigating
+                  ? Icons.cancel_outlined
+                  : Icons.place_outlined,
+              label: _isNavigating ? 'Cancel' : 'POIs',
+              color: _isNavigating ? Colors.redAccent : Colors.white70,
+              loading: _canceling,
+              onTap: _isNavigating
+                  ? () => _cancelNav()
+                  : () => showModalBottomSheet(
+                      context: context,
+                      isScrollControlled: true,
+                      shape: const RoundedRectangleBorder(
+                        borderRadius:
+                            BorderRadius.vertical(top: Radius.circular(20)),
+                      ),
+                      builder: (_) => _PoiSheet(pose: widget.pose),
+                    ),
+            ),
+            // Pause / Continue (only when nav running)
+            if (_navRunning)
+              _HudButton(
+                icon: _navPaused
+                    ? Icons.play_arrow_rounded
+                    : Icons.pause_rounded,
+                label: _navPaused ? 'Go' : 'Pause',
+                color: _navPaused
+                    ? const Color(0xFFFF9800)
+                    : Colors.white70,
+                onTap: () => _togglePause(_navPaused),
+              ),
+            // Nav ON/OFF
+            _HudButton(
+              icon: _navRunning
+                  ? Icons.sensors_rounded
+                  : Icons.sensors_off_rounded,
+              label: _navRunning ? 'Nav ON' : 'Nav',
+              color: _navRunning
+                  ? const Color(0xFF45C95A)
+                  : Colors.white54,
+              loading: _navToggling,
+              onTap: () => _toggleNav(_navRunning),
+            ),
+            // Layers
+            _HudButton(
+              icon: Icons.layers_outlined,
+              label: 'Layers',
+              color: Colors.white70,
+              onTap: () => showModalBottomSheet(
+                context: context,
+                backgroundColor: Colors.black87,
+                shape: const RoundedRectangleBorder(
+                  borderRadius:
+                      BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                builder: (_) => _LayerSheet(
+                  showObstacle: widget.showObstacle,
+                  showEsdf: widget.showEsdf,
+                  showTrajectory: widget.showTrajectory,
+                  showGlobalPath: widget.showGlobalPath,
+                  showGrid: widget.showGrid,
+                  onChanged: widget.onLayerChanged,
+                ),
+              ),
+            ),
+            // E-Stop
+            _HudEStopButton(onStop: widget.onStop),
+          ],
+        ),
       ),
-      icon: const Icon(Icons.place_outlined, size: 16),
-      label: Text('POIs${count > 0 ? ' ($count)' : ''}'),
     );
   }
 }
+
+// ── HUD button ────────────────────────────────────────────────────────────────
+
+class _HudButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final bool loading;
+  final VoidCallback onTap;
+
+  const _HudButton({
+    required this.icon,
+    required this.label,
+    this.color = Colors.white70,
+    this.loading = false,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: loading ? null : onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (loading)
+              const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              )
+            else
+              Icon(icon, size: 18, color: color),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── HUD E-Stop button ─────────────────────────────────────────────────────────
+
+class _HudEStopButton extends StatefulWidget {
+  final Future<void> Function() onStop;
+  const _HudEStopButton({required this.onStop});
+
+  @override
+  State<_HudEStopButton> createState() => _HudEStopButtonState();
+}
+
+class _HudEStopButtonState extends State<_HudEStopButton> {
+  bool _pressing = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressing = true),
+      onTapUp: (_) async {
+        setState(() => _pressing = false);
+        await widget.onStop();
+      },
+      onTapCancel: () => setState(() => _pressing = false),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: _pressing
+              ? const Color(0xFFB71C1C)
+              : const Color(0xFFE53935).withOpacity(0.85),
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xFFE53935).withOpacity(_pressing ? 0.3 : 0.5),
+              blurRadius: _pressing ? 4 : 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: const Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.pan_tool_rounded, color: Colors.white, size: 18),
+            SizedBox(height: 2),
+            Text('STOP',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 9,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.5,
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── Layer bottom sheet ────────────────────────────────────────────────────────
+
+class _LayerSheet extends StatelessWidget {
+  final bool showObstacle;
+  final bool showEsdf;
+  final bool showTrajectory;
+  final bool showGlobalPath;
+  final bool showGrid;
+  final void Function(bool obs, bool esdf, bool traj, bool gp, bool grid) onChanged;
+
+  const _LayerSheet({
+    required this.showObstacle,
+    required this.showEsdf,
+    required this.showTrajectory,
+    required this.showGlobalPath,
+    required this.showGrid,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+          16, 12, 16, 24 + MediaQuery.of(context).viewInsets.bottom),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 36, height: 4,
+              margin: const EdgeInsets.only(bottom: 14),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade600,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const Row(children: [
+            Icon(Icons.layers_outlined, color: Colors.white70, size: 20),
+            SizedBox(width: 8),
+            Text('Layers', style: TextStyle(
+              fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
+          ]),
+          const Divider(height: 20, color: Colors.white24),
+          _LayerRow('Obstacle', showObstacle, const Color(0xFFFF5252),
+              (v) => onChanged(v, showEsdf, showTrajectory, showGlobalPath, showGrid)),
+          _LayerRow('ESDF', showEsdf, const Color(0xFF7C4DFF),
+              (v) => onChanged(showObstacle, v, showTrajectory, showGlobalPath, showGrid)),
+          _LayerRow('Trajectory', showTrajectory, Colors.cyanAccent,
+              (v) => onChanged(showObstacle, showEsdf, v, showGlobalPath, showGrid)),
+          _LayerRow('Global Path', showGlobalPath, const Color(0xFF69F0AE),
+              (v) => onChanged(showObstacle, showEsdf, showTrajectory, v, showGrid)),
+          _LayerRow('Grid', showGrid, const Color(0xAAFFFFFF),
+              (v) => onChanged(showObstacle, showEsdf, showTrajectory, showGlobalPath, v)),
+        ],
+      ),
+    );
+  }
+}
+
+class _LayerRow extends StatelessWidget {
+  final String label;
+  final bool value;
+  final Color activeColor;
+  final ValueChanged<bool> onChanged;
+  const _LayerRow(this.label, this.value, this.activeColor, this.onChanged);
+
+  @override
+  Widget build(BuildContext context) {
+    return SwitchListTile(
+      value: value,
+      onChanged: onChanged,
+      activeColor: activeColor,
+      title: Text(label, style: const TextStyle(color: Colors.white70, fontSize: 14)),
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+    );
+  }
+}
+
+// ── Localization chip ─────────────────────────────────────────────────────────
+
+class _LocalizationChip extends StatelessWidget {
+  final bool localized;
+  const _LocalizationChip({required this.localized});
+
+  @override
+  Widget build(BuildContext context) {
+    final dotColor = localized ? const Color(0xFF69F0AE) : Colors.redAccent;
+    final glowColor = localized
+        ? const Color(0xFF69F0AE).withOpacity(0.3)
+        : Colors.redAccent.withOpacity(0.3);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.65),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: glowColor,
+          width: 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: glowColor,
+            blurRadius: 6,
+            spreadRadius: 0,
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 7, height: 7,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: dotColor,
+              boxShadow: [
+                BoxShadow(
+                  color: dotColor,
+                  blurRadius: 4,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            localized ? 'Localized' : 'Not Localized',
+            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── POI bottom sheet ──────────────────────────────────────────────────────────
 
 class _PoiSheet extends ConsumerStatefulWidget {
   final Pose? pose;
@@ -690,119 +1026,6 @@ class _PoiTile extends StatelessWidget {
       ),
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-    );
-  }
-}
-
-// ── Nav nodes toggle button ───────────────────────────────────────────────────
-
-class _NavNodesButton extends ConsumerStatefulWidget {
-  final AsyncValue<DeviceStatus> statusAsync;
-  const _NavNodesButton({required this.statusAsync});
-
-  @override
-  ConsumerState<_NavNodesButton> createState() => _NavNodesButtonState();
-}
-
-class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
-  bool _loading = false;
-
-  Future<void> _toggle(bool running) async {
-    setState(() => _loading = true);
-    try {
-      await ref.read(dioProvider).post(
-        running ? '/nav/nodes/disable' : '/nav/nodes/enable',
-      );
-    } on DioException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
-          backgroundColor: Colors.red,
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final status = widget.statusAsync.valueOrNull;
-    final running = status?.navNodesRunning ?? false;
-
-    return FilledButton.icon(
-      onPressed: _loading ? null : () => _toggle(running),
-      style: FilledButton.styleFrom(
-        backgroundColor: running
-            ? const Color(0xFF45C95A).withOpacity(0.9)
-            : Colors.black87,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      ),
-      icon: _loading
-          ? const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-            )
-          : Icon(
-              running ? Icons.sensors_rounded : Icons.sensors_off_rounded,
-              size: 16,
-            ),
-      label: Text(running ? 'Nav ON' : 'Nav'),
-    );
-  }
-}
-
-// ── Pause / Continue button ───────────────────────────────────────────────────
-
-class _PauseButton extends ConsumerStatefulWidget {
-  final AsyncValue<DeviceStatus> statusAsync;
-  const _PauseButton({required this.statusAsync});
-
-  @override
-  ConsumerState<_PauseButton> createState() => _PauseButtonState();
-}
-
-class _PauseButtonState extends ConsumerState<_PauseButton> {
-  bool _loading = false;
-
-  Future<void> _toggle(bool paused) async {
-    setState(() => _loading = true);
-    try {
-      await ref.read(dioProvider).post(paused ? '/nav/resume' : '/nav/pause');
-    } on DioException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
-          backgroundColor: Colors.red,
-        ));
-      }
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final status = widget.statusAsync.valueOrNull;
-    final running = status?.navNodesRunning ?? false;
-    if (!running) return const SizedBox.shrink();
-
-    final paused = status?.navPaused ?? false;
-    return FilledButton.icon(
-      onPressed: _loading ? null : () => _toggle(paused),
-      style: FilledButton.styleFrom(
-        backgroundColor: paused
-            ? const Color(0xFFFF9800).withOpacity(0.9)
-            : Colors.black54,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      ),
-      icon: _loading
-          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-          : Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 16),
-      label: Text(paused ? 'Continue' : 'Pause'),
     );
   }
 }
