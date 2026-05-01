@@ -77,13 +77,7 @@ class _SetupPageState extends ConsumerState<SetupPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ColorFiltered(
-                  colorFilter: const ColorFilter.mode(
-                    Color(0xFF00E676),
-                    BlendMode.srcIn,
-                  ),
-                  child: Image.asset('assets/images/tinynav.png', width: 80, height: 80),
-                ),
+                Image.asset('assets/images/tinynav_dark.png', width: 80, height: 80),
                 const SizedBox(height: 16),
                 const Text('TINYNAV',
                     style: TextStyle(
