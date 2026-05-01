@@ -967,7 +967,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
           if (selectedTopic != null && _latestFrame != null)
             GestureDetector(
               onTap: () => _showFullscreen(context),
-              child: Image.memory(_latestFrame!, fit: BoxFit.contain, gaplessPlayback: true),
+              child: Image.memory(_latestFrame!, fit: BoxFit.cover, gaplessPlayback: true),
             )
           else
             Center(
