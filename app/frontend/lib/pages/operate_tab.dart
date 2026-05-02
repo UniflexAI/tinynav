@@ -29,7 +29,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   double _linearX = 0, _linearY = 0, _angularZ = 0;
 
   bool _showObstacle = true;
-  bool _showEsdf = false;  // default off — developer-only
+  bool _showEsdf = true;
   bool _showTrajectory = true;
   bool _showGlobalPath = true;
   bool _showGrid = true;
@@ -285,7 +285,7 @@ class _LocalPlanningView extends StatelessWidget {
   const _LocalPlanningView({
     this.planning,
     this.showObstacle = true,
-    this.showEsdf = false,
+    this.showEsdf = true,
     this.showTrajectory = true,
     this.showGlobalPath = true,
     this.showGrid = true,
@@ -295,11 +295,6 @@ class _LocalPlanningView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = planning;
-    final gi = p?.gridInfo;
-    // Use grid aspect ratio if available, otherwise fill the space
-    final aspectRatio = (gi != null && gi.width > 0 && gi.height > 0)
-        ? gi.width / gi.height
-        : null;
 
     return Stack(
       fit: StackFit.expand,
@@ -315,13 +310,9 @@ class _LocalPlanningView extends StatelessWidget {
             ),
           ),
         ),
-        Center(
-          child: aspectRatio != null
-              ? AspectRatio(
-                  aspectRatio: aspectRatio,
-                  child: _buildContent(p),
-                )
-              : _buildContent(p),
+        // Fill entire space — no AspectRatio constraint
+        Positioned.fill(
+          child: _buildContent(p),
         ),
       ],
     );
@@ -779,7 +770,7 @@ class _HudEStopButtonState extends State<_HudEStopButton> {
 
 // ── Layer bottom sheet ────────────────────────────────────────────────────────
 
-class _LayerSheet extends StatelessWidget {
+class _LayerSheet extends StatefulWidget {
   final bool showObstacle;
   final bool showEsdf;
   final bool showTrajectory;
@@ -797,6 +788,33 @@ class _LayerSheet extends StatelessWidget {
     required this.showFootprint,
     required this.onChanged,
   });
+
+  @override
+  State<_LayerSheet> createState() => _LayerSheetState();
+}
+
+class _LayerSheetState extends State<_LayerSheet> {
+  late bool _obstacle;
+  late bool _esdf;
+  late bool _traj;
+  late bool _gp;
+  late bool _grid;
+  late bool _fp;
+
+  @override
+  void initState() {
+    super.initState();
+    _obstacle = widget.showObstacle;
+    _esdf = widget.showEsdf;
+    _traj = widget.showTrajectory;
+    _gp = widget.showGlobalPath;
+    _grid = widget.showGrid;
+    _fp = widget.showFootprint;
+  }
+
+  void _notify() {
+    widget.onChanged(_obstacle, _esdf, _traj, _gp, _grid, _fp);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -824,18 +842,18 @@ class _LayerSheet extends StatelessWidget {
               fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
           ]),
           const Divider(height: 20, color: Colors.white24),
-          _LayerRow('Obstacle', showObstacle, const Color(0xFFFF5252),
-              (v) => onChanged(v, showEsdf, showTrajectory, showGlobalPath, showGrid, showFootprint)),
-          _LayerRow('ESDF', showEsdf, const Color(0xFF7C4DFF),
-              (v) => onChanged(showObstacle, v, showTrajectory, showGlobalPath, showGrid, showFootprint)),
-          _LayerRow('Trajectory', showTrajectory, Colors.cyanAccent,
-              (v) => onChanged(showObstacle, showEsdf, v, showGlobalPath, showGrid, showFootprint)),
-          _LayerRow('Global Path', showGlobalPath, const Color(0xFF69F0AE),
-              (v) => onChanged(showObstacle, showEsdf, showTrajectory, v, showGrid, showFootprint)),
-          _LayerRow('Grid', showGrid, const Color(0xAAFFFFFF),
-              (v) => onChanged(showObstacle, showEsdf, showTrajectory, showGlobalPath, v, showFootprint)),
-          _LayerRow('Footprint', showFootprint, const Color(0xFF29B6F6),
-              (v) => onChanged(showObstacle, showEsdf, showTrajectory, showGlobalPath, showGrid, v)),
+          _LayerRow('Obstacle', _obstacle, const Color(0xFFFF5252),
+              (v) { setState(() => _obstacle = v); _notify(); }),
+          _LayerRow('ESDF', _esdf, const Color(0xFF7C4DFF),
+              (v) { setState(() => _esdf = v); _notify(); }),
+          _LayerRow('Trajectory', _traj, Colors.cyanAccent,
+              (v) { setState(() => _traj = v); _notify(); }),
+          _LayerRow('Global Path', _gp, const Color(0xFF69F0AE),
+              (v) { setState(() => _gp = v); _notify(); }),
+          _LayerRow('Grid', _grid, const Color(0xAAFFFFFF),
+              (v) { setState(() => _grid = v); _notify(); }),
+          _LayerRow('Footprint', _fp, const Color(0xFF29B6F6),
+              (v) { setState(() => _fp = v); _notify(); }),
         ],
       ),
     );
