@@ -10,22 +10,26 @@ import '../core/models.dart';
 class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> trajectory;
   final List<TrajPoint> globalPath;
+  final List<TrajPoint> footprint;
   final GridInfo? gridInfo;
   final Pose? odomPose;
   final bool showTrajectory;
   final bool showGlobalPath;
   final TrajPoint? navTargetPose;
   final bool showGrid;
+  final bool showFootprint;
 
   const LocalPlanningPainter({
     required this.trajectory,
     this.globalPath = const [],
+    this.footprint = const [],
     this.gridInfo,
     this.odomPose,
     this.showTrajectory = true,
     this.showGlobalPath = true,
     this.navTargetPose,
     this.showGrid = true,
+    this.showFootprint = true,
   });
 
   @override
@@ -52,6 +56,9 @@ class LocalPlanningPainter extends CustomPainter {
     if (navTargetPose != null && pose != null)
       _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
 
+    if (showFootprint) _drawFootprint(canvas, cx, cy, scaleX, scaleY, pose);
+
+    // Small arrow on top of everything
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
 
     // ── Scale bar ──────────────────────────────────────────────────────
@@ -328,10 +335,10 @@ class LocalPlanningPainter extends CustomPainter {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
 
-    final tip   = Offset(center.dx + cosY * 14, center.dy - sinY * 14);
-    final left  = Offset(center.dx - sinY *  6, center.dy - cosY *  6);
-    final right = Offset(center.dx + sinY *  6, center.dy + cosY *  6);
-    final base  = Offset(center.dx - cosY *  5, center.dy + sinY *  5);
+    final tip   = Offset(center.dx + cosY * 8, center.dy - sinY * 8);
+    final left  = Offset(center.dx - sinY *  3.5, center.dy - cosY *  3.5);
+    final right = Offset(center.dx + sinY *  3.5, center.dy + cosY *  3.5);
+    final base  = Offset(center.dx - cosY *  3, center.dy + sinY *  3);
 
     final path = Path()
       ..moveTo(tip.dx, tip.dy)
@@ -342,17 +349,54 @@ class LocalPlanningPainter extends CustomPainter {
 
     canvas.drawPath(path, Paint()..color = Colors.white);
     canvas.drawPath(path,
-        Paint()..color = Colors.black45..style = PaintingStyle.stroke..strokeWidth = 1.0);
+        Paint()..color = Colors.black45..style = PaintingStyle.stroke..strokeWidth = 0.8);
+  }
+
+  // ── Footprint ──────────────────────────────────────────────────────────
+
+  void _drawFootprint(Canvas canvas, double cx, double cy,
+      double scaleX, double scaleY, Pose? pose) {
+    if (footprint.isEmpty || pose == null) return;
+
+    final pts = <Offset>[];
+    for (int i = 0; i < footprint.length; i++) {
+      pts.add(Offset(
+        cx + (footprint[i].x - pose.x) * scaleX,
+        cy - (footprint[i].y - pose.y) * scaleY,
+      ));
+    }
+
+    final path = Path()..moveTo(pts[0].dx, pts[0].dy);
+    for (int i = 1; i < pts.length; i++) {
+      path.lineTo(pts[i].dx, pts[i].dy);
+    }
+    path.close();
+
+    // Semi-transparent fill
+    canvas.drawPath(path, Paint()..color = const Color(0xFF64B5F6).withOpacity(0.25));
+    // Bright solid border
+    canvas.drawPath(path,
+        Paint()
+          ..color = const Color(0xFF29B6F6)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 3.0
+          ..strokeJoin = StrokeJoin.miter);
+    // Corner markers
+    for (final p in pts) {
+      canvas.drawCircle(p, 4, Paint()..color = const Color(0xFF29B6F6));
+    }
   }
 
   @override
   bool shouldRepaint(LocalPlanningPainter old) =>
       trajectory != old.trajectory ||
       globalPath != old.globalPath ||
+      footprint != old.footprint ||
       gridInfo != old.gridInfo ||
       odomPose != old.odomPose ||
       showTrajectory != old.showTrajectory ||
       showGlobalPath != old.showGlobalPath ||
       navTargetPose != old.navTargetPose ||
-      showGrid != old.showGrid;
+      showGrid != old.showGrid ||
+      showFootprint != old.showFootprint;
 }
