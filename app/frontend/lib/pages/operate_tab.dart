@@ -653,6 +653,7 @@ class _HudToolbarState extends ConsumerState<_HudToolbar> {
                   showTrajectory: widget.showTrajectory,
                   showGlobalPath: widget.showGlobalPath,
                   showGrid: widget.showGrid,
+                  showFootprint: widget.showFootprint,
                   onChanged: widget.onLayerChanged,
                 ),
               ),
