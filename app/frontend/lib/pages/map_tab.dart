@@ -521,8 +521,13 @@ class _LoadingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Card(
-      child: Padding(
+    return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: Colors.grey.shade200),
+      ),
+      elevation: 0,
+      child: const Padding(
         padding: EdgeInsets.all(32),
         child: Center(child: CircularProgressIndicator()),
       ),
@@ -538,6 +543,10 @@ class _ErrorCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       color: Colors.red.shade50,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+      ),
+      elevation: 0,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(children: [

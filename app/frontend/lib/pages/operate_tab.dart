@@ -89,15 +89,21 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final planningAsync = ref.watch(planningStreamProvider);
     final planning = planningAsync.valueOrNull;
 
-    return Column(
-      children: [
-        // ── Camera (1/4) ──────────────────────────────────────────────
-        const Expanded(flex: 2, child: _CameraPanel()),
-        const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),
-        // ── Map / planning view (3/8) ─────────────────────────────────
-        Expanded(
-          flex: 3,
-          child: Stack(
+    return Container(
+      color: const Color(0xFFF2F3F5),
+      child: Column(
+        children: [
+          // ── Camera (1/4) ──────────────────────────────────────────────
+          Expanded(flex: 2, child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
+            child: const _CameraPanel(),
+          )),
+          // ── Map / planning view (3/8) ─────────────────────────────────
+          Expanded(
+            flex: 3,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+              child: Stack(
             children: [
               Positioned.fill(
                 child: _LocalPlanningView(
@@ -152,20 +158,24 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                 right: 10,
                 child: _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
               ),
-            ],
+                ],
+              ),
+            ),
           ),
-        ),
-        const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),
-        // ── Joystick panel (1/4) ──────────────────────────────────────
-        Expanded(
-          flex: 2,
-          child: _JoystickPanel(
-            onLeft: _onLeftJoystick,
-            onRight: _onRightJoystick,
-            onStop: _emergencyStop,
+          // ── Joystick panel (1/4) ──────────────────────────────────────
+          Expanded(
+            flex: 2,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+              child: _JoystickPanel(
+                onLeft: _onLeftJoystick,
+                onRight: _onRightJoystick,
+                onStop: _emergencyStop,
+              ),
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -188,42 +198,40 @@ class _GlobalMapView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = planning;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Container(color: const Color(0xFF0D1117)),
-        Center(
-          child: AspectRatio(
-            aspectRatio: mapInfo.width / mapInfo.height,
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 8.0,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Image.network(
-                    '$baseUrl${mapInfo.imageUrl}',
-                    fit: BoxFit.fill,
-                    gaplessPlayback: true,
-                    errorBuilder: (_, __, ___) => const ColoredBox(color: Color(0xFF1A1A2E)),
-                  ),
-                  if (p != null)
-                    CustomPaint(
-                      painter: MapOverlayPainter(
-                        mapInfo: mapInfo,
-                        pose: p.mapPose,
-                        pois: pois,
-                        globalPath: p.globalPath,
-                        showGlobalPath: true,
-                      ),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Container(color: const Color(0xFF0D1117)),
+          InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 8.0,
+            boundaryMargin: const EdgeInsets.all(double.infinity),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.network(
+                  '$baseUrl${mapInfo.imageUrl}',
+                  fit: BoxFit.fill,
+                  gaplessPlayback: true,
+                  errorBuilder: (_, __, ___) => const ColoredBox(color: Color(0xFF1A1A2E)),
+                ),
+                if (p != null)
+                  CustomPaint(
+                    painter: MapOverlayPainter(
+                      mapInfo: mapInfo,
+                      pose: p.mapPose,
+                      pois: pois,
+                      globalPath: p.globalPath,
+                      showGlobalPath: true,
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -248,60 +256,58 @@ class _LocalPlanningView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = planning;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        Container(color: const Color(0xFF0D1117)),
-        Center(
-          child: AspectRatio(
-            aspectRatio: 1.0,
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 8.0,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  if (showEsdf && p?.esdfImage != null)
-                    Opacity(
-                      opacity: 0.85,
-                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Container(color: const Color(0xFF0D1117)),
+          InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 8.0,
+            boundaryMargin: const EdgeInsets.all(double.infinity),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (showEsdf && p?.esdfImage != null)
+                  Opacity(
+                    opacity: 0.85,
+                    child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                  ),
+                if (showObstacle && p?.obstacleImage != null)
+                  Opacity(
+                    opacity: 0.45,
+                    child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                  ),
+                if (p != null)
+                  CustomPaint(
+                    painter: LocalPlanningPainter(
+                      trajectory: p.trajectory,
+                      globalPath: p.globalPath,
+                      gridInfo: p.gridInfo,
+                      odomPose: p.odomPose,
+                      showTrajectory: showTrajectory,
+                      showGlobalPath: showGlobalPath,
+                      navTargetPose: p.navTargetPose,
                     ),
-                  if (showObstacle && p?.obstacleImage != null)
-                    Opacity(
-                      opacity: 0.45,
-                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                  )
+                else
+                  const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.map_outlined, size: 48, color: Colors.white24),
+                        SizedBox(height: 8),
+                        Text('Waiting for planning data…',
+                            style: TextStyle(color: Colors.white38, fontSize: 13)),
+                      ],
                     ),
-                  if (p != null)
-                    CustomPaint(
-                      painter: LocalPlanningPainter(
-                        trajectory: p.trajectory,
-                        globalPath: p.globalPath,
-                        gridInfo: p.gridInfo,
-                        odomPose: p.odomPose,
-                        showTrajectory: showTrajectory,
-                        showGlobalPath: showGlobalPath,
-                        navTargetPose: p.navTargetPose,
-                      ),
-                    )
-                  else
-                    const Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.map_outlined, size: 48, color: Colors.white24),
-                          SizedBox(height: 8),
-                          Text('Waiting for planning data…',
-                              style: TextStyle(color: Colors.white38, fontSize: 13)),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
+                  ),
+              ],
             ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -863,9 +869,14 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     }
 
     return Container(
-      color: Colors.black,
-      child: Stack(
-        fit: StackFit.expand,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Stack(
+          fit: StackFit.expand,
         children: [
           if (selectedTopic != null && _latestFrame != null)
             GestureDetector(
@@ -958,6 +969,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
               ),
             ),
         ],
+      ),
       ),
     );
   }
@@ -1077,7 +1089,10 @@ class _JoystickPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Container(
-      color: const Color(0xFFF5F5F5),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(12),
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [

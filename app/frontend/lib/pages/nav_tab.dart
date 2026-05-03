@@ -20,10 +20,20 @@ class NavTab extends ConsumerWidget {
         children: [
           statusAsync.when(
             data: (s) => _NavStatusCard(status: s),
-            loading: () => const Card(
-              child: Padding(padding: EdgeInsets.all(32), child: Center(child: CircularProgressIndicator())),
+            loading: () => Card(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: BorderSide(color: Colors.grey.shade200),
+              ),
+              elevation: 0,
+              child: const Padding(padding: EdgeInsets.all(32), child: Center(child: CircularProgressIndicator())),
             ),
             error: (e, _) => Card(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: BorderSide(color: Colors.grey.shade200),
+              ),
+              elevation: 0,
               child: Padding(
                 padding: const EdgeInsets.all(16),
                 child: Text('$e', style: const TextStyle(color: Colors.red)),
@@ -32,6 +42,11 @@ class NavTab extends ConsumerWidget {
           ),
           const SizedBox(height: 12),
           Card(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: BorderSide(color: Colors.grey.shade200),
+            ),
+            elevation: 0,
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -108,6 +123,11 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
     final isNavigating = s.rawState == 'navigation';
 
     return Card(
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(color: Colors.grey.shade200),
+      ),
+      elevation: 0,
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(children: [
