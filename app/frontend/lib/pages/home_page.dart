@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/providers.dart';
 import 'device_tab.dart';
@@ -26,7 +25,7 @@ class HomePage extends ConsumerWidget {
     final isOnline = status?.online ?? false;
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF2F3F5),
+      backgroundColor: const Color(0xFF0B1118),
       body: SafeArea(
         child: Column(
           children: [
@@ -35,14 +34,14 @@ class HomePage extends ConsumerWidget {
             // ── Menu cards ─────────────────────────────────────────────────
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 28),
                 children: [
                   // ── Hero ─────────────────────────────────────────────────
                   const _HeroBanner(),
                   const SizedBox(height: 20),
                   _MenuCard(
                     icon: Icons.memory_rounded,
-                    iconColor: const Color(0xFF2B3A42),
+                    iconColor: const Color(0xFF7BD8FF),
                     title: 'Device',
                     subtitle: 'Status · Sensor · System info',
                     badge: status?.rawState == 'realsense_bag_record' ? 'REC' : null,
@@ -52,7 +51,7 @@ class HomePage extends ConsumerWidget {
                   const SizedBox(height: 12),
                   _MenuCard(
                     icon: Icons.folder_outlined,
-                    iconColor: const Color(0xFF4A90D9),
+                    iconColor: const Color(0xFF7BD8FF),
                     title: 'Map',
                     subtitle: 'Bag recording · Map building · Files',
                     badge: status?.rawState == 'rosbag_build_map' ? 'Building' : null,
@@ -62,7 +61,7 @@ class HomePage extends ConsumerWidget {
                   const SizedBox(height: 12),
                   _MenuCard(
                     icon: Icons.sports_esports_outlined,
-                    iconColor: const Color(0xFF45C95A),
+                    iconColor: const Color(0xFF7BD8FF),
                     title: 'Operate',
                     subtitle: 'Live map · Camera · Teleop · POI',
                     badge: status?.rawState == 'navigation' ? 'Navigating' : null,
@@ -100,9 +99,9 @@ class _SubPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF2F3F5),
+      backgroundColor: const Color(0xFF0B1118),
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: const Color(0xFF0F1822),
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         leading: IconButton(
@@ -113,7 +112,7 @@ class _SubPage extends StatelessWidget {
             style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 17)),
         bottom: const PreferredSize(
           preferredSize: Size.fromHeight(1),
-          child: Divider(height: 1, thickness: 1, color: Color(0xFFEEEEEE)),
+          child: Divider(height: 1, thickness: 1, color: Color(0xFF233142)),
         ),
       ),
       body: child,
@@ -132,37 +131,73 @@ class _StatusBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const kGreen = Color(0xFF45C95A);
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-      child: Row(
-        children: [
-          Container(
-            width: 7, height: 7,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: isOnline ? kGreen : Colors.red,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF111A24),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFF263647)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x11000000),
+              blurRadius: 10,
+              offset: Offset(0, 3),
             ),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            isOnline ? ip : 'Offline',
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              color: isOnline ? kGreen : Colors.red,
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isOnline ? kGreen : Colors.red,
+              ),
             ),
-          ),
-          const Spacer(),
-          IconButton(
-            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.black38),
-            tooltip: 'Disconnect',
-            onPressed: onDisconnect,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(),
-          ),
-          const SizedBox(width: 8),
-        ],
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                isOnline ? ip : 'Offline',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: isOnline ? kGreen : Colors.red,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 8),
+            InkWell(
+              borderRadius: BorderRadius.circular(20),
+              onTap: onDisconnect,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A2532),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.logout_rounded, size: 15, color: Color(0xFF9EB0C3)),
+                    SizedBox(width: 4),
+                    Text(
+                      'Disconnect',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF9EB0C3),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -175,23 +210,60 @@ class _HeroBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 24),
-      child: Column(
-        children: [
-          Image.asset(
-            'assets/images/tinynav.png',
-            width: 120,
-            height: 120,
+    return Container(
+      margin: const EdgeInsets.only(top: 8, bottom: 14),
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF132131), Color(0xFF0E1824)],
+        ),
+        border: Border.all(color: const Color(0xFF284057)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x12000000),
+            blurRadius: 14,
+            offset: Offset(0, 6),
           ),
-          const SizedBox(height: 10),
-          const Text(
-            'Visual Navigation Module',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF2B3A42),
-              letterSpacing: -0.3,
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: const Color(0xFF16283A),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Image.asset('assets/images/tinynav.png'),
+          ),
+          const SizedBox(width: 14),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'TinyNav Console',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFFE8F2FF),
+                    letterSpacing: -0.2,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Visual Navigation Module',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF9CB0C5),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -224,13 +296,24 @@ class _MenuCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(16),
+      color: const Color(0xFF111A24),
+      borderRadius: BorderRadius.circular(18),
       child: InkWell(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(18),
         onTap: onTap,
-        child: Padding(
+        child: Ink(
           padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: const Color(0xFF2A3B4D)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x10000000),
+                blurRadius: 10,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
           child: Row(
             children: [
               Container(
@@ -272,13 +355,21 @@ class _MenuCard extends StatelessWidget {
                     Text(subtitle,
                         style: const TextStyle(
                             fontSize: 12,
-                            color: Color(0xFF9E9E9E),
-                            fontWeight: FontWeight.w400)),
+                            color: Color(0xFF9AAFC4),
+                            fontWeight: FontWeight.w500)),
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right_rounded,
-                  color: Color(0xFFBDBDBD), size: 22),
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A2532),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: const Icon(Icons.chevron_right_rounded,
+                    color: Color(0xFFA9BDCF), size: 20),
+              ),
             ],
           ),
         ),
@@ -298,34 +389,42 @@ class _QuickStatusCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: const Color(0xFF111A24),
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF2A3B4D)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x10000000),
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('Quick Status',
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13,
-                  color: Color(0xFF9E9E9E))),
+                  color: Color(0xFF9FB0C3))),
           const SizedBox(height: 12),
           Row(
             children: [
               _StatItem(
                 label: 'State',
                 value: status.rawState ?? '—',
-                color: const Color(0xFF2B3A42),
+                color: const Color(0xFF7BD8FF),
               ),
               const SizedBox(width: 12),
               _StatItem(
                 label: 'Bag',
                 value: status.bagStatus ?? '—',
-                color: const Color(0xFF4A90D9),
+                color: const Color(0xFF7BD8FF),
               ),
               const SizedBox(width: 12),
               _StatItem(
                 label: 'Map',
                 value: status.mapStatus ?? '—',
-                color: const Color(0xFF45C95A),
+                color: const Color(0xFF7BD8FF),
               ),
             ],
           ),
@@ -347,7 +446,7 @@ class _StatItem extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.08),
+          color: const Color(0xFF1A2532),
           borderRadius: BorderRadius.circular(10),
         ),
         child: Column(
@@ -355,11 +454,11 @@ class _StatItem extends StatelessWidget {
           children: [
             Text(label,
                 style: TextStyle(
-                    fontSize: 10, color: color, fontWeight: FontWeight.w600)),
+                    fontSize: 10, color: Color(0xFF9FB0C3), fontWeight: FontWeight.w600)),
             const SizedBox(height: 3),
             Text(value,
                 style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600,
+                    fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFFE8F2FF),
                     overflow: TextOverflow.ellipsis),
                 maxLines: 1),
           ],
