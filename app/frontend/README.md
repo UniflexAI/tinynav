@@ -7,7 +7,7 @@ Flutter Web / Android / iOS app for controlling the TinyNav visual navigation mo
 ```bash
 cd /tinynav/app/frontend
 flutter pub get
-flutter build web --release
+flutter build web --release --no-web-resources-cdn
 uv run python -m http.server 8080 --directory build/web
 ```
 
@@ -31,7 +31,7 @@ Then:
 ```bash
 cd app/frontend
 flutter pub get
-flutter build web --release
+flutter build web --release --no-web-resources-cdn
 ```
 
 ---
