@@ -23,8 +23,15 @@ jobs:
       - name: Perform Git LFS checkout
         run: git lfs checkout
 
-      - name: Build image from Dockerfile
-        run: docker build -t tinynav:dockerfile-smoke -f Dockerfile .
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: tinynav:dockerfile-smoke
 
       - name: Import check in built image
         run: |
@@ -55,8 +62,15 @@ jobs:
       - name: Perform Git LFS checkout
         run: git lfs checkout
 
-      - name: Build image from Dockerfile
-        run: docker build -t tinynav:dockerfile-smoke -f Dockerfile .
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          load: true
+          tags: tinynav:dockerfile-smoke
 
       - name: Import check in built image
         run: |
