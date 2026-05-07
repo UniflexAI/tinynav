@@ -6,7 +6,6 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
-import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
@@ -146,32 +145,12 @@ class MapPoiCreateRequest(BaseModel):
     position: list[float]  # [x, y, z]
 
 
-def _snap_poi_z_to_map(path: str, position: list[float]) -> list[float]:
-    """Keep the clicked x/y and choose a z that is valid in the occupancy grid.
-
-    The map preview is 2-D, so the frontend sends z=0.0. If 0.0 is outside the
-    map's z range (or lands on an occupied voxel), map_node can fail before it
-    finds a path. Snap only z to the nearest non-occupied voxel in the clicked
-    x/y column, preserving x/y exactly.
-    """
+def _poi_position_with_robot_z(position: list[float]) -> list[float]:
     x, y, z = [float(v) for v in position]
-    try:
-        grid = np.load(os.path.join(path, 'occupancy_grid.npy'))
-        meta = np.load(os.path.join(path, 'occupancy_meta.npy'))
-        origin_x, origin_y, origin_z, resolution = [float(v) for v in meta[:4]]
-        x_idx = int((x - origin_x) / resolution)
-        y_idx = int((y - origin_y) / resolution)
-        if not (0 <= x_idx < grid.shape[0] and 0 <= y_idx < grid.shape[1]):
-            return [x, y, z]
-
-        desired_z_idx = int(round((z - origin_z) / resolution))
-        z_indices = np.arange(grid.shape[2])
-        free_z = z_indices[grid[x_idx, y_idx, :] != 2]
-        candidates = free_z if len(free_z) > 0 else z_indices
-        z_idx = int(candidates[np.argmin(np.abs(candidates - desired_z_idx))])
-        return [x, y, origin_z + z_idx * resolution]
-    except Exception:
-        return [x, y, z]
+    node = runner.node
+    if node is not None and node.current_pose is not None:
+        z = float(node.current_pose.get('z', z))
+    return [x, y, z]
 
 
 @router.post('/preview/{map_name}/pois')
@@ -179,7 +158,7 @@ def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
     path = _resolve_map_path(map_name)
     if len(req.position) != 3:
         raise HTTPException(400, 'position must be [x, y, z]')
-    position = _snap_poi_z_to_map(path, req.position)
+    position = _poi_position_with_robot_z(req.position)
     pois_file = os.path.join(path, 'pois.json')
     pois: dict = {}
     if os.path.exists(pois_file):
