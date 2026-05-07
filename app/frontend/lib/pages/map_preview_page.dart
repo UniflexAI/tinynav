@@ -161,6 +161,7 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
   Future<void> _addPoi(Offset imagePixel) async {
     final world = _pixelToWorld(imagePixel);
     final ctrl = TextEditingController();
+    final zCtrl = TextEditingController(text: '0.0');
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -176,8 +177,17 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
               textCapitalization: TextCapitalization.sentences,
             ),
             const SizedBox(height: 8),
+            TextField(
+              controller: zCtrl,
+              decoration: const InputDecoration(labelText: 'Z', hintText: 'e.g. 1.6'),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+                signed: true,
+              ),
+            ),
+            const SizedBox(height: 8),
             Text(
-              '(${world.dx.toStringAsFixed(2)}, ${world.dy.toStringAsFixed(2)})',
+              'x=${world.dx.toStringAsFixed(2)}, y=${world.dy.toStringAsFixed(2)}',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ],
@@ -189,10 +199,20 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
       ),
     );
     if (ok != true || ctrl.text.trim().isEmpty) return;
+    final z = double.tryParse(zCtrl.text.trim());
+    if (z == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Invalid Z value'),
+          backgroundColor: Colors.red,
+        ));
+      }
+      return;
+    }
     try {
       await ref.read(dioProvider).post('/map/preview/${widget.mapName}/pois', data: {
         'name': ctrl.text.trim(),
-        'position': [world.dx, world.dy, 0.0],
+        'position': [world.dx, world.dy, z],
       });
       ref.invalidate(mapFileInfoProvider(widget.mapName));
     } on DioException catch (e) {
