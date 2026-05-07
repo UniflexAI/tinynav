@@ -789,9 +789,16 @@ class BackendNode(Ros2NodeManager):
         if self._sensor_mode == 'looper':
             _env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-        self.processes['perception'] = self._launch_proc(
-            'perception',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+        if self._sensor_mode == 'looper':
+            source_name = 'looper_bridge'
+            source_cmd = ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py']
+        else:
+            source_name = 'perception'
+            source_cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+
+        self.processes[source_name] = self._launch_proc(
+            source_name,
+            source_cmd,
             env=_env,
         )
         self.processes['build_map'] = self._launch_proc_tee(
