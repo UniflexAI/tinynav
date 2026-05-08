@@ -18,7 +18,6 @@ from codetiming import Timer
 import os
 import argparse
 import sys
-import heapq
 from collections import deque
 import json
 
@@ -366,12 +365,7 @@ class BagPlayer(Node):
         self._publish_ahead_limit_ns = int(1.0 * 1e9)
         self._stall_cycles = 0
         self._stall_cycle_limit = 5000
-        self._no_odom_bootstrap_limit_ns = int(0.5 * 1e9)
         self._bootstrap_header_start_ns = None
-        self._pending_message = None  # (topic, serialized_msg, bag_timestamp_ns, msg, msg_timestamp_ns)
-        self._schedule_heap = []  # (msg_timestamp_ns, seq, topic, serialized_msg, bag_timestamp_ns, msg)
-        self._schedule_seq = 0
-        self._schedule_lookahead = 256
 
         self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
         bag_name = os.path.basename(os.path.normpath(bag_uri)) or "bag"
@@ -498,28 +492,6 @@ class BagPlayer(Node):
         self._aligned_queue.append(
             (topic, serialized_msg, int(bag_timestamp_ns), msg, int(msg_timestamp_ns))
         )
-
-    def _fill_schedule_buffer(self):
-        while len(self._schedule_heap) < self._schedule_lookahead and self._reader.has_next():
-            topic, serialized_msg, bag_timestamp_ns = self._reader.read_next()
-            pub_and_type = self._topic_publishers.get(topic)
-            if pub_and_type is None:
-                continue
-            _, msg_type = pub_and_type
-            msg = deserialize_message(serialized_msg, msg_type)
-            msg_timestamp_ns = self._message_timestamp_ns(msg, int(bag_timestamp_ns))
-            heapq.heappush(
-                self._schedule_heap,
-                (
-                    int(msg_timestamp_ns),
-                    self._schedule_seq,
-                    topic,
-                    serialized_msg,
-                    int(bag_timestamp_ns),
-                    msg,
-                ),
-            )
-            self._schedule_seq += 1
 
     def _read_next_into_topic_buffer(self):
         if self._reader_exhausted:
