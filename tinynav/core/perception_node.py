@@ -262,20 +262,6 @@ class PerceptionNode(Node):
         if self.input_aligner_seen_stereo:
             self.input_aligner.dispatchMessages()
 
-    def left_raw_callback_debug(self, msg):
-        self.left_raw_count_debug += 1
-        self.left_raw_last_stamp_debug = stamp2second(msg.header.stamp)
-        self.logger.debug(
-            f"left_raw_callback_debug stamp2second={self.left_raw_last_stamp_debug:.9f}"
-        )
-
-    def right_raw_callback_debug(self, msg):
-        self.right_raw_count_debug += 1
-        self.right_raw_last_stamp_debug = stamp2second(msg.header.stamp)
-        self.logger.debug(
-            f"right_raw_callback_debug stamp2second={self.right_raw_last_stamp_debug:.9f}"
-        )
-
     def images_callback(self, left_msg, right_msg):
         self.logger.debug(
             "images_callback stamp2second left=%.9f right=%.9f"
@@ -284,8 +270,6 @@ class PerceptionNode(Node):
                 stamp2second(right_msg.header.stamp),
             )
         )
-        self.ats_pair_count_debug += 1
-        self.ats_pair_last_stamp_debug = stamp2second(left_msg.header.stamp)
         stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
         self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
         self.input_aligner_seen_stereo = True

@@ -544,28 +544,7 @@ class BagPlayer(Node):
         pub, _ = pub_and_type
 
         self._publish_percent_from_timestamp(int(timestamp_ns))
-        header_stamp_sec = ""
-        header_stamp_nanosec = ""
-        header_timestamp_s = ""
-        if hasattr(msg, "header") and hasattr(msg.header, "stamp"):
-            header_stamp_sec = int(msg.header.stamp.sec)
-            header_stamp_nanosec = int(msg.header.stamp.nanosec)
-            # Keep the same conversion logic as perception_node.stamp2second.
-            header_timestamp_s = np.int64(header_stamp_sec) + np.int64(header_stamp_nanosec) * 1e-9
-        try:
-            if topic in (
-                "/camera/camera/infra1/image_rect_raw",
-                "/camera/camera/infra2/image_rect_raw",
-            ):
-                self.get_logger().info(
-                    f"BagPlayer publish {topic} timestamp: {header_timestamp_s}"
-                )
-            pub.publish(msg)
-        except Exception as e:
-            self.get_logger().error(
-                f"Failed to publish topic={topic} bag_ts={timestamp_ns} header_ts={msg_timestamp_ns}: {e}"
-            )
-            return True
+        pub.publish(msg)
 
         # Publish /clock with the same timestamp (for use_sim_time)
         if self._clock_pub is not None:
