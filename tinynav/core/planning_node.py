@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from numba import njit
 import message_filters
 from rclpy.time import Time
+from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
@@ -184,35 +185,48 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
-    num_samples=15, duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    num_samples=11, duration=2.0, dt=0.1,
+    acc_std=0.00001, omega_y_std_deg=20.0,
+    init_p=np.zeros(3), init_v=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
-    """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
-    vx_max = 0.5
-    n_vx = max(3, int(num_samples / 2))
-    vx_samples = np.linspace(0.0, vx_max, n_vx)
-    omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
+    max_acc = 0.2
+    acc_samples = np.linspace(-max_acc, max_acc, int(num_samples / 2))
+    max_omega = np.pi / 8
+    omega_y_samples = np.linspace(-max_omega, max_omega, num_samples)
 
-    num_samples = len(vx_samples) * len(omega_y_samples)
+    num_samples = len(acc_samples) * len(omega_y_samples)
 
     trajectories = np.empty((num_samples, num_steps, 7))
     params = np.empty((num_samples, 2))
 
     k = -1
-    for i_vx in range(len(vx_samples)):
+    for i_acc in range(len(acc_samples)):
         for i_omega in range(len(omega_y_samples)):
             k += 1
-            vx = vx_samples[i_vx]
+            dv = acc_samples[i_acc]
             omega_y = omega_y_samples[i_omega]
             p = init_p.copy()
+            v_world = init_v.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
             for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+                v_world = (q @ dq) @ q.T @ v_world
                 q = q @ dq
-                v_world = q @ np.array([0.0, 0.0, vx])
+
+                acc_body = q.T @ v_world
+                norm_val = np.linalg.norm(acc_body)
+                if norm_val > 1e-3:
+                    acc_body = acc_body / norm_val
+                else:
+                    acc_body = np.array([0.0, 0.0, 0.0])
+                acc_body = acc_body * dv
+
+                acc_world = q @ acc_body
+                v_world += acc_world * dt
+                v_world = np.clip(v_world, -0.5, 0.5)
                 p += v_world * dt
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
@@ -220,10 +234,9 @@ def generate_trajectory_library_3d(
             for i in range(num_steps):
                 traj[i, 2] = traj[0, 2]
             trajectories[k] = traj
-            params[k, 0] = vx
+            params[k, 0] = dv
             params[k, 1] = omega_y
     return trajectories, params
-
 
 def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
@@ -366,7 +379,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
@@ -386,6 +399,7 @@ class PlanningNode(Node):
         self.current_pose = None  # Store the latest pose from odometry
 
         self.smoothed_velocity = 0.0
+        self.dt = 0.1
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -592,11 +606,14 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+            v_dir = T[:3, :3] @ np.array([0, 0, 1])
+            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
+            init_v = v_dir * float(magnitude)
             trajectories, params = generate_trajectory_library_3d(
-                init_p=init_p, init_q=init_q
+                init_p=init_p, init_v=init_v, init_q=init_q, dt=self.dt
             )
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
-                init_p=init_p, init_q=init_q
+                duration=2.0, dt=self.dt, init_p=init_p, init_q=init_q
             )
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
@@ -646,11 +663,13 @@ class PlanningNode(Node):
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 return
 
+            base_time = Time.from_msg(depth_msg.header.stamp)
             for i in top_indices:
-                for j in range(0, len(trajectories[i]), 10):
+                for j in range(0, len(trajectories[i]), 2):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
                     pose = PoseStamped()
                     pose.header = depth_msg.header
+                    pose.header.stamp = (base_time + Duration(seconds=float(j) * self.dt)).to_msg()
                     pose.pose.position.x = x
                     pose.pose.position.y = y
                     pose.pose.position.z = z
