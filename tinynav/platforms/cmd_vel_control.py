@@ -47,7 +47,8 @@ class CmdVelControlNode(Node):
         self.path_filter_tau = 0.30
         self.lookahead_steps = 1
         # Static-friction compensation: very small vx often cannot move the robot.
-        self.min_effective_linear_speed = 0.2
+        self.min_effective_linear_speed = 0.1
+        self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
 
@@ -96,20 +97,39 @@ class CmdVelControlNode(Node):
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
 
-        # Acceleration limiting for smoother control.
+        out = Twist()
+        out.linear.y = 0.0
+
+        # Reverse is a predefined planner vocabulary: straight back at fixed speed.
+        # Do not smooth or re-lock it here; just pass it through while stale/paused guards still work.
+        if target_cmd.linear.x < 0.0:
+            out.linear.x = target_cmd.linear.x
+            out.angular.z = 0.0
+            self.cmd_pub.publish(out)
+            self.prev_cmd = out
+            return
+
+        # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
         max_dv = self.max_linear_acc * dt
         max_dw = self.max_angular_acc * dt
-        out = Twist()
-        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
+        # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
+        prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
+        out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
         out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
-        out.linear.y = 0.0
-        # Snap to min effective speed only when starting from standstill — avoids locking at min speed while decelerating.
-        if abs(out.linear.x) < 0.01:
+
+        # Linear x: robot cannot execute tiny non-zero speeds reliably.
+        # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
+        if 0.0 < out.linear.x < self.min_effective_linear_speed:
+            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
+        elif abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
-        elif 0 < out.linear.x < self.min_effective_linear_speed and self.prev_cmd.linear.x < 0.05:
-            out.linear.x = self.min_effective_linear_speed
-        if abs(out.angular.z) < 0.01:
-            out.angular.z = 0.0
+
+        # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
+        if 0.0 < abs(out.angular.z) < self.min_effective_angular_speed:
+            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed:
+                out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
+            else:
+                out.angular.z = 0.0
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
@@ -165,11 +185,17 @@ class CmdVelControlNode(Node):
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 
-        # Filter planner updates to reduce visible jitter from 7-10 Hz updates.
-        alpha = np.clip(self.path_period_ema / (self.path_filter_tau + self.path_period_ema), 0.15, 0.75)
-        self.latest_cmd.linear.x = float((1.0 - alpha) * self.latest_cmd.linear.x + alpha * vx)
-        self.latest_cmd.linear.y = float(vy)
-        self.latest_cmd.angular.z = float((1.0 - alpha) * self.latest_cmd.angular.z + alpha * vyaw)
+        # Reverse comes from the predefined planner vocabulary; pass it through directly.
+        if vx < 0.0:
+            self.latest_cmd.linear.x = float(vx)
+            self.latest_cmd.linear.y = 0.0
+            self.latest_cmd.angular.z = 0.0
+        else:
+            # Filter planner updates to reduce visible jitter from 7-10 Hz updates.
+            alpha = np.clip(self.path_period_ema / (self.path_filter_tau + self.path_period_ema), 0.15, 0.75)
+            self.latest_cmd.linear.x = float((1.0 - alpha) * self.latest_cmd.linear.x + alpha * vx)
+            self.latest_cmd.linear.y = float(vy)
+            self.latest_cmd.angular.z = float((1.0 - alpha) * self.latest_cmd.angular.z + alpha * vyaw)
         age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
         self.logger.debug(
             f"cmd vx={self.latest_cmd.linear.x:.3f} vyaw={self.latest_cmd.angular.z:.3f} "
