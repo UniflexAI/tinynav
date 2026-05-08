@@ -613,6 +613,19 @@ class PlanningNode(Node):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
 
+            # Heading error to target (>90° triggers spin-first gate)
+            heading_err = 0.0
+            desired_heading = 0.0
+            if self.target_pose is not None:
+                robot_pos_2d = self.camera_to_robot_center(T)[:2]
+                to_target = self.target_pose[:2] - robot_pos_2d
+                dist_to_target = np.linalg.norm(to_target)
+                if dist_to_target > 0.1:
+                    desired_heading = np.arctan2(to_target[1], to_target[0])
+                    fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                    robot_heading = np.arctan2(fwd[1], fwd[0])
+                    heading_err = (desired_heading - robot_heading + np.pi) % (2 * np.pi) - np.pi
+
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
@@ -623,12 +636,29 @@ class PlanningNode(Node):
                 elif not should_reverse and is_backward_traj:
                         reverse_gate_penalty = 1e9
 
+                # Heading gate: target behind robot (>90°) → force spin, block forward
+                heading_gate_penalty = 0.0
+                if abs(heading_err) > np.pi / 2 and param[0] > 0:
+                    heading_gate_penalty = 1e9
+
+                # Heading alignment cost: prefer trajectories whose final heading faces the target
+                heading_cost = 0.0
+                if self.target_pose is not None:
+                    to_target_2d = self.target_pose[:2] - init_p[:2]
+                    if np.linalg.norm(to_target_2d) > 0.1:
+                        qx, qy, qz, qw = traj[-1, 3], traj[-1, 4], traj[-1, 5], traj[-1, 6]
+                        traj_fwd_x = 2.0 * (qx * qz + qw * qy)
+                        traj_fwd_y = 2.0 * (qy * qz - qw * qx)
+                        traj_heading = np.arctan2(traj_fwd_y, traj_fwd_x)
+                        traj_heading_err = (desired_heading - traj_heading + np.pi) % (2 * np.pi) - np.pi
+                        heading_cost = 30 * abs(traj_heading_err)
+
                 # regular trajectory penalty
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return score * 100000 + 100 * dist + heading_cost + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty + heading_gate_penalty
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
