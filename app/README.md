@@ -16,7 +16,7 @@ TINYNAV_DB_PATH=/tinynav/tinynav_db uv run uvicorn app.backend.main:app --host 0
 ```bash
 cd /tinynav/app/frontend
 flutter pub get
-flutter build web --release
+flutter build web --release --no-web-resources-cdn
 # Then serve build/web/ on your preferred port, e.g.:
 cd build/web && uv run python -m http.server 8080
 ```

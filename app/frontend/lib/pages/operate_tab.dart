@@ -303,57 +303,121 @@ class _LocalPlanningView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = planning;
+    final gi = p?.gridInfo;
+    final localAspectRatio =
+        (gi != null && gi.height > 0) ? gi.width / gi.height : 1.0;
+
     return Stack(
       fit: StackFit.expand,
       children: [
         Container(color: const Color(0xFF0D1117)),
-        Center(
-          child: AspectRatio(
-            aspectRatio: 1.0,
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 8.0,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  if (showEsdf && p?.esdfImage != null)
-                    Opacity(
-                      opacity: 0.85,
-                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: Center(
+            child: AspectRatio(
+              aspectRatio: localAspectRatio,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white.withOpacity(0.12), width: 1),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x55000000),
+                      blurRadius: 14,
+                      offset: Offset(0, 6),
                     ),
-                  if (showObstacle && p?.obstacleImage != null)
-                    Opacity(
-                      opacity: 0.45,
-                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                    ),
-                  if (p != null)
-                    CustomPaint(
-                      painter: LocalPlanningPainter(
-                        trajectory: p.trajectory,
-                        globalPath: p.globalPath,
-                        footprint: p.footprint,
-                        gridInfo: p.gridInfo,
-                        odomPose: p.odomPose,
-                        showTrajectory: showTrajectory,
-                        showGlobalPath: showGlobalPath,
-                        showFootprint: showFootprint,
-                        navTargetPose: p.navTargetPose,
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      const ColoredBox(color: Color(0xFF0F1621)),
+                      InteractiveViewer(
+                        minScale: 0.5,
+                        maxScale: 8.0,
+                        boundaryMargin: const EdgeInsets.all(double.infinity),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            if (showEsdf && p?.esdfImage != null)
+                              Opacity(
+                                opacity: 0.85,
+                                child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                              ),
+                            if (showObstacle && p?.obstacleImage != null)
+                              Opacity(
+                                opacity: 0.45,
+                                child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                              ),
+                            if (p != null)
+                              CustomPaint(
+                                painter: LocalPlanningPainter(
+                                  trajectory: p.trajectory,
+                                  globalPath: p.globalPath,
+                                  footprint: p.footprint,
+                                  gridInfo: p.gridInfo,
+                                  odomPose: p.odomPose,
+                                  showTrajectory: showTrajectory,
+                                  showGlobalPath: showGlobalPath,
+                                  showFootprint: showFootprint,
+                                  navTargetPose: p.navTargetPose,
+                                ),
+                              )
+                            else
+                              Center(
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withOpacity(0.45),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: Colors.white.withOpacity(0.12)),
+                                  ),
+                                  child: const Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.map_outlined, size: 40, color: Colors.white38),
+                                      SizedBox(height: 8),
+                                      Text(
+                                        'Waiting for planning data…',
+                                        style: TextStyle(
+                                          color: Colors.white70,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                      SizedBox(height: 2),
+                                      Text(
+                                        'Connect device and start local planning',
+                                        style: TextStyle(color: Colors.white38, fontSize: 11),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
-                    ),
-                  if (p == null)
-                    const Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.map_outlined, size: 48, color: Colors.white24),
-                          SizedBox(height: 8),
-                          Text('Waiting for planning data…',
-                              style: TextStyle(color: Colors.white38, fontSize: 13)),
-                        ],
+                      IgnorePointer(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                              colors: [
+                                Colors.white.withOpacity(0.04),
+                                Colors.transparent,
+                                Colors.black.withOpacity(0.08),
+                              ],
+                              stops: const [0.0, 0.35, 1.0],
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                ],
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -972,7 +1036,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
           if (selectedTopic != null && _latestFrame != null)
             GestureDetector(
               onTap: () => _showFullscreen(context),
-              child: Image.memory(_latestFrame!, fit: BoxFit.contain, gaplessPlayback: true),
+              child: Image.memory(_latestFrame!, fit: BoxFit.cover, gaplessPlayback: true),
             )
           else
             Center(
