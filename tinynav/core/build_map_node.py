@@ -19,7 +19,6 @@ import os
 import argparse
 import sys
 import heapq
-from collections import deque
 import json
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
