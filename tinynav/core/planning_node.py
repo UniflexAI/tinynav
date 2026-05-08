@@ -52,10 +52,10 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.4, width=0.3,
-    camera_x=0.35, camera_y=0.0,
+    length=0.2, width=0.2,
+    camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
+    safety_radius=0.1,
 )
 
 B2_CONFIG = RobotConfig(
@@ -379,7 +379,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry')
+        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)

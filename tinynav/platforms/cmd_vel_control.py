@@ -24,7 +24,7 @@ class CmdVelControlNode(Node):
         self._track_idx = 0
         self._last_traj_update_sec = None
 
-        self.create_subscription(Odometry, "/slam/odometry_100hz", self._odom_cb, 10)
+        self.create_subscription(Odometry, "/slam/odometry", self._odom_cb, 10)
         self.create_subscription(Path, "/planning/trajectory_path", self._traj_cb, 10)
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
@@ -137,7 +137,7 @@ class CmdVelControlNode(Node):
         cmd.angular.z = wz
         self.cmd_pub.publish(cmd)
 
-        self.logger.info("cmd v=%.3f wz=%.3f", v, wz)
+        self.logger.info(f"cmd v={v:.3f} wz={wz:.3f}")
 
     def _find_tracking_target(self, robot_pos, robot_yaw):
         if self._path_ref is None or len(self._path_ref) == 0:
