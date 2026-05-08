@@ -364,8 +364,6 @@ class BagPlayer(Node):
         self._state = "WAIT_INIT"
         self._startup_release_until_ns = None
         self._publish_ahead_limit_ns = int(1.0 * 1e9)
-        self._stall_cycles = 0
-        self._stall_cycle_limit = 5000
         self._schedule_window_ns = int(0.5 * 1e9)
         self._schedule_min_msgs = 64
 
@@ -515,17 +513,15 @@ class BagPlayer(Node):
 
         msg_timestamp_ns, _, topic, bag_timestamp_ns, msg = self._schedule_heap[0]
         if self._should_gate_message(msg_timestamp_ns):
-            self._stall_cycles += 1
-            if self._stall_cycles > self._stall_cycle_limit:
+            if self._reader_exhausted:
                 self.get_logger().warning(
-                    "BagPlayer exiting due to gating stall: "
+                    "BagPlayer exiting due to gated deadlock after reader exhausted: "
                     f"state={self._state}, stats_msg_count={self._stats_msg_count}, "
                     f"msg_ts_ns={msg_timestamp_ns}, progress_ts_ns={self._latest_perception_timestamp_ns}"
                 )
                 return False
             return True
 
-        self._stall_cycles = 0
         _, _, topic, bag_timestamp_ns, msg = heapq.heappop(self._schedule_heap)
         pub_and_type = self._topic_publishers.get(topic)
         if pub_and_type is None:
