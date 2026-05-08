@@ -11,7 +11,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage
-from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
+from message_filters import Subscriber, ApproximateTimeSynchronizer
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
@@ -39,7 +39,6 @@ from scipy.spatial.transform import Rotation as R
 from scipy.ndimage import distance_transform_edt
 
 from rclpy.executors import SingleThreadedExecutor
-from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
 from rosidl_runtime_py.utilities import get_message
@@ -371,24 +370,6 @@ class BagPlayer(Node):
         self._started = False
         self._topic_buffers = {topic: deque() for topic in self._topic_publishers.keys()}
         self._reader_exhausted = False
-        self._aligned_queue = deque()  # (topic, serialized_msg, bag_timestamp_ns, msg, msg_timestamp_ns)
-        self._aligner_meta = {}
-        self._aligner_topics = [
-            topic for topic in self._topic_publishers.keys() if topic != "/tf_static"
-        ]
-        self._aligner_filters = {topic: SimpleFilter() for topic in self._aligner_topics}
-        if self._aligner_topics:
-            self._input_aligner = InputAligner(
-                Duration(seconds=1.0),
-                *[self._aligner_filters[topic] for topic in self._aligner_topics],
-            )
-            for idx, topic in enumerate(self._aligner_topics):
-                self._input_aligner.setInputPeriod(idx, Duration(seconds=self._topic_period_s(topic)))
-                self._input_aligner.registerCallback(
-                    idx, lambda msg, topic_name=topic: self._on_aligned_message(topic_name, msg)
-                )
-        else:
-            self._input_aligner = None
 
     def _scan_bag_time_range(self, bag_uri: str, storage_id: str, serialization_format: str) -> tuple[int, int]:
         # We have not found a rosbag2_py API that exposes the bag time range directly,
@@ -455,35 +436,14 @@ class BagPlayer(Node):
         if timestamp_s < 0.0:
             return
         self._latest_perception_timestamp_ns = int(timestamp_s * 1e9)
-        self.get_logger().info(
+        self.get_logger().debug(
             f"BagPlayer /slam/data latest timestamp: {timestamp_s:.9f}"
         )
 
-    def _message_timestamp_ns(self, msg, fallback_timestamp_ns: int) -> int:
+    def _message_timestamp_ns(self, msg) -> int | None:
         if hasattr(msg, "header") and hasattr(msg.header, "stamp"):
             return int(msg.header.stamp.sec * 1e9) + int(msg.header.stamp.nanosec)
-        return int(fallback_timestamp_ns)
-
-    def _topic_period_s(self, topic: str) -> float:
-        if topic == "/camera/camera/imu":
-            return 0.005
-        if topic == "/insight/vio_20hz":
-            return 0.05
-        if topic.endswith("/image_rect_raw"):
-            return 1.0 / 30.0
-        return 0.1
-
-    def _on_aligned_message(self, topic: str, msg) -> None:
-        meta = self._aligner_meta.pop(id(msg), None)
-        if meta is None:
-            msg_timestamp_ns = self._message_timestamp_ns(msg, 0)
-            self._aligned_queue.append((topic, None, int(msg_timestamp_ns), msg, int(msg_timestamp_ns)))
-            return
-        serialized_msg, bag_timestamp_ns = meta
-        msg_timestamp_ns = self._message_timestamp_ns(msg, int(bag_timestamp_ns))
-        self._aligned_queue.append(
-            (topic, serialized_msg, int(bag_timestamp_ns), msg, int(msg_timestamp_ns))
-        )
+        return None
 
     def _read_next_into_topic_buffer(self):
         if self._reader_exhausted:
@@ -497,12 +457,17 @@ class BagPlayer(Node):
             return True
         _, msg_type = pub_and_type
         msg = deserialize_message(serialized_msg, msg_type)
-        msg_timestamp_ns = self._message_timestamp_ns(msg, int(bag_timestamp_ns))
+        msg_timestamp_ns = self._message_timestamp_ns(msg)
+        if msg_timestamp_ns is None:
+            self.get_logger().debug(
+                f"Skip topic without header stamp: {topic}"
+            )
+            return True
         if self._bootstrap_header_start_ns is None:
             self._bootstrap_header_start_ns = msg_timestamp_ns
 
-        # No-drop replay mode: do not pass through InputAligner here.
-        # Buffer every bag message directly, then publish in global min-timestamp order.
+        # No-drop replay mode: buffer every bag message directly,
+        # then publish in global min-timestamp order.
         q = self._topic_buffers.get(topic)
         if q is None:
             return True
