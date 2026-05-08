@@ -137,7 +137,9 @@ class CmdVelControlNode(Node):
         cmd.angular.z = wz
         self.cmd_pub.publish(cmd)
 
-        self.logger.info("cmd v=%.3f wz=%.3f", v, wz)
+        self.logger.info(
+            f"v_ref={v_ref:.3f} w_ref={w_ref:.3f} | cmd v={v:.3f} wz={wz:.3f}"
+        )
 
     def _find_tracking_target(self, robot_pos, robot_yaw):
         if self._path_ref is None or len(self._path_ref) == 0:

@@ -589,7 +589,7 @@ def main(args=None):
 
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(perception_node)
-    executor.add_node(imu_propagator_node)
+    # executor.add_node(imu_propagator_node)
     executor.spin()
     perception_node.destroy_node()
     imu_propagator_node.destroy_node()
