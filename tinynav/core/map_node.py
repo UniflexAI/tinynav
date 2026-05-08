@@ -696,7 +696,12 @@ class MapNode(Node):
             or poi_goal_idx[2] < 0
             or poi_goal_idx[2] >= self.occupancy_map.shape[2]
         ):
+            self.logger.warning(
+                f"Out of occupancy map: start_idx={start_idx}, "
+                f"poi_goal_idx={poi_goal_idx}, map_shape={self.occupancy_map.shape}"
+            )
             return None 
+
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
 

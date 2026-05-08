@@ -14,7 +14,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from std_msgs.msg import String
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.duration import Duration
 from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
@@ -36,7 +36,7 @@ _KEYFRAME_MIN_DISTANCE = 0.1    # unit: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 0.1 # unit: degree
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 
 def keyframe_check(T_i, T_j):
@@ -118,14 +118,27 @@ class PerceptionNode(Node):
         self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
         self.left_sub = Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw")
         self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
-        self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=10, slop=0.02)
+        self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=30, slop=0.02)
         self.ts.registerCallback(self.images_callback)
+        # Debug-only raw subscribers to separate transport reception from ATS pairing.
+        self.left_raw_sub_debug = self.create_subscription(
+            Image,
+            "/camera/camera/infra1/image_rect_raw",
+            self.left_raw_callback_debug,
+            10,
+        )
+        self.right_raw_sub_debug = self.create_subscription(
+            Image,
+            "/camera/camera/infra2/image_rect_raw",
+            self.right_raw_callback_debug,
+            10,
+        )
 
         self.input_aligner_imu_filter = SimpleFilter()
         self.input_aligner_stereo_filter = SimpleFilter()
         self.input_aligner = InputAligner(Duration(seconds=1.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
         self.input_aligner.setInputPeriod(0, Duration(seconds=0.005))
-        self.input_aligner.setInputPeriod(1, Duration(seconds=0.01))
+        self.input_aligner.setInputPeriod(1, Duration(seconds=0.033))
         self.input_aligner.registerCallback(0, self._aligned_imu_callback)
         self.input_aligner.registerCallback(1, self._aligned_stereo_callback)
         self.input_aligner_seen_imu = False
@@ -137,7 +150,10 @@ class PerceptionNode(Node):
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
-        self.stats_pub = self.create_publisher(String, "/slam/data", 10)
+        stats_qos = QoSProfile(depth=10)
+        stats_qos.reliability = ReliabilityPolicy.RELIABLE
+        stats_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.stats_pub = self.create_publisher(String, "/slam/data", stats_qos)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -161,15 +177,22 @@ class PerceptionNode(Node):
 
         self.T_imu_body_to_camera = np.array(
                             [[1, 0, 0, 0],
-                             [0, 0, -1, 0], 
+                             [0, 0, -1, 0],
                              [0, 1, 0, 0],
                              [0, 0, 0, 1]])
+        self.stats_pub.publish(String(data=json.dumps({"initialized": True, "timestamp": -1.0})))
 
-        self.imu_measurements = deque(maxlen=1000)
+        self.imu_measurements = deque(maxlen=10000)
 
         self.keyframe_queue = []
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
+        self.left_raw_count_debug = 0
+        self.right_raw_count_debug = 0
+        self.ats_pair_count_debug = 0
+        self.left_raw_last_stamp_debug = None
+        self.right_raw_last_stamp_debug = None
+        self.ats_pair_last_stamp_debug = None
 
     def info_callback(self, msg):
         if self.K is None:
@@ -199,18 +222,28 @@ class PerceptionNode(Node):
         # if the timestamp jump is too large, it means the IMU is not working properly
         if self.imu_last_received_timestamp is not None and current_timestamp - self.imu_last_received_timestamp > 0.1:
             delta_timestamp = current_timestamp - self.imu_last_received_timestamp
-            self.get_logger().warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
+            self.logger.warning(f"IMU timestamp jump {delta_timestamp} s is too large, it means the IMU is not working properly")
         self.imu_last_received_timestamp = current_timestamp
         accel_data = np.array([[imu_msg.linear_acceleration.x], [imu_msg.linear_acceleration.y], [imu_msg.linear_acceleration.z]])
         gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
     def _aligned_imu_callback(self, imu_msg):
+        self.logger.debug(
+            f"_aligned_imu_callback stamp2second={stamp2second(imu_msg.header.stamp):.9f}"
+        )
         self._process_imu_msg(imu_msg)
 
     def _aligned_stereo_callback(self, stereo_pair_msg):
         left_msg = stereo_pair_msg.left_msg
         right_msg = stereo_pair_msg.right_msg
+        self.logger.debug(
+            " _aligned_stereo_callback stamp2second left=%.9f right=%.9f"
+            % (
+                stamp2second(left_msg.header.stamp),
+                stamp2second(right_msg.header.stamp),
+            )
+        )
         image_timestamp = stamp2second(left_msg.header.stamp)
         if image_timestamp - self.last_processed_timestamp < 0.1333:
             return
@@ -220,16 +253,41 @@ class PerceptionNode(Node):
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
             processed = asyncio.run(self.process(left_msg, right_msg))
         if processed:
+            processed["timestamp"] = float(image_timestamp)
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
 
     def imu_callback(self, imu_msg):
+        self.logger.debug(f"imu_callback stamp2second={stamp2second(imu_msg.header.stamp):.9f}")
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
         if self.input_aligner_seen_stereo:
             self.input_aligner.dispatchMessages()
 
+    def left_raw_callback_debug(self, msg):
+        self.left_raw_count_debug += 1
+        self.left_raw_last_stamp_debug = stamp2second(msg.header.stamp)
+        self.logger.debug(
+            f"left_raw_callback_debug stamp2second={self.left_raw_last_stamp_debug:.9f}"
+        )
+
+    def right_raw_callback_debug(self, msg):
+        self.right_raw_count_debug += 1
+        self.right_raw_last_stamp_debug = stamp2second(msg.header.stamp)
+        self.logger.debug(
+            f"right_raw_callback_debug stamp2second={self.right_raw_last_stamp_debug:.9f}"
+        )
+
     def images_callback(self, left_msg, right_msg):
+        self.logger.debug(
+            "images_callback stamp2second left=%.9f right=%.9f"
+            % (
+                stamp2second(left_msg.header.stamp),
+                stamp2second(right_msg.header.stamp),
+            )
+        )
+        self.ats_pair_count_debug += 1
+        self.ats_pair_last_stamp_debug = stamp2second(left_msg.header.stamp)
         stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
         self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
         self.input_aligner_seen_stereo = True
@@ -322,7 +380,7 @@ class PerceptionNode(Node):
                 self.K,
                 idx_valid
             )
-            self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
+            self.logger.debug(f"Estimated T_kf_curr: \n{T_kf_curr}")
         # for new frame, we first add it as keyframe, if not, we pop it later
         self.keyframe_queue.append(
             Keyframe(
@@ -408,8 +466,8 @@ class PerceptionNode(Node):
                         kf_prev = self.keyframe_queue[i]
                         kf_curr = self.keyframe_queue[j]
 
-                    self.logger.debug("timestamp prev: ", kf_prev.timestamp)
-                    self.logger.debug("timestamp curr: ", kf_curr.timestamp)
+                    self.logger.debug(f"timestamp prev:  {kf_prev.timestamp}")
+                    self.logger.debug(f"timestamp curr:  {kf_curr.timestamp}")
                     with Timer(name="[cached result[1.1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
                     with Timer(name="[cached result[1.2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
@@ -438,7 +496,6 @@ class PerceptionNode(Node):
 
                         depth = kf_curr.depth
 
-                        logging.debug(f"match cnt: {len(kpt_pre)}")
                         state, _, _, _, inliers = estimate_pose(
                             kpt_pre,
                             kpt_cur,
@@ -454,7 +511,7 @@ class PerceptionNode(Node):
                         else:
                             for idx in range(len(match_indices)):
                                 match_indices[idx] = -1
-                            self.logger.warning(f"match cnt: {len(kpt_pre)} is too small, {len(inlier_set)} inliers.enable velocity constraint")
+                            self.logger.warning(f"keyframe {i} match cnt: {len(kpt_pre)},but PnP {len(inlier_set)} inliers.enable velocity constraint")
                             velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
                             graph.add(velocity_constraint)
 
@@ -466,7 +523,7 @@ class PerceptionNode(Node):
                                 idx_curr = j * _M + match_idx
                                 uf_union(idx_prev, idx_curr, uf)
                                 count += 1
-                        self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
+                        self.logger.debug(f"{i} match {j} {len(kpt_pre)}, Pnp filter count: {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 tracks = uf_all_sets_list(uf, min_component_size=2)
@@ -557,9 +614,18 @@ class PerceptionNode(Node):
             last_keyframe = self.keyframe_queue[-2]
             current_keyframe = self.keyframe_queue[-1]
             if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
+                self.logger.info(
+                    f"Publish keyframe timestamp: {stamp2second(left_msg.header.stamp):.9f}"
+                )
                 self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera", current_keyframe.velocity))
                 self.keyframe_image_pub.publish(left_msg)
                 self.keyframe_depth_pub.publish(depth_msg)
+
+                T_ij = se3_inv(last_keyframe.pose) @ current_keyframe.pose
+                t_diff = np.linalg.norm(T_ij[:3, 3])
+                if t_diff > 2.0:
+                    self.logger.debug(f"keyframe jumps {t_diff} m, exit")
+                    exit(0)
             else:
                 self.keyframe_queue.pop()
 
@@ -582,12 +648,18 @@ def main(args=None):
     rclpy.init(args=args)
     parser = argparse.ArgumentParser(description='Run TinyNav perception node.')
     parser.add_argument('--verbose_timer', action='store_true', help='Print timing for key pipeline stages.')
+    parser.add_argument('--enable_odom_log', action='store_true', help='Write logs to odom.log file.')
+    parser.add_argument('--odom_log_path', type=str, default='odom.log', help='Path to odom log file.')
     parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
+    if parsed_args.enable_odom_log:
+        file_handler = logging.FileHandler(parsed_args.odom_log_path)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(filename)s:%(lineno)d - %(message)s'))
+        logging.getLogger().addHandler(file_handler)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
     imu_propagator_node = ImuPropagatorNode()
 
-    executor = rclpy.executors.MultiThreadedExecutor()
+    executor = rclpy.executors.MultiThreadedExecutor(2)
     executor.add_node(perception_node)
     executor.add_node(imu_propagator_node)
     executor.spin()
@@ -596,5 +668,5 @@ def main(args=None):
     rclpy.shutdown()
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     main()

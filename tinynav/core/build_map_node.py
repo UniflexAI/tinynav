@@ -2,7 +2,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 import numpy as np
 
 from sensor_msgs.msg import PointCloud2
@@ -11,13 +11,16 @@ from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage
-from message_filters import Subscriber, ApproximateTimeSynchronizer
+from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
 import os
 import argparse
 import sys
+import heapq
+from collections import deque
+import json
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
@@ -37,6 +40,8 @@ from scipy.spatial.transform import Rotation as R
 from scipy.ndimage import distance_transform_edt
 
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
 from rosidl_runtime_py.utilities import get_message
 from rosgraph_msgs.msg import Clock
@@ -346,8 +351,56 @@ class BagPlayer(Node):
         # /clock publisher (for use_sim_time)
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
         self._mapping_percent_pub = self.create_publisher(Float32, "/mapping/percent", 10)
+        stats_qos = QoSProfile(depth=10)
+        stats_qos.reliability = ReliabilityPolicy.RELIABLE
+        stats_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self._stats_progress_sub = self.create_subscription(
+            String, "/slam/data", self._stats_progress_callback, stats_qos
+        )
+
+        self._stats_msg_count = 0
+        self._latest_perception_timestamp_ns = None
+        self._perception_initialized = False
+        self._use_stats_pacing = False
+        self._startup_release_until_ns = None
+        self._publish_ahead_limit_ns = int(1.0 * 1e9)
+        self._no_odom_bootstrap_limit_ns = int(0.5 * 1e9)
+        self._bootstrap_header_start_ns = None
+        self._pending_message = None  # (topic, serialized_msg, bag_timestamp_ns, msg, msg_timestamp_ns)
+        self._schedule_heap = []  # (msg_timestamp_ns, seq, topic, serialized_msg, bag_timestamp_ns, msg)
+        self._schedule_seq = 0
+        self._schedule_lookahead = 256
 
         self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
+        bag_name = os.path.basename(os.path.normpath(bag_uri)) or "bag"
+        self._topic_timestamp_log_path = os.path.join("/tinynav", f"{bag_name}_topic_timestamps.log")
+        self._topic_timestamp_log_file = open(self._topic_timestamp_log_path, "w", encoding="utf-8")
+        self._topic_timestamp_log_file.write(
+            "topic,bag_timestamp_ns,header_stamp_sec,header_stamp_nanosec,header_timestamp_s\n"
+        )
+        self._topic_timestamp_log_file.flush()
+        self.get_logger().info(f"BagPlayer topic timestamp log: {self._topic_timestamp_log_path}")
+        self._started = False
+        self._topic_buffers = {topic: deque() for topic in self._topic_publishers.keys()}
+        self._reader_exhausted = False
+        self._aligned_queue = deque()  # (topic, serialized_msg, bag_timestamp_ns, msg, msg_timestamp_ns)
+        self._aligner_meta = {}
+        self._aligner_topics = [
+            topic for topic in self._topic_publishers.keys() if topic != "/tf_static"
+        ]
+        self._aligner_filters = {topic: SimpleFilter() for topic in self._aligner_topics}
+        if self._aligner_topics:
+            self._input_aligner = InputAligner(
+                Duration(seconds=1.0),
+                *[self._aligner_filters[topic] for topic in self._aligner_topics],
+            )
+            for idx, topic in enumerate(self._aligner_topics):
+                self._input_aligner.setInputPeriod(idx, Duration(seconds=self._topic_period_s(topic)))
+                self._input_aligner.registerCallback(
+                    idx, lambda msg, topic_name=topic: self._on_aligned_message(topic_name, msg)
+                )
+        else:
+            self._input_aligner = None
 
     def _scan_bag_time_range(self, bag_uri: str, storage_id: str, serialization_format: str) -> tuple[int, int]:
         # We have not found a rosbag2_py API that exposes the bag time range directly,
@@ -392,41 +445,232 @@ class BagPlayer(Node):
             self._last_percent_log_time = now
 
     def _publish_percent_from_timestamp(self, timestamp_ns: int) -> None:
-        percent = 100.0 * (timestamp_ns - self.start_timestamp_ns) / (self.end_timestamp_ns - self.start_timestamp_ns)
+        denom = self.end_timestamp_ns - self.start_timestamp_ns
+        if denom <= 0:
+            self._publish_percent(100.0)
+            return
+        percent = 100.0 * (timestamp_ns - self.start_timestamp_ns) / denom
         self._publish_percent(percent)
+
+    def _stats_progress_callback(self, stats_msg: String):
+        payload = json.loads(stats_msg.data)
+        self._stats_msg_count += 1
+        if bool(payload.get("initialized", False)):
+            self._perception_initialized = True
+        if self._stats_msg_count >= 2:
+            self._use_stats_pacing = True
+
+        timestamp_s = payload.get("timestamp", None)
+        if timestamp_s is None:
+            return
+        timestamp_s = float(timestamp_s)
+        if timestamp_s < 0.0:
+            return
+        self._latest_perception_timestamp_ns = int(timestamp_s * 1e9)
+        self.get_logger().info(
+            f"BagPlayer /slam/data latest timestamp: {timestamp_s:.9f}"
+        )
+
+    def _message_timestamp_ns(self, msg, fallback_timestamp_ns: int) -> int:
+        if hasattr(msg, "header") and hasattr(msg.header, "stamp"):
+            return int(msg.header.stamp.sec * 1e9) + int(msg.header.stamp.nanosec)
+        return int(fallback_timestamp_ns)
+
+    def _topic_period_s(self, topic: str) -> float:
+        if topic == "/camera/camera/imu":
+            return 0.005
+        if topic == "/insight/vio_20hz":
+            return 0.05
+        if topic.endswith("/image_rect_raw"):
+            return 1.0 / 30.0
+        return 0.1
+
+    def _on_aligned_message(self, topic: str, msg) -> None:
+        meta = self._aligner_meta.pop(id(msg), None)
+        if meta is None:
+            msg_timestamp_ns = self._message_timestamp_ns(msg, 0)
+            self._aligned_queue.append((topic, None, int(msg_timestamp_ns), msg, int(msg_timestamp_ns)))
+            return
+        serialized_msg, bag_timestamp_ns = meta
+        msg_timestamp_ns = self._message_timestamp_ns(msg, int(bag_timestamp_ns))
+        self._aligned_queue.append(
+            (topic, serialized_msg, int(bag_timestamp_ns), msg, int(msg_timestamp_ns))
+        )
+
+    def _fill_schedule_buffer(self):
+        while len(self._schedule_heap) < self._schedule_lookahead and self._reader.has_next():
+            topic, serialized_msg, bag_timestamp_ns = self._reader.read_next()
+            pub_and_type = self._topic_publishers.get(topic)
+            if pub_and_type is None:
+                continue
+            _, msg_type = pub_and_type
+            msg = deserialize_message(serialized_msg, msg_type)
+            msg_timestamp_ns = self._message_timestamp_ns(msg, int(bag_timestamp_ns))
+            heapq.heappush(
+                self._schedule_heap,
+                (
+                    int(msg_timestamp_ns),
+                    self._schedule_seq,
+                    topic,
+                    serialized_msg,
+                    int(bag_timestamp_ns),
+                    msg,
+                ),
+            )
+            self._schedule_seq += 1
+
+    def _ready_to_start(self) -> bool:
+        required_topics = [
+            "/camera/camera/imu",
+            "/camera/camera/infra1/image_rect_raw",
+            "/camera/camera/infra2/image_rect_raw",
+            "/camera/camera/infra2/camera_info",
+        ]
+        missing = []
+        for topic in required_topics:
+            pub_and_type = self._topic_publishers.get(topic)
+            if pub_and_type is None:
+                continue
+            pub, _ = pub_and_type
+            if pub.get_subscription_count() <= 0:
+                missing.append(topic)
+        if missing:
+            self.get_logger().info(
+                "BagPlayer waiting subscribers before start: %s"
+                % ", ".join(missing)
+            )
+            return False
+        return True
+
+    def _read_next_into_topic_buffer(self):
+        if self._reader_exhausted:
+            return False
+        if not self._reader.has_next():
+            self._reader_exhausted = True
+            return False
+        topic, serialized_msg, bag_timestamp_ns = self._reader.read_next()
+        pub_and_type = self._topic_publishers.get(topic)
+        if pub_and_type is None:
+            return True
+        _, msg_type = pub_and_type
+        msg = deserialize_message(serialized_msg, msg_type)
+        msg_timestamp_ns = self._message_timestamp_ns(msg, int(bag_timestamp_ns))
+        if self._bootstrap_header_start_ns is None:
+            self._bootstrap_header_start_ns = msg_timestamp_ns
+
+        # No-drop replay mode: do not pass through InputAligner here.
+        # Buffer every bag message directly, then publish in global min-timestamp order.
+        q = self._topic_buffers.get(topic)
+        if q is None:
+            return True
+        q.append(
+            (topic, serialized_msg, int(bag_timestamp_ns), msg, int(msg_timestamp_ns))
+        )
+        return True
+
+    def _fill_topic_heads(self):
+        while True:
+            missing = [topic for topic, q in self._topic_buffers.items() if len(q) == 0]
+            if not missing:
+                return
+            if self._reader_exhausted:
+                return
+            if not self._read_next_into_topic_buffer():
+                return
 
     def play_next(self) -> bool:
         """
         Publish the next message from the bag.
         Returns False when there are no more messages.
         """
-        if not self._reader.has_next():
+        if not self._started:
+            if not self._perception_initialized:
+                return True
+            self._started = True
+            self.get_logger().info("BagPlayer start publishing after perception init signal.")
+
+        self._fill_topic_heads()
+        candidate_heads = []
+        for topic, q in self._topic_buffers.items():
+            if q:
+                _, _, bag_timestamp_ns, _, msg_timestamp_ns = q[0]
+                candidate_heads.append((msg_timestamp_ns, bag_timestamp_ns, topic))
+        if not candidate_heads:
             return False
 
-        topic, serialized_msg, timestamp_ns = self._reader.read_next()
-        self._publish_percent_from_timestamp(int(timestamp_ns))
+        selected_msg_ts_ns, _, selected_topic = min(candidate_heads, key=lambda x: x[0])
 
-        # Find publisher + msg type for this topic
+        if self._startup_release_until_ns is None:
+            self._startup_release_until_ns = selected_msg_ts_ns + int(1.0 * 1e9)
+        if self._stats_msg_count < 2 and selected_msg_ts_ns > self._startup_release_until_ns:
+            return True
+
+        if self._use_stats_pacing:
+            progress_ts_ns = self._latest_perception_timestamp_ns
+            if progress_ts_ns is not None and selected_msg_ts_ns > progress_ts_ns + self._publish_ahead_limit_ns:
+                return True
+
+        topic, serialized_msg, timestamp_ns, msg, msg_timestamp_ns = self._topic_buffers[selected_topic].popleft()
         pub_and_type = self._topic_publishers.get(topic)
         if pub_and_type is None:
             # No publisher (should not really happen, but don't crash playback)
             self.get_logger().warn(f"No publisher for topic '{topic}'")
             return True
 
-        pub, msg_type = pub_and_type
+        pub, _ = pub_and_type
 
-        # Deserialize and publish actual message
-        msg = deserialize_message(serialized_msg, msg_type)
-        pub.publish(msg)
+        try:
+            self._publish_percent_from_timestamp(int(timestamp_ns))
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to publish percent for topic={topic} bag_ts={timestamp_ns}: {e}"
+            )
+        header_stamp_sec = ""
+        header_stamp_nanosec = ""
+        header_timestamp_s = ""
+        if hasattr(msg, "header") and hasattr(msg.header, "stamp"):
+            header_stamp_sec = int(msg.header.stamp.sec)
+            header_stamp_nanosec = int(msg.header.stamp.nanosec)
+            # Keep the same conversion logic as perception_node.stamp2second.
+            header_timestamp_s = np.int64(header_stamp_sec) + np.int64(header_stamp_nanosec) * 1e-9
+        try:
+            self._topic_timestamp_log_file.write(
+                f"{topic},{int(timestamp_ns)},{header_stamp_sec},{header_stamp_nanosec},{header_timestamp_s}\n"
+            )
+            self._topic_timestamp_log_file.flush()
+            if topic in (
+                "/camera/camera/infra1/image_rect_raw",
+                "/camera/camera/infra2/image_rect_raw",
+            ):
+                self.get_logger().info(
+                    f"BagPlayer publish {topic} timestamp: {header_timestamp_s}"
+                )
+            pub.publish(msg)
+        except Exception as e:
+            self.get_logger().error(
+                f"Failed to publish topic={topic} bag_ts={timestamp_ns} header_ts={msg_timestamp_ns}: {e}"
+            )
+            return True
 
         # Publish /clock with the same timestamp (for use_sim_time)
         if self._clock_pub is not None:
-            clock_msg = Clock()
-            clock_msg.clock.sec = int(timestamp_ns // 1_000_000_000)
-            clock_msg.clock.nanosec = int(timestamp_ns % 1_000_000_000)
-            self._clock_pub.publish(clock_msg)
+            try:
+                clock_msg = Clock()
+                clock_msg.clock.sec = int(timestamp_ns // 1_000_000_000)
+                clock_msg.clock.nanosec = int(timestamp_ns % 1_000_000_000)
+                self._clock_pub.publish(clock_msg)
+            except Exception as e:
+                self.get_logger().error(
+                    f"Failed to publish /clock for bag_ts={timestamp_ns}: {e}"
+                )
 
         return True
+
+    def destroy_node(self):
+        if hasattr(self, "_topic_timestamp_log_file") and self._topic_timestamp_log_file is not None:
+            self._topic_timestamp_log_file.close()
+            self._topic_timestamp_log_file = None
+        super().destroy_node()
 
 class BuildMapNode(Node):
     def __init__(self, map_save_path:str, verbose_timer: bool = True):
@@ -470,6 +714,7 @@ class BuildMapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
+        self._processed_keyframe_timestamps = set()
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
@@ -575,13 +820,25 @@ class BuildMapNode(Node):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
             keyframe_depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
+            if keyframe_image_timestamp in self._processed_keyframe_timestamps:
+                self.get_logger().warning(
+                    f"Skip duplicate keyframe timestamp: {keyframe_image_timestamp}"
+                )
+                return
+            keyframe_index = len(self.odom) + 1
+            self.get_logger().info(
+                f"Processing keyframe #{keyframe_index}: ts_ns={keyframe_image_timestamp}"
+            )
             if keyframe_image_timestamp != keyframe_odom_timestamp or keyframe_image_timestamp != keyframe_depth_timestamp:
                 self.get_logger().error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
+                return
 
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
+
+        self._processed_keyframe_timestamps.add(keyframe_image_timestamp)
 
         with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
