@@ -18,6 +18,7 @@ from codetiming import Timer
 import os
 import argparse
 import sys
+import heapq
 from collections import deque
 import json
 
@@ -360,15 +361,17 @@ class BagPlayer(Node):
         self._latest_perception_timestamp_ns = None
         self._perception_initialized = False
         self._use_stats_pacing = False
+        self._state = "WAIT_INIT"
         self._startup_release_until_ns = None
         self._publish_ahead_limit_ns = int(1.0 * 1e9)
         self._stall_cycles = 0
         self._stall_cycle_limit = 5000
-        self._bootstrap_header_start_ns = None
+        self._schedule_window_ns = int(0.5 * 1e9)
+        self._schedule_min_msgs = 64
 
         self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
-        self._started = False
-        self._topic_buffers = {topic: deque() for topic in self._topic_publishers.keys()}
+        self._schedule_heap = []  # (msg_timestamp_ns, seq, topic, bag_timestamp_ns, msg)
+        self._schedule_seq = 0
         self._reader_exhausted = False
 
     def _scan_bag_time_range(self, bag_uri: str, storage_id: str, serialization_format: str) -> tuple[int, int]:
@@ -445,96 +448,85 @@ class BagPlayer(Node):
             return int(msg.header.stamp.sec * 1e9) + int(msg.header.stamp.nanosec)
         return None
 
-    def _read_next_into_topic_buffer(self):
-        if self._reader_exhausted:
-            return False
-        if not self._reader.has_next():
-            self._reader_exhausted = True
-            return False
-        topic, serialized_msg, bag_timestamp_ns = self._reader.read_next()
-        pub_and_type = self._topic_publishers.get(topic)
-        if pub_and_type is None:
-            return True
-        _, msg_type = pub_and_type
-        msg = deserialize_message(serialized_msg, msg_type)
-        msg_timestamp_ns = self._message_timestamp_ns(msg)
-        if msg_timestamp_ns is None:
-            self.get_logger().debug(
-                f"Skip topic without header stamp: {topic}"
+    def _heap_time_span_ns(self) -> int:
+        if len(self._schedule_heap) <= 1:
+            return 0
+        min_ts = int(self._schedule_heap[0][0])
+        max_ts = max(int(item[0]) for item in self._schedule_heap)
+        return max_ts - min_ts
+
+    def _fill_schedule_buffer(self):
+        while not self._reader_exhausted:
+            if len(self._schedule_heap) >= self._schedule_min_msgs and self._heap_time_span_ns() >= self._schedule_window_ns:
+                return
+            if not self._reader.has_next():
+                self._reader_exhausted = True
+                return
+            topic, serialized_msg, bag_timestamp_ns = self._reader.read_next()
+            pub_and_type = self._topic_publishers.get(topic)
+            if pub_and_type is None:
+                continue
+            _, msg_type = pub_and_type
+            msg = deserialize_message(serialized_msg, msg_type)
+            msg_timestamp_ns = self._message_timestamp_ns(msg)
+            if msg_timestamp_ns is None:
+                self.get_logger().debug(f"Skip topic without header stamp: {topic}")
+                continue
+            heapq.heappush(
+                self._schedule_heap,
+                (
+                    int(msg_timestamp_ns),
+                    self._schedule_seq,
+                    topic,
+                    int(bag_timestamp_ns),
+                    msg,
+                ),
             )
-            return True
-        if self._bootstrap_header_start_ns is None:
-            self._bootstrap_header_start_ns = msg_timestamp_ns
+            self._schedule_seq += 1
 
-        # No-drop replay mode: buffer every bag message directly,
-        # then publish in global min-timestamp order.
-        q = self._topic_buffers.get(topic)
-        if q is None:
-            return True
-        q.append(
-            (topic, serialized_msg, int(bag_timestamp_ns), msg, int(msg_timestamp_ns))
-        )
-        return True
+    def _should_gate_message(self, msg_timestamp_ns: int) -> bool:
+        if self._state == "WAIT_INIT":
+            if not self._perception_initialized:
+                return True
+            self._state = "BOOTSTRAP"
+            self._startup_release_until_ns = msg_timestamp_ns + int(1.0 * 1e9)
+            return False
 
-    def _fill_topic_heads(self):
-        while True:
-            missing = [topic for topic, q in self._topic_buffers.items() if len(q) == 0]
-            if not missing:
-                return
-            if self._reader_exhausted:
-                return
-            if not self._read_next_into_topic_buffer():
-                return
+        if self._state == "BOOTSTRAP":
+            if self._stats_msg_count < 2 and msg_timestamp_ns > self._startup_release_until_ns:
+                return True
+            if self._stats_msg_count >= 2:
+                self._state = "FOLLOW_STATS"
+
+        if self._state == "FOLLOW_STATS" and self._use_stats_pacing:
+            progress_ts_ns = self._latest_perception_timestamp_ns
+            if progress_ts_ns is not None and msg_timestamp_ns > progress_ts_ns + self._publish_ahead_limit_ns:
+                return True
+        return False
 
     def play_next(self) -> bool:
         """
         Publish the next message from the bag.
         Returns False when there are no more messages.
         """
-        if not self._started:
-            if not self._perception_initialized:
-                return True
-            self._started = True
-            self.get_logger().info("BagPlayer start publishing after perception init signal.")
+        self._fill_schedule_buffer()
+        if not self._schedule_heap:
+            return not self._reader_exhausted
 
-        self._fill_topic_heads()
-        candidate_heads = []
-        for topic, q in self._topic_buffers.items():
-            if q:
-                _, _, bag_timestamp_ns, _, msg_timestamp_ns = q[0]
-                candidate_heads.append((msg_timestamp_ns, bag_timestamp_ns, topic))
-        if not candidate_heads:
-            return False
-
-        selected_msg_ts_ns, _, selected_topic = min(candidate_heads, key=lambda x: x[0])
-
-        if self._startup_release_until_ns is None:
-            self._startup_release_until_ns = selected_msg_ts_ns + int(1.0 * 1e9)
-        if self._stats_msg_count < 2 and selected_msg_ts_ns > self._startup_release_until_ns:
+        msg_timestamp_ns, _, topic, bag_timestamp_ns, msg = self._schedule_heap[0]
+        if self._should_gate_message(msg_timestamp_ns):
             self._stall_cycles += 1
             if self._stall_cycles > self._stall_cycle_limit:
                 self.get_logger().warning(
-                    "BagPlayer exiting due to startup gate stall: "
-                    f"stats_msg_count={self._stats_msg_count}, selected_ts_ns={selected_msg_ts_ns}"
+                    "BagPlayer exiting due to gating stall: "
+                    f"state={self._state}, stats_msg_count={self._stats_msg_count}, "
+                    f"msg_ts_ns={msg_timestamp_ns}, progress_ts_ns={self._latest_perception_timestamp_ns}"
                 )
                 return False
             return True
 
-        if self._use_stats_pacing:
-            progress_ts_ns = self._latest_perception_timestamp_ns
-            if progress_ts_ns is not None and selected_msg_ts_ns > progress_ts_ns + self._publish_ahead_limit_ns:
-                self._stall_cycles += 1
-                if self._stall_cycles > self._stall_cycle_limit:
-                    self.get_logger().warning(
-                        "BagPlayer exiting due to pacing stall: "
-                        f"selected_ts_ns={selected_msg_ts_ns}, progress_ts_ns={progress_ts_ns}, "
-                        f"ahead_limit_ns={self._publish_ahead_limit_ns}"
-                    )
-                    return False
-                return True
-
         self._stall_cycles = 0
-        topic, serialized_msg, timestamp_ns, msg, msg_timestamp_ns = self._topic_buffers[selected_topic].popleft()
+        _, _, topic, bag_timestamp_ns, msg = heapq.heappop(self._schedule_heap)
         pub_and_type = self._topic_publishers.get(topic)
         if pub_and_type is None:
             # No publisher (should not really happen, but don't crash playback)
@@ -543,14 +535,14 @@ class BagPlayer(Node):
 
         pub, _ = pub_and_type
 
-        self._publish_percent_from_timestamp(int(timestamp_ns))
+        self._publish_percent_from_timestamp(int(bag_timestamp_ns))
         pub.publish(msg)
 
         # Publish /clock with the same timestamp (for use_sim_time)
         if self._clock_pub is not None:
             clock_msg = Clock()
-            clock_msg.clock.sec = int(timestamp_ns // 1_000_000_000)
-            clock_msg.clock.nanosec = int(timestamp_ns % 1_000_000_000)
+            clock_msg.clock.sec = int(bag_timestamp_ns // 1_000_000_000)
+            clock_msg.clock.nanosec = int(bag_timestamp_ns % 1_000_000_000)
             self._clock_pub.publish(clock_msg)
 
         return True
