@@ -191,12 +191,6 @@ class PerceptionNode(Node):
         self.keyframe_queue = []
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
-        self.left_raw_count_debug = 0
-        self.right_raw_count_debug = 0
-        self.ats_pair_count_debug = 0
-        self.left_raw_last_stamp_debug = None
-        self.right_raw_last_stamp_debug = None
-        self.ats_pair_last_stamp_debug = None
 
     def info_callback(self, msg):
         if self.K is None:
@@ -618,7 +612,7 @@ class PerceptionNode(Node):
             last_keyframe = self.keyframe_queue[-2]
             current_keyframe = self.keyframe_queue[-1]
             if keyframe_check(last_keyframe.pose, current_keyframe.pose) or current_keyframe.timestamp - last_keyframe.timestamp > 3.0:
-                self.logger.info(
+                self.logger.debug(
                     f"Publish keyframe timestamp: {stamp2second(left_msg.header.stamp):.9f}"
                 )
                 self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera", current_keyframe.velocity))
@@ -658,7 +652,7 @@ def main(args=None):
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
     imu_propagator_node = ImuPropagatorNode()
 
-    executor = rclpy.executors.MultiThreadedExecutor(2)
+    executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(perception_node)
     executor.add_node(imu_propagator_node)
     executor.spin()
