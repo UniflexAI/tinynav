@@ -543,12 +543,7 @@ class BagPlayer(Node):
 
         pub, _ = pub_and_type
 
-        try:
-            self._publish_percent_from_timestamp(int(timestamp_ns))
-        except Exception as e:
-            self.get_logger().error(
-                f"Failed to publish percent for topic={topic} bag_ts={timestamp_ns}: {e}"
-            )
+        self._publish_percent_from_timestamp(int(timestamp_ns))
         header_stamp_sec = ""
         header_stamp_nanosec = ""
         header_timestamp_s = ""
@@ -574,15 +569,10 @@ class BagPlayer(Node):
 
         # Publish /clock with the same timestamp (for use_sim_time)
         if self._clock_pub is not None:
-            try:
-                clock_msg = Clock()
-                clock_msg.clock.sec = int(timestamp_ns // 1_000_000_000)
-                clock_msg.clock.nanosec = int(timestamp_ns % 1_000_000_000)
-                self._clock_pub.publish(clock_msg)
-            except Exception as e:
-                self.get_logger().error(
-                    f"Failed to publish /clock for bag_ts={timestamp_ns}: {e}"
-                )
+            clock_msg = Clock()
+            clock_msg.clock.sec = int(timestamp_ns // 1_000_000_000)
+            clock_msg.clock.nanosec = int(timestamp_ns % 1_000_000_000)
+            self._clock_pub.publish(clock_msg)
 
         return True
 
