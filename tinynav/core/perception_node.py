@@ -120,19 +120,6 @@ class PerceptionNode(Node):
         self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=30, slop=0.02)
         self.ts.registerCallback(self.images_callback)
-        # Debug-only raw subscribers to separate transport reception from ATS pairing.
-        self.left_raw_sub_debug = self.create_subscription(
-            Image,
-            "/camera/camera/infra1/image_rect_raw",
-            self.left_raw_callback_debug,
-            10,
-        )
-        self.right_raw_sub_debug = self.create_subscription(
-            Image,
-            "/camera/camera/infra2/image_rect_raw",
-            self.right_raw_callback_debug,
-            10,
-        )
 
         self.input_aligner_imu_filter = SimpleFilter()
         self.input_aligner_stereo_filter = SimpleFilter()
