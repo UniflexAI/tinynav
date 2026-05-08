@@ -364,6 +364,8 @@ class BagPlayer(Node):
         self._use_stats_pacing = False
         self._startup_release_until_ns = None
         self._publish_ahead_limit_ns = int(1.0 * 1e9)
+        self._stall_cycles = 0
+        self._stall_cycle_limit = 5000
         self._no_odom_bootstrap_limit_ns = int(0.5 * 1e9)
         self._bootstrap_header_start_ns = None
         self._pending_message = None  # (topic, serialized_msg, bag_timestamp_ns, msg, msg_timestamp_ns)
@@ -580,13 +582,29 @@ class BagPlayer(Node):
         if self._startup_release_until_ns is None:
             self._startup_release_until_ns = selected_msg_ts_ns + int(1.0 * 1e9)
         if self._stats_msg_count < 2 and selected_msg_ts_ns > self._startup_release_until_ns:
+            self._stall_cycles += 1
+            if self._stall_cycles > self._stall_cycle_limit:
+                self.get_logger().warning(
+                    "BagPlayer exiting due to startup gate stall: "
+                    f"stats_msg_count={self._stats_msg_count}, selected_ts_ns={selected_msg_ts_ns}"
+                )
+                return False
             return True
 
         if self._use_stats_pacing:
             progress_ts_ns = self._latest_perception_timestamp_ns
             if progress_ts_ns is not None and selected_msg_ts_ns > progress_ts_ns + self._publish_ahead_limit_ns:
+                self._stall_cycles += 1
+                if self._stall_cycles > self._stall_cycle_limit:
+                    self.get_logger().warning(
+                        "BagPlayer exiting due to pacing stall: "
+                        f"selected_ts_ns={selected_msg_ts_ns}, progress_ts_ns={progress_ts_ns}, "
+                        f"ahead_limit_ns={self._publish_ahead_limit_ns}"
+                    )
+                    return False
                 return True
 
+        self._stall_cycles = 0
         topic, serialized_msg, timestamp_ns, msg, msg_timestamp_ns = self._topic_buffers[selected_topic].popleft()
         pub_and_type = self._topic_publishers.get(topic)
         if pub_and_type is None:

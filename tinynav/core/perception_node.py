@@ -36,7 +36,6 @@ _KEYFRAME_MIN_DISTANCE = 0.1    # unit: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 0.1 # unit: degree
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 def keyframe_check(T_i, T_j):
@@ -167,7 +166,25 @@ class PerceptionNode(Node):
                              [0, 0, -1, 0],
                              [0, 1, 0, 0],
                              [0, 0, 0, 1]])
-        self.stats_pub.publish(String(data=json.dumps({"initialized": True, "timestamp": -1.0})))
+        self.stats_pub.publish(
+            String(
+                data=json.dumps(
+                    {
+                        "initialized": True,
+                        "timestamp": -1.0,
+                        "stats": {"process_cnt": 0, "loop_ms": 0.0},
+                        "metrics": {
+                            "num_keyframes": 0,
+                            "num_tracks": 0,
+                            "num_factors": 0,
+                            "num_variables": 0,
+                            "initial_error": 0.0,
+                            "final_error": 0.0,
+                        },
+                    }
+                )
+            )
+        )
 
         self.imu_measurements = deque(maxlen=10000)
 
@@ -607,12 +624,6 @@ class PerceptionNode(Node):
                 self.keyframe_pose_pub.publish(np2msg(current_keyframe.pose, left_msg.header.stamp, "world", "camera", current_keyframe.velocity))
                 self.keyframe_image_pub.publish(left_msg)
                 self.keyframe_depth_pub.publish(depth_msg)
-
-                T_ij = se3_inv(last_keyframe.pose) @ current_keyframe.pose
-                t_diff = np.linalg.norm(T_ij[:3, 3])
-                if t_diff > 2.0:
-                    self.logger.debug(f"keyframe jumps {t_diff} m, exit")
-                    exit(0)
             else:
                 self.keyframe_queue.pop()
 
@@ -632,6 +643,7 @@ class PerceptionNode(Node):
 
 
 def main(args=None):
+    logging.basicConfig(level=logging.INFO)
     rclpy.init(args=args)
     parser = argparse.ArgumentParser(description='Run TinyNav perception node.')
     parser.add_argument('--verbose_timer', action='store_true', help='Print timing for key pipeline stages.')
@@ -655,5 +667,4 @@ def main(args=None):
     rclpy.shutdown()
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
     main()
