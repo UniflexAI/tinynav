@@ -519,29 +519,6 @@ class BagPlayer(Node):
             )
             self._schedule_seq += 1
 
-    def _ready_to_start(self) -> bool:
-        required_topics = [
-            "/camera/camera/imu",
-            "/camera/camera/infra1/image_rect_raw",
-            "/camera/camera/infra2/image_rect_raw",
-            "/camera/camera/infra2/camera_info",
-        ]
-        missing = []
-        for topic in required_topics:
-            pub_and_type = self._topic_publishers.get(topic)
-            if pub_and_type is None:
-                continue
-            pub, _ = pub_and_type
-            if pub.get_subscription_count() <= 0:
-                missing.append(topic)
-        if missing:
-            self.get_logger().info(
-                "BagPlayer waiting subscribers before start: %s"
-                % ", ".join(missing)
-            )
-            return False
-        return True
-
     def _read_next_into_topic_buffer(self):
         if self._reader_exhausted:
             return False
@@ -714,7 +691,6 @@ class BuildMapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
-        self._processed_keyframe_timestamps = set()
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
@@ -820,25 +796,13 @@ class BuildMapNode(Node):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
             keyframe_depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
-            if keyframe_image_timestamp in self._processed_keyframe_timestamps:
-                self.get_logger().warning(
-                    f"Skip duplicate keyframe timestamp: {keyframe_image_timestamp}"
-                )
-                return
-            keyframe_index = len(self.odom) + 1
-            self.get_logger().info(
-                f"Processing keyframe #{keyframe_index}: ts_ns={keyframe_image_timestamp}"
-            )
             if keyframe_image_timestamp != keyframe_odom_timestamp or keyframe_image_timestamp != keyframe_depth_timestamp:
                 self.get_logger().error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
-                return
 
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
-
-        self._processed_keyframe_timestamps.add(keyframe_image_timestamp)
 
         with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
