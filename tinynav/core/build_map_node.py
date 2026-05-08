@@ -368,14 +368,6 @@ class BagPlayer(Node):
         self._bootstrap_header_start_ns = None
 
         self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
-        bag_name = os.path.basename(os.path.normpath(bag_uri)) or "bag"
-        self._topic_timestamp_log_path = os.path.join("/tinynav", f"{bag_name}_topic_timestamps.log")
-        self._topic_timestamp_log_file = open(self._topic_timestamp_log_path, "w", encoding="utf-8")
-        self._topic_timestamp_log_file.write(
-            "topic,bag_timestamp_ns,header_stamp_sec,header_stamp_nanosec,header_timestamp_s\n"
-        )
-        self._topic_timestamp_log_file.flush()
-        self.get_logger().info(f"BagPlayer topic timestamp log: {self._topic_timestamp_log_path}")
         self._started = False
         self._topic_buffers = {topic: deque() for topic in self._topic_publishers.keys()}
         self._reader_exhausted = False
@@ -601,10 +593,6 @@ class BagPlayer(Node):
             # Keep the same conversion logic as perception_node.stamp2second.
             header_timestamp_s = np.int64(header_stamp_sec) + np.int64(header_stamp_nanosec) * 1e-9
         try:
-            self._topic_timestamp_log_file.write(
-                f"{topic},{int(timestamp_ns)},{header_stamp_sec},{header_stamp_nanosec},{header_timestamp_s}\n"
-            )
-            self._topic_timestamp_log_file.flush()
             if topic in (
                 "/camera/camera/infra1/image_rect_raw",
                 "/camera/camera/infra2/image_rect_raw",
@@ -632,12 +620,6 @@ class BagPlayer(Node):
                 )
 
         return True
-
-    def destroy_node(self):
-        if hasattr(self, "_topic_timestamp_log_file") and self._topic_timestamp_log_file is not None:
-            self._topic_timestamp_log_file.close()
-            self._topic_timestamp_log_file = None
-        super().destroy_node()
 
 class BuildMapNode(Node):
     def __init__(self, map_save_path:str, verbose_timer: bool = True):
