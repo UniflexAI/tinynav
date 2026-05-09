@@ -34,6 +34,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   bool _showGlobalPath = true;
   bool _showGlobalMap = false;
   bool _navArrived = false;
+  bool _showFootprint = true;
 
   @override
   void initState() {
@@ -134,6 +135,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         showEsdf: _showEsdf,
                         showTrajectory: _showTrajectory,
                         showGlobalPath: _showGlobalPath,
+                        showFootprint: _showFootprint,
                       ),
               ),
               if (planning != null)
@@ -163,11 +165,13 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                     showEsdf: _showEsdf,
                     showTrajectory: _showTrajectory,
                     showGlobalPath: _showGlobalPath,
-                    onChanged: (obs, esdf, traj, gp) => setState(() {
+                    showFootprint: _showFootprint,
+                    onChanged: (obs, esdf, traj, gp, fp) => setState(() {
                       _showObstacle = obs;
                       _showEsdf = esdf;
                       _showTrajectory = traj;
                       _showGlobalPath = gp;
+                      _showFootprint = fp;
                     }),
                   ),
                 ),
@@ -283,6 +287,7 @@ class _LocalPlanningView extends StatelessWidget {
   final bool showEsdf;
   final bool showTrajectory;
   final bool showGlobalPath;
+  final bool showFootprint;
 
   const _LocalPlanningView({
     this.planning,
@@ -290,6 +295,7 @@ class _LocalPlanningView extends StatelessWidget {
     this.showEsdf = false,
     this.showTrajectory = false,
     this.showGlobalPath = true,
+    this.showFootprint = true,
   });
 
   @override
@@ -324,14 +330,16 @@ class _LocalPlanningView extends StatelessWidget {
                       painter: LocalPlanningPainter(
                         trajectory: p.trajectory,
                         globalPath: p.globalPath,
+                        footprint: p.footprint,
                         gridInfo: p.gridInfo,
                         odomPose: p.odomPose,
                         showTrajectory: showTrajectory,
                         showGlobalPath: showGlobalPath,
+                        showFootprint: showFootprint,
                         navTargetPose: p.navTargetPose,
                       ),
-                    )
-                  else
+                    ),
+                  if (p == null)
                     const Center(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -358,13 +366,15 @@ class _LayerTogglePanel extends StatefulWidget {
   final bool showEsdf;
   final bool showTrajectory;
   final bool showGlobalPath;
-  final void Function(bool obs, bool esdf, bool traj, bool gp) onChanged;
+  final bool showFootprint;
+  final void Function(bool obs, bool esdf, bool traj, bool gp, bool fp) onChanged;
 
   const _LayerTogglePanel({
     required this.showObstacle,
     required this.showEsdf,
     required this.showTrajectory,
     required this.showGlobalPath,
+    required this.showFootprint,
     required this.onChanged,
   });
 
@@ -415,13 +425,15 @@ class _LayerTogglePanelState extends State<_LayerTogglePanel> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 _LayerRow('Obstacle', widget.showObstacle,
-                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath)),
+                    (v) => widget.onChanged(v, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath, widget.showFootprint)),
                 _LayerRow('ESDF', widget.showEsdf,
-                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath)),
+                    (v) => widget.onChanged(widget.showObstacle, v, widget.showTrajectory, widget.showGlobalPath, widget.showFootprint)),
                 _LayerRow('Trajectory', widget.showTrajectory,
-                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath)),
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, v, widget.showGlobalPath, widget.showFootprint)),
                 _LayerRow('Global Path', widget.showGlobalPath,
-                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v)),
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, v, widget.showFootprint)),
+                _LayerRow('Footprint', widget.showFootprint,
+                    (v) => widget.onChanged(widget.showObstacle, widget.showEsdf, widget.showTrajectory, widget.showGlobalPath, v)),
               ],
             ),
           ),

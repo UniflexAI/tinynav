@@ -29,6 +29,7 @@ from tqdm import tqdm
 import einops
 from tf2_msgs.msg import TFMessage
 from typing import Dict
+from tool.video_db import VideoDB
 
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped,Point
@@ -246,28 +247,34 @@ class OdomPoseRecorder:
 class TinyNavDB():
     def __init__(self, map_save_path:str, is_scratch:bool = True):
         self.map_save_path = map_save_path
+        self.is_scratch = is_scratch
+        mode = "write" if is_scratch else "read"
+        self.infra1_video_db = VideoDB(
+            dir_path=f"{map_save_path}/infra1_images_db",
+            mode=mode,
+            fps=30,
+        )
+        self.rgb_video_db = VideoDB(
+            dir_path=f"{map_save_path}/rgb_images_db",
+            mode=mode,
+            fps=30,
+        )
         if is_scratch:
             if os.path.exists(f"{map_save_path}/features.db"):
                 os.remove(f"{map_save_path}/features.db")
-            if os.path.exists(f"{map_save_path}/infra1_images.db"):
-                os.remove(f"{map_save_path}/infra1_images.db")
             if os.path.exists(f"{map_save_path}/depths.db"):
                 os.remove(f"{map_save_path}/depths.db")
-            if os.path.exists(f"{map_save_path}/rgb_images.db"):
-                os.remove(f"{map_save_path}/rgb_images.db")
             if os.path.exists(f"{map_save_path}/embeddings.db"):
                 os.remove(f"{map_save_path}/embeddings.db")
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
-        self.infra1_images = IntKeyShelf(f"{map_save_path}/infra1_images")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
-        self.rgb_images = IntKeyShelf(f"{map_save_path}/rgb_images")
 
     def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
-            self.infra1_images[key] = infra1_image
+            self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
-            self.rgb_images[key] = rgb_image
+            self.rgb_video_db.write(key, rgb_image)
         if depth is not None:
             self.depths[key] = depth
         if embedding is not None:
@@ -276,7 +283,18 @@ class TinyNavDB():
             self.features[key] = features
 
     def get_depth_embedding_features_images(self, key:int):
-        return self.depths[key], self.embeddings[key], self.features[key], self.rgb_images[key], self.infra1_images[key]
+        key_int = int(key)
+        def rgb_loader():
+            if self.is_scratch:
+                return None
+            return self.rgb_video_db.read(key_int)
+
+        def infra1_loader():
+            if self.is_scratch:
+                return None
+            return self.infra1_video_db.read(key_int)
+
+        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
         return self.embeddings[key]
@@ -284,9 +302,9 @@ class TinyNavDB():
     def close(self):
         self.features.close()
         self.embeddings.close()
-        self.infra1_images.close()
         self.depths.close()
-        self.rgb_images.close()
+        self.infra1_video_db.close()
+        self.rgb_video_db.close()
 
 class BagPlayer(Node):
     def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
@@ -766,13 +784,13 @@ class BuildMapNode(Node):
             return
             
         transforms = []        
-        for time, pose_in_world in self.pose_graph_used_pose.items():
+        for timestamp, pose_in_world in self.pose_graph_used_pose.items():
             transform = TransformStamped()
             
             # Set header
             transform.header.stamp = self.get_clock().now().to_msg()
             transform.header.frame_id = 'world'
-            transform.child_frame_id = 'camera_' + str(time)
+            transform.child_frame_id = 'camera_' + str(timestamp)
             
             # Set position
             t = pose_in_world[:3, 3]

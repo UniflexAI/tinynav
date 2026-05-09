@@ -24,9 +24,9 @@ import rclpy
 import rclpy.time
 import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import CompressedImage, Image
+from sensor_msgs.msg import CompressedImage, Image, PointCloud
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
@@ -83,6 +83,7 @@ class BackendNode(Ros2NodeManager):
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
         self._global_path: list = []
+        self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
@@ -104,6 +105,9 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
         self.create_subscription(
             Odometry, '/control/target_pose', self._on_nav_target_pose, 1
+        )
+        self.create_subscription(
+            PointCloud, '/planning/footprint', self._on_footprint, 1
         )
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -271,6 +275,28 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._global_path = pts
+
+    def _on_footprint(self, msg: PointCloud):
+        """Store footprint corner points from PointCloud.
+
+        The planning node publishes 84 points (4 edges × 21 samples per edge).
+        We extract the 4 corner points (first of each edge group).
+        """
+        n = len(msg.points)
+        if n == 0:
+            return
+        # If 84 points (4 edges × 21), extract corners; otherwise store all unique points
+        if n >= 84 and n % 21 == 0:
+            edges = n // 21
+            corners = []
+            for i in range(edges):
+                p = msg.points[i * 21]
+                corners.append({'x': p.x, 'y': p.y})
+        else:
+            # Fallback: store all points
+            corners = [{'x': p.x, 'y': p.y} for p in msg.points]
+        with self._lock:
+            self._footprint = corners
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -463,6 +489,7 @@ class BackendNode(Ros2NodeManager):
                 'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
+                'footprint': list(self._footprint),
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot

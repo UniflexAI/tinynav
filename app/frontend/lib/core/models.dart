@@ -181,6 +181,7 @@ class PlanningState {
   final List<TrajPoint> mapGlobalPath;
   final GridInfo? gridInfo;
   final TrajPoint? navTargetPose;
+  final List<TrajPoint> footprint;
 
   const PlanningState({
     required this.localized,
@@ -194,6 +195,7 @@ class PlanningState {
     this.mapGlobalPath = const [],
     this.gridInfo,
     this.navTargetPose,
+    this.footprint = const [],
   });
 
   factory PlanningState.fromJson(Map<String, dynamic> j) {
@@ -232,6 +234,10 @@ class PlanningState {
               (j['nav_target_pose']['y'] as num).toDouble(),
             )
           : null,
+      footprint: (j['footprint'] as List? ?? []).map((p) {
+        final m = p as Map<String, dynamic>;
+        return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+      }).toList(),
     );
   }
 }
