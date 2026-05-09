@@ -51,6 +51,10 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
+        # Hack: if path first segment points far away from robot heading,
+        # rotate in place instead of publishing near-zero cmd_vel.
+        self.force_turn_heading_threshold = np.deg2rad(80.0)
+        self.force_turn_angular_speed = 1.0
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -172,30 +176,34 @@ class CmdVelControlNode(Node):
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
-        if vx < 0.0:
+        raw_vx = float(linear_velocity_vec[0])
+        if raw_vx < 0.0:
             vx = -self.fixed_reverse_speed
+        else:
+            vx = float(np.clip(raw_vx, 0.0, 0.5))
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
-        if vx < 0.0:
+        is_backward_segment = raw_vx < 0.0
+        if is_backward_segment:
             vyaw = 0.0
 
+        # Hack: if path first segment points >80 deg away from robot heading,
+        # force an in-place turn. Skip explicit backward segments because reverse
+        # naturally has heading_err close to +/-pi.
+        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+            vx = 0.0
+            vyaw = float(np.sign(heading_err) * self.force_turn_angular_speed)
         # Minimal rotate-first gate: apply only for forward motion.
-        if vx > 0.0 and abs(heading_err) > 0.45:
+        elif vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 
-        # Reverse comes from the predefined planner vocabulary; pass it through directly.
-        if vx < 0.0:
-            self.latest_cmd.linear.x = float(vx)
-            self.latest_cmd.linear.y = 0.0
-            self.latest_cmd.angular.z = 0.0
-        else:
-            # Filter planner updates to reduce visible jitter from 7-10 Hz updates.
-            alpha = np.clip(self.path_period_ema / (self.path_filter_tau + self.path_period_ema), 0.15, 0.75)
-            self.latest_cmd.linear.x = float((1.0 - alpha) * self.latest_cmd.linear.x + alpha * vx)
-            self.latest_cmd.linear.y = float(vy)
-            self.latest_cmd.angular.z = float((1.0 - alpha) * self.latest_cmd.angular.z + alpha * vyaw)
+        # Store the latest target command directly. Smoothing is intentionally kept
+        # only in cmd_timer_callback via acceleration limiting, so planner/control
+        # behavior stays easy to reason about during tuning.
+        self.latest_cmd.linear.x = float(vx)
+        self.latest_cmd.linear.y = float(vy)
+        self.latest_cmd.angular.z = float(vyaw)
         age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
         self.logger.debug(
             f"cmd vx={self.latest_cmd.linear.x:.3f} vyaw={self.latest_cmd.angular.z:.3f} "
