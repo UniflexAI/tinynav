@@ -1,3 +1,4 @@
 *.onnx filter=lfs diff=lfs merge=lfs -text
 *.engine filter=lfs diff=lfs merge=lfs -text
 *.plan filter=lfs diff=lfs merge=lfs -text
+docs/Vocabulary/ORBvoc.txt filter=lfs diff=lfs merge=lfs -text
