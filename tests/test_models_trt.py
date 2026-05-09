@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'cor
 import numpy as np
 import platform
 from codetiming import Timer
-from tinynav.core.models_trt import SuperPointTRT, LightGlueTRT, StereoEngineTRT
+from tinynav.core.models_trt import SuperPointTRT, LightGlueTRT, StereoEngineTRT, ORBFeatureTRTCompatible, ORBMatcher
 import asyncio
 import cv2
 
@@ -265,6 +265,81 @@ def test_stereo_engine_trt_with_looper_data():
     depth_u8 = np.clip(depth_norm * 255.0, 0, 255).astype(np.uint8)
     depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_VIRIDIS)
     cv2.imwrite(os.path.join(looper_dir, "depth_vis.png"), depth_color)
+
+
+def test_orb_feature_interface_shapes():
+    extractor = ORBFeatureTRTCompatible(nfeatures=500)
+
+    img = np.zeros((240, 320), dtype=np.uint8)
+    cv2.rectangle(img, (40, 40), (280, 200), 255, 2)
+    cv2.line(img, (0, 0), (319, 239), 255, 2)
+    cv2.circle(img, (160, 120), 50, 255, 2)
+
+    out = asyncio.run(extractor.infer(img))
+
+    assert "kpts" in out
+    assert "descps" in out
+    assert "mask" in out
+
+    kpts = out["kpts"]
+    descps = out["descps"]
+    mask = out["mask"]
+
+    assert kpts.dtype == np.float32
+    assert descps.dtype == np.float32
+    assert mask.dtype == np.float32
+
+    assert kpts.ndim == 3 and kpts.shape[0] == 1 and kpts.shape[2] == 2
+    assert descps.ndim == 3 and descps.shape[0] == 1 and descps.shape[2] == 32
+    assert mask.ndim == 3 and mask.shape[0] == 1 and mask.shape[2] == 1
+
+    n = kpts.shape[1]
+    assert descps.shape[1] == n
+    assert mask.shape[1] == n
+
+
+def test_orb_feature_empty_case():
+    extractor = ORBFeatureTRTCompatible(nfeatures=500)
+    blank = np.zeros((200, 300), dtype=np.uint8)
+    out = asyncio.run(extractor.infer(blank))
+
+    assert out["kpts"].shape == (1, 0, 2)
+    assert out["descps"].shape == (1, 0, 32)
+    assert out["mask"].shape == (1, 0, 1)
+
+
+def test_orb_bfmatcher_with_ransac():
+    extractor = ORBFeatureTRTCompatible(nfeatures=1000)
+    matcher = ORBMatcher(ransac_reproj_threshold=1.5)
+
+    img0 = np.zeros((300, 400), dtype=np.uint8)
+    cv2.rectangle(img0, (60, 60), (340, 240), 255, 2)
+    cv2.line(img0, (70, 70), (330, 230), 255, 2)
+    cv2.circle(img0, (200, 150), 50, 255, 2)
+
+    M = np.float32([[1, 0, 8], [0, 1, 5]])
+    img1 = cv2.warpAffine(img0, M, (400, 300))
+
+    feats0 = asyncio.run(extractor.infer(img0))
+    feats1 = asyncio.run(extractor.infer(img1))
+
+    match_result = asyncio.run(
+        matcher.infer(
+            feats0["kpts"],
+            feats1["kpts"],
+            feats0["descps"],
+            feats1["descps"],
+            feats0["mask"],
+            feats1["mask"],
+            img0.shape,
+            img1.shape,
+        )
+    )
+
+    match_indices = match_result["match_indices"][0]
+    assert match_indices.ndim == 1
+    assert match_indices.shape[0] == feats0["kpts"].shape[1]
+    assert np.any(match_indices != -1), "Expected at least one ORB match after BFMatcher+RANSAC."
 
 
 def test_stereo_engine_trt_with_realsense_data():

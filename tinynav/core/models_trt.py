@@ -179,6 +179,131 @@ class SuperPointTRT(TRTBase):
         results["mask"] = results["mask"][:, :, None]
         return results
 
+
+class ORBFeatureTRTCompatible:
+    """
+    ORB feature extractor with a SuperPoint-compatible output interface.
+
+    Returns a dict with:
+      - kpts:  (1, N, 2) float32
+      - descps: (1, N, 32) float32
+      - mask:  (1, N, 1) float32
+    """
+
+    def __init__(self, nfeatures: int = 1024):
+        self.nfeatures = int(nfeatures)
+        self.orb = cv2.ORB_create(nfeatures=self.nfeatures)
+
+    async def infer(self, input_image: np.ndarray):
+        if input_image is None:
+            raise ValueError("input_image is None")
+        if input_image.ndim == 3:
+            gray = cv2.cvtColor(input_image, cv2.COLOR_BGR2GRAY)
+        elif input_image.ndim == 2:
+            gray = input_image
+        else:
+            raise ValueError(f"Unsupported input_image ndim={input_image.ndim}")
+
+        keypoints, descriptors = self.orb.detectAndCompute(gray, None)
+        if keypoints is None or len(keypoints) == 0:
+            return {
+                "kpts": np.zeros((1, 0, 2), dtype=np.float32),
+                "descps": np.zeros((1, 0, 32), dtype=np.float32),
+                "mask": np.zeros((1, 0, 1), dtype=np.float32),
+            }
+
+        kpts = np.array([[kp.pt[0], kp.pt[1]] for kp in keypoints], dtype=np.float32)
+        if descriptors is None:
+            descps = np.zeros((kpts.shape[0], 32), dtype=np.float32)
+        else:
+            descps = descriptors.astype(np.float32) / 255.0
+
+        return {
+            "kpts": kpts[None, :, :],
+            "descps": descps[None, :, :],
+            "mask": np.ones((1, kpts.shape[0], 1), dtype=np.float32),
+        }
+
+
+class ORBMatcher:
+    """
+    ORB descriptor matcher with BFMatcher(crossCheck=True) and geometric RANSAC filtering.
+
+    Output is LightGlue-compatible:
+      - match_indices: (1, N0) int32, each value is matched index in keypoints1 or -1.
+    """
+
+    def __init__(self, ransac_reproj_threshold: float = 1.0):
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        self.ransac_reproj_threshold = float(ransac_reproj_threshold)
+
+    async def infer(
+        self,
+        kpts0: np.ndarray,
+        kpts1: np.ndarray,
+        desc0: np.ndarray,
+        desc1: np.ndarray,
+        mask0: np.ndarray,
+        mask1: np.ndarray,
+        img_shape0=None,
+        img_shape1=None,
+        match_threshold=None,
+    ):
+        k0 = kpts0[0]
+        k1 = kpts1[0]
+        n0 = int(k0.shape[0])
+        out = {"match_indices": np.full((1, n0), -1, dtype=np.int32)}
+        if n0 == 0 or k1.shape[0] == 0:
+            return out
+
+        d0 = np.asarray(desc0[0], dtype=np.float32)
+        d1 = np.asarray(desc1[0], dtype=np.float32)
+        if d0.shape[0] == 0 or d1.shape[0] == 0:
+            return out
+
+        m0 = np.asarray(mask0[0, :, 0] > 0, dtype=bool) if mask0.size else np.ones((d0.shape[0],), dtype=bool)
+        m1 = np.asarray(mask1[0, :, 0] > 0, dtype=bool) if mask1.size else np.ones((d1.shape[0],), dtype=bool)
+
+        idx0 = np.where(m0)[0]
+        idx1 = np.where(m1)[0]
+        if idx0.size == 0 or idx1.size == 0:
+            return out
+
+        # ORB descriptor is binary; convert normalized float [0,1] back to uint8 [0,255].
+        d0_u8 = np.clip(np.rint(d0[idx0] * 255.0), 0, 255).astype(np.uint8)
+        d1_u8 = np.clip(np.rint(d1[idx1] * 255.0), 0, 255).astype(np.uint8)
+        if d0_u8.size == 0 or d1_u8.size == 0:
+            return out
+
+        raw_matches = self.bf.match(d0_u8, d1_u8)
+        if len(raw_matches) == 0:
+            return out
+
+        raw_matches = sorted(raw_matches, key=lambda m: m.distance)
+        pts0 = np.array([k0[idx0[m.queryIdx]] for m in raw_matches], dtype=np.float32)
+        pts1 = np.array([k1[idx1[m.trainIdx]] for m in raw_matches], dtype=np.float32)
+
+        inlier_mask = np.ones((len(raw_matches),), dtype=bool)
+        if len(raw_matches) >= 8:
+            _, ransac_inliers = cv2.findFundamentalMat(
+                pts0,
+                pts1,
+                cv2.FM_RANSAC,
+                self.ransac_reproj_threshold,
+                0.99,
+            )
+            if ransac_inliers is not None and ransac_inliers.size == len(raw_matches):
+                inlier_mask = ransac_inliers.reshape(-1).astype(bool)
+
+        for i, m in enumerate(raw_matches):
+            if not inlier_mask[i]:
+                continue
+            gi = int(idx0[m.queryIdx])
+            gj = int(idx1[m.trainIdx])
+            out["match_indices"][0, gi] = gj
+        return out
+
+
 class LightGlueTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/lightglue_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
