@@ -10,6 +10,7 @@ from cuda import cudart
 import ctypes
 import einops
 import logging
+from typing import Any
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
@@ -302,6 +303,79 @@ class ORBMatcher:
             gj = int(idx1[m.trainIdx])
             out["match_indices"][0, gi] = gj
         return out
+
+
+class DBoW3Engine:
+    """
+    Thin Python wrapper for PyDBoW3 database operations.
+
+    Supports adding/querying either:
+      - ORBFeatureTRTCompatible outputs (dict with "descps")
+      - Raw descriptor arrays shaped (N, 32), dtype uint8/float32
+    """
+
+    def __init__(self, vocabulary_path: str):
+        self._bow = self._import_module()
+        self.voc = self._bow.Vocabulary()
+        load_ret = self.voc.load(vocabulary_path)
+        # PyDBoW3 often returns None on success (instead of True).
+        if load_ret is False:
+            raise RuntimeError(f"Failed to load DBoW3 vocabulary: {vocabulary_path}")
+        self.db = self._bow.Database()
+        self.db.setVocabulary(self.voc)
+
+    @staticmethod
+    def _import_module():
+        try:
+            import pydbow3 as bow  # type: ignore
+            return bow
+        except Exception:
+            import pyDBoW3 as bow  # type: ignore
+            return bow
+
+    @staticmethod
+    def _normalize_desc(features: Any) -> np.ndarray:
+        if isinstance(features, dict):
+            if "descps" not in features:
+                raise ValueError("features dict must contain 'descps'")
+            desc = np.asarray(features["descps"])
+            if desc.ndim == 3:
+                desc = desc[0]
+        else:
+            desc = np.asarray(features)
+
+        if desc.ndim != 2:
+            raise ValueError(f"Descriptor array must be 2D, got shape {desc.shape}")
+        if desc.shape[1] != 32:
+            raise ValueError(f"Expected ORB descriptor width 32, got {desc.shape[1]}")
+        if desc.size == 0:
+            return np.zeros((0, 32), dtype=np.uint8)
+
+        if desc.dtype == np.uint8:
+            return np.ascontiguousarray(desc)
+        # ORBFeatureTRTCompatible emits float32 in [0,1], convert back to binary-bytes domain.
+        if np.issubdtype(desc.dtype, np.floating):
+            return np.ascontiguousarray(np.clip(np.rint(desc * 255.0), 0, 255).astype(np.uint8))
+        return np.ascontiguousarray(desc.astype(np.uint8))
+
+    def add(self, features: Any):
+        desc = self._normalize_desc(features)
+        return self.db.add(desc)
+
+    def query(self, features: Any, max_results: int = 10):
+        desc = self._normalize_desc(features)
+        try:
+            results = self.db.query(desc, int(max_results))
+        except TypeError:
+            # Some bindings expose query(desc) only.
+            results = self.db.query(desc)
+        return [
+            {
+                "id": int(getattr(r, "Id", getattr(r, "id", -1))),
+                "score": float(getattr(r, "Score", getattr(r, "score", 0.0))),
+            }
+            for r in results
+        ]
 
 
 class LightGlueTRT(TRTBase):
