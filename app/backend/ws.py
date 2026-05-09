@@ -86,6 +86,38 @@ async def ws_pose(ws: WebSocket):
 
 
 # --------------------------------------------------------------------------- #
+# /ws/nav-progress  — pushed on every /mapping/nav_progress message          #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/nav-progress')
+async def ws_nav_progress(ws: WebSocket):
+    await ws.accept()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+    loop = asyncio.get_event_loop()
+
+    def _on_progress(data: dict):
+        loop.call_soon_threadsafe(lambda: _safe_put(queue, data))
+
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+
+    node.nav_progress_callbacks.append(_on_progress)
+    try:
+        while True:
+            data = await queue.get()
+            await ws.send_text(json.dumps(data))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            node.nav_progress_callbacks.remove(_on_progress)
+        except ValueError:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # /ws/map-update  — polls for occupancy_grid.npy mtime changes               #
 # --------------------------------------------------------------------------- #
 

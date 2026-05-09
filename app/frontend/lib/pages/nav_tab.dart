@@ -83,6 +83,20 @@ class _NavStatusCard extends ConsumerStatefulWidget {
 
 class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
   bool _canceling = false;
+  bool _showCompletion = false;
+
+  @override
+  void didUpdateWidget(_NavStatusCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasNavigating = oldWidget.status.rawState == 'navigation';
+    final isNavigating = widget.status.rawState == 'navigation';
+    if (wasNavigating && !isNavigating) {
+      setState(() => _showCompletion = true);
+      Future.delayed(const Duration(milliseconds: 1200), () {
+        if (mounted) setState(() => _showCompletion = false);
+      });
+    }
+  }
 
   Future<void> _cancel() async {
     setState(() => _canceling = true);
@@ -106,39 +120,86 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
   Widget build(BuildContext context) {
     final s = widget.status;
     final isNavigating = s.rawState == 'navigation';
+    final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
+    final showCompletion = _showCompletion;
+
+    String subtitle;
+    double progressValue;
+    if (showCompletion) {
+      subtitle = 'Arrived!';
+      progressValue = 1.0;
+    } else if (isNavigating && np != null) {
+      progressValue = (np.percent / 100.0).clamp(0.0, 1.0);
+      final remaining = np.pathRemainingM < 1000 ? '${np.pathRemainingM.toStringAsFixed(1)}m' : '--';
+      final eta = np.estimatedRemainingS >= 0
+          ? '~${np.estimatedRemainingS.toStringAsFixed(0)}s'
+          : '--';
+      subtitle = 'POI #${np.poiIndex + 1} · $remaining · $eta';
+    } else if (isNavigating) {
+      subtitle = 'Navigating...';
+      progressValue = 0.0;
+    } else {
+      subtitle = s.navStatus;
+      progressValue = 0.0;
+    }
+
+    final active = isNavigating || showCompletion;
+    final progressColor = showCompletion ? Colors.green : Colors.blue;
 
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: Row(children: [
-          Icon(
-            isNavigating ? Icons.navigation : Icons.navigation_outlined,
-            color: isNavigating ? Colors.blue : Colors.grey,
-            size: 28,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('Navigation',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              Text(
-                isNavigating ? 'Navigating...' : s.navStatus,
-                style: TextStyle(color: isNavigating ? Colors.blue : Colors.grey),
-              ),
-            ]),
-          ),
-          if (isNavigating)
-            OutlinedButton(
-              onPressed: _canceling ? null : _cancel,
-              style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
-              child: _canceling
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Cancel'),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(
+              active ? Icons.navigation : Icons.navigation_outlined,
+              color: active ? progressColor : Colors.grey,
+              size: 28,
             ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Navigation',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                Text(
+                  subtitle,
+                  style: TextStyle(color: active ? progressColor : Colors.grey),
+                ),
+              ]),
+            ),
+            if (isNavigating)
+              OutlinedButton(
+                onPressed: _canceling ? null : _cancel,
+                style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+                child: _canceling
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('Cancel'),
+              ),
+          ]),
+          if (active) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: progressValue,
+                color: progressColor,
+                backgroundColor: progressColor.withOpacity(0.15),
+                minHeight: 6,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                '${(progressValue * 100).toStringAsFixed(1)}%',
+                style: TextStyle(fontSize: 12, color: progressColor),
+              ),
+            ),
+          ],
         ]),
       ),
     );
