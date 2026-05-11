@@ -54,7 +54,6 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
-        self.force_turn_angular_speed = 1.0
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -115,11 +114,12 @@ class CmdVelControlNode(Node):
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
         max_dv = self.max_linear_acc * dt
-        max_dw = self.max_angular_acc * dt
         # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
         prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
         out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
-        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
+        # Do not acceleration-limit yaw. The planner/control layer already decides the turn rate,
+        # and forced rotate-in-place should take effect immediately.
+        out.angular.z = target_cmd.angular.z
 
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
         # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
@@ -192,7 +192,7 @@ class CmdVelControlNode(Node):
         # naturally has heading_err close to +/-pi.
         if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
-            vyaw = float(np.sign(heading_err) * self.force_turn_angular_speed)
+            vyaw = float(heading_err)
         # Minimal rotate-first gate: apply only for forward motion.
         elif vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
