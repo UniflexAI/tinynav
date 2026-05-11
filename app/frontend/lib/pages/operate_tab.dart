@@ -15,7 +15,7 @@ import 'planning_painter.dart';
 
 const double _maxLinear = 0.5;   // m/s
 const double _maxAngular = 1.0;  // rad/s
-const Duration _teleopSendInterval = Duration(milliseconds: 50); // 20 Hz
+const Duration _teleopSendInterval = Duration(milliseconds: 100); // 10 Hz
 
 // ── Main widget ───────────────────────────────────────────────────────────────
 
