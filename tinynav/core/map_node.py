@@ -27,6 +27,7 @@ from tinynav.core.models_trt import (
 )
 import logging
 import asyncio
+import time
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import solve_pose_graph
@@ -265,8 +266,6 @@ class MapNode(Node):
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
-        self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
-        self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
         self.map_loop_closure = LoopClosure(
             db=self.db,
             timestamps=list(self.map_poses.keys()),
@@ -360,13 +359,17 @@ class MapNode(Node):
                 self.localization_data_saved_pub.publish(save_finished_msg)
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
-        self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
+        t_start = time.perf_counter()
+        self.get_logger().info("keyframe_mapping is temporarily disabled.")
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
+        t_decode = time.perf_counter()
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+        t_reloc = time.perf_counter()
         if success:
             self.compute_transform_from_map_to_odom()
+        t_tf = time.perf_counter()
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
@@ -374,6 +377,21 @@ class MapNode(Node):
             # and record the map pose
             # compute the coordinate transform from the map pose to the keyframe pose
             # publish the nav path from the map pose to the keyframe pose with the cost map
+        t_nav = time.perf_counter()
+
+        decode_ms = (t_decode - t_start) * 1000.0
+        relocal_ms = (t_reloc - t_decode) * 1000.0
+        tf_ms = (t_tf - t_reloc) * 1000.0
+        nav_ms = (t_nav - t_tf) * 1000.0
+        total_ms = (t_nav - t_start) * 1000.0
+        msg = (
+            f"Localization loop timing ms: total={total_ms:.1f}, decode={decode_ms:.1f}, "
+            f"relocal={relocal_ms:.1f}, tf_update={tf_ms:.1f}, nav_path={nav_ms:.1f}, success={success}"
+        )
+        if total_ms > 500.0:
+            self.get_logger().warning(msg)
+        else:
+            self.get_logger().info(msg)
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -457,6 +475,14 @@ class MapNode(Node):
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
+        if feats0["kpts"].ndim != 3 or feats1["kpts"].ndim != 3:
+            return np.zeros((0, 2), dtype=np.float32), np.zeros((0, 2), dtype=np.float32), np.zeros((0, 2), dtype=np.int64)
+        if feats0["kpts"].shape[0] == 0 or feats1["kpts"].shape[0] == 0:
+            return np.zeros((0, 2), dtype=np.float32), np.zeros((0, 2), dtype=np.float32), np.zeros((0, 2), dtype=np.int64)
+        # Guard against invalid indices returned by matcher.
+        match_indices = match_indices.copy()
+        invalid = (match_indices < 0) | (match_indices >= feats1["kpts"][0].shape[0]) | (np.arange(match_indices.shape[0]) >= feats0["kpts"][0].shape[0])
+        match_indices[invalid] = -1
         valid_mask = match_indices != -1
         keypoints0 = feats0["kpts"][0][valid_mask]
         keypoints1 = feats1["kpts"][0][match_indices[valid_mask]]

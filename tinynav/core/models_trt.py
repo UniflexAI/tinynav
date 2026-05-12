@@ -1,4 +1,7 @@
-import tensorrt as trt
+try:
+    import tensorrt as trt
+except ImportError:
+    trt = None
 import numpy as np
 import cv2
 from codetiming import Timer
@@ -6,11 +9,16 @@ import platform
 import asyncio
 from tinynav.core.func import alru_cache_numpy
 
-from cuda import cudart
+try:
+    from cuda import cudart
+except ImportError:
+    cudart = None
 import ctypes
 import einops
 import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
@@ -40,6 +48,11 @@ def disparity_to_depth(disparity: np.ndarray, baseline: float, focal_length: flo
 
 class TRTBase:
     def __init__(self, engine_path):
+        if trt is None or cudart is None:
+            raise ImportError(
+                "tensorrt and cuda-python are required for TRT models. "
+                "Use BoW mode or install TensorRT Python bindings."
+            )
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
@@ -250,8 +263,14 @@ class ORBMatcher:
         img_shape1=None,
         match_threshold=None,
     ):
-        k0 = kpts0[0]
-        k1 = kpts1[0]
+        k0 = np.asarray(kpts0[0], dtype=np.float32)
+        k1 = np.asarray(kpts1[0], dtype=np.float32)
+        if k0.ndim != 2 or k1.ndim != 2 or k0.shape[1] < 2 or k1.shape[1] < 2:
+            n0 = int(k0.shape[0]) if k0.ndim >= 1 else 0
+            return {"match_indices": np.full((1, n0), -1, dtype=np.int32)}
+        # keep only xy coordinates
+        k0 = k0[:, :2]
+        k1 = k1[:, :2]
         n0 = int(k0.shape[0])
         out = {"match_indices": np.full((1, n0), -1, dtype=np.int32)}
         if n0 == 0 or k1.shape[0] == 0:
@@ -259,11 +278,25 @@ class ORBMatcher:
 
         d0 = np.asarray(desc0[0], dtype=np.float32)
         d1 = np.asarray(desc1[0], dtype=np.float32)
-        if d0.shape[0] == 0 or d1.shape[0] == 0:
+        if d0.ndim != 2 or d1.ndim != 2 or d0.shape[0] == 0 or d1.shape[0] == 0:
             return out
+        # Ensure descriptor rows and keypoints rows are aligned.
+        n0_valid = min(k0.shape[0], d0.shape[0])
+        n1_valid = min(k1.shape[0], d1.shape[0])
+        if n0_valid == 0 or n1_valid == 0:
+            return out
+        k0 = k0[:n0_valid]
+        k1 = k1[:n1_valid]
+        d0 = d0[:n0_valid]
+        d1 = d1[:n1_valid]
+        out = {"match_indices": np.full((1, n0_valid), -1, dtype=np.int32)}
 
         m0 = np.asarray(mask0[0, :, 0] > 0, dtype=bool) if mask0.size else np.ones((d0.shape[0],), dtype=bool)
         m1 = np.asarray(mask1[0, :, 0] > 0, dtype=bool) if mask1.size else np.ones((d1.shape[0],), dtype=bool)
+        if m0.shape[0] != d0.shape[0]:
+            m0 = np.ones((d0.shape[0],), dtype=bool)
+        if m1.shape[0] != d1.shape[0]:
+            m1 = np.ones((d1.shape[0],), dtype=bool)
 
         idx0 = np.where(m0)[0]
         idx1 = np.where(m1)[0]
@@ -281,11 +314,17 @@ class ORBMatcher:
             return out
 
         raw_matches = sorted(raw_matches, key=lambda m: m.distance)
-        pts0 = np.array([k0[idx0[m.queryIdx]] for m in raw_matches], dtype=np.float32)
-        pts1 = np.array([k1[idx1[m.trainIdx]] for m in raw_matches], dtype=np.float32)
+        pts0 = np.array([k0[idx0[m.queryIdx]] for m in raw_matches], dtype=np.float32).reshape(-1, 2)
+        pts1 = np.array([k1[idx1[m.trainIdx]] for m in raw_matches], dtype=np.float32).reshape(-1, 2)
 
         inlier_mask = np.ones((len(raw_matches),), dtype=bool)
-        if len(raw_matches) >= 8:
+        if len(raw_matches) >= 8 and np.isfinite(pts0).all() and np.isfinite(pts1).all():
+            logger.info(
+                "ORBMatcher RANSAC input: pts0.shape=%s pts1.shape=%s raw_matches=%d",
+                pts0.shape,
+                pts1.shape,
+                len(raw_matches),
+            )
             _, ransac_inliers = cv2.findFundamentalMat(
                 pts0,
                 pts1,

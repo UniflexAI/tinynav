@@ -32,11 +32,16 @@ from tinynav.core.planning_node import run_raycasting_loopy
 import logging
 import asyncio
 import shelve
+import dbm.dumb
+import pickle
 from tqdm import tqdm
 import einops
 from tf2_msgs.msg import TFMessage
 from typing import Dict
-from tool.video_db import VideoDB
+try:
+    from tool.video_db import VideoDB
+except ImportError:
+    VideoDB = None
 
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped,Point
@@ -139,8 +144,18 @@ class LoopClosure:
             if dbow3_vocabulary_path is None:
                 raise ValueError("dbow3_vocabulary_path is required when mode='bow'")
             self.dbow3_engine = DBoW3Engine(dbow3_vocabulary_path)
-            for ts in self.timestamps:
-                _, _, cand_features, _, _ = self.db.get_depth_embedding_features_images(ts)
+            total = len(self.timestamps)
+            for idx, ts in enumerate(self.timestamps):
+                logger.info(
+                    f"[LoopClosure] loading map keyframe {idx + 1}/{total}, timestamp={int(ts)}"
+                )
+                try:
+                    _, _, cand_features, _, _ = self.db.get_depth_embedding_features_images(ts)
+                except Exception as e:
+                    logger.error(
+                        f"[LoopClosure] failed loading timestamp={int(ts)}: {e}"
+                    )
+                    raise
                 self.dbow3_engine.add(cand_features)
 
     def add_timestamp(self, timestamp: int):
@@ -294,7 +309,9 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100)
 
 class IntKeyShelf:
     def __init__(self, filename):
-        self.db = shelve.open(filename)
+        # Force dbm.dumb backend so map DB files are portable across host/device runtimes.
+        self._raw_db = dbm.dumb.open(filename, "c")
+        self.db = shelve.Shelf(self._raw_db, protocol=pickle.HIGHEST_PROTOCOL)
 
     def __getitem__(self, key: int):
         return self.db[str(key)]
@@ -417,10 +434,13 @@ class TinyNavDB():
                 return None
             return self.infra1_video_db.read(key_int)
 
-        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
+        return self.depths[key], self.get_embedding(key), self.features[key], rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
-        return self.embeddings[key]
+        key_int = int(key)
+        if key_int in self.embeddings:
+            return self.embeddings[key_int]
+        return np.zeros((1,), dtype=np.float32)
 
     def close(self):
         self.features.close()
