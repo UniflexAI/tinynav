@@ -43,6 +43,11 @@ class MapTab extends ConsumerWidget {
             icon: Icons.map_outlined,
             provider: mapFilesProvider,
             onRefresh: () => ref.invalidate(mapFilesProvider),
+            deletePathBuilder: (f) => '/files/maps/${Uri.encodeComponent(f.name)}',
+            onDeleted: () {
+              ref.invalidate(mapFilesProvider);
+              ref.invalidate(mapInfoProvider);
+            },
             onTapFile: (f) => Navigator.push(
               context,
               MaterialPageRoute(
@@ -258,6 +263,17 @@ class _BagFileListCard extends ConsumerWidget {
                       ref.read(selectedBagProvider.notifier).state =
                           isSelected ? null : f.name;
                     },
+                    onDelete: () => _deleteFile(
+                      context,
+                      ref,
+                      file: f,
+                      deletePath: '/files/bags/${Uri.encodeComponent(f.name)}',
+                      onDeleted: () {
+                        if (isSelected) ref.read(selectedBagProvider.notifier).state = null;
+                        ref.invalidate(bagFilesProvider);
+                        ref.invalidate(deviceStatusProvider);
+                      },
+                    ),
                   );
                 }).toList(),
               ),
@@ -275,7 +291,13 @@ class _BagFileRow extends StatelessWidget {
   final FileEntry file;
   final bool isSelected;
   final VoidCallback onTap;
-  const _BagFileRow({required this.file, required this.isSelected, required this.onTap});
+  final VoidCallback onDelete;
+  const _BagFileRow({
+    required this.file,
+    required this.isSelected,
+    required this.onTap,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -321,6 +343,15 @@ class _BagFileRow extends StatelessWidget {
               size: 16,
               color: isSelected ? const Color(0xFF4A90D9) : Colors.grey.shade400,
             ),
+            const SizedBox(width: 4),
+            IconButton(
+              onPressed: onDelete,
+              icon: const Icon(Icons.delete_outline, size: 17),
+              color: Colors.red.shade600,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              tooltip: 'Delete',
+            ),
           ],
         ),
       ),
@@ -336,6 +367,8 @@ class _FileListCard extends ConsumerWidget {
   final ProviderListenable<AsyncValue<List<FileEntry>>> provider;
   final VoidCallback onRefresh;
   final void Function(FileEntry)? onTapFile;
+  final String Function(FileEntry)? deletePathBuilder;
+  final VoidCallback? onDeleted;
 
   const _FileListCard({
     required this.title,
@@ -343,6 +376,8 @@ class _FileListCard extends ConsumerWidget {
     required this.provider,
     required this.onRefresh,
     this.onTapFile,
+    this.deletePathBuilder,
+    this.onDeleted,
   });
 
   @override
@@ -369,9 +404,22 @@ class _FileListCard extends ConsumerWidget {
                 ),
               )
             : Column(
-                children: files
-                    .map((f) => _FileRow(file: f, onTap: onTapFile != null ? () => onTapFile!(f) : null))
-                    .toList(),
+                children: files.map((f) {
+                  final deletePath = deletePathBuilder?.call(f);
+                  return _FileRow(
+                    file: f,
+                    onTap: onTapFile != null ? () => onTapFile!(f) : null,
+                    onDelete: deletePath == null
+                        ? null
+                        : () => _deleteFile(
+                              context,
+                              ref,
+                              file: f,
+                              deletePath: deletePath,
+                              onDeleted: onDeleted ?? onRefresh,
+                            ),
+                  );
+                }).toList(),
               ),
         loading: () => const Padding(
           padding: EdgeInsets.symmetric(vertical: 12),
@@ -386,7 +434,8 @@ class _FileListCard extends ConsumerWidget {
 class _FileRow extends StatelessWidget {
   final FileEntry file;
   final VoidCallback? onTap;
-  const _FileRow({required this.file, this.onTap});
+  final VoidCallback? onDelete;
+  const _FileRow({required this.file, this.onTap, this.onDelete});
 
   @override
   Widget build(BuildContext context) {
@@ -417,6 +466,17 @@ class _FileRow extends StatelessWidget {
             '${file.sizeLabel}  $dateStr',
             style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
           ),
+          if (onDelete != null) ...[
+            const SizedBox(width: 4),
+            IconButton(
+              onPressed: onDelete,
+              icon: const Icon(Icons.delete_outline, size: 17),
+              color: Colors.red.shade600,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              tooltip: 'Delete',
+            ),
+          ],
           if (onTap != null) ...[
             const SizedBox(width: 4),
             const Icon(Icons.chevron_right_rounded, size: 16, color: Color(0xFFBDBDBD)),
@@ -428,6 +488,51 @@ class _FileRow extends StatelessWidget {
     if (onTap == null) return row;
     return InkWell(onTap: onTap, borderRadius: BorderRadius.circular(8), child: row);
   }
+}
+
+Future<void> _deleteFile(
+  BuildContext context,
+  WidgetRef ref, {
+  required FileEntry file,
+  required String deletePath,
+  required VoidCallback onDeleted,
+}) async {
+  final ok = await _confirmDelete(context, file.name);
+  if (ok != true) return;
+  try {
+    await ref.read(dioProvider).delete(deletePath);
+    onDeleted();
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Deleted ${file.name}')),
+      );
+    }
+  } on DioException catch (e) {
+    if (context.mounted) {
+      _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Delete failed');
+    }
+  }
+}
+
+Future<bool?> _confirmDelete(BuildContext context, String name) {
+  return showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Delete file?'),
+      content: Text('Delete "$name"? This cannot be undone.'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('Delete'),
+        ),
+      ],
+    ),
+  );
 }
 
 // ── Shared section card ───────────────────────────────────────────────────────
