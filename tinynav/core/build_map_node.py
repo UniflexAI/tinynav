@@ -362,7 +362,7 @@ class BagPlayer(Node):
         self._use_stats_pacing = False
         self._state = "WAIT_INIT"
         self._startup_release_until_ns = None
-        self._publish_ahead_limit_ns = int(1.0 * 1e9)
+        self._publish_ahead_limit_ns = int(1.5 * 1e9)
         self._schedule_window_ns = int(0.5 * 1e9)
         self._schedule_min_msgs = 64
 
@@ -486,7 +486,7 @@ class BagPlayer(Node):
             if not self._perception_initialized:
                 return True
             self._state = "BOOTSTRAP"
-            self._startup_release_until_ns = msg_timestamp_ns + int(1.0 * 1e9)
+            self._startup_release_until_ns = msg_timestamp_ns + int(1.5 * 1e9)
             return False
 
         if self._state == "BOOTSTRAP":

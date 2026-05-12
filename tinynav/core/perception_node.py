@@ -115,9 +115,10 @@ class PerceptionNode(Node):
 
 
         self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
+        # Keep at least ~1.5s stereo history at 30Hz, with headroom for jitter.
         self.left_sub = Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw")
         self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
-        self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=30, slop=0.02)
+        self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=90, slop=0.02)
         self.ts.registerCallback(self.images_callback)
 
         self.input_aligner_imu_filter = SimpleFilter()
@@ -166,24 +167,23 @@ class PerceptionNode(Node):
                              [0, 0, -1, 0],
                              [0, 1, 0, 0],
                              [0, 0, 0, 1]])
-        self.stats_pub.publish(
-            String(
-                data=json.dumps(
-                    {
-                        "initialized": True,
-                        "timestamp": -1.0,
-                        "stats": {"process_cnt": 0, "loop_ms": 0.0},
-                        "metrics": {
-                            "num_keyframes": 0,
-                            "num_tracks": 0,
-                            "num_factors": 0,
-                            "num_variables": 0,
-                            "initial_error": 0.0,
-                            "final_error": 0.0,
-                        },
-                    }
-                )
-            )
+        init_stats = {
+            "initialized": True,
+            "timestamp": -1.0,
+            "stats": {"process_cnt": 0, "loop_ms": 0.0},
+            "metrics": {
+                "num_keyframes": 0,
+                "num_tracks": 0,
+                "num_factors": 0,
+                "num_variables": 0,
+                "initial_error": 0.0,
+                "final_error": 0.0,
+            },
+        }
+        self.stats_pub.publish(String(data=json.dumps(init_stats)))
+        self.logger.debug(
+            "Published /slam/data initialized heartbeat with timestamp=%.9f",
+            float(init_stats["timestamp"]),
         )
 
         self.imu_measurements = deque(maxlen=10000)
@@ -254,6 +254,12 @@ class PerceptionNode(Node):
             processed["timestamp"] = float(image_timestamp)
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
+            self.logger.debug(
+                "Published /slam/data timestamp=%.9f loop_ms=%.3f process_cnt=%s",
+                float(processed["timestamp"]),
+                float(processed["stats"]["loop_ms"]),
+                processed["stats"].get("process_cnt", -1),
+            )
 
     def imu_callback(self, imu_msg):
         self.logger.debug(f"imu_callback stamp2second={stamp2second(imu_msg.header.stamp):.9f}")
