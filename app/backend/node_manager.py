@@ -914,7 +914,14 @@ class BackendNode(Ros2NodeManager):
                 return
             with open(pois_file) as f:
                 all_pois = json.load(f)
-            payload = {str(pid): all_pois[str(pid)] for pid in poi_ids if str(pid) in all_pois}
+            # Re-index as a dense queue ("0", "1", ...) so downstream
+            # consumers navigate in the same order the UI sent the checked POIs,
+            # instead of falling back to the original ids / pois.json order.
+            payload = {}
+            for pid in poi_ids:
+                key = str(pid)
+                if key in all_pois:
+                    payload[str(len(payload))] = all_pois[key]
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         with self._lock:
             nav_running = self._nav_nodes_running

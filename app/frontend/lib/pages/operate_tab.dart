@@ -628,7 +628,8 @@ class _PoiSheet extends ConsumerStatefulWidget {
 }
 
 class _PoiSheetState extends ConsumerState<_PoiSheet> {
-  final Set<int> _checkedIds = {};
+  /// POI ids in the exact order they were checked.
+  final List<int> _checkedIds = [];
 
   Future<void> _deletePoi(Poi poi) async {
     final ok = await showDialog<bool>(
@@ -662,7 +663,8 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   }
 
   Future<void> _startNav(List<Poi> pois) async {
-    final selectedPois = pois.where((p) => _checkedIds.contains(p.id)).toList();
+    final poiById = {for (final poi in pois) poi.id: poi};
+    final selectedPois = _checkedIds.map((id) => poiById[id]).whereType<Poi>().toList();
     if (selectedPois.isEmpty) return;
     try {
       await ref.read(dioProvider).post(
@@ -734,15 +736,24 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
                   )
                 : Column(
                     children: pois
-                        .map((poi) => _PoiTile(
-                              poi: poi,
-                              checked: _checkedIds.contains(poi.id),
-                              onChecked: (v) => setState(() {
-                                if (v) _checkedIds.add(poi.id);
-                                else _checkedIds.remove(poi.id);
-                              }),
-                              onDelete: () => _deletePoi(poi),
-                            ))
+                        .map((poi) {
+                          final orderIndex = _checkedIds.indexOf(poi.id);
+                          return _PoiTile(
+                            poi: poi,
+                            checked: orderIndex != -1,
+                            orderNumber: orderIndex == -1 ? null : orderIndex + 1,
+                            onChecked: (v) => setState(() {
+                              if (v) {
+                                if (!_checkedIds.contains(poi.id)) {
+                                  _checkedIds.add(poi.id);
+                                }
+                              } else {
+                                _checkedIds.remove(poi.id);
+                              }
+                            }),
+                            onDelete: () => _deletePoi(poi),
+                          );
+                        })
                         .toList(),
                   ),
             loading: () => const Center(child: CircularProgressIndicator()),
@@ -757,12 +768,14 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
 class _PoiTile extends StatelessWidget {
   final Poi poi;
   final bool checked;
+  final int? orderNumber;
   final ValueChanged<bool> onChecked;
   final VoidCallback onDelete;
 
   const _PoiTile({
     required this.poi,
     required this.checked,
+    required this.orderNumber,
     required this.onChecked,
     required this.onDelete,
   });
@@ -774,7 +787,7 @@ class _PoiTile extends StatelessWidget {
         value: checked,
         onChanged: (v) => onChecked(v ?? false),
       ),
-      title: Text(poi.name),
+      title: Text(orderNumber == null ? poi.name : '${poi.name} #$orderNumber'),
       subtitle: Text(
         '(${poi.x.toStringAsFixed(2)}, ${poi.y.toStringAsFixed(2)})',
         style: const TextStyle(fontSize: 12),
