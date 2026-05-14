@@ -144,7 +144,7 @@ class BackendNode(Ros2NodeManager):
         # Path to the last successfully verified bag (after stop + ros2 bag info check)
         self._last_verified_bag: str | None = None
 
-        # Nav nodes (map_node + cmd_vel_control) managed independently of _stop_all
+        # Nav nodes (map_node) managed independently of _stop_all
         self._nav_nodes_running: bool = False
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
@@ -658,11 +658,6 @@ class BackendNode(Ros2NodeManager):
             ],
             env=_env,
         )
-        self._cmd_vel_proc = self._launch_proc(
-            'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
-            env=_env,
-        )
         with self._lock:
             self._nav_nodes_running = True
         self.get_logger().info('Nav nodes started')
@@ -701,11 +696,6 @@ class BackendNode(Ros2NodeManager):
             'map_node',
             ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
              '--tinynav_map_path', self.map_path],
-            env=_env,
-        )
-        self._cmd_vel_proc = self._launch_proc(
-            'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
             env=_env,
         )
         with self._lock:

@@ -73,7 +73,7 @@ def load_robot_config(path: str) -> RobotConfig:
     )
 
 
-DEFAULT_ROBOT_CONFIG = os.path.join(os.path.dirname(__file__), '..', 'config', 'robot_go2.yaml')
+DEFAULT_ROBOT_CONFIG = os.path.join(os.path.dirname(__file__), '..', 'config', 'robot_b2.yaml')
 
 
 # === Helper functions ===
@@ -1252,7 +1252,7 @@ def main(args=None):
         '--robot_config',
         type=str,
         default=None,
-        help='Path to robot YAML config (default: config/robot_go2.yaml)',
+        help='Path to robot YAML config (default: config/robot_b2.yaml)',
     )
     parsed_args, unknown_args = parser.parse_known_args(args)
 
