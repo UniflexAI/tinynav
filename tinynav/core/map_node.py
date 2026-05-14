@@ -11,11 +11,13 @@ import json
 
 import heapq
 from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, se3_inv
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, PointCloud2
+from sensor_msgs_py import point_cloud2 as pc2
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
+from scipy.optimize import least_squares
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
@@ -174,6 +176,57 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
+
+def _object_points_planar_sv_ratio(object_points: np.ndarray) -> float:
+    """s_min / s_max from SVD of centered 3D points; near 0 means nearly coplanar."""
+    points = np.asarray(object_points, dtype=np.float64).reshape(-1, 3)
+    if points.shape[0] < 4:
+        return 1.0
+    centered = points - np.mean(points, axis=0)
+    try:
+        singular_values = np.linalg.svd(centered, full_matrices=False, compute_uv=False)
+        singular_values = np.maximum(singular_values, 1e-12)
+        return float(singular_values[-1] / singular_values[0])
+    except np.linalg.LinAlgError:
+        return 1.0
+
+
+def _relocalize_solve_pnp_ransac(
+    object_points: np.ndarray,
+    image_points: np.ndarray,
+    K: np.ndarray,
+    *,
+    planar_sv_ratio_max: float = 0.12,
+    iterations_count: int = 200,
+    reprojection_error_px: float = 4.0,
+) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray]:
+    """Handle planar-degenerate PnP by using IPPE when geometry is near-planar."""
+    sv_ratio = _object_points_planar_sv_ratio(object_points)
+    near_planar = sv_ratio < planar_sv_ratio_max
+    if near_planar and hasattr(cv2, "SOLVEPNP_IPPE"):
+        pnp_flag = int(cv2.SOLVEPNP_IPPE)
+    else:
+        pnp_flag = int(cv2.SOLVEPNP_EPNP)
+    try:
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            object_points.astype(np.float64),
+            image_points.astype(np.float64),
+            K.astype(np.float64),
+            None,
+            iterationsCount=iterations_count,
+            reprojectionError=reprojection_error_px,
+            confidence=0.995,
+            flags=pnp_flag,
+        )
+    except cv2.error:
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            object_points.astype(np.float64),
+            image_points.astype(np.float64),
+            K.astype(np.float64),
+            None,
+        )
+    return success, rvec, tvec, inliers
+
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
         """Initialization
@@ -199,6 +252,7 @@ class MapNode(Node):
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
+        self.live_occ_sub = self.create_subscription(PointCloud2, '/planning/occupied_voxels', self._live_occ_callback, 10)
 
         # pubs
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
@@ -267,6 +321,7 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+        self._live_occ_buffer: dict[int, tuple[np.ndarray, np.ndarray, float]] = {}
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -309,6 +364,50 @@ class MapNode(Node):
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
 
+    def _live_occ_callback(self, msg: PointCloud2):
+        """Cache latest local occupancy cloud as voxel grid for SE(2) map-odom correction."""
+        points = np.array(
+            list(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True)),
+            dtype=np.float32,
+        )
+        if points.size == 0:
+            return
+        resolution = float(self.occupancy_map_meta[3])
+        origin, occ_3d = self._points_to_occ_grid(points, resolution)
+        if occ_3d.size == 0:
+            return
+        timestamp_ns = int(msg.header.stamp.sec * 1e9) + int(msg.header.stamp.nanosec)
+        self._live_occ_buffer[timestamp_ns] = (occ_3d, origin, resolution)
+        # Keep buffer bounded.
+        if len(self._live_occ_buffer) > 30:
+            oldest = min(self._live_occ_buffer.keys())
+            del self._live_occ_buffer[oldest]
+
+    @staticmethod
+    def _points_to_occ_grid(points: np.ndarray, resolution: float) -> tuple[np.ndarray, np.ndarray]:
+        """Rasterize xyz points into a compact local occupancy grid."""
+        if points.shape[0] == 0:
+            return np.zeros(3, dtype=np.float64), np.zeros((0, 0, 0), dtype=np.float32)
+        mins = points.min(axis=0).astype(np.float64)
+        maxs = points.max(axis=0).astype(np.float64)
+        pad = float(resolution) * 2.0
+        origin = mins - pad
+        sizes = np.ceil((maxs - origin) / float(resolution)).astype(np.int32) + 1
+        sizes = np.maximum(sizes, 1)
+        # Keep memory bounded even if cloud has outliers.
+        sizes = np.minimum(sizes, np.array([220, 220, 120], dtype=np.int32))
+        occ_3d = np.zeros((int(sizes[0]), int(sizes[1]), int(sizes[2])), dtype=np.float32)
+        idx = np.floor((points.astype(np.float64) - origin) / float(resolution)).astype(np.int32)
+        valid = (
+            (idx[:, 0] >= 0) & (idx[:, 0] < occ_3d.shape[0]) &
+            (idx[:, 1] >= 0) & (idx[:, 1] < occ_3d.shape[1]) &
+            (idx[:, 2] >= 0) & (idx[:, 2] < occ_3d.shape[2])
+        )
+        idx = idx[valid]
+        if idx.shape[0] > 0:
+            occ_3d[idx[:, 0], idx[:, 1], idx[:, 2]] = 1.0
+        return origin, occ_3d
+
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
             self.get_logger().info("Received benchmark stop signal, starting save process...")
@@ -337,6 +436,45 @@ class MapNode(Node):
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
+
+        occ_match = None
+        if self.T_from_map_to_odom is not None and self._live_occ_buffer:
+            tol_ns = int(0.5e9)
+            closest_ts = min(
+                self._live_occ_buffer.keys(),
+                key=lambda ts: abs(ts - keyframe_image_timestamp_ns),
+            )
+            if abs(closest_ts - keyframe_image_timestamp_ns) < tol_ns:
+                occ_match = self._live_occ_buffer.pop(closest_ts)
+
+        if occ_match is not None:
+            live_occ, live_origin, live_res = occ_match
+            pose_in_odom = self.pose_graph_used_pose.get(keyframe_image_timestamp_ns)
+            if pose_in_odom is not None:
+                with Timer(name="occ se2", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                    yaw, tx_m, ty_m = self._dt_se2_localization(
+                        live_occ, live_origin, live_res, pose_in_odom
+                    )
+                trans_mag = float(np.hypot(tx_m, ty_m))
+                if np.isfinite(yaw) and np.isfinite(tx_m) and np.isfinite(ty_m):
+                    if abs(yaw) <= np.deg2rad(20.0) and trans_mag <= 1.5:
+                        c, s = np.cos(yaw), np.sin(yaw)
+                        T_se2 = np.eye(4)
+                        T_se2[0, 0] = c
+                        T_se2[0, 1] = -s
+                        T_se2[1, 0] = s
+                        T_se2[1, 1] = c
+                        T_se2[0, 3] = tx_m
+                        T_se2[1, 3] = ty_m
+                        self.T_from_map_to_odom = self.T_from_map_to_odom @ T_se2
+                        self.get_logger().info(
+                            f"SE(2) map-odom correction: yaw={np.rad2deg(yaw):.1f} deg, "
+                            f"trans=({tx_m:.3f}, {ty_m:.3f}) m"
+                        )
+                    else:
+                        self.get_logger().warning(
+                            f"Skip SE(2) correction outlier: yaw={np.rad2deg(yaw):.1f} deg, |t|={trans_mag:.3f} m"
+                        )
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
@@ -440,6 +578,130 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
+    @staticmethod
+    def _occ3d_to_z_slice(occ_3d, origin, resolution, robot_z, z_half=0.1, threshold=0.05):
+        """Project a z-band of a 3D occupancy grid to a 2D binary image."""
+        z_lo = int(max(0, (robot_z - z_half - origin[2]) / resolution))
+        z_hi = int(min(occ_3d.shape[2], (robot_z + z_half - origin[2]) / resolution + 1))
+        if z_lo >= z_hi:
+            return np.zeros((occ_3d.shape[0], occ_3d.shape[1]), dtype=np.float32)
+        slab = occ_3d[:, :, z_lo:z_hi]
+        return (np.max(slab, axis=2) > threshold).astype(np.float32)
+
+    @staticmethod
+    def trf_se2_match(
+        pts: np.ndarray,
+        dist_map: np.ndarray,
+        grad_x: np.ndarray,
+        grad_y: np.ndarray,
+        iters: int = 10,
+        tx_bounds: tuple[float, float] = (-2.0, 2.0),
+        ty_bounds: tuple[float, float] = (-2.0, 2.0),
+        theta_bounds: tuple[float, float] = (-0.4, 0.4),
+    ) -> tuple[float, float, float]:
+        """SE(2) matching via trust-region-reflective on distance-transform residuals."""
+        del grad_x, grad_y  # Reserved to keep call-sites compatible with previous GN API.
+        h, w = dist_map.shape
+        center = np.array([h / 2, w / 2], dtype=np.float64)
+        pts_f = pts.astype(np.float64)
+
+        def residuals(params: np.ndarray) -> np.ndarray:
+            tx, ty, theta = params
+            c, s = np.cos(theta), np.sin(theta)
+            rot = np.array([[c, -s], [s, c]], dtype=np.float64)
+            pts_world = pts_f @ rot.T + center + np.array([tx, ty], dtype=np.float64)
+            xi = pts_world[:, 0].astype(np.int32)
+            yi = pts_world[:, 1].astype(np.int32)
+            valid = (xi >= 1) & (xi < h - 1) & (yi >= 1) & (yi < w - 1)
+            residual = np.zeros(len(pts_f), dtype=np.float64)
+            if np.sum(valid) >= 20:
+                residual[valid] = dist_map[xi[valid], yi[valid]].astype(np.float64)
+            return residual
+
+        result = least_squares(
+            residuals,
+            x0=[0.0, 0.0, 0.0],
+            method="trf",
+            bounds=(
+                [tx_bounds[0], ty_bounds[0], theta_bounds[0]],
+                [tx_bounds[1], ty_bounds[1], theta_bounds[1]],
+            ),
+            max_nfev=iters * 10,
+            ftol=1e-4,
+            xtol=1e-4,
+        )
+        return float(result.x[0]), float(result.x[1]), float(result.x[2])
+
+    def _dt_se2_localization(
+        self,
+        live_occ: np.ndarray,
+        live_origin: np.ndarray,
+        live_res: float,
+        pose_in_odom: np.ndarray,
+    ) -> tuple[float, float, float]:
+        """Match live occupancy to offline occupancy via DT + TRF SE(2)."""
+        if self.T_from_map_to_odom is None:
+            return (0.0, 0.0, 0.0)
+
+        target_size = 96
+        patch_radius_m = 3.0
+
+        robot_xyz_odom = pose_in_odom[:3, 3]
+        robot_in_map = se3_inv(self.T_from_map_to_odom) @ pose_in_odom
+        robot_xyz_map = robot_in_map[:3, 3]
+
+        live_slice = self._occ3d_to_z_slice(
+            live_occ, live_origin, live_res, robot_xyz_odom[2]
+        )
+        offline_origin = self.occupancy_map_meta[:3].astype(np.float64)
+        offline_res = float(self.occupancy_map_meta[3])
+        offline_slice = self._occ3d_to_z_slice(
+            self.occupancy_map, offline_origin, offline_res, robot_xyz_map[2]
+        )
+
+        def extract_patch(img2d, origin, res, center_xy, radius_m):
+            cx = int((center_xy[0] - origin[0]) / res)
+            cy = int((center_xy[1] - origin[1]) / res)
+            radius = int(radius_m / res)
+            rows, cols = img2d.shape
+            x0, x1 = max(0, cx - radius), min(rows, cx + radius)
+            y0, y1 = max(0, cy - radius), min(cols, cy + radius)
+            return img2d[x0:x1, y0:y1].copy()
+
+        live_patch = extract_patch(
+            live_slice, live_origin, live_res, robot_xyz_odom[:2], patch_radius_m
+        )
+        offline_patch = extract_patch(
+            offline_slice, offline_origin, offline_res, robot_xyz_map[:2], patch_radius_m
+        )
+        if live_patch.size < 20 or offline_patch.size < 20:
+            return (0.0, 0.0, 0.0)
+
+        offline_h, offline_w = offline_patch.shape[:2]
+        patch_x_m = offline_h * offline_res
+        patch_y_m = offline_w * offline_res
+
+        live_patch = cv2.resize(live_patch, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+        offline_patch = cv2.resize(offline_patch, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+
+        occ_bin = (offline_patch > 0.5).astype(np.uint8)
+        dist_map = cv2.distanceTransform(1 - occ_bin, cv2.DIST_L2, 3)
+        grad_x = cv2.Sobel(dist_map, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(dist_map, cv2.CV_64F, 0, 1, ksize=3)
+
+        pts = np.argwhere(live_patch > 0.5).astype(np.float32)
+        if len(pts) < 20:
+            return (0.0, 0.0, 0.0)
+        if len(pts) > 300:
+            pts = pts[np.random.choice(len(pts), 300, replace=False)]
+        center = np.array([target_size / 2, target_size / 2], dtype=np.float32)
+        pts_centered = pts - center
+
+        tx, ty, theta = MapNode.trf_se2_match(pts_centered, dist_map, grad_x, grad_y)
+        tx_m = float(tx) * (patch_x_m / target_size)
+        ty_m = float(ty) * (patch_y_m / target_size)
+        return float(theta), tx_m, ty_m
+
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
@@ -467,8 +729,12 @@ class MapNode(Node):
                 point_3d_in_world_list = np.array(point_3d_in_world_list)
                 point_2d_in_keyframe_list = np.array(point_2d_in_keyframe_list)
 
-                success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
-                if success and len(inliers) >= 50:
+                success, rvec, tvec, inliers = _relocalize_solve_pnp_ransac(
+                    point_3d_in_world_list,
+                    point_2d_in_keyframe_list,
+                    self.map_K,
+                )
+                if success and inliers is not None and len(inliers) >= 50:
                     R, _ = cv2.Rodrigues(rvec)
                     T = np.eye(4)
                     T[:3, :3] = R
