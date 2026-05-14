@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -14,6 +15,7 @@ import 'planning_painter.dart';
 
 const double _maxLinear = 0.5;   // m/s
 const double _maxAngular = 1.0;  // rad/s
+const Duration _teleopSendInterval = Duration(milliseconds: 100); // 10 Hz
 
 // ── Main widget ───────────────────────────────────────────────────────────────
 
@@ -27,6 +29,8 @@ class OperateTab extends ConsumerStatefulWidget {
 class _OperateTabState extends ConsumerState<OperateTab> {
   WebSocketChannel? _teleopChannel;
   double _linearX = 0, _linearY = 0, _angularZ = 0;
+  DateTime _lastTeleopSend = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _teleopTimer;
 
   bool _showObstacle = true;
   bool _showEsdf = true;
@@ -52,7 +56,20 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     } catch (_) {}
   }
 
-  void _sendVelocity() {
+  void _sendVelocity({bool force = false}) {
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastTeleopSend);
+    if (!force && elapsed < _teleopSendInterval) {
+      _teleopTimer ??= Timer(_teleopSendInterval - elapsed, () {
+        _teleopTimer = null;
+        _sendVelocity(force: true);
+      });
+      return;
+    }
+
+    _teleopTimer?.cancel();
+    _teleopTimer = null;
+    _lastTeleopSend = now;
     try {
       _teleopChannel?.sink.add(jsonEncode({
         'linear_x': _linearX,
@@ -65,22 +82,23 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   void _onLeftJoystick(double x, double y) {
     _linearX = -y * _maxLinear;
     _linearY = -x * _maxLinear;
-    _sendVelocity();
+    _sendVelocity(force: x == 0 && y == 0);
   }
 
   void _onRightJoystick(double x, double y) {
     _angularZ = -x * _maxAngular;
-    _sendVelocity();
+    _sendVelocity(force: x == 0 && y == 0);
   }
 
   Future<void> _emergencyStop() async {
     _linearX = 0; _linearY = 0; _angularZ = 0;
-    _sendVelocity();
+    _sendVelocity(force: true);
     try { await ref.read(dioProvider).post('/nav/nodes/disable'); } catch (_) {}
   }
 
   @override
   void dispose() {
+    _teleopTimer?.cancel();
     _teleopChannel?.sink.close();
     super.dispose();
   }
