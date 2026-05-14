@@ -1,21 +1,45 @@
-import torch
 import tyro
 import numpy as np
-import shelve
 import os
 import cv2
-import einops
-from lightglue import LightGlue, SuperPoint
-from lightglue.utils import rbd
-from tinynav.tinynav_cpp_bind import ba_solve
+import asyncio
+from tinynav.tinynav_cpp_bind import ba_solve_depth_mahalanobis
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
-from convert_to_colmap_format import convert_nerf_format
+from tqdm import tqdm
+from tinynav.core.build_map_node import TinyNavDB
+from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT
 
 
-extractor = SuperPoint(max_num_keypoints=2048).eval().cuda()  # load the extractor
-extractor.preprocess_conf = {"resize": None}
-matcher = LightGlue(features='superpoint').eval().cuda()  # load the matcher
+extractor = SuperPointTRT()
+matcher = LightGlueTRT()
+
+class DisjointSet:
+    def __init__(self):
+        self.parent: Dict[tuple[int, int], tuple[int, int]] = {}
+        self.rank: Dict[tuple[int, int], int] = {}
+
+    def add(self, x: tuple[int, int]) -> None:
+        if x not in self.parent:
+            self.parent[x] = x
+            self.rank[x] = 0
+
+    def find(self, x: tuple[int, int]) -> tuple[int, int]:
+        p = self.parent[x]
+        if p != x:
+            self.parent[x] = self.find(p)
+        return self.parent[x]
+
+    def union(self, a: tuple[int, int], b: tuple[int, int]) -> None:
+        ra = self.find(a)
+        rb = self.find(b)
+        if ra == rb:
+            return
+        if self.rank[ra] < self.rank[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        if self.rank[ra] == self.rank[rb]:
+            self.rank[ra] += 1
 
 def multiview_triangulation(keypoints_list: List[np.ndarray], camera_poses: List[np.ndarray], K: np.ndarray) -> Tuple[bool, np.ndarray]:
     """
@@ -298,12 +322,14 @@ class LandmarkTracker:
                         self.landmarks[landmark_id].triangulated = True
 
 
-def solve_bundle_adjustment(points_3d: Dict[int, np.ndarray], 
-                                observations: List[Tuple[int, int, np.ndarray]], 
-                                camera_poses: Dict[int, np.ndarray], 
-                                intrinsics: np.ndarray,
-                                constant_pose_index: Dict[int, bool] = None,
-                                relative_pose_constraints: List[Tuple[int, int, np.ndarray, np.ndarray, np.ndarray]] = None):
+def solve_bundle_adjustment_depth_mahalanobis(
+    points_3d: Dict[int, np.ndarray],
+    observations: List[Tuple[int, int, np.ndarray, np.ndarray]],
+    camera_poses: Dict[int, np.ndarray],
+    intrinsics: np.ndarray,
+    constant_pose_index: Dict[int, bool] = None,
+    relative_pose_constraints: List[Tuple[int, int, np.ndarray, np.ndarray, np.ndarray]] = None,
+):
         if constant_pose_index is not None:
             py_constant_pose_index = {timestamp: is_constant for timestamp, is_constant in constant_pose_index.items()}
         else:
@@ -316,8 +342,51 @@ def solve_bundle_adjustment(points_3d: Dict[int, np.ndarray],
         else:
             py_relative_pose_constraints = []
 
-        optimized_camera_poses, optimized_points_3d = ba_solve(camera_poses, points_3d, observations, intrinsics, py_constant_pose_index, py_relative_pose_constraints)
+        optimized_camera_poses, optimized_points_3d = ba_solve_depth_mahalanobis(
+            camera_poses,
+            points_3d,
+            observations,
+            intrinsics,
+            py_constant_pose_index,
+            py_relative_pose_constraints,
+        )
         return optimized_camera_poses, optimized_points_3d
+
+
+def _unproject_depth_with_cov(
+    u: float,
+    v: float,
+    depth: float,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    sigma_u: float,
+    sigma_v: float,
+    sigma_disparity: float,
+    baseline: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if depth <= 0.0:
+        raise ValueError("depth must be > 0")
+    if baseline <= 0.0:
+        raise ValueError("baseline must be > 0")
+    sigma_z = (depth * depth / (fx * baseline)) * sigma_disparity
+    x = (u - cx) * depth / fx
+    y = (v - cy) * depth / fy
+    z = depth
+    jac = np.array(
+        [
+            [depth / fx, 0.0, (u - cx) / fx],
+            [0.0, depth / fy, (v - cy) / fy],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    cov_uvz = np.diag([sigma_u * sigma_u, sigma_v * sigma_v, sigma_z * sigma_z]).astype(np.float64)
+    cov_xyz = jac @ cov_uvz @ jac.T
+    cov_xyz += np.eye(3, dtype=np.float64) * 1e-9
+    sqrt_info = np.linalg.cholesky(np.linalg.inv(cov_xyz))
+    return np.array([x, y, z], dtype=np.float64), sqrt_info.astype(np.float64)
 
 def project_point_to_image(point_3d, pose_in_world, intrinsics):
     point_in_world = np.hstack((point_3d, 1))
@@ -327,19 +396,30 @@ def project_point_to_image(point_3d, pose_in_world, intrinsics):
     v = int(intrinsics[1, 1] * y / z + intrinsics[1, 2])
     return u, v
 
-def match_images(image0, image1):
-    image0 = einops.rearrange(image0, "h w c -> c h w")
-    image1 = einops.rearrange(image1, "h w c -> c h w")
-    image0 = (torch.from_numpy(image0) / 255.0).cuda()
-    image1 = (torch.from_numpy(image1) / 255.0).cuda()
-    feats0 = extractor.extract(image0)  # auto-resize the image, disable with resize=None
-    feats1 = extractor.extract(image1)
-    matches01 = matcher({'image0': feats0, 'image1': feats1})
-    feats0, feats1, matches01 = [rbd(x) for x in [feats0, feats1, matches01]]  # remove batch dimension
-    matches = matches01['matches']  # indices with shape (K,2)
-    descriptors0 = feats0['descriptors']
-    descriptors1 = feats1['descriptors']
-    return feats0['keypoints'], feats1['keypoints'], matches, descriptors0, descriptors1
+def match_images_with_trt(image0: np.ndarray, image1: np.ndarray, image_shape: np.ndarray):
+    if image0.ndim != 2 or image1.ndim != 2:
+        raise ValueError(
+            f"SuperPointTRT expects grayscale HxW images, got image0.shape={image0.shape}, image1.shape={image1.shape}"
+        )
+    feats0 = asyncio.run(extractor.infer(image0))
+    feats1 = asyncio.run(extractor.infer(image1))
+    match_result = asyncio.run(
+        matcher.infer(
+            feats0["kpts"],
+            feats1["kpts"],
+            feats0["descps"],
+            feats1["descps"],
+            feats0["mask"],
+            feats1["mask"],
+            image_shape,
+            image_shape,
+        )
+    )
+    keypoints0 = feats0["kpts"][0]
+    keypoints1 = feats1["kpts"][0]
+    match_indices = match_result["match_indices"][0]
+    matches = np.array([[i, idx] for i, idx in enumerate(match_indices) if idx != -1], dtype=np.int64)
+    return keypoints0, keypoints1, matches, feats0["descps"][0], feats1["descps"][0]
 
 def draw_image(image_left, image_right, keypoints0, keypoints1, matches):
     cv_matches = [cv2.DMatch(_queryIdx=matches[index, 0].item(), _trainIdx=matches[index, 1].item(), _imgIdx=0, _distance=0) for index in range(matches.shape[0])]
@@ -348,77 +428,296 @@ def draw_image(image_left, image_right, keypoints0, keypoints1, matches):
     output_image = cv2.drawMatches(image_left, cv_kpts_prev, image_right, cv_kpts_curr, cv_matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
     return output_image
 
-def main(tinynav_db_path: str):
+def main(
+    tinynav_db_path: str,
+    output_dir: str | None = None,
+    save_top_rotation_match_count: int = 20,
+    only_prev_timestamp: int | None = None,
+    only_curr_timestamp: int | None = None,
+    save_reprojection_visualization: bool = True,
+    save_reprojection_max_frames: int = -1,
+    save_match_pair_visualization: bool = True,
+):
+    if output_dir is None:
+        output_dir = f"{tinynav_db_path.rstrip('/')}_ba_refined"
+    os.makedirs(output_dir, exist_ok=True)
+
     infra1_poses = np.load(os.path.join(tinynav_db_path, "poses.npy"), allow_pickle=True).item()
-    rgb_images = shelve.open(os.path.join(tinynav_db_path, "rgb_images"), flag='r')
-    T_rgb_to_infra1 = np.load(os.path.join(tinynav_db_path, "T_rgb_to_infra1.npy"), allow_pickle=True)
-    rgb_intrinsics = np.load(os.path.join(tinynav_db_path, "rgb_camera_intrinsics.npy"), allow_pickle=True)
-    edges = np.load(os.path.join(tinynav_db_path, "edges.npy"), allow_pickle=True)
+    db = TinyNavDB(tinynav_db_path, is_scratch=False)
+    infra1_intrinsics = np.load(os.path.join(tinynav_db_path, "intrinsics.npy"), allow_pickle=True)
+    baseline = float(np.load(os.path.join(tinynav_db_path, "baseline.npy"), allow_pickle=True))
+    fx = float(infra1_intrinsics[0, 0])
+    fy = float(infra1_intrinsics[1, 1])
+    cx = float(infra1_intrinsics[0, 2])
+    cy = float(infra1_intrinsics[1, 2])
+    sigma_u = 1.0
+    sigma_v = 1.0
+    sigma_disparity = 1.0
+
+    sorted_timestamps = sorted(infra1_poses.keys())
+    edges = list(zip(sorted_timestamps[:-1], sorted_timestamps[1:]))
+    if only_prev_timestamp is not None or only_curr_timestamp is not None:
+        if only_prev_timestamp is None or only_curr_timestamp is None:
+            raise ValueError("Both --only-prev-timestamp and --only-curr-timestamp must be set together")
+        edges = [(int(only_prev_timestamp), int(only_curr_timestamp))]
+        print(f"two-frame mode: edges={edges}")
     min_timestamp = min(infra1_poses.keys())
-    rgb_poses = {}
-    for timestamp in infra1_poses.keys():
-        rgb_poses[timestamp] = infra1_poses[timestamp] @ T_rgb_to_infra1
-    keypoints_matches = {}
-    landmark_tracker = LandmarkTracker()
-    rgb_image_size = None
-    for prev_timestamp, curr_timestamp in edges:
-        prev_rgb_image = rgb_images[str(prev_timestamp)]
-        curr_rgb_image = rgb_images[str(curr_timestamp)]
-        if rgb_image_size is None:
-            rgb_image_size = prev_rgb_image.shape[:2]
-        keypoints0, keypoints1, matches, descriptors0, descriptors1 = match_images(prev_rgb_image, curr_rgb_image)
-        points0 = keypoints0[matches[..., 0]]  # coordinates in image #0, shape (K,2)
-        points1 = keypoints1[matches[..., 1]]  # coordinates in image #1, shape (K,2)
-        keypoints_matches[(prev_timestamp, curr_timestamp)] = (points0, points1, matches)
-        landmark_tracker.add_matched_frame(prev_timestamp, curr_timestamp, keypoints0.detach().cpu().numpy(), keypoints1.detach().cpu().numpy(), descriptors0.detach().cpu().numpy(), descriptors1.detach().cpu().numpy(), matches.detach().cpu().numpy())
-        landmark_tracker.triangulate_landmarks(rgb_poses, rgb_intrinsics)
-    print(f"landmark_tracker.observation_relations_for_ba(): {len(landmark_tracker.observation_relations_for_ba())}")
-    landmark_point3d = landmark_tracker.get_landmark_point3ds()
-    optimized_camera_poses, optimized_points_3d = solve_bundle_adjustment(
-        landmark_point3d,
-        landmark_tracker.observation_relations_for_ba(),
-        rgb_poses,
-        rgb_intrinsics,
-        constant_pose_index={timestamp: True for timestamp in rgb_poses.keys()})
+    ds = DisjointSet()
+    node_obs_cam: Dict[tuple[int, int], np.ndarray] = {}
+    node_sqrt_info: Dict[tuple[int, int], np.ndarray] = {}
+    node_valid = set()
+    frame_kpts: Dict[int, np.ndarray] = {}
+    frame_dropped_uv: Dict[int, List[Tuple[np.ndarray, str, float | None]]] = {}
+    match_pair_dir = os.path.join(output_dir, "match_pairs")
+    if save_match_pair_visualization:
+        os.makedirs(match_pair_dir, exist_ok=True)
 
-    landmark_point3d = {landmark_id: optimized_points_3d[landmark_id] for landmark_id in optimized_points_3d.keys()}
+    for prev_timestamp, curr_timestamp in tqdm(edges, desc="Process edges", unit="edge"):
+        if prev_timestamp not in infra1_poses or curr_timestamp not in infra1_poses:
+            continue
+        prev_depth, _, _, _, prev_infra1_loader = db.get_depth_embedding_features_images(prev_timestamp)
+        curr_depth, _, _, _, curr_infra1_loader = db.get_depth_embedding_features_images(curr_timestamp)
+        prev_infra1_image = prev_infra1_loader()
+        curr_infra1_image = curr_infra1_loader()
+        if prev_infra1_image is None or curr_infra1_image is None or prev_depth is None or curr_depth is None:
+            continue
+        image_shape = np.array([prev_infra1_image.shape[1], prev_infra1_image.shape[0]], dtype=np.int64)
+        keypoints0, keypoints1, matches, _, _ = match_images_with_trt(
+            prev_infra1_image,
+            curr_infra1_image,
+            image_shape,
+        )
+        if save_match_pair_visualization and matches.shape[0] > 0:
+            pair_vis = draw_image(prev_infra1_image, curr_infra1_image, keypoints0, keypoints1, matches)
+            pair_name = (
+                f"prev_{int(prev_timestamp)}_curr_{int(curr_timestamp)}_matches_{int(matches.shape[0])}.png"
+            )
+            cv2.imwrite(os.path.join(match_pair_dir, pair_name), pair_vis)
+        frame_kpts[int(prev_timestamp)] = np.asarray(keypoints0)
+        frame_kpts[int(curr_timestamp)] = np.asarray(keypoints1)
 
-    filter_landmark_count = 0
-    for landmark_id, landmark_position in landmark_point3d.items():
-        error = []
-        for timestamp, kp_idx in landmark_tracker.landmark_observations[landmark_id].items():
-            keypoint = landmark_tracker.landmark_keypoints[landmark_id][timestamp][kp_idx]
-            projected_landmark = project_point_to_image(landmark_position,optimized_camera_poses[timestamp], rgb_intrinsics)
-            error.append(np.linalg.norm(keypoint - projected_landmark))
-        if len(error) > 0 and np.mean(np.array(error)) > 10:
-            filter_landmark_count += 1
-            landmark_tracker.landmarks[landmark_id].triangulated = False
-            filter_landmark_count += 1
+        for i0, i1 in matches:
+            u0, v0 = keypoints0[i0]
+            u1, v1 = keypoints1[i1]
+            x0 = int(round(float(u0)))
+            y0 = int(round(float(v0)))
+            x1 = int(round(float(u1)))
+            y1 = int(round(float(v1)))
+            if y0 < 0 or y0 >= prev_depth.shape[0] or x0 < 0 or x0 >= prev_depth.shape[1]:
+                frame_dropped_uv.setdefault(int(prev_timestamp), []).append((np.array([u0, v0], dtype=np.float64), "oob_prev", None))
+                continue
+            if y1 < 0 or y1 >= curr_depth.shape[0] or x1 < 0 or x1 >= curr_depth.shape[1]:
+                frame_dropped_uv.setdefault(int(curr_timestamp), []).append((np.array([u1, v1], dtype=np.float64), "oob_curr", None))
+                continue
+            z0 = float(prev_depth[y0, x0])
+            z1 = float(curr_depth[y1, x1])
+            if not np.isfinite(z0) or not np.isfinite(z1) or z0 <= 0.0 or z1 <= 0.0:
+                if not np.isfinite(z0) or z0 <= 0.0:
+                    frame_dropped_uv.setdefault(int(prev_timestamp), []).append((np.array([u0, v0], dtype=np.float64), "invalid_prev_depth", z0))
+                if not np.isfinite(z1) or z1 <= 0.0:
+                    frame_dropped_uv.setdefault(int(curr_timestamp), []).append((np.array([u1, v1], dtype=np.float64), "invalid_curr_depth", z1))
+                continue
+            prev_point_cam, prev_sqrt_info = _unproject_depth_with_cov(
+                float(u0), float(v0), z0, fx, fy, cx, cy, sigma_u, sigma_v, sigma_disparity, baseline
+            )
+            curr_obs_point_cam, curr_sqrt_info = _unproject_depth_with_cov(
+                float(u1), float(v1), z1, fx, fy, cx, cy, sigma_u, sigma_v, sigma_disparity, baseline
+            )
+            n0 = (int(prev_timestamp), int(i0))
+            n1 = (int(curr_timestamp), int(i1))
+            ds.add(n0)
+            ds.add(n1)
+            ds.union(n0, n1)
+            node_obs_cam[n0] = prev_point_cam
+            node_sqrt_info[n0] = prev_sqrt_info
+            node_obs_cam[n1] = curr_obs_point_cam
+            node_sqrt_info[n1] = curr_sqrt_info
+            node_valid.add(n0)
+            node_valid.add(n1)
 
-    print(f"filter_landmark_count: {filter_landmark_count}")
-    optimized_camera_poses, optimized_points_3d = solve_bundle_adjustment(landmark_point3d, landmark_tracker.observation_relations_for_ba(), optimized_camera_poses, rgb_intrinsics, constant_pose_index={min_timestamp: True})
+    clusters: Dict[tuple[int, int], List[tuple[int, int]]] = {}
+    for node in node_valid:
+        root = ds.find(node)
+        clusters.setdefault(root, []).append(node)
+
+    point_3ds: Dict[int, np.ndarray] = {}
+    observations: List[Tuple[int, int, np.ndarray, np.ndarray]] = []
+    point_id = 0
+    landmark_feature_uv: Dict[int, Dict[int, np.ndarray]] = {}
+    for nodes in clusters.values():
+        if len(nodes) < 2:
+            continue
+        timestamps = [n[0] for n in nodes]
+        if len(set(timestamps)) < 2:
+            continue
+        world_points = []
+        for ts, kp_idx in nodes:
+            pose = infra1_poses[ts]
+            world_points.append(pose[:3, :3] @ node_obs_cam[(ts, kp_idx)] + pose[:3, 3])
+        if len(world_points) < 2:
+            continue
+        landmark_world = np.mean(np.asarray(world_points, dtype=np.float64), axis=0)
+        point_3ds[point_id] = landmark_world.astype(np.float64)
+        for ts, kp_idx in nodes:
+            node = (ts, kp_idx)
+            observations.append((int(ts), int(point_id), node_obs_cam[node], node_sqrt_info[node]))
+            kpts = frame_kpts[int(ts)]
+            uv = np.asarray(kpts[int(kp_idx)], dtype=np.float64)
+            if point_id not in landmark_feature_uv:
+                landmark_feature_uv[point_id] = {}
+            landmark_feature_uv[point_id][int(ts)] = uv
+        point_id += 1
+
+    print(f"num_points={len(point_3ds)}, num_observations={len(observations)}")
+    if len(point_3ds) == 0 or len(observations) == 0:
+        raise RuntimeError("No valid points/observations collected")
+    optimized_camera_poses, optimized_points_3d = solve_bundle_adjustment_depth_mahalanobis(
+        point_3ds,
+        observations,
+        infra1_poses,
+        infra1_intrinsics,
+        constant_pose_index={int(min_timestamp): True},
+    )
 
     delta_translation_list = []
     delta_rotation_list = []
+    delta_by_timestamp = []
     for timestamp, optimized_pose in optimized_camera_poses.items():
-        delta = np.linalg.inv(optimized_pose) @ rgb_poses[timestamp]
+        delta = np.linalg.inv(optimized_pose) @ infra1_poses[timestamp]
         delta_translation = delta[:3, 3]
         delta_rotation = delta[:3, :3]
         cos_theta = (np.trace(delta_rotation) - 1) / 2
         r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
         delta_translation_list.append(np.linalg.norm(delta_translation))
         delta_rotation_list.append(r_diff)
+        delta_by_timestamp.append((int(timestamp), float(np.linalg.norm(delta_translation)), float(r_diff)))
     mean_delta_translation = np.mean(delta_translation_list)
     mean_delta_rotation = np.mean(delta_rotation_list)
     print(f"mean_delta_translation: {mean_delta_translation}, mean_delta_rotation: {mean_delta_rotation}")
 
-    optimized_infra1_poses = {
-        timestamp: optimized_pose @ np.linalg.inv(T_rgb_to_infra1) for timestamp, optimized_pose in optimized_camera_poses.items()
-    }
-    np.save(os.path.join(tinynav_db_path, "poses.npy"), optimized_infra1_poses, allow_pickle=True)
-    print(f"save refined poses to {os.path.join(tinynav_db_path, 'poses.npy')}")
-    convert_nerf_format(tinynav_db_path, optimized_infra1_poses, rgb_intrinsics, rgb_image_size, T_rgb_to_infra1)
-    print(f"save refined poses to {os.path.join(tinynav_db_path, 'transforms.json')}")
+    if save_top_rotation_match_count > 0:
+        match_dir = os.path.join(output_dir, "largest_rotation_matches")
+        os.makedirs(match_dir, exist_ok=True)
+        edge_set = {(int(a), int(b)) for a, b in edges}
+        sorted_delta = sorted(delta_by_timestamp, key=lambda x: x[2], reverse=True)
+        saved = 0
+        for curr_timestamp, _, rot_deg in sorted_delta:
+            prev_timestamp = curr_timestamp - 1
+            # pick nearest sequential edge ending at curr_timestamp
+            candidates = [e for e in edge_set if e[1] == curr_timestamp]
+            if not candidates:
+                continue
+            prev_timestamp = max(candidates, key=lambda e: e[0])[0]
+            prev_depth, _, _, _, prev_loader = db.get_depth_embedding_features_images(prev_timestamp)
+            curr_depth, _, _, _, curr_loader = db.get_depth_embedding_features_images(curr_timestamp)
+            prev_img = prev_loader()
+            curr_img = curr_loader()
+            if prev_img is None or curr_img is None or prev_depth is None or curr_depth is None:
+                continue
+            image_shape = np.array([prev_img.shape[1], prev_img.shape[0]], dtype=np.int64)
+            k0, k1, m, _, _ = match_images_with_trt(prev_img, curr_img, image_shape)
+            if m.shape[0] == 0:
+                continue
+            vis = draw_image(prev_img, curr_img, k0, k1, m)
+            save_name = (
+                f"rank_{saved:03d}_curr_{curr_timestamp}_prev_{prev_timestamp}"
+                f"_rot_{rot_deg:.3f}_matches_{m.shape[0]}.png"
+            )
+            cv2.imwrite(os.path.join(match_dir, save_name), vis)
+            saved += 1
+            if saved >= save_top_rotation_match_count:
+                break
+        print(f"saved {saved} match visualization files to {match_dir}")
+
+    optimized_infra1_poses = {timestamp: optimized_pose for timestamp, optimized_pose in optimized_camera_poses.items()}
+    np.save(os.path.join(output_dir, "poses.npy"), optimized_infra1_poses, allow_pickle=True)
+    np.save(os.path.join(output_dir, "intrinsics.npy"), infra1_intrinsics, allow_pickle=True)
+    print(f"save refined poses to {os.path.join(output_dir, 'poses.npy')}")
+    if save_match_pair_visualization:
+        print(f"saved match pair visualizations to {match_pair_dir}")
+
+    if save_reprojection_visualization:
+        reproj_dir = os.path.join(output_dir, "reprojection_compare")
+        os.makedirs(reproj_dir, exist_ok=True)
+        # Collect valid depth range for depth-colored dropped markers.
+        valid_depth_values = []
+        for dropped_items in frame_dropped_uv.values():
+            for _, reason, depth_value in dropped_items:
+                if reason.startswith("invalid_") and depth_value is not None and np.isfinite(depth_value) and depth_value > 0.0:
+                    valid_depth_values.append(float(depth_value))
+        depth_min = float(np.min(valid_depth_values)) if len(valid_depth_values) > 0 else 0.1
+        depth_max = float(np.max(valid_depth_values)) if len(valid_depth_values) > 0 else 10.0
+        if depth_max <= depth_min:
+            depth_max = depth_min + 1.0
+
+        def _depth_to_bgr(depth_value: float) -> tuple[int, int, int]:
+            n = np.clip((depth_value - depth_min) / (depth_max - depth_min), 0.0, 1.0)
+            # Blue (near) -> Red (far) in BGR.
+            b = int((1.0 - n) * 255.0)
+            g = int((1.0 - abs(2.0 * n - 1.0)) * 255.0)
+            r = int(n * 255.0)
+            return (b, g, r)
+        by_frame: Dict[int, List[Tuple[np.ndarray, np.ndarray, int]]] = {}
+        for landmark_id, frame_uvs in landmark_feature_uv.items():
+            if landmark_id not in optimized_points_3d:
+                continue
+            landmark_world = np.asarray(optimized_points_3d[landmark_id], dtype=np.float64)
+            for ts, feat_uv in frame_uvs.items():
+                if ts not in optimized_infra1_poses:
+                    continue
+                pose = np.asarray(optimized_infra1_poses[ts], dtype=np.float64)
+                proj_u, proj_v = project_point_to_image(landmark_world, pose, infra1_intrinsics)
+                by_frame.setdefault(int(ts), []).append(
+                    (np.asarray(feat_uv, dtype=np.float64), np.array([proj_u, proj_v], dtype=np.float64), int(landmark_id))
+                )
+
+        frame_timestamps = sorted(by_frame.keys())
+        if save_reprojection_max_frames > 0:
+            frame_timestamps = frame_timestamps[:save_reprojection_max_frames]
+        saved_frames = 0
+        for ts in frame_timestamps:
+            _, _, _, _, img_loader = db.get_depth_embedding_features_images(ts)
+            img = img_loader()
+            if img is None:
+                continue
+            if img.ndim == 2:
+                vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            else:
+                vis = img.copy()
+            h, w = vis.shape[:2]
+            for feat_uv, proj_uv, _ in by_frame[ts]:
+                fu, fv = int(round(float(feat_uv[0]))), int(round(float(feat_uv[1])))
+                pu, pv = int(round(float(proj_uv[0]))), int(round(float(proj_uv[1])))
+                if 0 <= fu < w and 0 <= fv < h:
+                    cv2.circle(vis, (fu, fv), 2, (255, 0, 0), -1)  # original feature (blue)
+                if 0 <= pu < w and 0 <= pv < h:
+                    cv2.circle(vis, (pu, pv), 2, (0, 255, 0), -1)  # reprojected landmark (green)
+                if 0 <= fu < w and 0 <= fv < h and 0 <= pu < w and 0 <= pv < h:
+                    cv2.line(vis, (fu, fv), (pu, pv), (0, 0, 255), 1)  # residual vector (red)
+            for drop_uv, drop_reason, drop_depth in frame_dropped_uv.get(int(ts), []):
+                du = int(round(float(drop_uv[0])))
+                dv = int(round(float(drop_uv[1])))
+                if 0 <= du < w and 0 <= dv < h:
+                    if drop_reason.startswith("oob_"):
+                        marker_color = (255, 0, 255)  # magenta: out-of-bounds
+                    elif drop_depth is None or not np.isfinite(drop_depth) or drop_depth <= 0.0:
+                        marker_color = (0, 255, 255)  # yellow: invalid/zero/nan depth
+                    else:
+                        marker_color = _depth_to_bgr(float(drop_depth))  # depth-coded color
+                    cv2.drawMarker(
+                        vis,
+                        (du, dv),
+                        marker_color,
+                        markerType=cv2.MARKER_TILTED_CROSS,
+                        markerSize=8,
+                        thickness=1,
+                    )
+            out_path = os.path.join(reproj_dir, f"{ts}.png")
+            cv2.imwrite(out_path, vis)
+            saved_frames += 1
+        print(f"saved {saved_frames} reprojection visualization frames to {reproj_dir}")
+
+    db.close()
 
 if __name__ == "__main__":
     tyro.cli(main)

@@ -64,6 +64,14 @@ extern py::tuple ba_solve(
     std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>>> relative_pose_constraints
 );
 
+extern py::tuple ba_solve_depth_mahalanobis(
+    std::unordered_map<int64_t, py::array_t<double>> camera_poses,
+    std::unordered_map<int64_t, py::array_t<double>> point_3ds,
+    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>>> observations,
+    py::array_t<double> K,
+    std::unordered_map<int64_t, bool> constant_pose_index,
+    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>>> relative_pose_constraints
+);
 
 
 PYBIND11_MODULE(tinynav_cpp_bind, m) {
@@ -134,6 +142,21 @@ PYBIND11_MODULE(tinynav_cpp_bind, m) {
             -------
             tuple
                 (optimized_camera_poses, optimized_point_3ds)
+        )pbdoc"
+    );
+
+    m.def(
+        "ba_solve_depth_mahalanobis",
+        &ba_solve_depth_mahalanobis,
+        py::arg("camera_poses"),
+        py::arg("point_3ds"),
+        py::arg("observations"),
+        py::arg("K"),
+        py::arg("constant_pose_index"),
+        py::arg("relative_pose_constraints"),
+        R"pbdoc(
+            Depth-space bundle adjustment solve function (Mahalanobis residual).
+            observations: list[(camera_index, point_index, observed_point_in_camera(3,), sqrt_information(3,3))]
         )pbdoc"
     );
 }
