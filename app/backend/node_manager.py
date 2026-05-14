@@ -31,8 +31,11 @@ from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
 
-_REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
-_VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
+_DEFAULT_TINYNAV_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+_TINYNAV_ROOT = os.environ.get('TINYNAV_ROOT', _DEFAULT_TINYNAV_ROOT)
+_LOCAL_PREFIX = os.environ.get('LOCAL_PREFIX', '/userdata/local')
+_REALSENSE_SCRIPT = os.path.join(_TINYNAV_ROOT, 'scripts', 'run_realsense_sensor.sh')
+_VENV_SITE = os.path.join(_TINYNAV_ROOT, '.venv', 'lib', 'python3.10', 'site-packages')
 _MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic collision during map build
 
 # build_map_node.py emits "MAPPING_PERCENT:<float>" lines on stdout so the
@@ -61,7 +64,9 @@ _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
 class BackendNode(Ros2NodeManager):
     """Ros2NodeManager + subscriptions needed by the HTTP/WS layer."""
 
-    def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
+    def __init__(self, tinynav_db_path: str | None = None):
+        if tinynav_db_path is None:
+            tinynav_db_path = os.path.join(_TINYNAV_ROOT, 'tinynav_db')
         super().__init__(tinynav_db_path=tinynav_db_path)
 
         self._lock = threading.Lock()
@@ -450,7 +455,7 @@ class BackendNode(Ros2NodeManager):
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._unitree_proc = self._launch_proc(
             'unitree',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
+            ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/platforms/unitree_control.py')],
             env=_env,
         )
         self.get_logger().info('unitree_control started')
@@ -543,12 +548,20 @@ class BackendNode(Ros2NodeManager):
         return open(path, 'w')
 
     def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
-                      cwd: str = '/tinynav') -> subprocess.Popen:
+                      cwd: str = _TINYNAV_ROOT) -> subprocess.Popen:
         """Spawn a subprocess with standard logging and process-group setup."""
         lf = self._make_log(name)
+        run_env = env or os.environ.copy()
+        run_env.setdefault('TMPDIR', '/userdata/tmp')
+        run_env.setdefault('TEMP', run_env['TMPDIR'])
+        run_env.setdefault('TMP', run_env['TMPDIR'])
+        run_env['PATH'] = f"{_LOCAL_PREFIX}/bin:" + run_env.get('PATH', '')
+        run_env['LD_LIBRARY_PATH'] = f"{_LOCAL_PREFIX}/lib:" + run_env.get('LD_LIBRARY_PATH', '')
+        run_env['CMAKE_PREFIX_PATH'] = f"{_LOCAL_PREFIX}:" + run_env.get('CMAKE_PREFIX_PATH', '')
+        run_env['PKG_CONFIG_PATH'] = f"{_LOCAL_PREFIX}/lib/pkgconfig:" + run_env.get('PKG_CONFIG_PATH', '')
         proc = subprocess.Popen(
             cmd, preexec_fn=os.setsid, cwd=cwd,
-            env=env or os.environ.copy(),
+            env=run_env,
             stdout=lf, stderr=subprocess.STDOUT,
         )
         lf.close()
@@ -564,12 +577,12 @@ class BackendNode(Ros2NodeManager):
         if self._sensor_mode == 'looper':
             self._looper_bridge_proc = self._launch_proc(
                 'looper_bridge',
-                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
+                ['python3', os.path.join(_TINYNAV_ROOT, 'tool/looper_bridge_node.py')],
                 env=env,
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/planning_node.py')],
                 env=env,
             )
         elif self._sensor_mode == 'realsense':
@@ -579,12 +592,12 @@ class BackendNode(Ros2NodeManager):
             )
             self._perception_proc = self._launch_proc(
                 'perception',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/perception_node.py')],
                 env=env,
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/planning_node.py')],
                 env=env,
             )
 
@@ -604,14 +617,17 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc = self._launch_proc(
             'map_node',
             [
-                'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+                'python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/map_node.py'),
                 '--tinynav_map_path', self.map_path,
+                '--loop-closure-mode', 'bow',
+                '--loop-closure-use-bow',
+                '--dbow3-vocabulary-path', os.path.join(_TINYNAV_ROOT, 'docs/Vocabulary/ORBvoc.txt'),
             ],
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/platforms/cmd_vel_control.py')],
             env=_env,
         )
         with self._lock:
@@ -645,18 +661,21 @@ class BackendNode(Ros2NodeManager):
 
         self._planning_proc = self._launch_proc(
             'planning',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/planning_node.py')],
             env=_env,
         )
         self._map_node_proc = self._launch_proc(
             'map_node',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
-             '--tinynav_map_path', self.map_path],
+            ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/map_node.py'),
+             '--tinynav_map_path', self.map_path,
+             '--loop-closure-mode', 'bow',
+             '--loop-closure-use-bow',
+             '--dbow3-vocabulary-path', os.path.join(_TINYNAV_ROOT, 'docs/Vocabulary/ORBvoc.txt')],
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/platforms/cmd_vel_control.py')],
             env=_env,
         )
         with self._lock:
@@ -740,17 +759,26 @@ class BackendNode(Ros2NodeManager):
         if self._sensor_mode == 'looper':
             _env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-        self.processes['perception'] = self._launch_proc(
-            'perception',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+        source_node_cmd = (
+            ['python3', os.path.join(_TINYNAV_ROOT, 'tool/looper_bridge_node.py')]
+            if self._sensor_mode == 'looper'
+            else ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/perception_node.py')]
+        )
+        source_node_name = 'looper_bridge' if self._sensor_mode == 'looper' else 'perception'
+        self.processes[source_node_name] = self._launch_proc(
+            source_node_name,
+            source_node_cmd,
             env=_env,
         )
         self.processes['build_map'] = self._launch_proc_tee(
             'build_map_node',
             [
-                'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
+                'python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/build_map_node.py'),
                 '--map_save_path', self.map_path,
                 '--bag_file', bag_file,
+                '--loop-closure-mode', 'bow',
+                '--loop-closure-use-bow',
+                '--dbow3-vocabulary-path', os.path.join(_TINYNAV_ROOT, 'docs/Vocabulary/ORBvoc.txt'),
             ],
             env=_env,
         )
@@ -758,7 +786,7 @@ class BackendNode(Ros2NodeManager):
         threading.Thread(target=self._on_build_map_done, daemon=True).start()
 
     def _launch_proc_tee(self, name: str, cmd: list[str], env: dict | None = None,
-                          cwd: str = '/tinynav') -> subprocess.Popen:
+                          cwd: str = _TINYNAV_ROOT) -> subprocess.Popen:
         """Like _launch_proc, but also tees stdout to a pipe so the caller can
         scan for MAPPING_PERCENT: lines while still logging everything to file."""
         lf = self._make_log(name)
@@ -797,13 +825,33 @@ class BackendNode(Ros2NodeManager):
         import shutil
         from datetime import datetime
         proc_build = self.processes.get('build_map')
-        if proc_build:
-            proc_build.wait()
-        subprocess.run([
-            'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
+        build_ret = proc_build.wait() if proc_build else 1
+        if build_ret != 0:
+            self.get_logger().error(f'build_map process failed with code {build_ret}')
+            self._stop_all()
+            self.state = 'idle'
+            self._pub_state()
+            self._restart_sensor_procs()
+            return
+        if not os.path.isdir(self.map_path):
+            self.get_logger().error(f'map output not found: {self.map_path}')
+            self._stop_all()
+            self.state = 'idle'
+            self._pub_state()
+            self._restart_sensor_procs()
+            return
+        convert_ret = subprocess.run([
+            'python3', os.path.join(_TINYNAV_ROOT, 'tool/convert_to_colmap_format.py'),
             '--input_dir', self.map_path,
             '--output_dir', self.map_path,
-        ])
+        ]).returncode
+        if convert_ret != 0:
+            self.get_logger().error(f'convert_to_colmap_format failed with code {convert_ret}')
+            self._stop_all()
+            self.state = 'idle'
+            self._pub_state()
+            self._restart_sensor_procs()
+            return
         # mv map → maps/map_YYYY_MM_DD_HH_MM_SS, symlink back
         maps_dir = os.path.join(self.tinynav_db_path, 'maps')
         os.makedirs(maps_dir, exist_ok=True)
@@ -926,8 +974,8 @@ class BackendNode(Ros2NodeManager):
 class NodeRunner:
     """Manages the rclpy lifecycle; spins BackendNode in a daemon thread."""
 
-    def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
-        self._db_path = tinynav_db_path
+    def __init__(self, tinynav_db_path: str | None = None):
+        self._db_path = tinynav_db_path or os.path.join(_TINYNAV_ROOT, 'tinynav_db')
         self.node: BackendNode | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()

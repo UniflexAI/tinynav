@@ -9,13 +9,14 @@ import 'pages/setup_page.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final prefs = await SharedPreferences.getInstance();
-  final savedIp = prefs.getString('device_ip');
+  const defaultDeviceIp = '169.254.10.1';
+  final savedIp = prefs.getString('device_ip') ?? defaultDeviceIp;
 
   runApp(
     ProviderScope(
       overrides: [
         sharedPreferencesProvider.overrideWithValue(prefs),
-        if (savedIp != null) deviceIpProvider.overrideWith((ref) => savedIp),
+        deviceIpProvider.overrideWith((ref) => savedIp),
       ],
       child: const TinyNavApp(),
     ),

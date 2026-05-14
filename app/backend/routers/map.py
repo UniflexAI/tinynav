@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -77,7 +78,7 @@ def map_set_active(map_name: str):
     import shutil
     if not re.match(r'^[a-zA-Z0-9_\-]+$', map_name):
         raise HTTPException(400, 'Invalid map name')
-    root = os.environ.get('TINYNAV_DB_PATH', '/tinynav/tinynav_db')
+    root = os.environ.get('TINYNAV_DB_PATH', str(Path(__file__).resolve().parents[3] / 'tinynav_db'))
     src = os.path.join(root, 'maps', map_name)
     if not os.path.isdir(src):
         raise HTTPException(404, f'Map {map_name!r} not found')
@@ -93,7 +94,7 @@ def map_set_active(map_name: str):
 def _resolve_map_path(map_name: str) -> str:
     if not re.match(r'^[a-zA-Z0-9_\-]+$', map_name):
         raise HTTPException(400, 'Invalid map name')
-    root = os.environ.get('TINYNAV_DB_PATH', '/tinynav/tinynav_db')
+    root = os.environ.get('TINYNAV_DB_PATH', str(Path(__file__).resolve().parents[3] / 'tinynav_db'))
     path = os.path.join(root, 'maps', map_name)
     if not os.path.isdir(path) or not os.path.exists(os.path.join(path, 'occupancy_grid.npy')):
         raise HTTPException(404, f'Map {map_name!r} not found')
