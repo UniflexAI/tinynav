@@ -115,6 +115,87 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
                             parent[neighbor] = current
     return []
 
+def _segment_is_shortcut_safe(
+    start: tuple,
+    goal: tuple,
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    sdf_margin_m: float = 0.2,
+) -> bool:
+    """Return whether a straight shortcut stays in known-safe map cells.
+
+    Keep this deliberately conservative: bound segment length so DWA does not see
+    huge sparse path jumps, reject occupied voxels, and avoid shortcuts that cut
+    far away from the demonstrated/odom corridor encoded by sdf_map.
+    """
+    start_np = np.asarray(start, dtype=np.float32)
+    goal_np = np.asarray(goal, dtype=np.float32)
+    delta = goal_np - start_np
+    distance_m = float(np.linalg.norm(delta) * resolution)
+    if distance_m <= 1e-6:
+        return True
+    if distance_m > max_segment_m:
+        return False
+
+    steps = max(1, int(np.ceil(float(np.max(np.abs(delta))))))
+    max_allowed_sdf = max(float(sdf_map[start]), float(sdf_map[goal]), 0.5) + sdf_margin_m
+    for t in np.linspace(0.0, 1.0, steps + 1):
+        idx = tuple(np.rint(start_np + delta * t).astype(np.int32).tolist())
+        if (
+            idx[0] < 0
+            or idx[0] >= occupancy_map.shape[0]
+            or idx[1] < 0
+            or idx[1] >= occupancy_map.shape[1]
+            or idx[2] < 0
+            or idx[2] >= occupancy_map.shape[2]
+        ):
+            return False
+        if occupancy_map[idx] == 2:
+            return False
+        if not np.isfinite(sdf_map[idx]) or float(sdf_map[idx]) > max_allowed_sdf:
+            return False
+    return True
+
+
+def shortcut_prune_path(
+    path: list,
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    max_skip_nodes: int = 30,
+) -> list:
+    """Greedily remove small zig-zags from a voxel path using local line-of-sight.
+
+    This is intentionally low-cost and local: from each kept point, look ahead at
+    most max_skip_nodes / max_segment_m and keep the farthest safe shortcut.
+    """
+    if len(path) <= 2:
+        return path
+
+    pruned = [path[0]]
+    i = 0
+    while i < len(path) - 1:
+        farthest = i + 1
+        upper = min(len(path) - 1, i + max_skip_nodes)
+        for j in range(upper, i, -1):
+            if _segment_is_shortcut_safe(
+                path[i],
+                path[j],
+                sdf_map,
+                occupancy_map,
+                resolution,
+                max_segment_m=max_segment_m,
+            ):
+                farthest = j
+                break
+        pruned.append(path[farthest])
+        i = farthest
+    return pruned
+
+
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
@@ -755,6 +836,12 @@ class MapNode(Node):
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
 
+        if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
+            self.get_logger().warning(
+                f"search_close_to_sdf_map returned empty path: start_idx={tuple(start_idx)}, goal_idx={tuple(poi_goal_idx)}"
+            )
+            return None
+
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
@@ -764,7 +851,10 @@ class MapNode(Node):
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
-            converted_path = np.array(path) * resolution + occupancy_map_origin
+            pruned_path = shortcut_prune_path(path, self.sdf_map, self.occupancy_map, resolution)
+            if len(pruned_path) < len(path):
+                self.get_logger().info(f"shortcut pruned nav path: {len(path)} -> {len(pruned_path)} points")
+            converted_path = np.array(pruned_path) * resolution + occupancy_map_origin
             return converted_path
         return None
 
