@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, se3_inv
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -373,7 +373,7 @@ class MapNode(Node):
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
-            T_prev_curr = se3_inv(last_keyframe_odom_pose) @ odom
+            T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
@@ -517,7 +517,7 @@ class MapNode(Node):
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug
-            pose_in_world = se3_inv(pose_in_camera)
+            pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
@@ -574,7 +574,7 @@ class MapNode(Node):
             if timestamp in self.pose_graph_used_pose:
                 camera_in_map_world = pose
                 camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-                observation_T_from_map_to_odom =  camera_in_odom_world @ se3_inv(camera_in_map_world)
+                observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
@@ -602,7 +602,7 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         # get the pose from the map to the odom
-        pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
@@ -693,7 +693,7 @@ class MapNode(Node):
                     target_position = paths_in_map[0]
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 pose_in_origin_odom = self.odom[timestamp]
-                T = pose_in_origin_odom @ se3_inv(pose_in_map)
+                T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
                 dummy_pose = np.eye(4)
                 dummy_pose[:3, 3] = target_position_in_odom
