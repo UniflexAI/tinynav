@@ -263,13 +263,3 @@ def uf_all_sets_list(uf, min_component_size=1):
         if part.size >= int(min_component_size):
             out.append(np.sort(part).tolist())
     return out
-
-
-
-def se3_inv(matrix_4x4:np.ndarray):
-    rotation = matrix_4x4[:3, :3]
-    translation = matrix_4x4[:3, 3]
-    T = np.eye(4)
-    T[:3, :3] = rotation.T
-    T[:3, 3] = -rotation.T @ translation
-    return T

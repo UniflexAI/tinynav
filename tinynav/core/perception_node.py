@@ -16,7 +16,7 @@ from sensor_msgs.msg import Image, Imu, CameraInfo
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.duration import Duration
-from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
+from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
 import asyncio
@@ -40,7 +40,7 @@ logger.setLevel(logging.INFO)
 
 
 def keyframe_check(T_i, T_j):
-    T_ij = se3_inv(T_i) @ T_j
+    T_ij = np.linalg.inv(T_i) @ T_j
     t_diff = np.linalg.norm(T_ij[:3, 3])
     cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
     r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
