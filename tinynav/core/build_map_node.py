@@ -20,14 +20,6 @@ import argparse
 import sys
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import (
-    DBoW3Engine,
-    Dinov2TRT,
-    LightGlueTRT,
-    ORBFeatureTRTCompatible,
-    ORBMatcher,
-    SuperPointTRT,
-)
 from tinynav.core.planning_node import run_raycasting_loopy
 import logging
 import asyncio
@@ -35,7 +27,6 @@ import shelve
 import dbm.dumb
 import pickle
 from tqdm import tqdm
-import einops
 from tf2_msgs.msg import TFMessage
 from typing import Dict
 try:
@@ -143,6 +134,7 @@ class LoopClosure:
             self.embeddings = np.zeros((0, 1), dtype=np.float32)
             if dbow3_vocabulary_path is None:
                 raise ValueError("dbow3_vocabulary_path is required when mode='bow'")
+            from tinynav.core.models_trt import DBoW3Engine
             self.dbow3_engine = DBoW3Engine(dbow3_vocabulary_path)
             total = len(self.timestamps)
             for idx, ts in enumerate(self.timestamps):
@@ -331,6 +323,9 @@ class IntKeyShelf:
     def close(self):
         self.db.close()
 
+    def sync(self):
+        self.db.sync()
+
 
 class OdomPoseRecorder:
     """
@@ -448,6 +443,15 @@ class TinyNavDB():
         self.depths.close()
         self.infra1_video_db.close()
         self.rgb_video_db.close()
+
+    def sync(self):
+        self.features.sync()
+        self.embeddings.sync()
+        self.depths.sync()
+        if hasattr(self.infra1_video_db, "sync"):
+            self.infra1_video_db.sync()
+        if hasattr(self.rgb_video_db, "sync"):
+            self.rgb_video_db.sync()
 
 class BagPlayer(Node):
     def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
@@ -626,6 +630,8 @@ class BuildMapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
+        self.processed_keyframes = 0
+        self.db_sync_every = max(1, int(os.getenv("TINYNAV_DB_SYNC_EVERY", "1")))
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
@@ -764,7 +770,7 @@ class BuildMapNode(Node):
             if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
                 self.odom[keyframe_image_timestamp] = odom
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
-                self.loop_closure.add_timestamp(keyframe_image_timestamp)
+                # self.loop_closure.add_timestamp(keyframe_image_timestamp)  # temp disabled
             else:
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
                 T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
@@ -802,8 +808,8 @@ class BuildMapNode(Node):
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-                find_loop_and_pose_graph(keyframe_image_timestamp)
-                self.loop_closure.add_timestamp(keyframe_image_timestamp)
+                # find_loop_and_pose_graph(keyframe_image_timestamp)  # temp disabled
+                # self.loop_closure.add_timestamp(keyframe_image_timestamp)  # temp disabled
 
         with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             cloud = depth_to_cloud(depth, self.K, 30, 3)
@@ -814,6 +820,12 @@ class BuildMapNode(Node):
 
         with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+        self.processed_keyframes += 1
+        if self.processed_keyframes % self.db_sync_every == 0:
+            self.db.sync()
+            self.get_logger().info(
+                f"Synced TinyNavDB to disk at keyframe {self.processed_keyframes}"
+            )
         self.last_keyframe_timestamp = keyframe_image_timestamp
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
@@ -1044,10 +1056,12 @@ def main(args=None):
             raise FileNotFoundError(
                 f"DBoW3 vocabulary file not found: {parsed_args.dbow3_vocabulary_path}"
             )
+        from tinynav.core.models_trt import ORBFeatureTRTCompatible, ORBMatcher
         extractor = ORBFeatureTRTCompatible()
         matcher = ORBMatcher()
         embedding_extractor = DummyEmbeddingEngine()
     else:
+        from tinynav.core.models_trt import Dinov2TRT, LightGlueTRT, SuperPointTRT
         extractor = SuperPointTRT()
         matcher = LightGlueTRT()
         embedding_extractor = Dinov2TRT()

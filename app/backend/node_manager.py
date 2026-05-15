@@ -34,13 +34,18 @@ from tool.ros2_node_manager import Ros2NodeManager
 _DEFAULT_TINYNAV_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 _TINYNAV_ROOT = os.environ.get('TINYNAV_ROOT', _DEFAULT_TINYNAV_ROOT)
 _LOCAL_PREFIX = os.environ.get('LOCAL_PREFIX', '/userdata/local')
+_DEVICE_VENV = os.environ.get('TINYNAV_VENV', '/userdata/junlinp/venv')
+_DEFAULT_LOG_DIR = os.environ.get('TINYNAV_LOG_DIR', '/userdata/junlinp/logs')
 _REALSENSE_SCRIPT = os.path.join(_TINYNAV_ROOT, 'scripts', 'run_realsense_sensor.sh')
 _VENV_SITE = os.path.join(_TINYNAV_ROOT, '.venv', 'lib', 'python3.10', 'site-packages')
 _MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic collision during map build
+_ROS2_NODE_LIST_TIMEOUT = float(os.environ.get('TINYNAV_ROS2_NODE_LIST_TIMEOUT', '8'))
+_ROS2_NODE_LIST_RETRIES = int(os.environ.get('TINYNAV_ROS2_NODE_LIST_RETRIES', '3'))
 
 # build_map_node.py emits "MAPPING_PERCENT:<float>" lines on stdout so the
 # parent process can track progress without a separate bridge subprocess.
 _MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
+_ENABLE_CMD_VEL_NODE = os.environ.get('TINYNAV_ENABLE_CMD_VEL_NODE', '0') == '1'
 
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
@@ -312,9 +317,23 @@ class BackendNode(Ros2NodeManager):
         domain = os.environ.get('ROS_DOMAIN_ID', '0')
         self.get_logger().info(f'BackendNode ROS_DOMAIN_ID={domain}')
         try:
-            result = subprocess.run(
-                ['ros2', 'node', 'list'], capture_output=True, text=True, timeout=3
-            )
+            result = None
+            last_err = None
+            for _ in range(max(1, _ROS2_NODE_LIST_RETRIES)):
+                try:
+                    result = subprocess.run(
+                        ['ros2', 'node', 'list'],
+                        capture_output=True,
+                        text=True,
+                        timeout=_ROS2_NODE_LIST_TIMEOUT,
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(1.0)
+            if result is None:
+                raise RuntimeError(f'ros2 node list failed after retries: {last_err}')
+
             if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
                 self.get_logger().info('Sensor mode: looper — launching looper bridge + planning')
@@ -541,7 +560,7 @@ class BackendNode(Ros2NodeManager):
         """Open a timestamped log file under tinynav_db/logs/. Safe to close in parent
         after Popen — the child process inherits its own fd copy at fork time."""
         from datetime import datetime
-        logs_dir = os.path.join(self.tinynav_db_path, 'logs')
+        logs_dir = _DEFAULT_LOG_DIR
         os.makedirs(logs_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
         path = os.path.join(logs_dir, f'{ts}_{name}.txt')
@@ -551,14 +570,7 @@ class BackendNode(Ros2NodeManager):
                       cwd: str = _TINYNAV_ROOT) -> subprocess.Popen:
         """Spawn a subprocess with standard logging and process-group setup."""
         lf = self._make_log(name)
-        run_env = env or os.environ.copy()
-        run_env.setdefault('TMPDIR', '/userdata/tmp')
-        run_env.setdefault('TEMP', run_env['TMPDIR'])
-        run_env.setdefault('TMP', run_env['TMPDIR'])
-        run_env['PATH'] = f"{_LOCAL_PREFIX}/bin:" + run_env.get('PATH', '')
-        run_env['LD_LIBRARY_PATH'] = f"{_LOCAL_PREFIX}/lib:" + run_env.get('LD_LIBRARY_PATH', '')
-        run_env['CMAKE_PREFIX_PATH'] = f"{_LOCAL_PREFIX}:" + run_env.get('CMAKE_PREFIX_PATH', '')
-        run_env['PKG_CONFIG_PATH'] = f"{_LOCAL_PREFIX}/lib/pkgconfig:" + run_env.get('PKG_CONFIG_PATH', '')
+        run_env = self._normalize_run_env(env)
         proc = subprocess.Popen(
             cmd, preexec_fn=os.setsid, cwd=cwd,
             env=run_env,
@@ -566,6 +578,26 @@ class BackendNode(Ros2NodeManager):
         )
         lf.close()
         return proc
+
+    def _normalize_run_env(self, env: dict | None) -> dict:
+        run_env = (env or os.environ.copy()).copy()
+        # Ensure in-repo modules and compiled extension (tinynav_cpp_bind) are importable.
+        run_env['PYTHONPATH'] = f"{_TINYNAV_ROOT}:" + run_env.get('PYTHONPATH', '')
+        if os.path.exists(os.path.join(_DEVICE_VENV, 'bin', 'python3')):
+            run_env['PATH'] = f"{_DEVICE_VENV}/bin:" + run_env.get('PATH', '')
+            run_env['VIRTUAL_ENV'] = _DEVICE_VENV
+        run_env.setdefault('TMPDIR', '/userdata/tmp')
+        run_env.setdefault('TEMP', run_env['TMPDIR'])
+        run_env.setdefault('TMP', run_env['TMPDIR'])
+        run_env['PATH'] = f"{_LOCAL_PREFIX}/bin:" + run_env.get('PATH', '')
+        # Keep /userdata/junlinp/local first so pydbow3 resolves against rebuilt DBoW3.
+        run_env['LD_LIBRARY_PATH'] = (
+            f"{_LOCAL_PREFIX}/lib:/userdata/junlinp/local/lib:/userdata/opencv-release/lib:"
+            + run_env.get('LD_LIBRARY_PATH', '')
+        )
+        run_env['CMAKE_PREFIX_PATH'] = f"{_LOCAL_PREFIX}:" + run_env.get('CMAKE_PREFIX_PATH', '')
+        run_env['PKG_CONFIG_PATH'] = f"{_LOCAL_PREFIX}/lib/pkgconfig:" + run_env.get('PKG_CONFIG_PATH', '')
+        return run_env
 
     def _stop_sensor_procs(self):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
@@ -625,11 +657,14 @@ class BackendNode(Ros2NodeManager):
             ],
             env=_env,
         )
-        self._cmd_vel_proc = self._launch_proc(
-            'cmd_vel_control',
-            ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/platforms/cmd_vel_control.py')],
-            env=_env,
-        )
+        if _ENABLE_CMD_VEL_NODE:
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/platforms/cmd_vel_control.py')],
+                env=_env,
+            )
+        else:
+            self._cmd_vel_proc = None
         with self._lock:
             self._nav_nodes_running = True
         self.get_logger().info('Nav nodes started')
@@ -673,11 +708,14 @@ class BackendNode(Ros2NodeManager):
              '--dbow3-vocabulary-path', os.path.join(_TINYNAV_ROOT, 'docs/Vocabulary/ORBvoc.txt')],
             env=_env,
         )
-        self._cmd_vel_proc = self._launch_proc(
-            'cmd_vel_control',
-            ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/platforms/cmd_vel_control.py')],
-            env=_env,
-        )
+        if _ENABLE_CMD_VEL_NODE:
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/platforms/cmd_vel_control.py')],
+                env=_env,
+            )
+        else:
+            self._cmd_vel_proc = None
         with self._lock:
             self._nav_nodes_running = True
             self._localized = False
@@ -790,9 +828,10 @@ class BackendNode(Ros2NodeManager):
         """Like _launch_proc, but also tees stdout to a pipe so the caller can
         scan for MAPPING_PERCENT: lines while still logging everything to file."""
         lf = self._make_log(name)
+        run_env = self._normalize_run_env(env)
         proc = subprocess.Popen(
             cmd, preexec_fn=os.setsid, cwd=cwd,
-            env=env or os.environ.copy(),
+            env=run_env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         threading.Thread(
@@ -821,7 +860,7 @@ class BackendNode(Ros2NodeManager):
             log_file.close()
 
     def _on_build_map_done(self):
-        """Wait for build_map to finish, then convert, archive, and restart."""
+        """Wait for build_map to finish, then archive and restart."""
         import shutil
         from datetime import datetime
         proc_build = self.processes.get('build_map')
@@ -835,18 +874,6 @@ class BackendNode(Ros2NodeManager):
             return
         if not os.path.isdir(self.map_path):
             self.get_logger().error(f'map output not found: {self.map_path}')
-            self._stop_all()
-            self.state = 'idle'
-            self._pub_state()
-            self._restart_sensor_procs()
-            return
-        convert_ret = subprocess.run([
-            'python3', os.path.join(_TINYNAV_ROOT, 'tool/convert_to_colmap_format.py'),
-            '--input_dir', self.map_path,
-            '--output_dir', self.map_path,
-        ]).returncode
-        if convert_ret != 0:
-            self.get_logger().error(f'convert_to_colmap_format failed with code {convert_ret}')
             self._stop_all()
             self.state = 'idle'
             self._pub_state()

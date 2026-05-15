@@ -366,6 +366,9 @@ class MapNode(Node):
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+        odom, _ = msg2np(keyframe_odom_msg)
+        self.pose_graph_used_pose[keyframe_image_timestamp_ns] = odom
+        self.odom[keyframe_image_timestamp_ns] = odom
         t_reloc = time.perf_counter()
         if success:
             self.compute_transform_from_map_to_odom()
@@ -788,6 +791,7 @@ class MapNode(Node):
             or poi_goal_idx[2] < 0
             or poi_goal_idx[2] >= self.occupancy_map.shape[2]
         ):
+            print("here")
             return None 
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
