@@ -76,6 +76,7 @@ RUN apt-get update && apt-get install -y ros-humble-desktop \
 
 # env
 ENV RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
+ENV OPENBLAS_NUM_THREADS=1
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 ENV CYCLONEDDS_URI=/tinynav/scripts/cyclone_dds_localhost.xml
 ENV PATH=$PATH:/usr/src/tensorrt/bin/

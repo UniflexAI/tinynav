@@ -1,12 +1,3 @@
-import os
-# Limit native math libraries before importing numpy/scipy.
-# On Jetson/OpenBLAS, tiny matrix ops can otherwise spin multiple worker threads
-# and make this low-rate control node look like it uses >100% CPU.
-os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
-os.environ.setdefault('OMP_NUM_THREADS', '1')
-os.environ.setdefault('MKL_NUM_THREADS', '1')
-os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
-
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
