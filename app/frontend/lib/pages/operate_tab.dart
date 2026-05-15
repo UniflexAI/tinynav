@@ -946,13 +946,16 @@ class _CameraPanel extends ConsumerStatefulWidget {
 
 class _CameraPanelState extends ConsumerState<_CameraPanel> {
   Uint8List? _latestFrame;
+  bool _previewCover = false;
+
+  BoxFit get _previewFit => _previewCover ? BoxFit.cover : BoxFit.contain;
 
   void _showFullscreen(BuildContext context) {
     final topic = ref.read(selectedPreviewTopicProvider);
     if (topic == null) return;
     showDialog(
       context: context,
-      builder: (_) => _FullscreenPreview(topic: topic),
+      builder: (_) => _FullscreenPreview(topic: topic, fit: _previewFit),
     );
   }
 
@@ -998,7 +1001,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
           if (selectedTopic != null && _latestFrame != null)
             GestureDetector(
               onTap: () => _showFullscreen(context),
-              child: Image.memory(_latestFrame!, fit: BoxFit.contain, gaplessPlayback: true),
+              child: Image.memory(_latestFrame!, fit: _previewFit, gaplessPlayback: true),
             )
           else
             Center(
@@ -1038,6 +1041,22 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: _previewCover ? 'Fill preview' : 'Show full preview',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () => setState(() => _previewCover = !_previewCover),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                        child: Icon(
+                          _previewCover ? Icons.crop_free_rounded : Icons.fit_screen_rounded,
+                          color: Colors.white70,
+                          size: 15,
+                        ),
+                      ),
+                    ),
+                  ),
                   const SizedBox(width: 6),
                   DropdownButton<String?>(
                     value: selectedTopic,
@@ -1097,7 +1116,8 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
 
 class _FullscreenPreview extends ConsumerStatefulWidget {
   final String topic;
-  const _FullscreenPreview({required this.topic});
+  final BoxFit fit;
+  const _FullscreenPreview({required this.topic, required this.fit});
 
   @override
   ConsumerState<_FullscreenPreview> createState() => _FullscreenPreviewState();
@@ -1124,7 +1144,7 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
         children: [
           Center(
             child: _frame != null
-                ? Image.memory(_frame!, fit: BoxFit.contain, gaplessPlayback: true)
+                ? Image.memory(_frame!, fit: widget.fit, gaplessPlayback: true)
                 : const CircularProgressIndicator(color: Colors.white54),
           ),
           Positioned(
