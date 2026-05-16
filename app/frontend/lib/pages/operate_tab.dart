@@ -39,6 +39,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   bool _showGlobalMap = false;
   bool _navArrived = false;
   bool _showFootprint = true;
+  bool _localMapFill = false;
 
   @override
   void initState() {
@@ -154,6 +155,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         showTrajectory: _showTrajectory,
                         showGlobalPath: _showGlobalPath,
                         showFootprint: _showFootprint,
+                        fillViewport: _localMapFill,
                       ),
               ),
               if (planning != null)
@@ -178,19 +180,30 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                 Positioned(
                   top: 8,
                   right: 8,
-                  child: _LayerTogglePanel(
-                    showObstacle: _showObstacle,
-                    showEsdf: _showEsdf,
-                    showTrajectory: _showTrajectory,
-                    showGlobalPath: _showGlobalPath,
-                    showFootprint: _showFootprint,
-                    onChanged: (obs, esdf, traj, gp, fp) => setState(() {
-                      _showObstacle = obs;
-                      _showEsdf = esdf;
-                      _showTrajectory = traj;
-                      _showGlobalPath = gp;
-                      _showFootprint = fp;
-                    }),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _LocalMapScaleButton(
+                        fillViewport: _localMapFill,
+                        onTap: () => setState(() => _localMapFill = !_localMapFill),
+                      ),
+                      const SizedBox(height: 6),
+                      _LayerTogglePanel(
+                        showObstacle: _showObstacle,
+                        showEsdf: _showEsdf,
+                        showTrajectory: _showTrajectory,
+                        showGlobalPath: _showGlobalPath,
+                        showFootprint: _showFootprint,
+                        onChanged: (obs, esdf, traj, gp, fp) => setState(() {
+                          _showObstacle = obs;
+                          _showEsdf = esdf;
+                          _showTrajectory = traj;
+                          _showGlobalPath = gp;
+                          _showFootprint = fp;
+                        }),
+                      ),
+                    ],
                   ),
                 ),
               if (isNavigating || _navArrived)
@@ -306,6 +319,7 @@ class _LocalPlanningView extends StatelessWidget {
   final bool showTrajectory;
   final bool showGlobalPath;
   final bool showFootprint;
+  final bool fillViewport;
 
   const _LocalPlanningView({
     this.planning,
@@ -314,6 +328,7 @@ class _LocalPlanningView extends StatelessWidget {
     this.showTrajectory = false,
     this.showGlobalPath = true,
     this.showFootprint = true,
+    this.fillViewport = false,
   });
 
   @override
@@ -323,16 +338,21 @@ class _LocalPlanningView extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         Container(color: const Color(0xFF0D1117)),
-        Center(
-          child: AspectRatio(
-            aspectRatio: 1.0,
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 8.0,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final side = fillViewport
+                ? max(constraints.maxWidth, constraints.maxHeight)
+                : min(constraints.maxWidth, constraints.maxHeight);
+            return Center(
+              child: SizedBox.square(
+                dimension: side,
+                child: InteractiveViewer(
+                  minScale: 0.5,
+                  maxScale: 8.0,
+                  boundaryMargin: const EdgeInsets.all(double.infinity),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
                   if (showEsdf && p?.esdfImage != null)
                     Opacity(
                       opacity: 0.85,
@@ -369,12 +389,55 @@ class _LocalPlanningView extends StatelessWidget {
                         ],
                       ),
                     ),
-                ],
+                    ],
+                  ),
+                ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ],
+    );
+  }
+}
+
+class _LocalMapScaleButton extends StatelessWidget {
+  final bool fillViewport;
+  final VoidCallback onTap;
+
+  const _LocalMapScaleButton({required this.fillViewport, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.black54,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              fillViewport ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
+              size: 15,
+              color: Colors.white70,
+            ),
+            const SizedBox(width: 5),
+            Text(
+              fillViewport ? 'Fill' : 'Fit',
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
