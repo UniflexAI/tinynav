@@ -367,14 +367,19 @@ class _LocalPlanningView extends StatelessWidget {
                     maxScale: 8.0,
                     boundaryMargin: const EdgeInsets.all(double.infinity),
                     child: show3d
-                        ? CustomPaint(
-                            painter: LocalVoxelPainter(
-                              points: p?.voxelPoints ?? const [],
-                              trajectory: p?.trajectory ?? const [],
-                              globalPath: p?.globalPath ?? const [],
-                              footprint: p?.footprint ?? const [],
-                              navTargetPose: p?.navTargetPose,
-                              odomPose: p?.odomPose,
+                        ? InteractiveViewer(
+                            minScale: 0.5,
+                            maxScale: 8.0,
+                            boundaryMargin: const EdgeInsets.all(double.infinity),
+                            child: CustomPaint(
+                              painter: LocalVoxelPainter(
+                                points: p?.voxelPoints ?? const [],
+                                trajectory: p?.trajectory ?? const [],
+                                globalPath: p?.globalPath ?? const [],
+                                footprint: p?.footprint ?? const [],
+                                navTargetPose: p?.navTargetPose,
+                                odomPose: p?.odomPose,
+                              ),
                             ),
                           )
                         : Stack(
