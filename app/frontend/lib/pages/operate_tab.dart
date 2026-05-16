@@ -338,21 +338,22 @@ class _LocalPlanningView extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         Container(color: const Color(0xFF0D1117)),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final side = fillViewport
-                ? max(constraints.maxWidth, constraints.maxHeight)
-                : min(constraints.maxWidth, constraints.maxHeight);
-            return Center(
-              child: SizedBox.square(
-                dimension: side,
-                child: InteractiveViewer(
-                  minScale: 0.5,
-                  maxScale: 8.0,
-                  boundaryMargin: const EdgeInsets.all(double.infinity),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
+        ClipRect(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final side = fillViewport
+                  ? max(constraints.maxWidth, constraints.maxHeight)
+                  : min(constraints.maxWidth, constraints.maxHeight);
+              return Center(
+                child: SizedBox.square(
+                  dimension: side,
+                  child: InteractiveViewer(
+                    minScale: 0.5,
+                    maxScale: 8.0,
+                    boundaryMargin: const EdgeInsets.all(double.infinity),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
                   if (showEsdf && p?.esdfImage != null)
                     Opacity(
                       opacity: 0.85,
@@ -389,12 +390,13 @@ class _LocalPlanningView extends StatelessWidget {
                         ],
                       ),
                     ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            );
-          },
+              );
+            },
+          ),
         ),
       ],
     );
