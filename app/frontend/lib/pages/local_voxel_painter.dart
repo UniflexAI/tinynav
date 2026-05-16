@@ -31,34 +31,24 @@ class LocalVoxelPainter extends CustomPainter {
       return;
     }
 
-    final cosYaw = math.cos(-pose.yaw);
-    final sinYaw = math.sin(-pose.yaw);
-    const rangeM = 3.0;
-    final scale = math.min(size.width, size.height) / (rangeM * 2.0);
-    final center = Offset(size.width / 2, size.height * 0.58);
+    const worldW = 10.0;
+    const worldH = 10.0;
+    final scaleX = size.width / worldW;
+    final scaleY = size.height / worldH;
+    final center = Offset(size.width / 2, size.height / 2);
 
     final sorted = [...points]..sort((a, b) => a.z.compareTo(b.z));
     for (final p in sorted) {
-      final dx = p.x - pose.x;
-      final dy = p.y - pose.y;
-      final localX = dx * cosYaw - dy * sinYaw;
-      final localY = dx * sinYaw + dy * cosYaw;
-      if (localX.abs() > rangeM || localY.abs() > rangeM) continue;
+      final sx = center.dx + (p.x - pose.x) * scaleX;
+      final sy = center.dy - (p.y - pose.y) * scaleY - (p.z * math.min(scaleX, scaleY) * 0.08);
+      if (sx < -8 || sx > size.width + 8 || sy < -8 || sy > size.height + 8) continue;
 
-      final sx = center.dx + localX * scale;
-      final sy = center.dy - localY * scale - (p.z * scale * 0.22);
       final zNorm = ((p.z + 0.4) / 1.2).clamp(0.0, 1.0);
       final color = Color.lerp(const Color(0xFF25D0FF), const Color(0xFFFFB020), zNorm)!;
       canvas.drawCircle(Offset(sx, sy), 2.0, Paint()..color = color.withOpacity(0.82));
     }
 
-    final robotPaint = Paint()..color = Colors.white;
-    final path = Path()
-      ..moveTo(center.dx, center.dy - 12)
-      ..lineTo(center.dx - 8, center.dy + 10)
-      ..lineTo(center.dx + 8, center.dy + 10)
-      ..close();
-    canvas.drawPath(path, robotPaint);
+    _drawRobotArrow(canvas, center, pose.yaw);
   }
 
   void _drawEmpty(Canvas canvas, Size size) {
@@ -70,6 +60,32 @@ class LocalVoxelPainter extends CustomPainter {
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: size.width);
     tp.paint(canvas, Offset((size.width - tp.width) / 2, (size.height - tp.height) / 2));
+  }
+
+  void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
+    final cosY = math.cos(yaw);
+    final sinY = math.sin(yaw);
+
+    final tip = Offset(center.dx + cosY * 8, center.dy - sinY * 8);
+    final left = Offset(center.dx - sinY * 3.5, center.dy - cosY * 3.5);
+    final right = Offset(center.dx + sinY * 3.5, center.dy + cosY * 3.5);
+    final base = Offset(center.dx - cosY * 3, center.dy + sinY * 3);
+
+    final path = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(left.dx, left.dy)
+      ..lineTo(base.dx, base.dy)
+      ..lineTo(right.dx, right.dy)
+      ..close();
+
+    canvas.drawPath(path, Paint()..color = Colors.white);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.black45
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 0.8,
+    );
   }
 
   @override
