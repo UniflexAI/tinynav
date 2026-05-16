@@ -370,6 +370,10 @@ class _LocalPlanningView extends StatelessWidget {
                         ? CustomPaint(
                             painter: LocalVoxelPainter(
                               points: p?.voxelPoints ?? const [],
+                              trajectory: p?.trajectory ?? const [],
+                              globalPath: p?.globalPath ?? const [],
+                              footprint: p?.footprint ?? const [],
+                              navTargetPose: p?.navTargetPose,
                               odomPose: p?.odomPose,
                             ),
                           )
