@@ -26,7 +26,7 @@ import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import CompressedImage, Image, PointCloud
+from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
@@ -84,6 +84,7 @@ class BackendNode(Ros2NodeManager):
         self._trajectory: list = []
         self._global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
+        self._voxel_points: list = []
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
@@ -108,6 +109,9 @@ class BackendNode(Ros2NodeManager):
         )
         self.create_subscription(
             PointCloud, '/planning/footprint', self._on_footprint, 1
+        )
+        self.create_subscription(
+            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
         )
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -297,6 +301,23 @@ class BackendNode(Ros2NodeManager):
             corners = [{'x': p.x, 'y': p.y} for p in msg.points]
         with self._lock:
             self._footprint = corners
+
+    def _on_occupied_voxels(self, msg: PointCloud2):
+        """Store a downsampled local 3D occupied voxel cloud for the web UI."""
+        try:
+            step = max(1, len(msg.data) // max(1, msg.point_step) // 2500)
+            points = []
+            import sensor_msgs_py.point_cloud2 as pc2
+            for i, p in enumerate(pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)):
+                if i % step != 0:
+                    continue
+                points.append({'x': float(p[0]), 'y': float(p[1]), 'z': float(p[2])})
+                if len(points) >= 2500:
+                    break
+            with self._lock:
+                self._voxel_points = points
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -490,6 +511,7 @@ class BackendNode(Ros2NodeManager):
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
                 'footprint': list(self._footprint),
+                'voxel_points': list(self._voxel_points),
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot

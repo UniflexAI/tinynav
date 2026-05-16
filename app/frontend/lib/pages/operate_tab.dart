@@ -10,6 +10,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import 'local_voxel_painter.dart';
 import 'map_painter.dart';
 import 'planning_painter.dart';
 
@@ -40,6 +41,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   bool _navArrived = false;
   bool _showFootprint = true;
   bool _localMapFill = false;
+  bool _showLocal3d = false;
 
   @override
   void initState() {
@@ -156,6 +158,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         showGlobalPath: _showGlobalPath,
                         showFootprint: _showFootprint,
                         fillViewport: _localMapFill,
+                        show3d: _showLocal3d,
                       ),
               ),
               if (planning != null)
@@ -184,9 +187,19 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                     crossAxisAlignment: CrossAxisAlignment.end,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _LocalMapScaleButton(
-                        fillViewport: _localMapFill,
-                        onTap: () => setState(() => _localMapFill = !_localMapFill),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _LocalViewModeButton(
+                            show3d: _showLocal3d,
+                            onTap: () => setState(() => _showLocal3d = !_showLocal3d),
+                          ),
+                          const SizedBox(width: 6),
+                          _LocalMapScaleButton(
+                            fillViewport: _localMapFill,
+                            onTap: () => setState(() => _localMapFill = !_localMapFill),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 6),
                       _LayerTogglePanel(
@@ -320,6 +333,7 @@ class _LocalPlanningView extends StatelessWidget {
   final bool showGlobalPath;
   final bool showFootprint;
   final bool fillViewport;
+  final bool show3d;
 
   const _LocalPlanningView({
     this.planning,
@@ -329,6 +343,7 @@ class _LocalPlanningView extends StatelessWidget {
     this.showGlobalPath = true,
     this.showFootprint = true,
     this.fillViewport = false,
+    this.show3d = false,
   });
 
   @override
@@ -351,9 +366,16 @@ class _LocalPlanningView extends StatelessWidget {
                     minScale: 0.5,
                     maxScale: 8.0,
                     boundaryMargin: const EdgeInsets.all(double.infinity),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
+                    child: show3d
+                        ? CustomPaint(
+                            painter: LocalVoxelPainter(
+                              points: p?.voxelPoints ?? const [],
+                              odomPose: p?.odomPose,
+                            ),
+                          )
+                        : Stack(
+                            fit: StackFit.expand,
+                            children: [
                   if (showEsdf && p?.esdfImage != null)
                     Opacity(
                       opacity: 0.85,
@@ -399,6 +421,36 @@ class _LocalPlanningView extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _LocalViewModeButton extends StatelessWidget {
+  final bool show3d;
+  final VoidCallback onTap;
+
+  const _LocalViewModeButton({required this.show3d, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.black54,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Text(
+          show3d ? '3D' : '2D',
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
     );
   }
 }
