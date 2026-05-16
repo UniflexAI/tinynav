@@ -42,8 +42,10 @@ class LocalVoxelPainter extends CustomPainter {
       final c = _project3d(center, scale, p.x - pose.x, p.y - pose.y, p.z);
       if (c.dx < -10 || c.dx > size.width + 10 || c.dy < -10 || c.dy > size.height + 10) continue;
       final zNorm = ((p.z + 0.4) / 1.2).clamp(0.0, 1.0);
-      final color = Color.lerp(const Color(0xFF25D0FF), const Color(0xFFFFB020), zNorm)!;
-      canvas.drawCircle(c, 2.1, Paint()..color = color.withOpacity(0.82));
+      final color = zNorm < 0.55
+          ? Color.lerp(const Color(0xFF163B2B), const Color(0xFF59C36A), zNorm / 0.55)!
+          : Color.lerp(const Color(0xFF59C36A), const Color(0xFFFFB020), (zNorm - 0.55) / 0.45)!;
+      canvas.drawCircle(c, 2.1, Paint()..color = color.withOpacity(0.86));
     }
 
     _drawPath(canvas, center, scale, globalPath, const Color(0xFF69F0AE), 2.6);
