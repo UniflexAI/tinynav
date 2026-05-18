@@ -38,16 +38,14 @@ class LocalVoxelPainter extends CustomPainter {
 
     _drawGroundGrid(canvas, center, scale);
 
+    final zRange = _zRange(points);
     final sorted = [...points]
       ..sort((a, b) => _depth(a, pose).compareTo(_depth(b, pose)));
     for (final p in sorted) {
       final c = _project3d(center, scale, p.x - pose.x, p.y - pose.y, p.z);
       if (c.dx < -10 || c.dx > size.width + 10 || c.dy < -10 || c.dy > size.height + 10) continue;
-      final zNorm = ((p.z + 0.4) / 1.2).clamp(0.0, 1.0);
-      final color = zNorm < 0.55
-          ? Color.lerp(const Color(0xFF163B2B), const Color(0xFF59C36A), zNorm / 0.55)!
-          : Color.lerp(const Color(0xFF59C36A), const Color(0xFFFFB020), (zNorm - 0.55) / 0.45)!;
-      canvas.drawCircle(c, 2.1, Paint()..color = color.withOpacity(0.86));
+      final color = _heightColor(_zNorm(p.z, zRange.$1, zRange.$2));
+      canvas.drawCircle(c, 2.25, Paint()..color = color.withOpacity(0.92));
     }
 
     _drawPath(canvas, center, scale, globalPath, const Color(0xFF69F0AE), 2.6);
@@ -77,6 +75,35 @@ class LocalVoxelPainter extends CustomPainter {
     final rx = dx * cosYaw - dy * sinYaw;
     final ry = dx * sinYaw + dy * cosYaw;
     return rx + ry + p.z;
+  }
+
+  (double, double) _zRange(List<VoxelPoint> pts) {
+    if (pts.isEmpty) return (-0.4, 0.8);
+    final zs = pts.map((p) => p.z).toList()..sort();
+    final loIdx = (zs.length * 0.05).floor().clamp(0, zs.length - 1).toInt();
+    final hiIdx = (zs.length * 0.95).floor().clamp(0, zs.length - 1).toInt();
+    final lo = zs[loIdx];
+    final hi = zs[hiIdx];
+    final mid = (lo + hi) * 0.5;
+    final span = math.max(hi - lo, 0.6);
+    return (mid - span * 0.5, mid + span * 0.5);
+  }
+
+  double _zNorm(double z, double zMin, double zMax) =>
+      ((z - zMin) / math.max(zMax - zMin, 0.001)).clamp(0.0, 1.0).toDouble();
+
+  Color _heightColor(double t) {
+    const stops = [
+      Color(0xFF064E3B), // low: dark green
+      Color(0xFF22C55E), // lower-mid: vivid green
+      Color(0xFFFACC15), // mid: yellow
+      Color(0xFFF97316), // high: orange
+      Color(0xFFEF4444), // highest: red
+    ];
+    final scaled = (t * (stops.length - 1)).clamp(0.0, stops.length - 1.0);
+    final i = scaled.floor().clamp(0, stops.length - 2).toInt();
+    final localT = scaled - i;
+    return Color.lerp(stops[i], stops[i + 1], localT)!;
   }
 
   TrajPoint _rel(TrajPoint p, Pose pose) => TrajPoint(p.x - pose.x, p.y - pose.y);
