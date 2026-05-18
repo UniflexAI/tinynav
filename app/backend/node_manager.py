@@ -120,6 +120,9 @@ class BackendNode(Ros2NodeManager):
         # Publisher for POI nav target consumed by map_node via /mapping/cmd_pois
         self._cmd_pois_pub = self.create_publisher(String, '/mapping/cmd_pois', 10)
 
+        # Manual local target for planning_node, used by the operate tab long-press tool.
+        self._target_pose_pub = self.create_publisher(Odometry, '/control/target_pose', 10)
+
         # Latched publisher — new subscribers (cmd_vel_control) get current state immediately on connect
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._pause_pub = self.create_publisher(Bool, '/nav/paused', _latched_qos)
@@ -924,6 +927,23 @@ class BackendNode(Ros2NodeManager):
         # Re-index as "0" to match pub_pois.py convention expected by map_node
         payload = {'0': pois[key]}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
+
+    def cmd_manual_target_pose(self, x: float, y: float, z: float):
+        """Publish a manually selected local-planner target pose.
+
+        planning_node subscribes to /control/target_pose and only reads the
+        position vector, so Odometry is used here to match that existing API.
+        """
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.position.z = float(z)
+        msg.pose.pose.orientation.w = 1.0
+        self._target_pose_pub.publish(msg)
+        with self._lock:
+            self._nav_target_pose = {'x': float(x), 'y': float(y)}
 
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""

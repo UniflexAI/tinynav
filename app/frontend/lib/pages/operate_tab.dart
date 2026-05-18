@@ -327,7 +327,7 @@ class _GlobalMapView extends StatelessWidget {
 
 // ── Local planning view ───────────────────────────────────────────────────────
 
-class _LocalPlanningView extends StatelessWidget {
+class _LocalPlanningView extends ConsumerStatefulWidget {
   final PlanningState? planning;
   final bool showObstacle;
   final bool showEsdf;
@@ -349,8 +349,156 @@ class _LocalPlanningView extends StatelessWidget {
   });
 
   @override
+  ConsumerState<_LocalPlanningView> createState() => _LocalPlanningViewState();
+}
+
+class _ManualTarget {
+  final double x;
+  final double y;
+  final double z;
+  final bool usedVoxelZ;
+
+  const _ManualTarget({
+    required this.x,
+    required this.y,
+    required this.z,
+    required this.usedVoxelZ,
+  });
+}
+
+class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
+  final TransformationController _txCtrl = TransformationController();
+  _ManualTarget? _pendingTarget;
+  Timer? _manualTargetTimer;
+  Offset? _manualTargetStart;
+
+  @override
+  void dispose() {
+    _manualTargetTimer?.cancel();
+    _txCtrl.dispose();
+    super.dispose();
+  }
+
+  _ManualTarget? _targetFromLocalPosition(Offset viewportPos, Size viewportSize) {
+    final p = widget.planning;
+    final pose = p?.odomPose;
+    if (p == null || pose == null || viewportSize.width <= 0 || viewportSize.height <= 0) {
+      return null;
+    }
+
+    final childPos = MatrixUtils.transformPoint(
+      Matrix4.inverted(_txCtrl.value),
+      viewportPos,
+    );
+    final gi = p.gridInfo;
+    final worldW = gi != null ? gi.width * gi.resolution : 10.0;
+    final worldH = gi != null ? gi.height * gi.resolution : 10.0;
+    final dx = (childPos.dx - viewportSize.width / 2) * worldW / viewportSize.width;
+    final dy = (viewportSize.height / 2 - childPos.dy) * worldH / viewportSize.height;
+    final x = pose.x + dx;
+    final y = pose.y + dy;
+    final zHit = _nearbyVoxelMedianZ(p.voxelPoints, x, y);
+    return _ManualTarget(
+      x: x,
+      y: y,
+      z: zHit ?? pose.z ?? 0.0,
+      usedVoxelZ: zHit != null,
+    );
+  }
+
+  double? _nearbyVoxelMedianZ(List<VoxelPoint> voxels, double x, double y) {
+    const radius = 0.35;
+    final zs = <double>[];
+    for (final v in voxels) {
+      final dx = v.x - x;
+      final dy = v.y - y;
+      if (dx * dx + dy * dy <= radius * radius) zs.add(v.z);
+    }
+    if (zs.isEmpty) return null;
+    zs.sort();
+    return zs[zs.length ~/ 2];
+  }
+
+  void _startManualTargetTimer(PointerDownEvent event, Size viewportSize) {
+    _manualTargetTimer?.cancel();
+    _manualTargetStart = event.localPosition;
+    _manualTargetTimer = Timer(const Duration(seconds: 2), () {
+      _manualTargetTimer = null;
+      final start = _manualTargetStart;
+      if (start != null) _handleLongPress(start, viewportSize);
+    });
+  }
+
+  void _maybeCancelManualTargetTimer(PointerMoveEvent event) {
+    final start = _manualTargetStart;
+    if (start == null) return;
+    if ((event.localPosition - start).distance > 10) {
+      _cancelManualTargetTimer();
+    }
+  }
+
+  void _cancelManualTargetTimer() {
+    _manualTargetTimer?.cancel();
+    _manualTargetTimer = null;
+    _manualTargetStart = null;
+  }
+
+  Future<void> _handleLongPress(Offset localPos, Size viewportSize) async {
+    final target = _targetFromLocalPosition(localPos, viewportSize);
+    if (target == null || !mounted) return;
+    setState(() => _pendingTarget = target);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Set manual target?'),
+        content: Text(
+          'Publish /control/target_pose to:\n'
+          'x=${target.x.toStringAsFixed(2)}, '
+          'y=${target.y.toStringAsFixed(2)}, '
+          'z=${target.z.toStringAsFixed(2)}\n\n'
+          '${target.usedVoxelZ ? 'z from nearby occupied voxels.' : 'No nearby voxel height; z uses current robot height.'}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Publish'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted) return;
+    if (confirmed == true) {
+      try {
+        await ref.read(dioProvider).post('/nav/manual-target', data: {
+          'x': target.x,
+          'y': target.y,
+          'z': target.z,
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Manual target published')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to publish target: $e')),
+          );
+        }
+      }
+    }
+    if (mounted) setState(() => _pendingTarget = null);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final p = planning;
+    final p = widget.planning;
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -358,60 +506,76 @@ class _LocalPlanningView extends StatelessWidget {
         ClipRect(
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final side = fillViewport
+              final side = widget.fillViewport
                   ? max(constraints.maxWidth, constraints.maxHeight)
                   : min(constraints.maxWidth, constraints.maxHeight);
+              final targetPose = _pendingTarget != null
+                  ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
+                  : p?.navTargetPose;
               return Center(
                 child: SizedBox.square(
                   dimension: side,
-                  child: show3d
-                      ? _Local3dPlanningView(planning: p)
-                      : InteractiveViewer(
-                          minScale: 0.5,
-                          maxScale: 8.0,
-                          boundaryMargin: const EdgeInsets.all(double.infinity),
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              if (showEsdf && p?.esdfImage != null)
-                                Opacity(
-                                  opacity: 0.85,
-                                  child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                                ),
-                              if (showObstacle && p?.obstacleImage != null)
-                                Opacity(
-                                  opacity: 0.45,
-                                  child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                                ),
-                              if (p != null)
-                                CustomPaint(
-                                  painter: LocalPlanningPainter(
-                                    trajectory: p.trajectory,
-                                    globalPath: p.globalPath,
-                                    footprint: p.footprint,
-                                    gridInfo: p.gridInfo,
-                                    odomPose: p.odomPose,
-                                    showTrajectory: showTrajectory,
-                                    showGlobalPath: showGlobalPath,
-                                    showFootprint: showFootprint,
-                                    navTargetPose: p.navTargetPose,
-                                  ),
-                                ),
-                              if (p == null)
-                                const Center(
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(Icons.map_outlined, size: 48, color: Colors.white24),
-                                      SizedBox(height: 8),
-                                      Text('Waiting for planning data…',
-                                          style: TextStyle(color: Colors.white38, fontSize: 13)),
-                                    ],
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
+                  child: Builder(
+                    builder: (mapContext) {
+                      final content = widget.show3d
+                          ? _Local3dPlanningView(planning: p)
+                          : InteractiveViewer(
+                              transformationController: _txCtrl,
+                              minScale: 0.5,
+                              maxScale: 8.0,
+                              boundaryMargin: const EdgeInsets.all(double.infinity),
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  if (widget.showEsdf && p?.esdfImage != null)
+                                    Opacity(
+                                      opacity: 0.85,
+                                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                    ),
+                                  if (widget.showObstacle && p?.obstacleImage != null)
+                                    Opacity(
+                                      opacity: 0.45,
+                                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                    ),
+                                  if (p != null)
+                                    CustomPaint(
+                                      painter: LocalPlanningPainter(
+                                        trajectory: p.trajectory,
+                                        globalPath: p.globalPath,
+                                        footprint: p.footprint,
+                                        gridInfo: p.gridInfo,
+                                        odomPose: p.odomPose,
+                                        showTrajectory: widget.showTrajectory,
+                                        showGlobalPath: widget.showGlobalPath,
+                                        showFootprint: widget.showFootprint,
+                                        navTargetPose: targetPose,
+                                      ),
+                                    ),
+                                  if (p == null)
+                                    const Center(
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(Icons.map_outlined, size: 48, color: Colors.white24),
+                                          SizedBox(height: 8),
+                                          Text('Waiting for planning data…',
+                                              style: TextStyle(color: Colors.white38, fontSize: 13)),
+                                        ],
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            );
+                      return Listener(
+                        behavior: HitTestBehavior.translucent,
+                        onPointerDown: (event) => _startManualTargetTimer(event, Size(side, side)),
+                        onPointerMove: _maybeCancelManualTargetTimer,
+                        onPointerUp: (_) => _cancelManualTargetTimer(),
+                        onPointerCancel: (_) => _cancelManualTargetTimer(),
+                        child: content,
+                      );
+                    },
+                  ),
                 ),
               );
             },
