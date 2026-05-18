@@ -928,12 +928,29 @@ class BackendNode(Ros2NodeManager):
         payload = {'0': pois[key]}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
 
+    def _ensure_cmd_vel_control(self):
+        if self._cmd_vel_proc is not None and self._cmd_vel_proc.poll() is None:
+            return
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        self._cmd_vel_proc = self._launch_proc(
+            'cmd_vel_control',
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            env=_env,
+        )
+        with self._lock:
+            self._nav_nodes_running = True
+            self._nav_paused = False
+        self._pause_pub.publish(Bool(data=False))
+        self.get_logger().info('cmd_vel_control started for manual local target')
+
     def cmd_manual_target_pose(self, x: float, y: float, z: float):
         """Publish a manually selected local-planner target pose.
 
         planning_node subscribes to /control/target_pose and only reads the
         position vector, so Odometry is used here to match that existing API.
         """
+        self._ensure_cmd_vel_control()
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
