@@ -11,6 +11,7 @@ class LocalVoxelPainter extends CustomPainter {
   final List<TrajPoint> footprint;
   final TrajPoint? navTargetPose;
   final Pose? odomPose;
+  final double viewYaw;
 
   const LocalVoxelPainter({
     required this.points,
@@ -19,6 +20,7 @@ class LocalVoxelPainter extends CustomPainter {
     this.footprint = const [],
     this.navTargetPose,
     this.odomPose,
+    this.viewYaw = 0.0,
   });
 
   @override
@@ -37,7 +39,7 @@ class LocalVoxelPainter extends CustomPainter {
     _drawGroundGrid(canvas, center, scale);
 
     final sorted = [...points]
-      ..sort((a, b) => (a.x + a.y + a.z).compareTo(b.x + b.y + b.z));
+      ..sort((a, b) => _depth(a, pose).compareTo(_depth(b, pose)));
     for (final p in sorted) {
       final c = _project3d(center, scale, p.x - pose.x, p.y - pose.y, p.z);
       if (c.dx < -10 || c.dx > size.width + 10 || c.dy < -10 || c.dy > size.height + 10) continue;
@@ -56,11 +58,25 @@ class LocalVoxelPainter extends CustomPainter {
   }
 
   Offset _project3d(Offset center, double scale, double dx, double dy, double z) {
-    // Isometric-ish projection. World +X points down-right, +Y points up-right,
-    // +Z lifts upward. This is intentionally not yaw-rotated, matching 2D map axes.
-    final sx = center.dx + (dx - dy) * scale * 0.72;
-    final sy = center.dy - (dx + dy) * scale * 0.36 - z * scale * 0.75;
+    // Isometric-ish projection. viewYaw rotates the world around +Z before
+    // projection so users can inspect the local voxel map from any side.
+    final cosYaw = math.cos(viewYaw);
+    final sinYaw = math.sin(viewYaw);
+    final rx = dx * cosYaw - dy * sinYaw;
+    final ry = dx * sinYaw + dy * cosYaw;
+    final sx = center.dx + (rx - ry) * scale * 0.72;
+    final sy = center.dy - (rx + ry) * scale * 0.36 - z * scale * 0.75;
     return Offset(sx, sy);
+  }
+
+  double _depth(VoxelPoint p, Pose pose) {
+    final dx = p.x - pose.x;
+    final dy = p.y - pose.y;
+    final cosYaw = math.cos(viewYaw);
+    final sinYaw = math.sin(viewYaw);
+    final rx = dx * cosYaw - dy * sinYaw;
+    final ry = dx * sinYaw + dy * cosYaw;
+    return rx + ry + p.z;
   }
 
   TrajPoint _rel(TrajPoint p, Pose pose) => TrajPoint(p.x - pose.x, p.y - pose.y);
@@ -176,5 +192,6 @@ class LocalVoxelPainter extends CustomPainter {
       oldDelegate.globalPath != globalPath ||
       oldDelegate.footprint != footprint ||
       oldDelegate.navTargetPose != navTargetPose ||
-      oldDelegate.odomPose != odomPose;
+      oldDelegate.odomPose != odomPose ||
+      oldDelegate.viewYaw != viewYaw;
 }

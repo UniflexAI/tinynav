@@ -5,6 +5,8 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -362,74 +364,183 @@ class _LocalPlanningView extends StatelessWidget {
               return Center(
                 child: SizedBox.square(
                   dimension: side,
-                  child: InteractiveViewer(
-                    minScale: 0.5,
-                    maxScale: 8.0,
-                    boundaryMargin: const EdgeInsets.all(double.infinity),
-                    child: show3d
-                        ? InteractiveViewer(
-                            minScale: 0.5,
-                            maxScale: 8.0,
-                            boundaryMargin: const EdgeInsets.all(double.infinity),
-                            child: CustomPaint(
-                              painter: LocalVoxelPainter(
-                                points: p?.voxelPoints ?? const [],
-                                trajectory: p?.trajectory ?? const [],
-                                globalPath: p?.globalPath ?? const [],
-                                footprint: p?.footprint ?? const [],
-                                navTargetPose: p?.navTargetPose,
-                                odomPose: p?.odomPose,
-                              ),
-                            ),
-                          )
-                        : Stack(
+                  child: show3d
+                      ? _Local3dPlanningView(planning: p)
+                      : InteractiveViewer(
+                          minScale: 0.5,
+                          maxScale: 8.0,
+                          boundaryMargin: const EdgeInsets.all(double.infinity),
+                          child: Stack(
                             fit: StackFit.expand,
                             children: [
-                  if (showEsdf && p?.esdfImage != null)
-                    Opacity(
-                      opacity: 0.85,
-                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                    ),
-                  if (showObstacle && p?.obstacleImage != null)
-                    Opacity(
-                      opacity: 0.45,
-                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                    ),
-                  if (p != null)
-                    CustomPaint(
-                      painter: LocalPlanningPainter(
-                        trajectory: p.trajectory,
-                        globalPath: p.globalPath,
-                        footprint: p.footprint,
-                        gridInfo: p.gridInfo,
-                        odomPose: p.odomPose,
-                        showTrajectory: showTrajectory,
-                        showGlobalPath: showGlobalPath,
-                        showFootprint: showFootprint,
-                        navTargetPose: p.navTargetPose,
-                      ),
-                    ),
-                  if (p == null)
-                    const Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.map_outlined, size: 48, color: Colors.white24),
-                          SizedBox(height: 8),
-                          Text('Waiting for planning data…',
-                              style: TextStyle(color: Colors.white38, fontSize: 13)),
-                        ],
-                      ),
-                    ),
-                      ],
-                    ),
-                  ),
+                              if (showEsdf && p?.esdfImage != null)
+                                Opacity(
+                                  opacity: 0.85,
+                                  child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                ),
+                              if (showObstacle && p?.obstacleImage != null)
+                                Opacity(
+                                  opacity: 0.45,
+                                  child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                ),
+                              if (p != null)
+                                CustomPaint(
+                                  painter: LocalPlanningPainter(
+                                    trajectory: p.trajectory,
+                                    globalPath: p.globalPath,
+                                    footprint: p.footprint,
+                                    gridInfo: p.gridInfo,
+                                    odomPose: p.odomPose,
+                                    showTrajectory: showTrajectory,
+                                    showGlobalPath: showGlobalPath,
+                                    showFootprint: showFootprint,
+                                    navTargetPose: p.navTargetPose,
+                                  ),
+                                ),
+                              if (p == null)
+                                const Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.map_outlined, size: 48, color: Colors.white24),
+                                      SizedBox(height: 8),
+                                      Text('Waiting for planning data…',
+                                          style: TextStyle(color: Colors.white38, fontSize: 13)),
+                                    ],
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
                 ),
               );
             },
           ),
         ),
       ],
+    );
+  }
+}
+
+class _Local3dPlanningView extends StatefulWidget {
+  final PlanningState? planning;
+
+  const _Local3dPlanningView({this.planning});
+
+  @override
+  State<_Local3dPlanningView> createState() => _Local3dPlanningViewState();
+}
+
+class _Local3dPlanningViewState extends State<_Local3dPlanningView> {
+  static const double _minScale = 0.5;
+  static const double _maxScale = 8.0;
+
+  double _scale = 1.0;
+  double _viewYaw = 0.0;
+  Offset _pan = Offset.zero;
+
+  double _startScale = 1.0;
+  double _startYaw = 0.0;
+  Offset _startPan = Offset.zero;
+  Offset _startFocalPoint = Offset.zero;
+
+  void _onScaleStart(ScaleStartDetails details) {
+    _startScale = _scale;
+    _startYaw = _viewYaw;
+    _startPan = _pan;
+    _startFocalPoint = details.focalPoint;
+  }
+
+  bool get _isControlPressed {
+    final keys = HardwareKeyboard.instance.logicalKeysPressed;
+    return keys.contains(LogicalKeyboardKey.controlLeft) ||
+        keys.contains(LogicalKeyboardKey.controlRight);
+  }
+
+  void _onScaleUpdate(ScaleUpdateDetails details) {
+    final ctrlRotate = _isControlPressed && details.pointerCount <= 1;
+    setState(() {
+      if (ctrlRotate) {
+        _viewYaw = _startYaw + (details.focalPoint.dx - _startFocalPoint.dx) * 0.012;
+        return;
+      }
+
+      _scale = (_startScale * details.scale).clamp(_minScale, _maxScale).toDouble();
+      _pan = _startPan + details.focalPoint - _startFocalPoint;
+      if (details.pointerCount >= 2) {
+        _viewYaw = _startYaw + details.rotation;
+      }
+    });
+  }
+
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final zoom = event.scrollDelta.dy < 0 ? 1.10 : 0.90;
+    setState(() => _scale = (_scale * zoom).clamp(_minScale, _maxScale).toDouble());
+  }
+
+  void _resetView() {
+    setState(() {
+      _scale = 1.0;
+      _viewYaw = 0.0;
+      _pan = Offset.zero;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.planning;
+    return Listener(
+      onPointerSignal: _onPointerSignal,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onDoubleTap: _resetView,
+        onScaleStart: _onScaleStart,
+        onScaleUpdate: _onScaleUpdate,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Transform.translate(
+              offset: _pan,
+              child: Transform.scale(
+                scale: _scale,
+                alignment: Alignment.center,
+                child: CustomPaint(
+                  painter: LocalVoxelPainter(
+                    points: p?.voxelPoints ?? const [],
+                    trajectory: p?.trajectory ?? const [],
+                    globalPath: p?.globalPath ?? const [],
+                    footprint: p?.footprint ?? const [],
+                    navTargetPose: p?.navTargetPose,
+                    odomPose: p?.odomPose,
+                    viewYaw: _viewYaw,
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 8,
+              bottom: 8,
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black45,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                    child: Text(
+                      'Pinch rotate · Ctrl+drag rotate · double tap reset',
+                      style: TextStyle(color: Colors.white54, fontSize: 10),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
