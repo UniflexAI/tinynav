@@ -604,34 +604,43 @@ class BackendNode(Ros2NodeManager):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
 
+    @staticmethod
+    def _proc_alive(proc: subprocess.Popen | None) -> bool:
+        return proc is not None and proc.poll() is None
+
     def _launch_sensor_procs(self, env: dict):
         """Start sensor procs based on current _sensor_mode."""
         if self._sensor_mode == 'looper':
-            self._looper_bridge_proc = self._launch_proc(
-                'looper_bridge',
-                ['python3', os.path.join(_TINYNAV_ROOT, 'tool/looper_bridge_node.py')],
-                env=env,
-            )
-            self._planning_proc = self._launch_proc(
-                'planning',
-                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/planning_node.py')],
-                env=env,
-            )
+            if not self._proc_alive(self._looper_bridge_proc):
+                self._looper_bridge_proc = self._launch_proc(
+                    'looper_bridge',
+                    ['python3', os.path.join(_TINYNAV_ROOT, 'tool/looper_bridge_node.py')],
+                    env=env,
+                )
+            if not self._proc_alive(self._planning_proc):
+                self._planning_proc = self._launch_proc(
+                    'planning',
+                    ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/planning_node.py')],
+                    env=env,
+                )
         elif self._sensor_mode == 'realsense':
-            self._realsense_proc = self._launch_proc(
-                'realsense',
-                ['bash', _REALSENSE_SCRIPT],
-            )
-            self._perception_proc = self._launch_proc(
-                'perception',
-                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/perception_node.py')],
-                env=env,
-            )
-            self._planning_proc = self._launch_proc(
-                'planning',
-                ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/planning_node.py')],
-                env=env,
-            )
+            if not self._proc_alive(self._realsense_proc):
+                self._realsense_proc = self._launch_proc(
+                    'realsense',
+                    ['bash', _REALSENSE_SCRIPT],
+                )
+            if not self._proc_alive(self._perception_proc):
+                self._perception_proc = self._launch_proc(
+                    'perception',
+                    ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/perception_node.py')],
+                    env=env,
+                )
+            if not self._proc_alive(self._planning_proc):
+                self._planning_proc = self._launch_proc(
+                    'planning',
+                    ['python3', os.path.join(_TINYNAV_ROOT, 'tinynav/core/planning_node.py')],
+                    env=env,
+                )
 
     def _restart_sensor_procs(self):
         _env = os.environ.copy()
