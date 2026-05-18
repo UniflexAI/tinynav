@@ -60,8 +60,10 @@ class CmdVelControlNode(Node):
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
+        self._nav_active = False
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
+        self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _on_paused(self, msg: Bool):
@@ -69,6 +71,17 @@ class CmdVelControlNode(Node):
         if not self._paused:
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
+
+    def _on_nav_active(self, msg: Bool):
+        was_active = self._nav_active
+        self._nav_active = bool(msg.data)
+        if was_active and not self._nav_active:
+            self.latest_cmd = Twist()
+            self.prev_cmd = Twist()
+            self.last_path_update_time = None
+            # Send one stop when navigation is deactivated, then stay silent so
+            # manual teleop can own /cmd_vel without being overwritten by zeros.
+            self.cmd_pub.publish(Twist())
 
     def pose_callback(self, msg):
         self.pose = msg
@@ -80,6 +93,9 @@ class CmdVelControlNode(Node):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
+
+        if not self._nav_active:
+            return
 
         if self._paused:
             self.cmd_pub.publish(Twist())
@@ -139,6 +155,8 @@ class CmdVelControlNode(Node):
         self.prev_cmd = out
         
     def path_callback(self, msg):
+        if not self._nav_active:
+            return
         if msg is None or self.pose is None:
             return
         if len(msg.poses) < 2:
