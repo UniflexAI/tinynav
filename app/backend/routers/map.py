@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
+import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
@@ -145,11 +146,52 @@ class MapPoiCreateRequest(BaseModel):
     position: list[float]  # [x, y, z]
 
 
+def _position_with_sdf_z(path: str, position: list[float]) -> list[float]:
+    """Use clicked x/y and infer z from the map's odom-seeded SDF column."""
+    x, y, _ = [float(v) for v in position]
+    try:
+        occupancy = np.load(os.path.join(path, 'occupancy_grid.npy'))
+        sdf = np.load(os.path.join(path, 'sdf_map.npy'))
+        meta = np.load(os.path.join(path, 'occupancy_meta.npy'))
+    except Exception as e:
+        raise HTTPException(500, f'Failed to load map SDF/occupancy data: {e}') from e
+
+    if occupancy.shape != sdf.shape:
+        raise HTTPException(
+            500,
+            f'occupancy_grid and sdf_map shape mismatch: {occupancy.shape} vs {sdf.shape}',
+        )
+    if len(meta) < 4:
+        raise HTTPException(500, 'Invalid occupancy_meta.npy: expected [origin_x, origin_y, origin_z, resolution]')
+
+    origin_x, origin_y, origin_z, resolution = [float(v) for v in meta[:4]]
+    if resolution <= 0:
+        raise HTTPException(500, f'Invalid occupancy resolution: {resolution}')
+
+    x_idx = int((x - origin_x) / resolution)
+    y_idx = int((y - origin_y) / resolution)
+    if not (0 <= x_idx < occupancy.shape[0] and 0 <= y_idx < occupancy.shape[1]):
+        raise HTTPException(400, 'POI position is outside the map bounds')
+
+    sdf_col = sdf[x_idx, y_idx, :]
+    occ_col = occupancy[x_idx, y_idx, :]
+    valid = np.isfinite(sdf_col) & (occ_col != 2)
+    if not np.any(valid):
+        raise HTTPException(400, 'No valid non-occupied SDF voxel found for this POI position')
+
+    # sdf_map is generated from odom pose seeds, so the smallest SDF in this
+    # x/y column is the height closest to the robot/map trajectory.
+    valid_indices = np.flatnonzero(valid)
+    z_idx = int(valid_indices[np.argmin(sdf_col[valid])])
+    return [x, y, origin_z + z_idx * resolution]
+
+
 @router.post('/preview/{map_name}/pois')
 def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
     path = _resolve_map_path(map_name)
     if len(req.position) != 3:
         raise HTTPException(400, 'position must be [x, y, z]')
+    position = _position_with_sdf_z(path, req.position)
     pois_file = os.path.join(path, 'pois.json')
     pois: dict = {}
     if os.path.exists(pois_file):
@@ -157,7 +199,7 @@ def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
             pois = json.load(f)
     existing_ids = [int(k) for k in pois.keys()] if pois else []
     new_id = max(existing_ids) + 1 if existing_ids else 0
-    pois[str(new_id)] = {'id': new_id, 'name': req.name, 'position': req.position}
+    pois[str(new_id)] = {'id': new_id, 'name': req.name, 'position': position}
     with open(pois_file, 'w') as f:
         json.dump(pois, f, indent=2)
     return pois[str(new_id)]
