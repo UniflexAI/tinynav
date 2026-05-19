@@ -130,7 +130,7 @@ class PerceptionNode(Node):
         self.input_aligner.registerCallback(1, self._aligned_stereo_callback)
         self.input_aligner_seen_imu = False
         self.input_aligner_seen_stereo = False
-        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
+        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
