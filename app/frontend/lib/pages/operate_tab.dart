@@ -704,7 +704,7 @@ class _Local3dPlanningViewState extends State<_Local3dPlanningView> {
             ),
           ],
         ),
-      ),
+      )
     );
   }
 }
@@ -734,7 +734,7 @@ class _LocalViewModeButton extends StatelessWidget {
             fontWeight: FontWeight.w700,
           ),
         ),
-      ),
+      )
     );
   }
 }
@@ -1049,6 +1049,7 @@ class _PoiSheet extends ConsumerStatefulWidget {
 class _PoiSheetState extends ConsumerState<_PoiSheet> {
   /// POI ids in the exact order they were checked.
   final List<int> _checkedIds = [];
+  final ScrollController _poiScrollController = ScrollController();
 
   Future<void> _deletePoi(Poi poi) async {
     final ok = await showDialog<bool>(
@@ -1102,27 +1103,36 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   }
 
   @override
+  void dispose() {
+    _poiScrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final poisAsync = ref.watch(poisProvider);
     final status = ref.watch(deviceStatusProvider).valueOrNull;
     final localized = ref.watch(planningStreamProvider).valueOrNull?.localized ?? false;
     final canGo = status != null && status.online && localized;
 
-    final sheetHeight = MediaQuery.sizeOf(context).height * 0.75;
-
     return SafeArea(
       top: false,
-      child: SizedBox(
-        height: sheetHeight,
+      child: FractionallySizedBox(
+        heightFactor: 0.9,
         child: Padding(
           padding: EdgeInsets.fromLTRB(
-              16, 12, 16, 24 + MediaQuery.of(context).viewInsets.bottom),
+            16,
+            12,
+            16,
+            24 + MediaQuery.of(context).viewInsets.bottom,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Center(
                 child: Container(
-                  width: 36, height: 4,
+                  width: 36,
+                  height: 4,
                   margin: const EdgeInsets.only(bottom: 14),
                   decoration: BoxDecoration(
                     color: Colors.grey.shade300,
@@ -1130,7 +1140,6 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
                   ),
                 ),
               ),
-              // ── Header ──────────────────────────────────────────────
               Row(children: [
                 const Icon(Icons.place_outlined, size: 20),
                 const SizedBox(width: 8),
@@ -1149,42 +1158,67 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
                 ),
               ]),
               const Divider(height: 20),
-              // ── POI list ────────────────────────────────────────────
               Expanded(
                 child: poisAsync.when(
                   data: (pois) => pois.isEmpty
                       ? const Center(
                           child: Text('No POIs yet', style: TextStyle(color: Colors.grey)),
                         )
-                      : Scrollbar(
-                          thumbVisibility: pois.length > 8,
-                          child: ListView.builder(
-                            padding: EdgeInsets.zero,
-                            itemCount: pois.length,
-                            itemBuilder: (context, index) {
-                              final poi = pois[index];
-                              final orderIndex = _checkedIds.indexOf(poi.id);
-                              return _PoiTile(
-                                poi: poi,
-                                checked: orderIndex != -1,
-                                orderNumber: orderIndex == -1 ? null : orderIndex + 1,
-                                onChecked: (v) => setState(() {
-                                  if (v) {
-                                    if (!_checkedIds.contains(poi.id)) {
-                                      _checkedIds.add(poi.id);
-                                    }
-                                  } else {
-                                    _checkedIds.remove(poi.id);
-                                  }
-                                }),
-                                onDelete: () => _deletePoi(poi),
-                              );
+                      : ScrollConfiguration(
+                          behavior: ScrollConfiguration.of(context).copyWith(
+                            dragDevices: {
+                              PointerDeviceKind.touch,
+                              PointerDeviceKind.mouse,
+                              PointerDeviceKind.trackpad,
+                              PointerDeviceKind.stylus,
+                              PointerDeviceKind.unknown,
                             },
                           ),
+                          child: Scrollbar(
+                            thumbVisibility: pois.length > 8,
+                            controller: _poiScrollController,
+                            child: ListView.builder(
+                              controller: _poiScrollController,
+                              primary: false,
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              padding: EdgeInsets.zero,
+                              itemCount: pois.length,
+                              itemBuilder: (context, index) {
+                                final poi = pois[index];
+                                final orderIndex = _checkedIds.indexOf(poi.id);
+                                return _PoiTile(
+                                  poi: poi,
+                                  checked: orderIndex != -1,
+                                  orderNumber: orderIndex == -1 ? null : orderIndex + 1,
+                                  onChecked: (v) => setState(() {
+                                    if (v) {
+                                      if (!_checkedIds.contains(poi.id)) {
+                                        _checkedIds.add(poi.id);
+                                      }
+                                    } else {
+                                      _checkedIds.remove(poi.id);
+                                    }
+                                  }),
+                                  onDelete: () => _deletePoi(poi),
+                                );
+                              },
+                            ),
+                          ),
                         ),
-                  loading: () => const Center(child: CircularProgressIndicator()),
-                  error: (e, _) => SingleChildScrollView(
-                    child: Text('$e', style: const TextStyle(color: Colors.red)),
+                  loading: () => ListView(
+                    controller: _poiScrollController,
+                    children: const [
+                      SizedBox(
+                        height: 180,
+                        child: Center(child: CircularProgressIndicator()),
+                      ),
+                    ],
+                  ),
+                  error: (e, _) => ListView(
+                    controller: _poiScrollController,
+                    children: [
+                      Text('$e', style: const TextStyle(color: Colors.red)),
+                    ],
                   ),
                 ),
               ),
