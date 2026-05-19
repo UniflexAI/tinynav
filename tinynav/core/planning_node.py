@@ -696,14 +696,19 @@ class PlanningNode(Node):
             centerline_points, ct_target = self._compute_centerline(T, ESDF_map)
             local_target = ct_target if ct_target is not None else self.target_pose
 
-            # Temporal low-pass to avoid jitter; accept large jumps (POI / path update).
-            if local_target is not None and self._last_local_target is not None:
-                jump = float(np.linalg.norm(local_target[:2] - self._last_local_target[:2]))
-                if jump < 1.5:
-                    local_target = 0.3 * local_target + 0.7 * self._last_local_target
-            self._last_local_target = local_target
+            # Temporal low-pass on local_target. Only active while we have a valid
+            # global path — matches the prior behavior of resetting smoothing state
+            # whenever the centerline pipeline isn't running.
+            if (self.target_pose is not None and self.global_path_odom is not None
+                    and len(self.global_path_odom) >= 2):
+                if self._last_local_target is not None:
+                    jump = float(np.linalg.norm(local_target[:2] - self._last_local_target[:2]))
+                    if jump < 1.5:
+                        local_target = 0.3 * local_target + 0.7 * self._last_local_target
+                self._last_local_target = local_target
 
-            if centerline_points:
+            if (self.target_pose is not None and self.global_path_odom is not None
+                    and len(self.global_path_odom) >= 2):
                 cl_path = Path()
                 cl_path.header.stamp = depth_msg.header.stamp
                 cl_path.header.frame_id = "world"
