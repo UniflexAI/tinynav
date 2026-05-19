@@ -664,10 +664,10 @@ class PlanningNode(Node):
                                            self.target_pose[0] - init_p_w[0]))
                 ang = abs(float(np.arctan2(np.sin(bearing - robot_yaw),
                                            np.cos(bearing - robot_yaw))))
-                # Quadratic falloff: 0 rad -> 2.5m, pi/4 -> 1.0m, pi/2+ -> 0.5m.
+                # Quadratic falloff: 0 rad -> 2.5m, pi/4 -> ~1.2m, pi/2+ -> 0.8m.
                 # Squared term makes mid-angles brake harder than a linear map.
                 align = max(0.0, 1.0 - ang / (np.pi / 2.0))
-                MAX_DIST = float(np.clip(0.5 + 2.0 * align * align, 0.5, 2.5))
+                MAX_DIST = float(np.clip(0.8 + 1.7 * align * align, 0.8, 2.5))
                 centerline_pt = init_p_w[:2].copy()
                 centerline_points = []
                 accumulated = 0.0
