@@ -471,9 +471,11 @@ class PlanningNode(Node):
         bearing = np.arctan2(self.target_pose[1] - init_p_w[1],
                              self.target_pose[0] - init_p_w[0])
         ang = abs(np.arctan2(np.sin(bearing - robot_yaw), np.cos(bearing - robot_yaw)))
-        # Exponential falloff: 0 rad -> 2.5m, 15deg -> 1.2m, 30deg -> 0.75m,
-        # 90deg -> ~0.5m. Aggressive in the first 30deg, then plateaus at floor.
-        max_dist = float(0.5 + 2.0 * np.exp(-4.0 * ang))
+        # Exponential falloff between bounds. Shape (decay rate) stays fixed;
+        # tune speed envelope by editing the two bounds only.
+        lookahead_max = 3.0
+        lookahead_min = 0.6
+        max_dist = float(lookahead_min + (lookahead_max - lookahead_min) * np.exp(-4.0 * ang))
 
         step = self.resolution
         lat_range = 0.4
