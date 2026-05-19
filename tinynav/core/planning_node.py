@@ -51,10 +51,10 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.4, width=0.3,
+    length=0.7, width=0.3,
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
+    safety_radius=0.1,
 )
 
 B2_CONFIG = RobotConfig(
@@ -155,7 +155,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    dilation_cells: int = 1
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -389,14 +389,34 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
+        self.target_yaw = None
+        self._last_local_target = None
+        self.global_path_odom = None  # path in odom frame for centerline anchor
+        self.centerline_pub = self.create_publisher(Path, '/planning/centerline', 10)
+        self.local_target_pub = self.create_publisher(Odometry, '/planning/local_target', 10)
+        self.create_subscription(Path, '/mapping/global_plan_odom', self._on_global_path_odom, 10)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self.target_yaw = None
+        self._last_local_target = None
+        self.global_path_odom = None
+
+    def _on_global_path_odom(self, msg):
+        pts = np.array([[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses])
+        self.global_path_odom = pts if len(pts) > 0 else None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        qx = msg.pose.pose.orientation.x
+        qy = msg.pose.pose.orientation.y
+        qz = msg.pose.pose.orientation.z
+        qw = msg.pose.pose.orientation.w
+        siny_cosp = 2.0 * (qw * qz + qx * qy)
+        cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+        self.target_yaw = float(np.arctan2(siny_cosp, cosy_cosp))
 
     def info_callback(self, msg):
         if self.K is None:
@@ -613,6 +633,109 @@ class PlanningNode(Node):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
 
+            # Local centerline: walk along path-tangent direction (from target_yaw)
+            # in local ESDF and snap laterally to corridor center. Decouples lateral
+            # position from global localization error.
+            local_target = self.target_pose
+            if (self.target_pose is not None and self.target_yaw is not None and
+                    self.global_path_odom is not None and len(self.global_path_odom) >= 2):
+                init_p_w = self.camera_to_robot_center(T)
+                # Find closest path point to robot, then anchor walk along path from there
+                path_xy = self.global_path_odom[:, :2]
+                d_to_path = np.linalg.norm(path_xy - init_p_w[:2], axis=1)
+                start_idx = int(np.argmin(d_to_path))
+
+                # Use cumulative arc length along the path as the axial coordinate
+                LAT_RANGE = 0.4
+                n_lat = 9
+                STEP = self.resolution  # 0.1m per centerline step
+                # Adaptive centerline length by the angle between robot heading and
+                # bearing-to-target: aligned -> long lookahead, turning -> short.
+                qx, qy, qz, qw = init_q
+                robot_yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy),
+                                             1.0 - 2.0 * (qy * qy + qz * qz)))
+                bearing = float(np.arctan2(self.target_pose[1] - init_p_w[1],
+                                           self.target_pose[0] - init_p_w[0]))
+                ang = abs(float(np.arctan2(np.sin(bearing - robot_yaw),
+                                           np.cos(bearing - robot_yaw))))
+                # 0 rad -> 3.0m, pi/2+ -> 1.0m, linear in between
+                MAX_DIST = float(np.clip(3.0 - 2.0 * (ang / (np.pi / 2.0)), 1.0, 3.0))
+                centerline_pt = init_p_w[:2].copy()
+                centerline_points = []
+                accumulated = 0.0
+                cur_idx = start_idx
+                while accumulated < MAX_DIST and cur_idx < len(path_xy) - 1:
+                    seg = path_xy[cur_idx + 1] - path_xy[cur_idx]
+                    seg_len = float(np.linalg.norm(seg))
+                    if seg_len < 1e-6:
+                        cur_idx += 1
+                        continue
+                    n_seg = max(1, int(seg_len / STEP))
+                    for s in range(1, n_seg + 1):
+                        t = s / n_seg
+                        anchor = path_xy[cur_idx] + seg * t
+                        tang = seg / seg_len
+                        perp_x_l, perp_y_l = -float(tang[1]), float(tang[0])
+                        best_sdf, best_xy = -1.0, (float(anchor[0]), float(anchor[1]))
+                        for lat in np.linspace(-LAT_RANGE, LAT_RANGE, n_lat):
+                            px = anchor[0] + perp_x_l * lat
+                            py = anchor[1] + perp_y_l * lat
+                            ex = int((px - self.origin[0]) / self.resolution)
+                            ey = int((py - self.origin[1]) / self.resolution)
+                            if 0 <= ex < ESDF_map.shape[0] and 0 <= ey < ESDF_map.shape[1]:
+                                v = float(ESDF_map[ex, ey])
+                                if v > best_sdf:
+                                    best_sdf = v
+                                    best_xy = (px, py)
+                        # If anchor itself is too close to wall, skip but keep walking
+                        # (don't fall back to target_pose which may be behind wall at corner).
+                        if best_sdf >= self.robot.safety_radius:
+                            centerline_pt = np.array(best_xy)
+                            centerline_points.append((float(best_xy[0]), float(best_xy[1]), float(self.target_pose[2])))
+                        accumulated += STEP
+                        if accumulated >= MAX_DIST:
+                            break
+                    cur_idx += 1
+                # Use last valid centerline point if we got any; only fall back to
+                # global target_pose when scan produced literally nothing.
+                if len(centerline_points) >= 1:
+                    local_target = np.array([centerline_pt[0], centerline_pt[1], self.target_pose[2]])
+
+                # Temporal low-pass on local_target to avoid jitter when ESDF decays during rotation.
+                # Reset if jump from last is huge (target_pose changed significantly).
+                if self._last_local_target is not None:
+                    jump = float(np.linalg.norm(local_target[:2] - self._last_local_target[:2]))
+                    if jump < 1.5:  # smooth small jumps, accept large ones (POI change/global path update)
+                        alpha = 0.3
+                        local_target = alpha * local_target + (1.0 - alpha) * self._last_local_target
+                self._last_local_target = local_target
+
+                cl_path = Path()
+                cl_path.header.stamp = depth_msg.header.stamp
+                cl_path.header.frame_id = "world"
+                for cx_p, cy_p, cz_p in centerline_points:
+                    ps = PoseStamped()
+                    ps.header = cl_path.header
+                    ps.pose.position.x = cx_p
+                    ps.pose.position.y = cy_p
+                    ps.pose.position.z = cz_p
+                    ps.pose.orientation.w = 1.0
+                    cl_path.poses.append(ps)
+                self.centerline_pub.publish(cl_path)
+
+                # Republish actual pursued target on /control/target_pose so backend/frontend
+                # show the local centerline target (not the raw global lookahead).
+                lt_msg = Odometry()
+                lt_msg.header.stamp = depth_msg.header.stamp
+                lt_msg.header.frame_id = "world"
+                lt_msg.pose.pose.position.x = float(local_target[0])
+                lt_msg.pose.pose.position.y = float(local_target[1])
+                lt_msg.pose.pose.position.z = float(local_target[2])
+                yaw_v = self.target_yaw if self.target_yaw is not None else 0.0
+                lt_msg.pose.pose.orientation.z = float(np.sin(yaw_v / 2.0))
+                lt_msg.pose.pose.orientation.w = float(np.cos(yaw_v / 2.0))
+                self.local_target_pub.publish(lt_msg)
+
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
@@ -631,7 +754,7 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], local_target) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path

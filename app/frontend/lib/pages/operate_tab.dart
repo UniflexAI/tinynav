@@ -557,6 +557,7 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                                     CustomPaint(
                                       painter: LocalPlanningPainter(
                                         trajectory: p.trajectory,
+                                        centerline: p.centerline,
                                         globalPath: p.globalPath,
                                         footprint: p.footprint,
                                         gridInfo: p.gridInfo,
