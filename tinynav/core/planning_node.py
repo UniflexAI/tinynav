@@ -644,6 +644,10 @@ class PlanningNode(Node):
                 path_xy = self.global_path_odom[:, :2]
                 d_to_path = np.linalg.norm(path_xy - init_p_w[:2], axis=1)
                 start_idx = int(np.argmin(d_to_path))
+                # Cap centerline at target_pose's projection on path so we never
+                # walk beyond the lookahead point map_node chose.
+                d_to_target = np.linalg.norm(path_xy - self.target_pose[:2], axis=1)
+                target_idx = int(np.argmin(d_to_target))
 
                 # Use cumulative arc length along the path as the axial coordinate
                 LAT_RANGE = 0.4
@@ -660,13 +664,15 @@ class PlanningNode(Node):
                                            self.target_pose[0] - init_p_w[0]))
                 ang = abs(float(np.arctan2(np.sin(bearing - robot_yaw),
                                            np.cos(bearing - robot_yaw))))
-                # 0 rad -> 2.5m, pi/2+ -> 1.0m, linear in between
-                MAX_DIST = float(np.clip(2.5 - 1.5 * (ang / (np.pi / 2.0)), 1.0, 2.5))
+                # Quadratic falloff: 0 rad -> 2.5m, pi/4 -> 1.0m, pi/2+ -> 0.5m.
+                # Squared term makes mid-angles brake harder than a linear map.
+                align = max(0.0, 1.0 - ang / (np.pi / 2.0))
+                MAX_DIST = float(np.clip(0.5 + 2.0 * align * align, 0.5, 2.5))
                 centerline_pt = init_p_w[:2].copy()
                 centerline_points = []
                 accumulated = 0.0
                 cur_idx = start_idx
-                while accumulated < MAX_DIST and cur_idx < len(path_xy) - 1:
+                while accumulated < MAX_DIST and cur_idx < len(path_xy) - 1 and cur_idx < target_idx:
                     seg = path_xy[cur_idx + 1] - path_xy[cur_idx]
                     seg_len = float(np.linalg.norm(seg))
                     if seg_len < 1e-6:
