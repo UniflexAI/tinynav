@@ -473,19 +473,24 @@ class PlanningNode(Node):
         ang = abs(np.arctan2(np.sin(bearing - robot_yaw), np.cos(bearing - robot_yaw)))
         # Exponential falloff between bounds. Shape (decay rate) stays fixed;
         # tune speed envelope by editing the two bounds only.
-        lookahead_max = 3.0
-        lookahead_min = 0.6
+        lookahead_max = 4.0
+        lookahead_min = 1.0
         max_dist = float(lookahead_min + (lookahead_max - lookahead_min) * np.exp(-4.0 * ang))
 
         step = self.resolution
         lat_range = 0.4
         n_lat = 9
         safety = self.robot.safety_radius
+        # Clearance brake: when the best-snapped point is closer than this to the
+        # nearest obstacle, append it then stop walking. Shortens centerline at
+        # the first bottleneck so DWA picks a slower trajectory.
+        clearance_brake = 0.4
         target_z = float(self.target_pose[2])
         rows, cols = ESDF_map.shape
 
         points = []
         accumulated = 0.0
+        braked = False
         for i in range(start_idx, min(target_idx, len(path_xy) - 1)):
             seg = path_xy[i + 1] - path_xy[i]
             seg_len = float(np.linalg.norm(seg))
@@ -508,10 +513,13 @@ class PlanningNode(Node):
                 # which may be behind a corner.
                 if best_sdf >= safety:
                     points.append((float(best_xy[0]), float(best_xy[1]), target_z))
+                    if best_sdf < clearance_brake:
+                        braked = True
+                        break
                 accumulated += step
                 if accumulated >= max_dist:
                     break
-            if accumulated >= max_dist:
+            if braked or accumulated >= max_dist:
                 break
 
         if not points:
