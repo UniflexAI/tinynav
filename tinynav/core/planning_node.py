@@ -651,9 +651,11 @@ class PlanningNode(Node):
                 STEP = self.resolution  # 0.1m per centerline step
                 # Adaptive centerline length by the angle between robot heading and
                 # bearing-to-target: aligned -> long lookahead, turning -> short.
-                qx, qy, qz, qw = init_q
-                robot_yaw = float(np.arctan2(2.0 * (qw * qz + qx * qy),
-                                             1.0 - 2.0 * (qy * qy + qz * qz)))
+                # Body frame here is +Z forward (see _front_obstacle_dist / footprint),
+                # so the standard atan2-of-quat yaw is wrong by ~90deg. Take forward
+                # from the rotation matrix directly.
+                fwd_w = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                robot_yaw = float(np.arctan2(fwd_w[1], fwd_w[0]))
                 bearing = float(np.arctan2(self.target_pose[1] - init_p_w[1],
                                            self.target_pose[0] - init_p_w[0]))
                 ang = abs(float(np.arctan2(np.sin(bearing - robot_yaw),
