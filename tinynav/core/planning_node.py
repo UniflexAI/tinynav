@@ -471,9 +471,9 @@ class PlanningNode(Node):
         bearing = np.arctan2(self.target_pose[1] - init_p_w[1],
                              self.target_pose[0] - init_p_w[0])
         ang = abs(np.arctan2(np.sin(bearing - robot_yaw), np.cos(bearing - robot_yaw)))
-        # Quadratic falloff: 0 rad -> 2.5m, pi/4 -> ~1.2m, pi/2+ -> 0.8m.
-        align = max(0.0, 1.0 - ang / (np.pi / 2.0))
-        max_dist = float(np.clip(0.8 + 1.7 * align * align, 0.8, 2.5))
+        # Exponential falloff: 0 rad -> 2.5m, 15deg -> 1.2m, 30deg -> 0.75m,
+        # 90deg -> ~0.5m. Aggressive in the first 30deg, then plateaus at floor.
+        max_dist = float(0.5 + 2.0 * np.exp(-4.0 * ang))
 
         step = self.resolution
         lat_range = 0.4
