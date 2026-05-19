@@ -20,6 +20,7 @@ from rclpy.node import Node
 import rclpy
 import os
 from math_utils import msg2np, matrix_to_quat
+from tool.video_db import VideoDB
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -138,6 +139,33 @@ def load_pointcloud_ply(ply_file_path: Path, center: bool = False) -> dict:
         "positions": positions,
         "colors": colors,
     }
+
+
+def _open_infra1_video_db(map_dir: Path) -> VideoDB | None:
+    db_dir = map_dir / "infra1_images_db"
+    if not db_dir.exists():
+        return None
+    try:
+        return VideoDB(dir_path=str(db_dir), mode="read")
+    except Exception as e:
+        print(f"Warning: failed to open infra1 VideoDB at {db_dir}: {e}")
+        return None
+
+
+def _load_infra1_camera_image(infra1_db: VideoDB | None, timestamp: str) -> np.ndarray | None:
+    if infra1_db is None:
+        return None
+    try:
+        # Keep exact-key lookup, but tolerate float-string formatting like "1756222679.0".
+        ts_key = int(float(timestamp))
+    except (TypeError, ValueError):
+        return None
+    img = infra1_db.read(ts_key)
+    if img is None:
+        return None
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     
 def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphere_handle:viser.SceneHandle):
@@ -539,11 +567,13 @@ def main(
         raise FileNotFoundError("Neither intrinsics.npy nor rgb_camera_intrinsics.npy exists.")
 
     fx, _, cx, cy = camera_K[0, 0], camera_K[1, 1], camera_K[0, 2], camera_K[1, 2]
+    infra1_db = _open_infra1_video_db(tinynav_map_path)
     with server.gui.add_folder("cameras") as _:
         for timestamp, camera_pose in poses.items():
             R = vtf.SO3.from_matrix(camera_pose[:3, :3])
             t = camera_pose[:3, 3]
-            _ = server.scene.add_camera_frustum(
+            timestamp_str = str(timestamp)
+            frustum = server.scene.add_camera_frustum(
                 name=f"/cameras/camera_{timestamp}",
                 fov=float(2 * np.arctan((cx / fx))),
                 scale=0.01,
@@ -554,6 +584,25 @@ def main(
                 format="jpeg",
                 jpeg_quality=50
             )
+
+            @frustum.on_click
+            def _(event, cam_pose=camera_pose, ts=timestamp_str, fr=frustum):
+                q = matrix_to_quat(cam_pose[:3, :3])  # xyzw
+                target_position = tuple(cam_pose[:3, 3].tolist())
+                target_wxyz = (q[3], q[0], q[1], q[2])
+                img = _load_infra1_camera_image(infra1_db, ts)
+                if img is not None:
+                    fr.image = img
+                else:
+                    print(f"timestamp {ts} don't found image")
+                client = getattr(event, "client", None)
+                if client is not None:
+                    client.camera.position = target_position
+                    client.camera.wxyz = target_wxyz
+                    return
+                for c in server.get_clients().values():
+                    c.camera.position = target_position
+                    c.camera.wxyz = target_wxyz
 
     # Load splat or point cloud files
     splat_path = Path(f"{tinynav_map_path}/splat.ply")
@@ -621,6 +670,9 @@ def main(
         rclpy.shutdown()
     except KeyboardInterrupt:
         pass
+    finally:
+        if infra1_db is not None:
+            infra1_db.close()
 
 
 if __name__ == "__main__":
