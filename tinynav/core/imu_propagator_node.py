@@ -70,9 +70,9 @@ class ImuPropagatorNode(Node):
             Imu, "/camera/camera/imu", self.imu_callback, qos_profile
         )
         self.odom_sub = self.create_subscription(
-            Odometry, "/slam/odometry", self.odom_callback, qos_profile
+            Odometry, "/slam/odometry_visual", self.odom_callback, qos_profile
         )
-        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry_100hz", 50)
+        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 50)
 
         self.imu_buffer = []
         self.odom_10hz_buffer = []
