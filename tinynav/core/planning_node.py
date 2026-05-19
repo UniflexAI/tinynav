@@ -660,8 +660,8 @@ class PlanningNode(Node):
                                            self.target_pose[0] - init_p_w[0]))
                 ang = abs(float(np.arctan2(np.sin(bearing - robot_yaw),
                                            np.cos(bearing - robot_yaw))))
-                # 0 rad -> 3.0m, pi/2+ -> 1.0m, linear in between
-                MAX_DIST = float(np.clip(3.0 - 2.0 * (ang / (np.pi / 2.0)), 1.0, 3.0))
+                # 0 rad -> 2.5m, pi/2+ -> 1.0m, linear in between
+                MAX_DIST = float(np.clip(2.5 - 1.5 * (ang / (np.pi / 2.0)), 1.0, 2.5))
                 centerline_pt = init_p_w[:2].copy()
                 centerline_points = []
                 accumulated = 0.0
