@@ -19,10 +19,11 @@ class CmdVelControlNode(Node):
 
         self._odom_stamp_sec = None
 
-        # columns: x, y, yaw, v_ref, w_ref
+        # columns: x, y, yaw, v_ref, w_ref, t_abs
         self._path_ref = None
         self._track_idx = 0
         self._last_traj_update_sec = None
+        self._time_lookahead_s = 0.1
 
         self.create_subscription(Odometry, "/slam/odometry_100hz", self._odom_cb, 10)
         self.create_subscription(Path, "/planning/trajectory_path", self._traj_cb, 10)
@@ -53,15 +54,30 @@ class CmdVelControlNode(Node):
         ):
             return
 
-        self._rebuild_path(msg)
+        new_ref = self._rebuild_path(msg)
+        if new_ref is None:
+            self._path_ref = None
+            self._track_idx = 0
+        elif self._path_ref is None or len(self._path_ref) == 0:
+            self._path_ref = new_ref
+            self._track_idx = 0
+        else:
+            # Concatenate by timestamp: keep old segment strictly before new start,
+            # then append the new trajectory (replaces overlapping future tail).
+            new_start_t = float(new_ref[0, 5])
+            keep_mask = self._path_ref[:, 5] < new_start_t
+            kept = self._path_ref[keep_mask]
+            if len(kept) == 0:
+                self._path_ref = new_ref
+            else:
+                self._path_ref = np.vstack((kept, new_ref))
+            self._track_idx = int(np.clip(np.searchsorted(self._path_ref[:, 5], now, side='left'), 0, len(self._path_ref) - 1))
         self._last_traj_update_sec = now
 
     def _rebuild_path(self, path_msg: Path):
         n = len(path_msg.poses)
         if n == 0:
-            self._path_ref = None
-            self._track_idx = 0
-            return
+            return None
 
         xy_yaw = np.zeros((n, 3), dtype=np.float64)
         t = np.zeros(n, dtype=np.float64)
@@ -76,13 +92,14 @@ class CmdVelControlNode(Node):
                 last_yaw = math.atan2(float(forward[1]), float(forward[0]))
             xy_yaw[i, 2] = last_yaw
 
-        path_ref = np.zeros((n, 5), dtype=np.float64)
+        path_ref = np.zeros((n, 6), dtype=np.float64)
         path_ref[:, :3] = xy_yaw
+        path_ref[:, 5] = t
         if n > 1:
-            t = t - t[0]
-            if np.min(np.diff(t)) <= 0.0:
+            dt_arr = np.diff(t)
+            if np.min(dt_arr) <= 0.0:
                 # Planner publishes every other 0.1s trajectory sample.
-                t = np.arange(n, dtype=np.float64) * 0.2
+                t = t[0] + np.arange(n, dtype=np.float64) * 0.2
 
             yaw_u = np.unwrap(xy_yaw[:, 2])
             for i in range(n - 1):
@@ -93,8 +110,7 @@ class CmdVelControlNode(Node):
             path_ref[-1, 3] = path_ref[-2, 3]
             path_ref[-1, 4] = path_ref[-2, 4]
 
-        self._path_ref = path_ref
-        self._track_idx = 0
+        return path_ref
 
     def _control_loop(self):
         if self._path_ref is None:
@@ -107,7 +123,7 @@ class CmdVelControlNode(Node):
         forward = self.rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
         robot_yaw = math.atan2(forward[1], forward[0])
 
-        target = self._find_tracking_target(robot_pos, robot_yaw)
+        target = self._find_tracking_target(robot_pos, robot_yaw, self._now_sec())
         if target is None:
             self._publish_zero()
             return
@@ -139,21 +155,27 @@ class CmdVelControlNode(Node):
 
         self.logger.info("cmd v=%.3f wz=%.3f", v, wz)
 
-    def _find_tracking_target(self, robot_pos, robot_yaw):
+    def _find_tracking_target(self, robot_pos, robot_yaw, now_sec):
         if self._path_ref is None or len(self._path_ref) == 0:
             return None
 
         start_idx = int(np.clip(self._track_idx, 0, len(self._path_ref) - 1))
+        t_vec = self._path_ref[start_idx:, 5]
+        if len(t_vec) > 1 and np.min(np.diff(t_vec)) > 0.0:
+            query_t = now_sec + self._time_lookahead_s
+            rel_idx = int(np.searchsorted(t_vec, query_t, side='left'))
+            target_idx = min(start_idx + rel_idx, len(self._path_ref) - 1)
+            self._track_idx = target_idx
+            return self._path_ref[target_idx]
+
         delta = self._path_ref[start_idx:, :2] - robot_pos[:2]
         dist = np.linalg.norm(delta, axis=1)
-
         if float(np.max(dist)) < 0.05:
             yaw_err = np.abs([self._wrap_angle(float(yaw) - robot_yaw) for yaw in self._path_ref[start_idx:, 2]])
             nearest_idx = start_idx + int(np.argmin(yaw_err))
         else:
             nearest_idx = start_idx + int(np.argmin(dist))
-
-        target_idx = min(nearest_idx + 1, len(self._path_ref) - 1)  # Track one point ahead for stability.
+        target_idx = min(nearest_idx + 1, len(self._path_ref) - 1)
         self._track_idx = nearest_idx
         return self._path_ref[target_idx]
 

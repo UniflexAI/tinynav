@@ -526,6 +526,7 @@ class PlanningNode(Node):
             return None
         idx = int(round(rel_t / self.dt))
         idx = max(0, min(idx, len(traj) - 1))
+        seed_stamp = self.last_planned_traj_base_stamp + float(idx) * self.dt
         p = traj[idx, :3].copy()
         q = traj[idx, 3:].copy()
         if len(traj) == 1:
@@ -535,7 +536,7 @@ class PlanningNode(Node):
         else:
             v = (traj[idx, :3] - traj[idx - 1, :3]) / self.dt
         v = np.asarray(v, dtype=np.float64)
-        return p, v, q
+        return p, v, q, seed_stamp
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -587,11 +588,13 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             query_stamp = stamp + self.planning_latency_s
             seed = self._seed_from_last_trajectory(query_stamp)
+            planning_base_stamp = stamp
             if seed is not None:
-                init_p_seed, init_v_seed, init_q_seed = seed
+                init_p_seed, init_v_seed, init_q_seed, seed_stamp = seed
                 current_center = self.camera_to_robot_center(T)
                 if np.linalg.norm(init_p_seed - current_center) <= self.seed_fallback_distance_m:
                     init_p, init_v, init_q = init_p_seed, init_v_seed, init_q_seed
+                    planning_base_stamp = seed_stamp
                 else:
                     seed = None
             if seed is None:
@@ -632,13 +635,13 @@ class PlanningNode(Node):
             self.last_param = params[top_indices[0]]
             best_idx = int(top_indices[0])
             self.last_planned_traj = trajectories[best_idx].copy()
-            self.last_planned_traj_base_stamp = stamp
+            self.last_planned_traj_base_stamp = planning_base_stamp
 
             # path
             path = Path()
             path.header = depth_msg.header
             path.header.frame_id = "world"
-            base_time = Time.from_msg(depth_msg.header.stamp)
+            base_time = Time(seconds=planning_base_stamp)
 
             if self.target_pose is None:
                 return
