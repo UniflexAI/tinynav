@@ -166,24 +166,31 @@ def shortcut_prune_path(
     resolution: float,
     max_segment_m: float = 1.0,
     max_skip_nodes: int = 30,
+    max_prune_nodes: int = 100,
 ) -> list:
-    """Greedily remove small zig-zags from a voxel path using local line-of-sight.
+    """Greedily remove small zig-zags near the robot using local line-of-sight.
 
-    This is intentionally low-cost and local: from each kept point, look ahead at
-    most max_skip_nodes / max_segment_m and keep the farthest safe shortcut.
+    The global path can be very long, so keep the shortcut work bounded: prune
+    only the first max_prune_nodes points and append the untouched tail. From
+    each kept point, look ahead at most max_skip_nodes / max_segment_m and keep
+    the farthest safe shortcut.
     """
     if len(path) <= 2:
         return path
 
-    pruned = [path[0]]
+    prune_end = min(len(path), max_prune_nodes)
+    prune_path = path[:prune_end]
+    tail = path[prune_end:]
+
+    pruned = [prune_path[0]]
     i = 0
-    while i < len(path) - 1:
+    while i < len(prune_path) - 1:
         farthest = i + 1
-        upper = min(len(path) - 1, i + max_skip_nodes)
+        upper = min(len(prune_path) - 1, i + max_skip_nodes)
         for j in range(upper, i, -1):
             if _segment_is_shortcut_safe(
-                path[i],
-                path[j],
+                prune_path[i],
+                prune_path[j],
                 sdf_map,
                 occupancy_map,
                 resolution,
@@ -191,9 +198,10 @@ def shortcut_prune_path(
             ):
                 farthest = j
                 break
-        pruned.append(path[farthest])
+        pruned.append(prune_path[farthest])
         i = farthest
-    return pruned
+
+    return pruned + tail
 
 
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
