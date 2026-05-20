@@ -51,10 +51,10 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.4, width=0.3,
+    length=0.7, width=0.3,
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
+    safety_radius=0.1,
 )
 
 B2_CONFIG = RobotConfig(
@@ -155,7 +155,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    dilation_cells: int = 1
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -389,11 +389,21 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
+        self._last_local_target = None
+        self.global_path_odom = None  # path in odom frame for centerline anchor
+        self.centerline_pub = self.create_publisher(Path, '/planning/centerline', 10)
+        self.create_subscription(Path, '/mapping/global_plan_odom', self._on_global_path_odom, 10)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self._last_local_target = None
+        self.global_path_odom = None
+
+    def _on_global_path_odom(self, msg):
+        pts = np.array([[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses])
+        self.global_path_odom = pts if len(pts) > 0 else None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -437,6 +447,84 @@ class PlanningNode(Node):
         msg.header.frame_id = "world"
         msg.points = points
         self.footprint_pub.publish(msg)
+
+    def _compute_centerline(self, T, ESDF_map):
+        """Walk ESDF-snapped lookahead along the global path.
+
+        Returns (points, local_target). points is a list of (x,y,z) tuples for
+        visualization; local_target is the last point as np.ndarray, or None
+        when inputs are missing or no point cleared the safety radius.
+        """
+        if (self.target_pose is None or self.global_path_odom is None
+                or len(self.global_path_odom) < 2):
+            return [], None
+
+        init_p_w = self.camera_to_robot_center(T)
+        path_xy = self.global_path_odom[:, :2]
+        start_idx = int(np.argmin(np.linalg.norm(path_xy - init_p_w[:2], axis=1)))
+        target_idx = int(np.argmin(np.linalg.norm(path_xy - self.target_pose[:2], axis=1)))
+
+        # Adaptive lookahead by robot-heading vs bearing-to-target.
+        # Body frame is +Z forward (see _front_obstacle_dist / footprint).
+        fwd_w = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        robot_yaw = np.arctan2(fwd_w[1], fwd_w[0])
+        bearing = np.arctan2(self.target_pose[1] - init_p_w[1],
+                             self.target_pose[0] - init_p_w[0])
+        ang = abs(np.arctan2(np.sin(bearing - robot_yaw), np.cos(bearing - robot_yaw)))
+        # Exponential falloff between bounds. Shape (decay rate) stays fixed;
+        # tune speed envelope by editing the two bounds only.
+        lookahead_max = 4.0
+        lookahead_min = 1.0
+        max_dist = float(lookahead_min + (lookahead_max - lookahead_min) * np.exp(-4.0 * ang))
+
+        step = self.resolution
+        lat_range = 0.4
+        n_lat = 9
+        safety = self.robot.safety_radius
+        # Clearance brake: when the best-snapped point is closer than this to the
+        # nearest obstacle, append it then stop walking. Shortens centerline at
+        # the first bottleneck so DWA picks a slower trajectory.
+        clearance_brake = 0.4
+        target_z = float(self.target_pose[2])
+        rows, cols = ESDF_map.shape
+
+        points = []
+        accumulated = 0.0
+        braked = False
+        for i in range(start_idx, min(target_idx, len(path_xy) - 1)):
+            seg = path_xy[i + 1] - path_xy[i]
+            seg_len = float(np.linalg.norm(seg))
+            if seg_len < 1e-6:
+                continue
+            perp = np.array([-seg[1] / seg_len, seg[0] / seg_len])
+            n_seg = max(1, int(seg_len / step))
+            for s in range(1, n_seg + 1):
+                anchor = path_xy[i] + seg * (s / n_seg)
+                best_sdf, best_xy = -1.0, anchor
+                for lat in np.linspace(-lat_range, lat_range, n_lat):
+                    p = anchor + perp * lat
+                    ex = int((p[0] - self.origin[0]) / self.resolution)
+                    ey = int((p[1] - self.origin[1]) / self.resolution)
+                    if 0 <= ex < rows and 0 <= ey < cols:
+                        v = float(ESDF_map[ex, ey])
+                        if v > best_sdf:
+                            best_sdf, best_xy = v, p
+                # Skip anchors too close to walls; don't fall back to target_pose
+                # which may be behind a corner.
+                if best_sdf >= safety:
+                    points.append((float(best_xy[0]), float(best_xy[1]), target_z))
+                    if best_sdf < clearance_brake:
+                        braked = True
+                        break
+                accumulated += step
+                if accumulated >= max_dist:
+                    break
+            if braked or accumulated >= max_dist:
+                break
+
+        if not points:
+            return [], None
+        return points, np.array(points[-1])
 
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
@@ -613,6 +701,37 @@ class PlanningNode(Node):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
 
+            # Local centerline: ESDF-snapped lookahead along global path. Decouples
+            # lateral position from global localization error and shortens on turns.
+            centerline_points, ct_target = self._compute_centerline(T, ESDF_map)
+            local_target = ct_target if ct_target is not None else self.target_pose
+
+            # Temporal low-pass on local_target. Only active while we have a valid
+            # global path — matches the prior behavior of resetting smoothing state
+            # whenever the centerline pipeline isn't running.
+            if (self.target_pose is not None and self.global_path_odom is not None
+                    and len(self.global_path_odom) >= 2):
+                if self._last_local_target is not None:
+                    jump = float(np.linalg.norm(local_target[:2] - self._last_local_target[:2]))
+                    if jump < 1.5:
+                        local_target = 0.3 * local_target + 0.7 * self._last_local_target
+                self._last_local_target = local_target
+
+            if (self.target_pose is not None and self.global_path_odom is not None
+                    and len(self.global_path_odom) >= 2):
+                cl_path = Path()
+                cl_path.header.stamp = depth_msg.header.stamp
+                cl_path.header.frame_id = "world"
+                for x, y, z in centerline_points:
+                    ps = PoseStamped()
+                    ps.header = cl_path.header
+                    ps.pose.position.x = x
+                    ps.pose.position.y = y
+                    ps.pose.position.z = z
+                    ps.pose.orientation.w = 1.0
+                    cl_path.poses.append(ps)
+                self.centerline_pub.publish(cl_path)
+
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
@@ -631,7 +750,7 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], local_target) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path

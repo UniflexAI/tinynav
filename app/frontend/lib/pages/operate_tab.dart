@@ -572,6 +572,7 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                                           CustomPaint(
                                             painter: LocalPlanningPainter(
                                               trajectory: p.trajectory,
+                                              centerline: p.centerline,
                                               globalPath: p.globalPath,
                                               footprint: p.footprint,
                                               gridInfo: p.gridInfo,
@@ -636,6 +637,12 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                                             Colors.white.withOpacity(0.04),
                                             Colors.transparent,
                                             Colors.black.withOpacity(0.08),
+                                          ],
+                                          stops: const [0.0, 0.35, 1.0],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
                                           ],
                                           stops: const [0.0, 0.35, 1.0],
                                         ),

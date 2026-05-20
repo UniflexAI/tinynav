@@ -105,6 +105,7 @@ class BackendNode(Ros2NodeManager):
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
+        self._centerline: list = []
         self._global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
         self._voxel_points: list = []
@@ -126,6 +127,7 @@ class BackendNode(Ros2NodeManager):
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
         )
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
+        self.create_subscription(Path, '/planning/centerline', self._on_centerline, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
         self.create_subscription(
             Odometry, '/control/target_pose', self._on_nav_target_pose, 1
@@ -307,6 +309,14 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._trajectory = pts
+
+    def _on_centerline(self, msg: Path):
+        pts = [
+            {'x': p.pose.position.x, 'y': p.pose.position.y}
+            for p in msg.poses
+        ]
+        with self._lock:
+            self._centerline = pts
 
     def _on_global_plan(self, msg: Path):
         pts = [
@@ -549,6 +559,7 @@ class BackendNode(Ros2NodeManager):
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
+                'centerline': list(self._centerline),
                 'global_path': None,  # filled after TF transform (odom frame)
                 'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,
