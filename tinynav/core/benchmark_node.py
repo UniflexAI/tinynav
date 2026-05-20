@@ -30,6 +30,7 @@ class BenchmarkConfig:
     height_m: float = 0.0
     lookahead_m: float = 1.5
     finish_radius_m: float = 0.35
+    score_sigma_m: float = 0.5
     auto_start: bool = True
 
 
@@ -76,6 +77,58 @@ def _path_distances(path: np.ndarray) -> np.ndarray:
     return np.concatenate([[0.0], np.cumsum(seg)])
 
 
+def _nearest_path_distances(points: np.ndarray, path: np.ndarray) -> np.ndarray:
+    """Return each point's nearest 2D distance to a polyline point set."""
+    if len(points) == 0 or len(path) == 0:
+        return np.zeros((0,), dtype=np.float64)
+    # Benchmark paths are intentionally small (default 500 points), so the dense
+    # point-to-path distance matrix is simple and stable here.
+    delta = points[:, None, :2] - path[None, :, :2]
+    return np.min(np.linalg.norm(delta, axis=2), axis=1)
+
+
+def _score_tracking(trajectory: np.ndarray, path: np.ndarray, path_s: np.ndarray, sigma_m: float) -> dict:
+    """Compare executed odom trajectory against the reference path.
+
+    Score is 0-100. It combines tracking error and completion progress:
+      - error_score uses exp(-RMSE / sigma), so smaller path deviation is better;
+      - completion_score is the fraction of reference arclength reached.
+    """
+    if len(trajectory) == 0 or len(path) == 0 or len(path_s) == 0:
+        return {
+            "score": 0.0,
+            "rmse_m": None,
+            "mean_error_m": None,
+            "max_error_m": None,
+            "completion_percent": 0.0,
+            "samples": int(len(trajectory)),
+        }
+
+    dists = _nearest_path_distances(trajectory, path)
+    rmse = float(np.sqrt(np.mean(np.square(dists))))
+    mean = float(np.mean(dists))
+    max_err = float(np.max(dists))
+
+    final_pos = trajectory[-1]
+    final_idx = int(np.argmin(np.linalg.norm(path[:, :2] - final_pos[:2], axis=1)))
+    total = float(path_s[-1]) if len(path_s) else 0.0
+    completion = float(path_s[final_idx] / total) if total > 1e-6 else 0.0
+    completion = max(0.0, min(1.0, completion))
+
+    sigma = max(1e-3, float(sigma_m))
+    error_score = math.exp(-rmse / sigma)
+    score = 100.0 * (0.75 * error_score + 0.25 * completion)
+
+    return {
+        "score": round(score, 1),
+        "rmse_m": round(rmse, 3),
+        "mean_error_m": round(mean, 3),
+        "max_error_m": round(max_err, 3),
+        "completion_percent": round(completion * 100.0, 1),
+        "samples": int(len(trajectory)),
+    }
+
+
 class BenchmarkNode(Node):
     """Publishes a synthetic figure-eight global path and rolling local target.
 
@@ -98,6 +151,7 @@ class BenchmarkNode(Node):
         self.global_plan_pub = self.create_publisher(Path, "/mapping/global_plan", 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         self.status_pub = self.create_publisher(String, "/benchmark/status", 10)
+        self.result_pub = self.create_publisher(String, "/benchmark/result", 10)
 
         period = 1.0 / max(1e-3, float(config.publish_rate_hz))
         self.timer = self.create_timer(period, self._timer_callback)
@@ -109,6 +163,8 @@ class BenchmarkNode(Node):
         self.started = False
         self.completed = False
         self.started_at: float | None = None
+        self.trajectory: list[list[float]] = []
+        self.result: dict | None = None
 
         self.get_logger().info(
             f"benchmark_node ready: odom_topic={config.odom_topic} "
@@ -128,12 +184,17 @@ class BenchmarkNode(Node):
             self.started = False
             self.completed = False
             self.started_at = None
+            self.trajectory = []
+            self.result = None
             if self.latest_odom is not None:
                 self._start_from_odom(self.latest_odom)
         elif action in {"stop", "cancel"}:
-            self.started = False
-            self.completed = True
-            self._publish_status("stopped")
+            if self.started and not self.completed:
+                self._finish("stopped")
+            else:
+                self.started = False
+                self.completed = True
+                self._publish_status("stopped")
         else:
             self.get_logger().warning("Unknown benchmark action: %s", action)
 
@@ -141,11 +202,19 @@ class BenchmarkNode(Node):
         self.latest_odom = msg
         if self.config.auto_start and not self.started and not self.completed:
             self._start_from_odom(msg)
+        if self.started and not self.completed:
+            self._record_odom(msg)
 
     def _reset_path(self):
         self.path_world = None
         self.path_s = None
         self.progress_idx = 0
+        self.trajectory = []
+        self.result = None
+
+    def _record_odom(self, odom: Odometry):
+        p = odom.pose.pose.position
+        self.trajectory.append([float(p.x), float(p.y), float(p.z)])
 
     def _start_from_odom(self, odom: Odometry):
         p = odom.pose.pose.position
@@ -164,6 +233,9 @@ class BenchmarkNode(Node):
         self.started = True
         self.completed = False
         self.started_at = time.time()
+        self.trajectory = []
+        self.result = None
+        self._record_odom(odom)
         self.get_logger().info("Started figure-eight benchmark with %d path points", len(self.path_world))
         self._publish_status("running")
 
@@ -200,9 +272,28 @@ class BenchmarkNode(Node):
         is_near_end = self.progress_idx >= len(self.path_world) - 3
         end_dist = float(np.linalg.norm(self.path_world[-1, :2] - pos[:2]))
         if is_near_end and end_dist <= self.config.finish_radius_m:
-            self.completed = True
-            self._publish_status("completed")
+            self._finish("completed")
             self.get_logger().info("Figure-eight benchmark completed")
+
+    def _finish(self, state: str):
+        if self.completed and self.result is not None:
+            return
+        self.completed = True
+        self.started = False
+        if self.path_world is None or self.path_s is None:
+            self.result = None
+        else:
+            trajectory = np.asarray(self.trajectory, dtype=np.float64)
+            self.result = _score_tracking(
+                trajectory,
+                self.path_world,
+                self.path_s,
+                self.config.score_sigma_m,
+            )
+            if self.started_at is not None:
+                self.result["duration_s"] = round(time.time() - self.started_at, 2)
+        self._publish_status(state)
+        self._publish_result(state)
 
     def _target_index(self) -> int:
         assert self.path_s is not None
@@ -242,10 +333,24 @@ class BenchmarkNode(Node):
             "percent": round((progress / total * 100.0) if total > 0 else 0.0, 1),
             "progress_idx": self.progress_idx,
             "path_points": int(len(self.path_world)) if self.path_world is not None else 0,
+            "trajectory_samples": len(self.trajectory),
         }
+        if self.result is not None:
+            payload["result"] = self.result
         msg = String()
         msg.data = json.dumps(payload)
         self.status_pub.publish(msg)
+
+    def _publish_result(self, state: str):
+        if self.result is None:
+            return
+        payload = {
+            "state": state,
+            **self.result,
+        }
+        msg = String()
+        msg.data = json.dumps(payload)
+        self.result_pub.publish(msg)
 
 
 def main(args=None):
@@ -261,6 +366,7 @@ def main(args=None):
     parser.add_argument("--height_m", type=float, default=BenchmarkConfig.height_m)
     parser.add_argument("--lookahead_m", type=float, default=BenchmarkConfig.lookahead_m)
     parser.add_argument("--finish_radius_m", type=float, default=BenchmarkConfig.finish_radius_m)
+    parser.add_argument("--score_sigma_m", type=float, default=BenchmarkConfig.score_sigma_m)
     parser.add_argument("--auto_start", action="store_true", default=BenchmarkConfig.auto_start)
     parser.add_argument("--no_auto_start", dest="auto_start", action="store_false")
     parsed_args, _ = parser.parse_known_args(sys.argv[1:])
