@@ -643,12 +643,6 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                                       ),
                                     ),
                                   ),
-                                          ],
-                                          stops: const [0.0, 0.35, 1.0],
-                                        ),
-                                      ),
-                                    ),
-                                  ),
                                 ],
                               ),
                             );
