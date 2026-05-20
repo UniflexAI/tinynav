@@ -54,6 +54,19 @@ final navProgressStreamProvider = StreamProvider<NavProgress>((ref) {
   );
 });
 
+/// Streams BenchmarkStatus from WS /ws/benchmark.
+final benchmarkStreamProvider = StreamProvider<BenchmarkStatus>((ref) {
+  final ip = ref.watch(deviceIpProvider);
+  if (ip == null) return const Stream.empty();
+
+  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/benchmark'));
+  ref.onDispose(() => channel.sink.close());
+
+  return channel.stream.map(
+    (data) => BenchmarkStatus.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+  );
+});
+
 /// Streams robot Pose from WS /ws/pose (pushed on every odometry message).
 final poseStreamProvider = StreamProvider<Pose>((ref) {
   final ip = ref.watch(deviceIpProvider);

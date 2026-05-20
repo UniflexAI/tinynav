@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/providers.dart';
+import 'benchmark_tab.dart';
 import 'device_tab.dart';
 import 'map_tab.dart';
 import 'operate_tab.dart';
@@ -68,6 +69,16 @@ class HomePage extends ConsumerWidget {
                     badge: status?.rawState == 'navigation' ? 'Navigating' : null,
                     badgeColor: const Color(0xFF45C95A),
                     onTap: () => _push(context, 'Operate', const OperateTab()),
+                  ),
+                  const SizedBox(height: 12),
+                  _MenuCard(
+                    icon: Icons.analytics_outlined,
+                    iconColor: const Color(0xFF7B61FF),
+                    title: 'Benchmark',
+                    subtitle: 'Figure-eight PNC tracking score',
+                    badge: status?.rawState == 'benchmark' ? 'Running' : null,
+                    badgeColor: const Color(0xFF7B61FF),
+                    onTap: () => _push(context, 'Benchmark', const BenchmarkTab()),
                   ),
                   const SizedBox(height: 24),
                   if (status != null) _QuickStatusCard(status: status),

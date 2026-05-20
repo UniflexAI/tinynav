@@ -25,6 +25,71 @@ class NavProgress {
       );
 }
 
+class BenchmarkStatus {
+  final String state;
+  final bool running;
+  final double progressM;
+  final double totalM;
+  final double percent;
+  final int trajectorySamples;
+  final BenchmarkResult? result;
+
+  const BenchmarkStatus({
+    required this.state,
+    required this.running,
+    required this.progressM,
+    required this.totalM,
+    required this.percent,
+    required this.trajectorySamples,
+    this.result,
+  });
+
+  factory BenchmarkStatus.fromJson(Map<String, dynamic> json) => BenchmarkStatus(
+        state: json['state'] as String? ?? 'idle',
+        running: json['running'] as bool? ?? (json['state'] == 'running'),
+        progressM: (json['progress_m'] as num?)?.toDouble() ?? 0.0,
+        totalM: (json['total_m'] as num?)?.toDouble() ?? 0.0,
+        percent: (json['percent'] as num?)?.toDouble() ?? 0.0,
+        trajectorySamples: (json['trajectory_samples'] as num?)?.toInt() ?? 0,
+        result: json['result'] is Map<String, dynamic>
+            ? BenchmarkResult.fromJson(json['result'] as Map<String, dynamic>)
+            : null,
+      );
+}
+
+class BenchmarkResult {
+  final String state;
+  final double score;
+  final double? rmseM;
+  final double? meanErrorM;
+  final double? maxErrorM;
+  final double completionPercent;
+  final int samples;
+  final double? durationS;
+
+  const BenchmarkResult({
+    required this.state,
+    required this.score,
+    this.rmseM,
+    this.meanErrorM,
+    this.maxErrorM,
+    required this.completionPercent,
+    required this.samples,
+    this.durationS,
+  });
+
+  factory BenchmarkResult.fromJson(Map<String, dynamic> json) => BenchmarkResult(
+        state: json['state'] as String? ?? 'completed',
+        score: (json['score'] as num?)?.toDouble() ?? 0.0,
+        rmseM: (json['rmse_m'] as num?)?.toDouble(),
+        meanErrorM: (json['mean_error_m'] as num?)?.toDouble(),
+        maxErrorM: (json['max_error_m'] as num?)?.toDouble(),
+        completionPercent: (json['completion_percent'] as num?)?.toDouble() ?? 0.0,
+        samples: (json['samples'] as num?)?.toInt() ?? 0,
+        durationS: (json['duration_s'] as num?)?.toDouble(),
+      );
+}
+
 class DeviceStatus {
   final bool online;
   final double? battery;

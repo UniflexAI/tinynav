@@ -118,6 +118,39 @@ async def ws_nav_progress(ws: WebSocket):
 
 
 # --------------------------------------------------------------------------- #
+# /ws/benchmark  — pushed on every /benchmark/status or result message       #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/benchmark')
+async def ws_benchmark(ws: WebSocket):
+    await ws.accept()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=10)
+    loop = asyncio.get_event_loop()
+
+    def _on_benchmark(data: dict):
+        loop.call_soon_threadsafe(lambda: _safe_put(queue, data))
+
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+
+    node.benchmark_callbacks.append(_on_benchmark)
+    try:
+        await ws.send_text(json.dumps(node.get_benchmark_status()))
+        while True:
+            data = await queue.get()
+            await ws.send_text(json.dumps(data))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            node.benchmark_callbacks.remove(_on_benchmark)
+        except ValueError:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # /ws/map-update  — polls for occupancy_grid.npy mtime changes               #
 # --------------------------------------------------------------------------- #
 

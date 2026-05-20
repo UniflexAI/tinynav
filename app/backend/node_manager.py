@@ -144,6 +144,7 @@ class BackendNode(Ros2NodeManager):
         self._perception_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
         self._unitree_proc: subprocess.Popen | None = None
+        self._benchmark_proc: subprocess.Popen | None = None
 
         # Battery level from /battery topic (published by unitree_control)
         self._battery: float | None = None
@@ -158,10 +159,16 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
+        self._benchmark_status: dict | None = None
+        self._benchmark_result: dict | None = None
+        self.benchmark_callbacks: list = []
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
+        self.create_subscription(String, '/benchmark/status', self._on_benchmark_status, 10)
+        self.create_subscription(String, '/benchmark/result', self._on_benchmark_result, 10)
+        self._benchmark_cmd_pub = self.create_publisher(String, '/benchmark/cmd', 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -185,6 +192,27 @@ class BackendNode(Ros2NodeManager):
                 self._nav_progress = data
             for cb in self.nav_progress_callbacks:
                 cb(data)
+        except json.JSONDecodeError:
+            pass
+
+    def _on_benchmark_status(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            with self._lock:
+                self._benchmark_status = data
+            for cb in self.benchmark_callbacks:
+                cb(data)
+        except json.JSONDecodeError:
+            pass
+
+    def _on_benchmark_result(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            with self._lock:
+                self._benchmark_result = data
+                self._benchmark_status = {**(self._benchmark_status or {}), 'result': data}
+            for cb in self.benchmark_callbacks:
+                cb({'state': data.get('state', 'completed'), 'result': data})
         except json.JSONDecodeError:
             pass
 
@@ -581,6 +609,17 @@ class BackendNode(Ros2NodeManager):
             'navPaused': nav_paused,
         }
 
+    def get_benchmark_status(self) -> dict:
+        with self._lock:
+            running = self._benchmark_proc is not None and self._benchmark_proc.poll() is None
+            status = dict(self._benchmark_status or {'state': 'idle'})
+            result = self._benchmark_result
+        status.setdefault('state', 'running' if running else 'idle')
+        status['running'] = running
+        if result is not None:
+            status['result'] = result
+        return status
+
     @staticmethod
     def _derive_map_status(raw: str, pct: float, files_exist: bool) -> str:
         if raw == 'rosbag_build_map':
@@ -742,6 +781,66 @@ class BackendNode(Ros2NodeManager):
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
+
+    # ------------------------------------------------------------------ #
+    # Benchmark                                                            #
+    # ------------------------------------------------------------------ #
+
+    def cmd_start_benchmark(self):
+        """Run planning + control against the synthetic benchmark node."""
+        if self._benchmark_proc is not None and self._benchmark_proc.poll() is None:
+            self._benchmark_cmd_pub.publish(String(data=json.dumps({'action': 'restart'})))
+            return
+
+        self.cmd_stop_nav_nodes()
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+
+        if self._planning_proc is None or self._planning_proc.poll() is not None:
+            self._planning_proc = self._launch_proc(
+                'planning',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                env=_env,
+            )
+        self._cmd_vel_proc = self._launch_proc(
+            'cmd_vel_control',
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            env=_env,
+        )
+        self._benchmark_proc = self._launch_proc(
+            'benchmark_node',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/benchmark_node.py'],
+            env=_env,
+        )
+        with self._lock:
+            self._benchmark_status = {'state': 'starting'}
+            self._benchmark_result = None
+            self._nav_paused = False
+        self.state = 'benchmark'
+        self._pub_state()
+        self.get_logger().info('Benchmark started')
+
+    def cmd_stop_benchmark(self):
+        self._benchmark_cmd_pub.publish(String(data=json.dumps({'action': 'stop'})))
+        self._kill_proc(self._benchmark_proc)
+        self._kill_proc(self._cmd_vel_proc)
+        self._benchmark_proc = None
+        self._cmd_vel_proc = None
+        with self._lock:
+            if self._benchmark_status is None:
+                self._benchmark_status = {'state': 'stopped'}
+            else:
+                self._benchmark_status = {**self._benchmark_status, 'state': 'stopped'}
+            self._global_path = []
+            self._nav_target_pose = None
+            self._nav_paused = False
+        self.state = 'idle'
+        self._pub_state()
+        self.get_logger().info('Benchmark stopped')
+
+    def cmd_restart_benchmark(self):
+        self.cmd_stop_benchmark()
+        self.cmd_start_benchmark()
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
