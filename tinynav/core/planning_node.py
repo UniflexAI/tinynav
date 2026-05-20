@@ -198,7 +198,10 @@ def generate_trajectory_library_3d(
 
     num_samples = len(acc_samples) * len(omega_y_samples)
 
-    trajectories = np.empty((num_samples, num_steps, 7))
+    # Per step state layout:
+    # [0:3]=position(x,y,z), [3:7]=quaternion(x,y,z,w),
+    # [7:10]=linear velocity(vx,vy,vz), [10:13]=angular velocity(wx,wy,wz) in world frame.
+    trajectories = np.empty((num_samples, num_steps, 13))
     params = np.empty((num_samples, 2))
 
     k = -1
@@ -210,7 +213,7 @@ def generate_trajectory_library_3d(
             p = init_p.copy()
             v_world = init_v.copy()
             q = quat_to_matrix(init_q)
-            traj = np.empty((num_steps, 7))
+            traj = np.empty((num_steps, 13))
             for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
                 v_world = (q @ dq) @ q.T @ v_world
@@ -229,7 +232,9 @@ def generate_trajectory_library_3d(
                 v_world = np.clip(v_world, -0.5, 0.5)
                 p += v_world * dt
                 traj[i, :3] = p
-                traj[i, 3:] = matrix_to_quat(q)
+                traj[i, 3:7] = matrix_to_quat(q)
+                traj[i, 7:10] = v_world
+                traj[i, 10:13] = np.array([0.0, omega_y, 0.0])
             #hack
             for i in range(num_steps):
                 traj[i, 2] = traj[0, 2]
@@ -371,6 +376,10 @@ class PlanningNode(Node):
 
         self.smoothed_velocity = 0.0
         self.dt = 0.1
+        self.planning_latency_s = 0.1
+        self.seed_fallback_distance_m = 2.0
+        self.last_planned_traj = None
+        self.last_planned_traj_base_stamp = None
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -506,6 +515,28 @@ class PlanningNode(Node):
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
+    def _seed_from_last_trajectory(self, query_stamp):
+        if self.last_planned_traj is None or self.last_planned_traj_base_stamp is None:
+            return None
+        traj = self.last_planned_traj
+        if len(traj) < 1:
+            return None
+        rel_t = query_stamp - self.last_planned_traj_base_stamp
+        if rel_t < 0.0:
+            return None
+        idx = int(round(rel_t / self.dt))
+        idx = max(0, min(idx, len(traj) - 1))
+        p = traj[idx, :3].copy()
+        q = traj[idx, 3:].copy()
+        if len(traj) == 1:
+            v = np.zeros(3, dtype=np.float64)
+        elif idx < len(traj) - 1:
+            v = (traj[idx + 1, :3] - traj[idx, :3]) / self.dt
+        else:
+            v = (traj[idx, :3] - traj[idx - 1, :3]) / self.dt
+        v = np.asarray(v, dtype=np.float64)
+        return p, v, q
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
@@ -554,13 +585,30 @@ class PlanningNode(Node):
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            v_dir = T[:3, :3] @ np.array([0, 0, 1])
-            magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
-            init_v = v_dir * float(magnitude)
+            query_stamp = stamp + self.planning_latency_s
+            seed = self._seed_from_last_trajectory(query_stamp)
+            if seed is not None:
+                init_p_seed, init_v_seed, init_q_seed = seed
+                current_center = self.camera_to_robot_center(T)
+                if np.linalg.norm(init_p_seed - current_center) <= self.seed_fallback_distance_m:
+                    init_p, init_v, init_q = init_p_seed, init_v_seed, init_q_seed
+                else:
+                    seed = None
+            if seed is None:
+                v_dir = T[:3, :3] @ np.array([0, 0, 1])
+                magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
+                init_v = v_dir * float(magnitude)
+                init_p = self.camera_to_robot_center(T)
+                init_q = np.array([
+                    odom_msg.pose.pose.orientation.x,
+                    odom_msg.pose.pose.orientation.y,
+                    odom_msg.pose.pose.orientation.z,
+                    odom_msg.pose.pose.orientation.w,
+                ])
             trajectories, params = generate_trajectory_library_3d(
-                init_p = self.camera_to_robot_center(T),
+                init_p = init_p,
                 init_v = init_v,
-                init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w]),
+                init_q = init_q,
                 dt = self.dt
             )
             self.last_T = T
@@ -582,6 +630,9 @@ class PlanningNode(Node):
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
+            best_idx = int(top_indices[0])
+            self.last_planned_traj = trajectories[best_idx].copy()
+            self.last_planned_traj_base_stamp = stamp
 
             # path
             path = Path()
