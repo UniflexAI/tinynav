@@ -151,6 +151,15 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     return occupancy_grid
 
 
+# Local-target (ESDF-snapped lookahead) tuning.
+LOOKAHEAD_MAX_M = 4.0          # lookahead when robot heading aligned with bearing
+LOOKAHEAD_MIN_M = 1.0          # lookahead when heading orthogonal/opposite to bearing
+LOOKAHEAD_DECAY = 4.0          # exp(-DECAY * angle) falloff between min/max
+LATERAL_RANGE_M = 0.4          # ± lateral search range for max-SDF snap
+LATERAL_SAMPLES = 9            # samples across the lateral range
+CLEARANCE_BRAKE_M = 0.4        # snapped SDF below this -> emit + stop walking
+
+
 @dataclass
 class ObstacleConfig:
     robot_z_bottom: float = -0.4
@@ -486,15 +495,14 @@ class PlanningNode(Node):
         bearing = np.arctan2(self.target_pose[1] - init_p_w[1],
                              self.target_pose[0] - init_p_w[0])
         ang = abs(np.arctan2(np.sin(bearing - robot_yaw), np.cos(bearing - robot_yaw)))
-        lookahead_max, lookahead_min = 4.0, 1.0
-        max_dist = float(lookahead_min + (lookahead_max - lookahead_min) * np.exp(-4.0 * ang))
+        max_dist = float(LOOKAHEAD_MIN_M +
+                         (LOOKAHEAD_MAX_M - LOOKAHEAD_MIN_M) * np.exp(-LOOKAHEAD_DECAY * ang))
 
         step = self.resolution
-        lat_range, n_lat = 0.4, 9
         safety = self.robot.safety_radius
-        clearance_brake = 0.4
         target_z = float(self.target_pose[2])
         rows, cols = ESDF_map.shape
+        lats = np.linspace(-LATERAL_RANGE_M, LATERAL_RANGE_M, LATERAL_SAMPLES)
 
         last = None
         accumulated = 0.0
@@ -507,18 +515,21 @@ class PlanningNode(Node):
             n_seg = max(1, int(seg_len / step))
             for s in range(1, n_seg + 1):
                 anchor = path_xy[i] + seg * (s / n_seg)
-                best_sdf, best_xy = -1.0, anchor
-                for lat in np.linspace(-lat_range, lat_range, n_lat):
-                    p = anchor + perp * lat
-                    ex = int((p[0] - self.origin[0]) / self.resolution)
-                    ey = int((p[1] - self.origin[1]) / self.resolution)
-                    if 0 <= ex < rows and 0 <= ey < cols:
-                        v = float(ESDF_map[ex, ey])
-                        if v > best_sdf:
-                            best_sdf, best_xy = v, p
+                # Vectorize the LATERAL_SAMPLES SDF lookups across this anchor.
+                candidates = anchor + perp * lats[:, None]
+                ex = ((candidates[:, 0] - self.origin[0]) / self.resolution).astype(int)
+                ey = ((candidates[:, 1] - self.origin[1]) / self.resolution).astype(int)
+                valid = (ex >= 0) & (ex < rows) & (ey >= 0) & (ey < cols)
+                sdfs = np.where(
+                    valid,
+                    ESDF_map[np.clip(ex, 0, rows - 1), np.clip(ey, 0, cols - 1)],
+                    -1.0,
+                )
+                k = int(np.argmax(sdfs))
+                best_sdf = float(sdfs[k])
                 if best_sdf >= safety:
-                    last = np.array([float(best_xy[0]), float(best_xy[1]), target_z])
-                    if best_sdf < clearance_brake:
+                    last = np.array([float(candidates[k, 0]), float(candidates[k, 1]), target_z])
+                    if best_sdf < CLEARANCE_BRAKE_M:
                         return last
                 accumulated += step
                 if accumulated >= max_dist:
