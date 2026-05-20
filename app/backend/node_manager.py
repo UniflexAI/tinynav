@@ -167,6 +167,7 @@ class BackendNode(Ros2NodeManager):
         self._looper_bridge_proc: subprocess.Popen | None = None
         self._realsense_proc: subprocess.Popen | None = None
         self._perception_proc: subprocess.Popen | None = None
+        self._imu_propagation_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
         self._unitree_proc: subprocess.Popen | None = None
 
@@ -671,7 +672,7 @@ class BackendNode(Ros2NodeManager):
         return proc
 
     def _stop_sensor_procs(self):
-        for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
+        for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_imu_propagation_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
 
@@ -696,6 +697,11 @@ class BackendNode(Ros2NodeManager):
             self._perception_proc = self._launch_proc(
                 'perception',
                 ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                env=env,
+            )
+            self._imu_propagation_proc = self._launch_proc(
+                'perception',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/imu_propagator_node.py'],
                 env=env,
             )
             self._planning_proc = self._launch_proc(
@@ -1119,7 +1125,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._imu_propagation_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)

@@ -59,10 +59,10 @@ GO2_CONFIG = RobotConfig(
 
 B2_CONFIG = RobotConfig(
     name='b2', shape='square',
-    length=1.0, width=0.5,
+    length=0.8, width=0.4,
     camera_x=0.5, camera_y=0.0,
     control_x=-0.5, control_y=0.0,
-    safety_radius=0.1,
+    safety_radius=0.2,
 )
 
 # === Helper functions ===
@@ -151,10 +151,10 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.4
+    robot_z_bottom: float = -0.5
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.2
+    min_wall_span_m: float = 0.3
     dilation_cells: int = 2
 
 
@@ -350,7 +350,7 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
-        self.robot = GO2_CONFIG
+        self.robot = B2_CONFIG
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
@@ -375,7 +375,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 10
+        self.step = 5
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None

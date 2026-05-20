@@ -108,7 +108,7 @@ class PerceptionNode(Node):
 
         self.bridge = CvBridge()
         self.tf_broadcaster = TransformBroadcaster(self)
-        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
+        qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=200)
 
         # use a single topic to handle the imu data.
         self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.imu_callback, qos_profile)
@@ -125,7 +125,7 @@ class PerceptionNode(Node):
         self.input_aligner_stereo_filter = SimpleFilter()
         self.input_aligner = InputAligner(Duration(seconds=1.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
         self.input_aligner.setInputPeriod(0, Duration(seconds=0.005))
-        self.input_aligner.setInputPeriod(1, Duration(seconds=0.01))
+        self.input_aligner.setInputPeriod(1, Duration(seconds=0.033))
         self.input_aligner.registerCallback(0, self._aligned_imu_callback)
         self.input_aligner.registerCallback(1, self._aligned_stereo_callback)
         self.input_aligner_seen_imu = False
@@ -206,9 +206,11 @@ class PerceptionNode(Node):
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
     def _aligned_imu_callback(self, imu_msg):
+        #print(f"aligned_imu_callback")
         self._process_imu_msg(imu_msg)
 
     def _aligned_stereo_callback(self, stereo_pair_msg):
+        #print(f"aligned_stereo_callback")
         left_msg = stereo_pair_msg.left_msg
         right_msg = stereo_pair_msg.right_msg
         image_timestamp = stamp2second(left_msg.header.stamp)
@@ -224,12 +226,14 @@ class PerceptionNode(Node):
             self.stats_pub.publish(String(data=json.dumps(processed)))
 
     def imu_callback(self, imu_msg):
+        #print(f"imu callback at {imu_msg.header.stamp}")
         self.input_aligner_imu_filter.signalMessage(imu_msg)
         self.input_aligner_seen_imu = True
         if self.input_aligner_seen_stereo:
             self.input_aligner.dispatchMessages()
 
     def images_callback(self, left_msg, right_msg):
+        #print(f"image callback at {left_msg.header.stamp}")
         stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
         self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
         self.input_aligner_seen_stereo = True
@@ -266,7 +270,7 @@ class PerceptionNode(Node):
             "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
         }
 
-        with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+        with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
             kf_prev = self.keyframe_queue[-1]
             prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
@@ -304,7 +308,7 @@ class PerceptionNode(Node):
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt)
             self.keyframe_queue[-1].imu_measurement_count += 1
 
-        with Timer(name="[PnP]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+        with Timer(name="[PnP]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
         # do simple pose estimation between last keyframe and current frame
             prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
             current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
@@ -392,7 +396,7 @@ class PerceptionNode(Node):
             #        print("kf_factor: ", kf_factor)
             #current_i = len(self.keyframe_queue[-_N:])
 
-            with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
                 extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
                 uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
@@ -401,7 +405,7 @@ class PerceptionNode(Node):
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
             # match by LightGlue, filter by geometric consistency (pose estimation), 
             # and build tracks via Union-Find
-            with Timer(name="[cached result]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+            with Timer(name="[cached result]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
                 for i in range(max(0, len(self.keyframe_queue) - _N), len(self.keyframe_queue) - 1):
                     with Timer(name="[cached result[1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         j = i + 1
@@ -526,14 +530,14 @@ class PerceptionNode(Node):
                 self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
-        with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+        with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
             disp_vis = disparity.copy().astype(np.uint8)
             disp_color = cv2.applyColorMap(disp_vis * 4, cv2.COLORMAP_PLASMA)
             disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding='bgr8')
             disp_color_msg.header = left_msg.header
             self.disparity_pub_vis.publish(disp_color_msg)
 
-        with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+        with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
             # publish depth image and camera info for depth topic (required by DepthCloud)
             depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
             depth_msg.header.stamp = left_msg.header.stamp
@@ -546,7 +550,7 @@ class PerceptionNode(Node):
         self.logger.debug(f"lightglue cache info: {self.light_glue.infer.cache_info()}")
         self.logger.debug(f"estimate_pose cache info: {estimate_pose.cache_info()}")
 
-        with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+        with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.info):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
             # publish odometry
@@ -585,11 +589,11 @@ def main(args=None):
     parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
-    imu_propagator_node = ImuPropagatorNode()
+    #imu_propagator_node = ImuPropagatorNode()
 
-    executor = rclpy.executors.MultiThreadedExecutor()
+    executor = rclpy.executors.MultiThreadedExecutor(1)
     executor.add_node(perception_node)
-    executor.add_node(imu_propagator_node)
+    #executor.add_node(imu_propagator_node)
     executor.spin()
     perception_node.destroy_node()
     imu_propagator_node.destroy_node()
