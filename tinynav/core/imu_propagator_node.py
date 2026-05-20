@@ -70,9 +70,9 @@ class ImuPropagatorNode(Node):
             Imu, "/camera/camera/imu", self.imu_callback, qos_profile
         )
         self.odom_sub = self.create_subscription(
-            Odometry, "/slam/odometry", self.odom_callback, qos_profile
+            Odometry, "/slam/odometry_visual", self.odom_callback, qos_profile
         )
-        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry_100hz", 50)
+        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 50)
 
         self.imu_buffer = []
         self.odom_10hz_buffer = []
@@ -83,7 +83,6 @@ class ImuPropagatorNode(Node):
             return
 
         timestamp = self._stamp_to_sec(imu_msg.header.stamp)
-        print("imu: ", timestamp)
         self.imu_buffer.append((timestamp, imu_msg))
         if len(self.imu_buffer) > 2000:
             self.imu_buffer.pop(0)

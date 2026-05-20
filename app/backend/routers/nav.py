@@ -20,6 +20,12 @@ class SendPoisRequest(BaseModel):
     poi_ids: list[int]
 
 
+class ManualTargetRequest(BaseModel):
+    x: float
+    y: float
+    z: float
+
+
 @router.post('/send-pois')
 def nav_send_pois(req: SendPoisRequest):
     node = _require_node()
@@ -38,6 +44,15 @@ def nav_go_to_poi(req: GoToPoiRequest):
         raise HTTPException(409, f'Cannot start navigation while in state: {node.state}')
     node.cmd_nav_start(poi_id=str(req.poi_id))
     return {'ok': True, 'poi_id': req.poi_id}
+
+
+@router.post('/manual-target')
+def nav_manual_target(req: ManualTargetRequest):
+    node = _require_node()
+    if node._odom_pose is None:
+        raise HTTPException(409, 'Odometry not ready')
+    node.cmd_manual_target_pose(req.x, req.y, req.z)
+    return {'ok': True, 'target': {'x': req.x, 'y': req.y, 'z': req.z}}
 
 
 @router.post('/cancel')

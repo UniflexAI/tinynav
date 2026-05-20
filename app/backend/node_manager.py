@@ -24,9 +24,9 @@ import rclpy
 import rclpy.time
 import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import CompressedImage, Image
+from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
@@ -34,6 +34,10 @@ from tool.ros2_node_manager import Ros2NodeManager
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
 _MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic collision during map build
+
+# build_map_node.py emits "MAPPING_PERCENT:<float>" lines on stdout so the
+# parent process can track progress without a separate bridge subprocess.
+_MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
 
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
@@ -79,11 +83,13 @@ class BackendNode(Ros2NodeManager):
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
         self._global_path: list = []
+        self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
+        self._voxel_points: list = []
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
-        self.create_subscription(Odometry, '/slam/odometry', self._on_slam_odom, 10)
+        self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
@@ -101,12 +107,21 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             Odometry, '/control/target_pose', self._on_nav_target_pose, 1
         )
+        self.create_subscription(
+            PointCloud, '/planning/footprint', self._on_footprint, 1
+        )
+        self.create_subscription(
+            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+        )
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         # Publisher for POI nav target consumed by map_node via /mapping/cmd_pois
         self._cmd_pois_pub = self.create_publisher(String, '/mapping/cmd_pois', 10)
+
+        # Manual local target for planning_node, used by the operate tab long-press tool.
+        self._target_pose_pub = self.create_publisher(Odometry, '/control/target_pose', 10)
 
         # Latched publisher — new subscribers (cmd_vel_control) get current state immediately on connect
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -141,7 +156,12 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
 
+        self._nav_progress: dict | None = None
+        self.nav_progress_callbacks: list = []
+
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
+        self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
+        self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -152,6 +172,21 @@ class BackendNode(Ros2NodeManager):
     def _on_battery(self, msg: Float32):
         with self._lock:
             self._battery = float(msg.data)
+
+    def _on_nav_done(self, msg: Bool):
+        if msg.data and self.state == 'navigation':
+            self.state = 'idle'
+            self._pub_state()
+
+    def _on_nav_progress(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            with self._lock:
+                self._nav_progress = data
+            for cb in self.nav_progress_callbacks:
+                cb(data)
+        except json.JSONDecodeError:
+            pass
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -182,7 +217,9 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def _on_relocalization(self, msg: Odometry):
+        pose = self._odom_to_dict(msg, source='map')
         with self._lock:
+            self._map_pose = pose
             self._localized = True
 
     def _on_nav_target_pose(self, msg: Odometry):
@@ -245,6 +282,45 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._global_path = pts
+
+    def _on_footprint(self, msg: PointCloud):
+        """Store footprint corner points from PointCloud.
+
+        The planning node publishes 84 points (4 edges × 21 samples per edge).
+        We extract the 4 corner points (first of each edge group).
+        """
+        n = len(msg.points)
+        if n == 0:
+            return
+        # If 84 points (4 edges × 21), extract corners; otherwise store all unique points
+        if n >= 84 and n % 21 == 0:
+            edges = n // 21
+            corners = []
+            for i in range(edges):
+                p = msg.points[i * 21]
+                corners.append({'x': p.x, 'y': p.y})
+        else:
+            # Fallback: store all points
+            corners = [{'x': p.x, 'y': p.y} for p in msg.points]
+        with self._lock:
+            self._footprint = corners
+
+    def _on_occupied_voxels(self, msg: PointCloud2):
+        """Store a downsampled local 3D occupied voxel cloud for the web UI."""
+        try:
+            step = max(1, len(msg.data) // max(1, msg.point_step) // 2500)
+            points = []
+            import sensor_msgs_py.point_cloud2 as pc2
+            for i, p in enumerate(pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)):
+                if i % step != 0:
+                    continue
+                points.append({'x': float(p[0]), 'y': float(p[1]), 'z': float(p[2])})
+                if len(points) >= 2500:
+                    break
+            with self._lock:
+                self._voxel_points = points
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -437,6 +513,8 @@ class BackendNode(Ros2NodeManager):
                 'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
+                'footprint': list(self._footprint),
+                'voxel_points': list(self._voxel_points),
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot
@@ -741,7 +819,7 @@ class BackendNode(Ros2NodeManager):
             ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
             env=_env,
         )
-        self.processes['build_map'] = self._launch_proc(
+        self.processes['build_map'] = self._launch_proc_tee(
             'build_map_node',
             [
                 'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
@@ -752,6 +830,41 @@ class BackendNode(Ros2NodeManager):
         )
 
         threading.Thread(target=self._on_build_map_done, daemon=True).start()
+
+    def _launch_proc_tee(self, name: str, cmd: list[str], env: dict | None = None,
+                          cwd: str = '/tinynav') -> subprocess.Popen:
+        """Like _launch_proc, but also tees stdout to a pipe so the caller can
+        scan for MAPPING_PERCENT: lines while still logging everything to file."""
+        lf = self._make_log(name)
+        proc = subprocess.Popen(
+            cmd, preexec_fn=os.setsid, cwd=cwd,
+            env=env or os.environ.copy(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        threading.Thread(
+            target=self._tee_and_read_percent,
+            args=(proc, lf),
+            daemon=True,
+        ).start()
+        return proc
+
+    def _tee_and_read_percent(self, proc: subprocess.Popen, log_file):
+        """Read lines from proc.stdout, write to log_file, and extract
+        MAPPING_PERCENT:<float> values into self.mapping_percent."""
+        try:
+            for raw in proc.stdout:
+                line = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
+                log_file.write(line)
+                log_file.flush()
+                if _MAPPING_PERCENT_PREFIX in line:
+                    try:
+                        pct = float(line.split(_MAPPING_PERCENT_PREFIX, 1)[1].strip())
+                        with self._lock:
+                            self.mapping_percent = pct
+                    except (ValueError, AttributeError):
+                        pass
+        finally:
+            log_file.close()
 
     def _on_build_map_done(self):
         """Wait for build_map to finish, then convert, archive, and restart."""
@@ -815,6 +928,23 @@ class BackendNode(Ros2NodeManager):
         payload = {'0': pois[key]}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
 
+    def cmd_manual_target_pose(self, x: float, y: float, z: float):
+        """Publish a manually selected local-planner target pose.
+
+        planning_node subscribes to /control/target_pose and only reads the
+        position vector, so Odometry is used here to match that existing API.
+        """
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.position.z = float(z)
+        msg.pose.pose.orientation.w = 1.0
+        self._target_pose_pub.publish(msg)
+        with self._lock:
+            self._nav_target_pose = {'x': float(x), 'y': float(y)}
+
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""
         if not poi_ids:
@@ -826,7 +956,14 @@ class BackendNode(Ros2NodeManager):
                 return
             with open(pois_file) as f:
                 all_pois = json.load(f)
-            payload = {str(pid): all_pois[str(pid)] for pid in poi_ids if str(pid) in all_pois}
+            # Re-index as a dense queue ("0", "1", ...) so downstream
+            # consumers navigate in the same order the UI sent the checked POIs,
+            # instead of falling back to the original ids / pois.json order.
+            payload = {}
+            for pid in poi_ids:
+                key = str(pid)
+                if key in all_pois:
+                    payload[str(len(payload))] = all_pois[key]
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         with self._lock:
             nav_running = self._nav_nodes_running

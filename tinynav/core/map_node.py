@@ -1,5 +1,6 @@
 import rclpy
 import os
+import time
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -9,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, se3_inv
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -117,13 +118,35 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    open_heap = [(sdf_map[start] + heuristic(start, goal, resolution), start)]
-    open_heap_set = set()
-    open_heap_set.add(start)
+    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+    def get_queue_index(sdf_value: float) -> int:
+        for idx, threshold in enumerate(sdf_bins):
+            if sdf_value < threshold:
+                return idx
+        return len(sdf_bins)
+
+    open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
+    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
+    start_queue_idx = get_queue_index(float(sdf_map[start]))
+    heapq.heappush(open_heaps[start_queue_idx], (heuristic(start, goal, resolution), start))
+    open_sets[start_queue_idx].add(start)
     parent = {start: start}
     visited = set()
-    while len(open_heap) > 0:
-        current_cost, current = heapq.heappop(open_heap)
+
+    while True:
+        queue_idx = -1
+        for i, q in enumerate(open_heaps):
+            if len(q) > 0:
+                queue_idx = i
+                break
+        if queue_idx == -1:
+            break
+
+        current_cost, current = heapq.heappop(open_heaps[queue_idx])
+        open_sets[queue_idx].remove(current)
+        if current in visited:
+            continue
         visited.add(current)
         if current == goal:
             return reconstruct_path_sdf(parent, current)
@@ -136,9 +159,18 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                     if (0 <= neighbor[0] < sdf_map.shape[0] and
                             0 <= neighbor[1] < sdf_map.shape[1] and
                             0 <= neighbor[2] < sdf_map.shape[2]):
-                        if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2 and sdf_map[neighbor] < 0.2:
-                            open_heap_set.add(neighbor)
-                            heapq.heappush(open_heap, (heuristic(neighbor, goal, resolution) + sdf_map[neighbor], neighbor))
+                        if neighbor in visited or occupancy_map[neighbor] == 2:
+                            continue
+                        neighbor_sdf = float(sdf_map[neighbor])
+                        neighbor_queue_idx = get_queue_index(neighbor_sdf)
+                        if neighbor in open_sets[neighbor_queue_idx]:
+                            continue
+                        open_sets[neighbor_queue_idx].add(neighbor)
+                        heapq.heappush(
+                            open_heaps[neighbor_queue_idx],
+                            (heuristic(neighbor, goal, resolution), neighbor),
+                        )
+                        if neighbor not in parent:
                             parent[neighbor] = current
     return []
 
@@ -218,9 +250,15 @@ class MapNode(Node):
 
         self.pois = {}
         self.poi_index = -1
+        self._nav_completed = False
+        self._leg_initial_length: float | None = None
+        self._leg_start_time: float | None = None
+        self._speed_estimate: float | None = None
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+        self.nav_done_pub = self.create_publisher(Bool, '/mapping/nav_done', 10)
+        self.nav_progress_pub = self.create_publisher(String, '/mapping/nav_progress', 10)
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
@@ -250,6 +288,10 @@ class MapNode(Node):
                 return
 
             self.poi_index = min(0, len(self.pois) - 1)
+            self._nav_completed = False
+            self._leg_initial_length = None
+            self._leg_start_time = None
+            self._speed_estimate = None
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
@@ -331,7 +373,7 @@ class MapNode(Node):
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
-            T_prev_curr = se3_inv(last_keyframe_odom_pose) @ odom
+            T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
@@ -475,7 +517,7 @@ class MapNode(Node):
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug
-            pose_in_world = se3_inv(pose_in_camera)
+            pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
@@ -532,7 +574,7 @@ class MapNode(Node):
             if timestamp in self.pose_graph_used_pose:
                 camera_in_map_world = pose
                 camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-                observation_T_from_map_to_odom =  camera_in_odom_world @ se3_inv(camera_in_map_world)
+                observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
@@ -560,7 +602,7 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         # get the pose from the map to the odom
-        pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
@@ -570,7 +612,19 @@ class MapNode(Node):
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
             if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+                if self._leg_initial_length is not None:
+                    arrived_msg = String()
+                    arrived_msg.data = json.dumps({
+                        "poi_index": self.poi_index,
+                        "percent": 100.0,
+                        "path_remaining_m": 0.0,
+                        "path_total_m": round(self._leg_initial_length, 2),
+                        "estimated_remaining_s": 0.0,
+                    })
+                    self.nav_progress_pub.publish(arrived_msg)
                 self.poi_index += 1
+                self._leg_initial_length = None
+                self._leg_start_time = None
                 dummy_pose = np.eye(4)
 
                 stamp_msg = self.get_clock().now().to_msg()
@@ -582,7 +636,10 @@ class MapNode(Node):
                 break
 
         if self.poi_index >= len(self.pois):
-            self.get_logger().info("All POIs have been visited, skip publishing nav path")
+            if not self._nav_completed:
+                self._nav_completed = True
+                self.get_logger().info("All POIs have been visited, nav done")
+                self.nav_done_pub.publish(Bool(data=True))
             return
 
         target_poi = self.pois[self.poi_index]
@@ -590,6 +647,35 @@ class MapNode(Node):
             paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
 
         if paths_in_map is not None:
+            remaining_length = sum(
+                np.linalg.norm(paths_in_map[i + 1] - paths_in_map[i])
+                for i in range(len(paths_in_map) - 1)
+            ) if len(paths_in_map) > 1 else 0.0
+
+            now = time.time()
+            if self._leg_initial_length is None:
+                self._leg_initial_length = remaining_length
+                self._leg_start_time = now
+
+            covered = self._leg_initial_length - remaining_length
+            elapsed = now - self._leg_start_time
+            if covered > 0.1 and elapsed > 1.0:
+                self._speed_estimate = covered / elapsed
+
+            initial = self._leg_initial_length
+            percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
+            estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
+
+            progress_msg = String()
+            progress_msg.data = json.dumps({
+                "poi_index": self.poi_index,
+                "percent": round(percent, 1),
+                "path_remaining_m": round(remaining_length, 2),
+                "path_total_m": round(initial, 2),
+                "estimated_remaining_s": round(estimated_remaining_s, 1),
+            })
+            self.nav_progress_pub.publish(progress_msg)
+
             # use the max_speed to publish the position the robot should be after 5 seconds
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
@@ -607,7 +693,7 @@ class MapNode(Node):
                     target_position = paths_in_map[0]
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 pose_in_origin_odom = self.odom[timestamp]
-                T = pose_in_origin_odom @ se3_inv(pose_in_map)
+                T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
                 dummy_pose = np.eye(4)
                 dummy_pose[:3, 3] = target_position_in_odom
@@ -672,6 +758,10 @@ class MapNode(Node):
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        if len(path_sdf) == 0:
+            self.get_logger().warning(
+                f"search_within_sdf_map returned empty path: start_idx={tuple(sdf_start_sdf)}, goal_idx={tuple(sdf_goal_sdf)}"
+            )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
@@ -701,4 +791,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

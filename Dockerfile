@@ -76,6 +76,9 @@ RUN apt-get update && apt-get install -y ros-humble-desktop \
 
 # env
 ENV RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
+# Limit OpenBLAS worker threads globally to avoid high CPU on small NumPy/SciPy
+# workloads on Jetson. See OpenBLAS fix context: https://github.com/OpenMathLib/OpenBLAS/pull/4388
+ENV OPENBLAS_NUM_THREADS=1
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 ENV CYCLONEDDS_URI=/tinynav/scripts/cyclone_dds_localhost.xml
 ENV PATH=$PATH:/usr/src/tensorrt/bin/
@@ -195,6 +198,19 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 # lekiwi conflicts with unitree (lerobot vs unitree-sdk2py dependency clash), so only unitree is included by default.
 # To use lekiwi instead, replace --extra unitree with --extra lekiwi.
 RUN /root/.local/bin/uv sync --python /opt/venv/bin/python --extra unitree
+
+# build decord from source
+RUN git clone --recursive https://github.com/dmlc/decord.git /tmp/decord \
+    && cd /tmp/decord \
+    && mkdir -p build \
+    && cd build \
+    && cmake .. -DUSE_CUDA=0 -DCMAKE_BUILD_TYPE=Release \
+    && make -j"$(nproc)" \
+    && cd ../python \
+    && /opt/venv/bin/python setup.py install \
+    && DECORD_PKG_DIR=$(/opt/venv/bin/python -c "import site; print(site.getsitepackages()[0] + '/decord')") \
+    && ln -sf /opt/venv/decord/libdecord.so "${DECORD_PKG_DIR}/libdecord.so" \
+    && rm -rf /tmp/decord
 
 # Write entrypoint.sh (model build prompt only)
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
