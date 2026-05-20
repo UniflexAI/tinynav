@@ -1,4 +1,7 @@
-import tensorrt as trt
+try:
+    import tensorrt as trt
+except ImportError:
+    trt = None
 import numpy as np
 import cv2
 from codetiming import Timer
@@ -6,10 +9,16 @@ import platform
 import asyncio
 from tinynav.core.func import alru_cache_numpy
 
-from cuda import cudart
+try:
+    from cuda import cudart
+except ImportError:
+    cudart = None
 import ctypes
 import einops
 import logging
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
@@ -39,6 +48,11 @@ def disparity_to_depth(disparity: np.ndarray, baseline: float, focal_length: flo
 
 class TRTBase:
     def __init__(self, engine_path):
+        if trt is None or cudart is None:
+            raise ImportError(
+                "tensorrt and cuda-python are required for TRT models. "
+                "Use BoW mode or install TensorRT Python bindings."
+            )
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
@@ -178,6 +192,230 @@ class SuperPointTRT(TRTBase):
             k[:, 1] = (k[:, 1] + 0.5) * scale_y - 0.5
         results["mask"] = results["mask"][:, :, None]
         return results
+
+
+class ORBFeatureTRTCompatible:
+    """
+    ORB feature extractor with a SuperPoint-compatible output interface.
+
+    Returns a dict with:
+      - kpts:  (1, N, 2) float32
+      - descps: (1, N, 32) float32
+      - mask:  (1, N, 1) float32
+    """
+
+    def __init__(self, nfeatures: int = 1024):
+        self.nfeatures = int(nfeatures)
+        self.orb = cv2.ORB_create(nfeatures=self.nfeatures)
+
+    async def infer(self, input_image: np.ndarray):
+        if input_image is None:
+            raise ValueError("input_image is None")
+        if input_image.ndim == 3:
+            gray = cv2.cvtColor(input_image, cv2.COLOR_BGR2GRAY)
+        elif input_image.ndim == 2:
+            gray = input_image
+        else:
+            raise ValueError(f"Unsupported input_image ndim={input_image.ndim}")
+
+        keypoints, descriptors = self.orb.detectAndCompute(gray, None)
+        if keypoints is None or len(keypoints) == 0:
+            return {
+                "kpts": np.zeros((1, 0, 2), dtype=np.float32),
+                "descps": np.zeros((1, 0, 32), dtype=np.float32),
+                "mask": np.zeros((1, 0, 1), dtype=np.float32),
+            }
+
+        kpts = np.array([[kp.pt[0], kp.pt[1]] for kp in keypoints], dtype=np.float32)
+        if descriptors is None:
+            descps = np.zeros((kpts.shape[0], 32), dtype=np.float32)
+        else:
+            descps = descriptors.astype(np.float32) / 255.0
+
+        return {
+            "kpts": kpts[None, :, :],
+            "descps": descps[None, :, :],
+            "mask": np.ones((1, kpts.shape[0], 1), dtype=np.float32),
+        }
+
+
+class ORBMatcher:
+    """
+    ORB descriptor matcher with BFMatcher(crossCheck=True) and geometric RANSAC filtering.
+
+    Output is LightGlue-compatible:
+      - match_indices: (1, N0) int32, each value is matched index in keypoints1 or -1.
+    """
+
+    def __init__(self, ransac_reproj_threshold: float = 1.0):
+        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        self.ransac_reproj_threshold = float(ransac_reproj_threshold)
+
+    async def infer(
+        self,
+        kpts0: np.ndarray,
+        kpts1: np.ndarray,
+        desc0: np.ndarray,
+        desc1: np.ndarray,
+        mask0: np.ndarray,
+        mask1: np.ndarray,
+        img_shape0=None,
+        img_shape1=None,
+        match_threshold=None,
+    ):
+        k0 = np.asarray(kpts0[0], dtype=np.float32)
+        k1 = np.asarray(kpts1[0], dtype=np.float32)
+        if k0.ndim != 2 or k1.ndim != 2 or k0.shape[1] < 2 or k1.shape[1] < 2:
+            n0 = int(k0.shape[0]) if k0.ndim >= 1 else 0
+            return {"match_indices": np.full((1, n0), -1, dtype=np.int32)}
+        # keep only xy coordinates
+        k0 = k0[:, :2]
+        k1 = k1[:, :2]
+        n0 = int(k0.shape[0])
+        out = {"match_indices": np.full((1, n0), -1, dtype=np.int32)}
+        if n0 == 0 or k1.shape[0] == 0:
+            return out
+
+        d0 = np.asarray(desc0[0], dtype=np.float32)
+        d1 = np.asarray(desc1[0], dtype=np.float32)
+        if d0.ndim != 2 or d1.ndim != 2 or d0.shape[0] == 0 or d1.shape[0] == 0:
+            return out
+        # Ensure descriptor rows and keypoints rows are aligned.
+        n0_valid = min(k0.shape[0], d0.shape[0])
+        n1_valid = min(k1.shape[0], d1.shape[0])
+        if n0_valid == 0 or n1_valid == 0:
+            return out
+        k0 = k0[:n0_valid]
+        k1 = k1[:n1_valid]
+        d0 = d0[:n0_valid]
+        d1 = d1[:n1_valid]
+        out = {"match_indices": np.full((1, n0_valid), -1, dtype=np.int32)}
+
+        m0 = np.asarray(mask0[0, :, 0] > 0, dtype=bool) if mask0.size else np.ones((d0.shape[0],), dtype=bool)
+        m1 = np.asarray(mask1[0, :, 0] > 0, dtype=bool) if mask1.size else np.ones((d1.shape[0],), dtype=bool)
+        if m0.shape[0] != d0.shape[0]:
+            m0 = np.ones((d0.shape[0],), dtype=bool)
+        if m1.shape[0] != d1.shape[0]:
+            m1 = np.ones((d1.shape[0],), dtype=bool)
+
+        idx0 = np.where(m0)[0]
+        idx1 = np.where(m1)[0]
+        if idx0.size == 0 or idx1.size == 0:
+            return out
+
+        # ORB descriptor is binary; convert normalized float [0,1] back to uint8 [0,255].
+        d0_u8 = np.clip(np.rint(d0[idx0] * 255.0), 0, 255).astype(np.uint8)
+        d1_u8 = np.clip(np.rint(d1[idx1] * 255.0), 0, 255).astype(np.uint8)
+        if d0_u8.size == 0 or d1_u8.size == 0:
+            return out
+
+        raw_matches = self.bf.match(d0_u8, d1_u8)
+        if len(raw_matches) == 0:
+            return out
+
+        raw_matches = sorted(raw_matches, key=lambda m: m.distance)
+        pts0 = np.array([k0[idx0[m.queryIdx]] for m in raw_matches], dtype=np.float32).reshape(-1, 2)
+        pts1 = np.array([k1[idx1[m.trainIdx]] for m in raw_matches], dtype=np.float32).reshape(-1, 2)
+
+        inlier_mask = np.ones((len(raw_matches),), dtype=bool)
+        if len(raw_matches) >= 8 and np.isfinite(pts0).all() and np.isfinite(pts1).all():
+            logger.info(
+                "ORBMatcher RANSAC input: pts0.shape=%s pts1.shape=%s raw_matches=%d",
+                pts0.shape,
+                pts1.shape,
+                len(raw_matches),
+            )
+            _, ransac_inliers = cv2.findFundamentalMat(
+                pts0,
+                pts1,
+                cv2.FM_RANSAC,
+                self.ransac_reproj_threshold,
+                0.99,
+            )
+            if ransac_inliers is not None and ransac_inliers.size == len(raw_matches):
+                inlier_mask = ransac_inliers.reshape(-1).astype(bool)
+
+        for i, m in enumerate(raw_matches):
+            if not inlier_mask[i]:
+                continue
+            gi = int(idx0[m.queryIdx])
+            gj = int(idx1[m.trainIdx])
+            out["match_indices"][0, gi] = gj
+        return out
+
+
+class DBoW3Engine:
+    """
+    Thin Python wrapper for PyDBoW3 database operations.
+
+    Supports adding/querying either:
+      - ORBFeatureTRTCompatible outputs (dict with "descps")
+      - Raw descriptor arrays shaped (N, 32), dtype uint8/float32
+    """
+
+    def __init__(self, vocabulary_path: str):
+        self._bow = self._import_module()
+        self.voc = self._bow.Vocabulary()
+        load_ret = self.voc.load(vocabulary_path)
+        # PyDBoW3 often returns None on success (instead of True).
+        if load_ret is False:
+            raise RuntimeError(f"Failed to load DBoW3 vocabulary: {vocabulary_path}")
+        self.db = self._bow.Database()
+        self.db.setVocabulary(self.voc)
+
+    @staticmethod
+    def _import_module():
+        try:
+            import pydbow3 as bow  # type: ignore
+            return bow
+        except Exception:
+            import pyDBoW3 as bow  # type: ignore
+            return bow
+
+    @staticmethod
+    def _normalize_desc(features: Any) -> np.ndarray:
+        if isinstance(features, dict):
+            if "descps" not in features:
+                raise ValueError("features dict must contain 'descps'")
+            desc = np.asarray(features["descps"])
+            if desc.ndim == 3:
+                desc = desc[0]
+        else:
+            desc = np.asarray(features)
+
+        if desc.ndim != 2:
+            raise ValueError(f"Descriptor array must be 2D, got shape {desc.shape}")
+        if desc.shape[1] != 32:
+            raise ValueError(f"Expected ORB descriptor width 32, got {desc.shape[1]}")
+        if desc.size == 0:
+            return np.zeros((0, 32), dtype=np.uint8)
+
+        if desc.dtype == np.uint8:
+            return np.ascontiguousarray(desc)
+        # ORBFeatureTRTCompatible emits float32 in [0,1], convert back to binary-bytes domain.
+        if np.issubdtype(desc.dtype, np.floating):
+            return np.ascontiguousarray(np.clip(np.rint(desc * 255.0), 0, 255).astype(np.uint8))
+        return np.ascontiguousarray(desc.astype(np.uint8))
+
+    def add(self, features: Any):
+        desc = self._normalize_desc(features)
+        return self.db.add(desc)
+
+    def query(self, features: Any, max_results: int = 10):
+        desc = self._normalize_desc(features)
+        try:
+            results = self.db.query(desc, int(max_results))
+        except TypeError:
+            # Some bindings expose query(desc) only.
+            results = self.db.query(desc)
+        return [
+            {
+                "id": int(getattr(r, "Id", getattr(r, "id", -1))),
+                "score": float(getattr(r, "Score", getattr(r, "score", 0.0))),
+            }
+            for r in results
+        ]
+
 
 class LightGlueTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/lightglue_fp16_{platform.machine()}.plan"):

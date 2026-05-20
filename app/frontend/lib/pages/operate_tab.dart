@@ -1426,15 +1426,12 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
       }
     });
 
-    if (selectedTopic != null) {
-      ref.listen<AsyncValue<Uint8List>>(
-        previewStreamProvider(selectedTopic),
-        (_, next) {
-          if (next case AsyncData(:final value)) {
-            if (mounted) setState(() => _latestFrame = value);
-          }
-        },
-      );
+    final previewFrame = selectedTopic == null
+        ? null
+        : ref.watch(previewStreamProvider(selectedTopic)).valueOrNull;
+    final frameToShow = previewFrame ?? _latestFrame;
+    if (previewFrame != null && !identical(previewFrame, _latestFrame)) {
+      _latestFrame = previewFrame;
     }
 
     return Container(
@@ -1442,10 +1439,10 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (selectedTopic != null && _latestFrame != null)
+          if (selectedTopic != null && frameToShow != null)
             GestureDetector(
               onTap: () => _showFullscreen(context),
-              child: Image.memory(_latestFrame!, fit: BoxFit.contain, gaplessPlayback: true),
+              child: Image.memory(frameToShow, fit: BoxFit.contain, gaplessPlayback: true),
             )
           else
             Center(
@@ -1521,7 +1518,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
               ),
             ),
           ),
-          if (selectedTopic != null && _latestFrame != null)
+          if (selectedTopic != null && frameToShow != null)
             Positioned(
               bottom: 8, right: 8,
               child: GestureDetector(

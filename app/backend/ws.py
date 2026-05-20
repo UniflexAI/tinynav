@@ -10,6 +10,7 @@ WebSocket endpoints:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import time
@@ -196,7 +197,7 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
     try:
         while True:
             frame = await queue.get()
-            await ws.send_bytes(frame)
+            await ws.send_text(base64.b64encode(frame).decode('ascii'))
     except WebSocketDisconnect:
         pass
     finally:

@@ -20,16 +20,19 @@ import argparse
 import sys
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 import logging
 import asyncio
 import shelve
+import dbm.dumb
+import pickle
 from tqdm import tqdm
-import einops
 from tf2_msgs.msg import TFMessage
 from typing import Dict
-from tool.video_db import VideoDB
+try:
+    from tool.video_db import VideoDB
+except ImportError:
+    VideoDB = None
 
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped,Point
@@ -90,16 +93,143 @@ def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, m
     optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
     return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
 
-def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarity_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
-    if len(embeddings) == 0:
-        return []
-    similarity_array = einops.einsum(target_embedding, embeddings, "d, n d -> n")
-    top_k_indices = np.argsort(similarity_array, axis = 0)
-    loop_list = []
-    for idx in top_k_indices:
-        if similarity_array[idx] > loop_similarity_threshold:
-            loop_list.append((idx, similarity_array[idx]))
-    return loop_list[-loop_top_k:]
+class LoopClosure:
+    """
+    Loop-closure candidate search over TinyNavDB keyframes.
+
+    Input query is (kp, desc, embedding). Candidates are ranked by:
+      1) embedding cosine similarity (embedding mode), or
+      2) DBoW3 score (bow mode).
+    """
+
+    def __init__(
+        self,
+        db: "TinyNavDB",
+        timestamps: list[int],
+        mode: str = "embedding",
+        dbow3_vocabulary_path: str | None = None,
+        embedding_similarity_threshold: float = 0.90,
+        embedding_top_k: int = 20,
+    ):
+        self.db = db
+        self.timestamps = list(timestamps)
+        self.mode = mode
+        self.embedding_similarity_threshold = float(embedding_similarity_threshold)
+        self.embedding_top_k = int(embedding_top_k)
+        self.timestamp_to_idx = {ts: i for i, ts in enumerate(self.timestamps)}
+        self.dbow3_engine = None
+
+        if self.mode not in ("embedding", "bow"):
+            raise ValueError(f"Unsupported LoopClosure mode: {self.mode}")
+
+        if self.mode == "embedding":
+            if len(self.timestamps) == 0:
+                self.embeddings = np.zeros((0, 1), dtype=np.float32)
+            else:
+                self.embeddings = np.stack(
+                    [self._normalize_embedding(self.db.get_embedding(ts)) for ts in self.timestamps],
+                    axis=0,
+                )
+        else:
+            self.embeddings = np.zeros((0, 1), dtype=np.float32)
+            if dbow3_vocabulary_path is None:
+                raise ValueError("dbow3_vocabulary_path is required when mode='bow'")
+            from tinynav.core.models_trt import DBoW3Engine
+            self.dbow3_engine = DBoW3Engine(dbow3_vocabulary_path)
+            total = len(self.timestamps)
+            for idx, ts in enumerate(self.timestamps):
+                logger.info(
+                    f"[LoopClosure] loading map keyframe {idx + 1}/{total}, timestamp={int(ts)}"
+                )
+                try:
+                    _, _, cand_features, _, _ = self.db.get_depth_embedding_features_images(ts)
+                except Exception as e:
+                    logger.error(
+                        f"[LoopClosure] failed loading timestamp={int(ts)}: {e}"
+                    )
+                    raise
+                self.dbow3_engine.add(cand_features)
+
+    def add_timestamp(self, timestamp: int):
+        ts = int(timestamp)
+        if ts in self.timestamp_to_idx:
+            return
+        self.timestamp_to_idx[ts] = len(self.timestamps)
+        self.timestamps.append(ts)
+        if self.mode == "embedding":
+            emb = self._normalize_embedding(self.db.get_embedding(ts))
+            emb = emb[None, :]
+            if self.embeddings.shape[0] == 0:
+                self.embeddings = emb
+            else:
+                self.embeddings = np.concatenate([self.embeddings, emb], axis=0)
+        else:
+            _, _, cand_features, _, _ = self.db.get_depth_embedding_features_images(ts)
+            self.dbow3_engine.add(cand_features)
+
+    @staticmethod
+    def _normalize_embedding(embedding: np.ndarray) -> np.ndarray:
+        e = np.asarray(embedding, dtype=np.float32).reshape(-1)
+        n = np.linalg.norm(e)
+        return e / n if n > 0 else e
+
+    def find_candidate_timestamps(
+        self,
+        kp: np.ndarray,
+        desc: np.ndarray,
+        embedding: np.ndarray,
+        top_k: int | None = None,
+        allowed_timestamps: set[int] | None = None,
+    ) -> list[dict]:
+        if self.mode == "embedding":
+            if self.embeddings.shape[0] == 0:
+                return []
+            emb = self._normalize_embedding(embedding)
+            similarities = self.embeddings @ emb
+            sorted_idx = np.argsort(similarities)[::-1]
+            k = self.embedding_top_k if top_k is None else int(top_k)
+            candidate_idx = sorted_idx[: max(1, k)]
+            scored_candidates = [
+                (self.timestamps[int(idx)], float(similarities[idx]))
+                for idx in candidate_idx
+                if float(similarities[idx]) >= self.embedding_similarity_threshold
+            ]
+        else:
+            if self.dbow3_engine is None:
+                return []
+            query_features = {
+                "kpts": np.asarray(kp)[None, ...] if np.asarray(kp).ndim == 2 else np.asarray(kp),
+                "descps": np.asarray(desc)[None, ...] if np.asarray(desc).ndim == 2 else np.asarray(desc),
+                "mask": np.ones((1, np.asarray(desc).shape[0], 1), dtype=np.float32)
+                if np.asarray(desc).ndim == 2
+                else np.ones((1, np.asarray(desc)[0].shape[0], 1), dtype=np.float32),
+            }
+            k = self.embedding_top_k if top_k is None else int(top_k)
+            dbow_results = self.dbow3_engine.query(query_features, max_results=max(1, k))
+            scored_candidates = []
+            for r in dbow_results:
+                idx = int(r["id"])
+                if 0 <= idx < len(self.timestamps):
+                    scored_candidates.append((self.timestamps[idx], float(r["score"])))
+
+        results = []
+        for ts, sim in scored_candidates:
+            if allowed_timestamps is not None and int(ts) not in allowed_timestamps:
+                continue
+            results.append(
+                {
+                    "timestamp": int(ts),
+                    "similarity": sim,
+                }
+            )
+
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results
+
+
+class DummyEmbeddingEngine:
+    async def infer(self, _image: np.ndarray) -> np.ndarray:
+        return np.zeros((1, 768), dtype=np.float32)
 
 def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100):
     """
@@ -171,7 +301,9 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100)
 
 class IntKeyShelf:
     def __init__(self, filename):
-        self.db = shelve.open(filename)
+        # Force dbm.dumb backend so map DB files are portable across host/device runtimes.
+        self._raw_db = dbm.dumb.open(filename, "c")
+        self.db = shelve.Shelf(self._raw_db, protocol=pickle.HIGHEST_PROTOCOL)
 
     def __getitem__(self, key: int):
         return self.db[str(key)]
@@ -190,6 +322,9 @@ class IntKeyShelf:
 
     def close(self):
         self.db.close()
+
+    def sync(self):
+        self.db.sync()
 
 
 class OdomPoseRecorder:
@@ -294,10 +429,13 @@ class TinyNavDB():
                 return None
             return self.infra1_video_db.read(key_int)
 
-        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
+        return self.depths[key], self.get_embedding(key), self.features[key], rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
-        return self.embeddings[key]
+        key_int = int(key)
+        if key_int in self.embeddings:
+            return self.embeddings[key_int]
+        return np.zeros((1,), dtype=np.float32)
 
     def close(self):
         self.features.close()
@@ -305,6 +443,15 @@ class TinyNavDB():
         self.depths.close()
         self.infra1_video_db.close()
         self.rgb_video_db.close()
+
+    def sync(self):
+        self.features.sync()
+        self.embeddings.sync()
+        self.depths.sync()
+        if hasattr(self.infra1_video_db, "sync"):
+            self.infra1_video_db.sync()
+        if hasattr(self.rgb_video_db, "sync"):
+            self.rgb_video_db.sync()
 
 class BagPlayer(Node):
     def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
@@ -429,14 +576,27 @@ class BagPlayer(Node):
         return True
 
 class BuildMapNode(Node):
-    def __init__(self, map_save_path:str, verbose_timer: bool = True):
+    def __init__(
+        self,
+        map_save_path: str,
+        extractor,
+        matcher,
+        embedding_extractor,
+        loop_closure_mode: str = "embedding",
+        loop_closure_use_bow: bool = False,
+        dbow3_vocabulary_path: str | None = None,
+        verbose_timer: bool = True,
+    ):
         super().__init__('build_map_node')
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        self.super_point_extractor = SuperPointTRT()
-        self.light_glue_matcher = LightGlueTRT()
-        self.dinov2_model = Dinov2TRT()
+        self.extractor = extractor
+        self.matcher = matcher
+        self.embedding_extractor = embedding_extractor
+        self.loop_closure_use_bow = bool(loop_closure_use_bow)
+        self.loop_closure_mode = "bow" if self.loop_closure_use_bow else loop_closure_mode
+        self.dbow3_vocabulary_path = dbow3_vocabulary_path
 
         self.bridge = CvBridge()
 
@@ -470,6 +630,8 @@ class BuildMapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
+        self.processed_keyframes = 0
+        self.db_sync_every = max(1, int(os.getenv("TINYNAV_DB_SYNC_EVERY", "1")))
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
         os.makedirs(f"{map_save_path}", exist_ok=True)
@@ -479,6 +641,14 @@ class BuildMapNode(Node):
 
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
+        self.loop_closure = LoopClosure(
+            db=self.db,
+            timestamps=[],
+            mode=self.loop_closure_mode,
+            dbow3_vocabulary_path=self.dbow3_vocabulary_path,
+            embedding_similarity_threshold=self.loop_similarity_threshold,
+            embedding_top_k=self.loop_top_k,
+        )
 
         self.map_save_path = map_save_path
         self._save_completed = False
@@ -588,16 +758,19 @@ class BuildMapNode(Node):
 
         with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             embedding = self.get_embeddings(infra1_image)
-            embedding = embedding / np.linalg.norm(embedding)
+            embedding_norm = np.linalg.norm(embedding)
+            if embedding_norm > 0:
+                embedding = embedding / embedding_norm
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
-        with Timer(name = "super point extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            features = asyncio.run(self.super_point_extractor.infer(infra1_image))
+        with Timer(name = "feature extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            features = asyncio.run(self.extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
 
         with Timer(name = "loop and pose graph solve", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
                 self.odom[keyframe_image_timestamp] = odom
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+                # self.loop_closure.add_timestamp(keyframe_image_timestamp)  # temp disabled
             else:
                 last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
                 T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
@@ -607,16 +780,24 @@ class BuildMapNode(Node):
 
 
                 def find_loop_and_pose_graph(timestamp):
-                    target_embedding = self.db.get_embedding(timestamp)
                     valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
-                    valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
-
-                    idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
+                    if len(valid_timestamp) == 0:
+                        return
+                    target_embedding = self.db.get_embedding(timestamp)
+                    _, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(timestamp)
+                    curr_kp = curr_features["kpts"][0] if curr_features["kpts"].ndim == 3 else curr_features["kpts"]
+                    curr_desc = curr_features["descps"][0] if curr_features["descps"].ndim == 3 else curr_features["descps"]
                     with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
+                        loop_list = self.loop_closure.find_candidate_timestamps(
+                            curr_kp,
+                            curr_desc,
+                            target_embedding,
+                            top_k=self.loop_top_k,
+                            allowed_timestamps=set(valid_timestamp),
+                        )
                     with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        for idx, similarity in loop_list:
-                            prev_timestamp = idx_to_timestamp[idx]
+                        for candidate in loop_list:
+                            prev_timestamp = candidate["timestamp"]
                             curr_timestamp = timestamp
                             prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
                             curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
@@ -627,7 +808,8 @@ class BuildMapNode(Node):
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-                find_loop_and_pose_graph(keyframe_image_timestamp)
+                # find_loop_and_pose_graph(keyframe_image_timestamp)  # temp disabled
+                # self.loop_closure.add_timestamp(keyframe_image_timestamp)  # temp disabled
 
         with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             cloud = depth_to_cloud(depth, self.K, 30, 3)
@@ -638,14 +820,20 @@ class BuildMapNode(Node):
 
         with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+        self.processed_keyframes += 1
+        if self.processed_keyframes % self.db_sync_every == 0:
+            self.db.sync()
+            self.get_logger().info(
+                f"Synced TinyNavDB to disk at keyframe {self.processed_keyframes}"
+            )
         self.last_keyframe_timestamp = keyframe_image_timestamp
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
-        return asyncio.run(self.dinov2_model.infer(image))
+        return asyncio.run(self.embedding_extractor.infer(image))
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
+        match_result = asyncio.run(self.matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
         keypoints0 = feats0["kpts"][0][valid_mask]
@@ -851,11 +1039,45 @@ def main(args=None):
     parser.add_argument("--map_save_path", type=str, default="tinynav_db")
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument("--loop-closure-mode", type=str, default="embedding", choices=["embedding", "bow"])
+    parser.add_argument("--loop-closure-use-bow", action="store_true", help="Use ORB+BF and DBoW3 for loop closure")
+    parser.add_argument(
+        "--dbow3-vocabulary-path",
+        type=str,
+        default="/tinynav/docs/Vocabulary/ORBvoc.txt",
+        help="DBoW3 vocabulary path for bow mode",
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+
+    use_bow = parsed_args.loop_closure_use_bow or parsed_args.loop_closure_mode == "bow"
+    if use_bow:
+        parsed_args.loop_closure_mode = "bow"
+        if not os.path.exists(parsed_args.dbow3_vocabulary_path):
+            raise FileNotFoundError(
+                f"DBoW3 vocabulary file not found: {parsed_args.dbow3_vocabulary_path}"
+            )
+        from tinynav.core.models_trt import ORBFeatureTRTCompatible, ORBMatcher
+        extractor = ORBFeatureTRTCompatible()
+        matcher = ORBMatcher()
+        embedding_extractor = DummyEmbeddingEngine()
+    else:
+        from tinynav.core.models_trt import Dinov2TRT, LightGlueTRT, SuperPointTRT
+        extractor = SuperPointTRT()
+        matcher = LightGlueTRT()
+        embedding_extractor = Dinov2TRT()
 
     exec_ = SingleThreadedExecutor()
     player_node = BagPlayer(parsed_args.bag_file)
-    map_node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
+    map_node = BuildMapNode(
+        parsed_args.map_save_path,
+        extractor=extractor,
+        matcher=matcher,
+        embedding_extractor=embedding_extractor,
+        loop_closure_mode=parsed_args.loop_closure_mode,
+        loop_closure_use_bow=use_bow,
+        dbow3_vocabulary_path=parsed_args.dbow3_vocabulary_path,
+        verbose_timer=parsed_args.verbose_timer,
+    )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)
     exec_.add_node(map_node)

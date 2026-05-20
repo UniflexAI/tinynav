@@ -11,7 +11,8 @@ router = APIRouter(prefix='/files', tags=['files'])
 
 
 def _db_root() -> Path:
-    return Path(os.environ.get('TINYNAV_DB_PATH', '/tinynav/tinynav_db'))
+    default_root = Path(__file__).resolve().parents[3] / 'tinynav_db'
+    return Path(os.environ.get('TINYNAV_DB_PATH', str(default_root)))
 
 
 def _path_size(p: Path) -> int:

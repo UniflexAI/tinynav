@@ -129,8 +129,10 @@ final previewStreamProvider =
   ref.onDispose(() => channel.sink.close());
 
   return channel.stream.map((data) {
+    if (data is String) return base64Decode(data);
     if (data is Uint8List) return data;
     if (data is List<int>) return Uint8List.fromList(data);
+    if (data is ByteBuffer) return Uint8List.view(data);
     return Uint8List(0);
   }).where((b) => b.isNotEmpty);
 });
