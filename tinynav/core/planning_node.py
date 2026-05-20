@@ -372,14 +372,53 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
+        self._last_local_target = None  # EMA-smoothed local target
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self._last_local_target = None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+
+    def _esdf_lateral_correction(self, target_xy, ESDF_map):
+        """Shift target laterally toward ESDF maximum (corridor center).
+
+        Scans ±lat_range around target along the direction perpendicular to
+        the robot-to-target bearing. Returns the point with the highest ESDF
+        value, or the original target if no lateral scan clears safety_radius.
+        """
+        init_p_w = self.camera_to_robot_center(self.last_T) if self.last_T is not None else None
+        if init_p_w is None:
+            return target_xy
+
+        lat_range = 0.4   # metres each side
+        n_lat = 9
+        safety = self.robot.safety_radius
+        rows, cols = ESDF_map.shape
+
+        # Perpendicular to robot-to-target bearing
+        bearing = target_xy - init_p_w[:2]
+        bn = np.linalg.norm(bearing)
+        if bn < 1e-6:
+            return target_xy
+        perp = np.array([-bearing[1], bearing[0]]) / bn
+
+        best_sdf, best_xy = -1.0, target_xy
+        for lat in np.linspace(-lat_range, lat_range, n_lat):
+            p = target_xy + perp * lat
+            ex = int((p[0] - self.origin[0]) / self.resolution)
+            ey = int((p[1] - self.origin[1]) / self.resolution)
+            if 0 <= ex < rows and 0 <= ey < cols:
+                v = float(ESDF_map[ex, ey])
+                if v > best_sdf:
+                    best_sdf, best_xy = v, p
+
+        if best_sdf >= safety:
+            return best_xy
+        return target_xy  # no safe lateral position found, keep original
 
     def info_callback(self, msg):
         if self.K is None:
@@ -570,6 +609,29 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # --- Local target: ESDF lateral correction + near-goal fade ---
+            local_target = self.target_pose
+            if self.target_pose is not None:
+                init_p_w = self.camera_to_robot_center(T)
+                dist_to_goal = np.linalg.norm(self.target_pose[:2] - init_p_w[:2])
+                goal_fade_radius = 1.0  # metres: within this, correction fades out
+                correction = min(1.0, dist_to_goal / goal_fade_radius)  # 0 at goal, 1 far away
+
+                corrected_xy = self._esdf_lateral_correction(
+                    self.target_pose[:2], ESDF_map
+                )
+                corrected_target = np.array([
+                    corrected_xy[0], corrected_xy[1], self.target_pose[2]
+                ])
+                local_target = correction * corrected_target + (1.0 - correction) * self.target_pose
+
+                # EMA smoothing to avoid target jumps
+                if self._last_local_target is not None:
+                    jump = float(np.linalg.norm(local_target[:2] - self._last_local_target[:2]))
+                    if jump < 1.5:
+                        local_target = 0.3 * local_target + 0.7 * self._last_local_target
+                self._last_local_target = local_target.copy()
+
             def cost_function(traj, param, score, target_pose):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
@@ -577,7 +639,7 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], local_target) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path

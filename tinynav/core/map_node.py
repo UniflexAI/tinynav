@@ -679,12 +679,40 @@ class MapNode(Node):
             # use the max_speed to publish the position the robot should be after 5 seconds
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
+                # Turn-regulated lookahead: if a significant turn is ahead,
+                # place target_pose at the turn point instead of accumulating
+                # distance past it. This prevents DWA from cutting corners.
+                turn_angle_threshold = np.radians(30)  # min direction change to count as a turn
+                turn_lookbehind = 3  # path steps to average direction before each point
+                turn_lookahead = 3  # path steps to average direction after each point
+
                 if len(paths_in_map) > 1:
                     accumulated_distance = 0.0
                     start_point = pose_in_map_position[:3]
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
                         accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
+
+                        # Check for turn at path point i
+                        if i >= turn_lookbehind and i + turn_lookahead < len(paths_in_map):
+                            d_before = paths_in_map[i][:2] - paths_in_map[i - turn_lookbehind][:2]
+                            d_after = paths_in_map[i + turn_lookahead][:2] - paths_in_map[i][:2]
+                            n_before = np.linalg.norm(d_before)
+                            n_after = np.linalg.norm(d_after)
+                            if n_before > 1e-6 and n_after > 1e-6:
+                                cos_angle = np.clip(
+                                    np.dot(d_before, d_after) / (n_before * n_after), -1.0, 1.0
+                                )
+                                turn_angle = np.arccos(cos_angle)
+                                if turn_angle > turn_angle_threshold:
+                                    target_position = paths_in_map[i]
+                                    self.get_logger().info(
+                                        f"Turn detected at path idx {i}, "
+                                        f"angle={np.degrees(turn_angle):.1f}deg, "
+                                        f"dist={accumulated_distance:.2f}m"
+                                    )
+                                    break
+
                         if accumulated_distance > max_speed * 5:
                             target_position = paths_in_map[i]
                             break
