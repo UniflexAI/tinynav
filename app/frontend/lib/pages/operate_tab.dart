@@ -499,9 +499,6 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
   @override
   Widget build(BuildContext context) {
     final p = widget.planning;
-    final gi = p?.gridInfo;
-    final localAspectRatio =
-        (gi != null && gi.height > 0) ? gi.width / gi.height : 1.0;
 
     return Stack(
       fit: StackFit.expand,
@@ -509,137 +506,160 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
         Container(color: const Color(0xFF0D1117)),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Center(
-            child: AspectRatio(
-              aspectRatio: localAspectRatio,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white.withOpacity(0.12), width: 1),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Color(0x55000000),
-                      blurRadius: 14,
-                      offset: Offset(0, 6),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      final targetPose = _pendingTarget != null
-                          ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
-                          : p?.navTargetPose;
-                      final viewportSize = Size(constraints.maxWidth, constraints.maxHeight);
-                      final content = widget.show3d
-                          ? _Local3dPlanningView(planning: p)
-                          : InteractiveViewer(
-                              transformationController: _txCtrl,
-                              minScale: 0.5,
-                              maxScale: 8.0,
-                              boundaryMargin: const EdgeInsets.all(double.infinity),
+          child: ClipRect(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final gi = p?.gridInfo;
+                final contentAspect =
+                    (gi != null && gi.height > 0) ? gi.width / gi.height : 1.0;
+                final viewportAspect = constraints.maxWidth / constraints.maxHeight;
+                final useWidth = widget.fillViewport
+                    ? viewportAspect > contentAspect
+                    : viewportAspect < contentAspect;
+                final contentWidth = useWidth
+                    ? constraints.maxWidth
+                    : constraints.maxHeight * contentAspect;
+                final contentHeight = useWidth
+                    ? constraints.maxWidth / contentAspect
+                    : constraints.maxHeight;
+                final contentSize = Size(contentWidth, contentHeight);
+                final targetPose = _pendingTarget != null
+                    ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
+                    : p?.navTargetPose;
+
+                return Center(
+                  child: SizedBox(
+                    width: contentWidth,
+                    height: contentHeight,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.white.withOpacity(0.12), width: 1),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x55000000),
+                            blurRadius: 14,
+                            offset: Offset(0, 6),
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: Builder(
+                          builder: (mapContext) {
+                            final content = widget.show3d
+                                ? _Local3dPlanningView(planning: p)
+                                : InteractiveViewer(
+                                    transformationController: _txCtrl,
+                                    minScale: 0.5,
+                                    maxScale: 8.0,
+                                    boundaryMargin: const EdgeInsets.all(double.infinity),
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        const ColoredBox(color: Color(0xFF0F1621)),
+                                        if (widget.showEsdf && p?.esdfImage != null)
+                                          Opacity(
+                                            opacity: 0.85,
+                                            child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                          ),
+                                        if (widget.showObstacle && p?.obstacleImage != null)
+                                          Opacity(
+                                            opacity: 0.45,
+                                            child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                          ),
+                                        if (p != null)
+                                          CustomPaint(
+                                            painter: LocalPlanningPainter(
+                                              trajectory: p.trajectory,
+                                              centerline: p.centerline,
+                                              globalPath: p.globalPath,
+                                              footprint: p.footprint,
+                                              gridInfo: p.gridInfo,
+                                              odomPose: p.odomPose,
+                                              showTrajectory: widget.showTrajectory,
+                                              showGlobalPath: widget.showGlobalPath,
+                                              showFootprint: widget.showFootprint,
+                                              navTargetPose: targetPose,
+                                            ),
+                                          )
+                                        else
+                                          Center(
+                                            child: Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                              decoration: BoxDecoration(
+                                                color: Colors.black.withOpacity(0.45),
+                                                borderRadius: BorderRadius.circular(12),
+                                                border: Border.all(color: Colors.white.withOpacity(0.12)),
+                                              ),
+                                              child: const Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(Icons.map_outlined, size: 40, color: Colors.white38),
+                                                  SizedBox(height: 8),
+                                                  Text(
+                                                    'Waiting for planning data…',
+                                                    style: TextStyle(
+                                                      color: Colors.white70,
+                                                      fontSize: 13,
+                                                      fontWeight: FontWeight.w500,
+                                                    ),
+                                                  ),
+                                                  SizedBox(height: 2),
+                                                  Text(
+                                                    'Connect device and start local planning',
+                                                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                            return Listener(
+                              behavior: HitTestBehavior.translucent,
+                              onPointerDown: (event) => _startManualTargetTimer(event, contentSize),
+                              onPointerMove: _maybeCancelManualTargetTimer,
+                              onPointerUp: (_) => _cancelManualTargetTimer(),
+                              onPointerCancel: (_) => _cancelManualTargetTimer(),
                               child: Stack(
                                 fit: StackFit.expand,
                                 children: [
-                                  const ColoredBox(color: Color(0xFF0F1621)),
-                                  if (widget.showEsdf && p?.esdfImage != null)
-                                    Opacity(
-                                      opacity: 0.85,
-                                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                                    ),
-                                  if (widget.showObstacle && p?.obstacleImage != null)
-                                    Opacity(
-                                      opacity: 0.45,
-                                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                                    ),
-                                  if (p != null)
-                                    CustomPaint(
-                                      painter: LocalPlanningPainter(
-                                        trajectory: p.trajectory,
-                                        globalPath: p.globalPath,
-                                        footprint: p.footprint,
-                                        gridInfo: p.gridInfo,
-                                        odomPose: p.odomPose,
-                                        showTrajectory: widget.showTrajectory,
-                                        showGlobalPath: widget.showGlobalPath,
-                                        showFootprint: widget.showFootprint,
-                                        navTargetPose: targetPose,
-                                      ),
-                                    )
-                                  else
-                                    Center(
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black.withOpacity(0.45),
-                                          borderRadius: BorderRadius.circular(12),
-                                          border: Border.all(color: Colors.white.withOpacity(0.12)),
-                                        ),
-                                        child: const Column(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: [
-                                            Icon(Icons.map_outlined, size: 40, color: Colors.white38),
-                                            SizedBox(height: 8),
-                                            Text(
-                                              'Waiting for planning data…',
-                                              style: TextStyle(
-                                                color: Colors.white70,
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                            ),
-                                            SizedBox(height: 2),
-                                            Text(
-                                              'Connect device and start local planning',
-                                              style: TextStyle(color: Colors.white38, fontSize: 11),
-                                            ),
+                                  content,
+                                  IgnorePointer(
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        gradient: LinearGradient(
+                                          begin: Alignment.topCenter,
+                                          end: Alignment.bottomCenter,
+                                          colors: [
+                                            Colors.white.withOpacity(0.04),
+                                            Colors.transparent,
+                                            Colors.black.withOpacity(0.08),
                                           ],
+                                          stops: const [0.0, 0.35, 1.0],
                                         ),
                                       ),
                                     ),
+                                  ),
                                 ],
                               ),
                             );
-                      return Listener(
-                        behavior: HitTestBehavior.translucent,
-                        onPointerDown: (event) => _startManualTargetTimer(event, viewportSize),
-                        onPointerMove: _maybeCancelManualTargetTimer,
-                        onPointerUp: (_) => _cancelManualTargetTimer(),
-                        onPointerCancel: (_) => _cancelManualTargetTimer(),
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            content,
-                            IgnorePointer(
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(
-                                    begin: Alignment.topCenter,
-                                    end: Alignment.bottomCenter,
-                                    colors: [
-                                      Colors.white.withOpacity(0.04),
-                                      Colors.transparent,
-                                      Colors.black.withOpacity(0.08),
-                                    ],
-                                    stops: const [0.0, 0.35, 1.0],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
+                          },
                         ),
-                      );
-                    },
+                      ),
+                    ),
                   ),
-                ),
-              ),
+                );
+              },
             ),
           ),
         ),
       ],
     );
   }
+
 }
 
 class _Local3dPlanningView extends StatefulWidget {
@@ -760,7 +780,7 @@ class _Local3dPlanningViewState extends State<_Local3dPlanningView> {
             ),
           ],
         ),
-      ),
+      )
     );
   }
 }
@@ -790,7 +810,7 @@ class _LocalViewModeButton extends StatelessWidget {
             fontWeight: FontWeight.w700,
           ),
         ),
-      ),
+      )
     );
   }
 }
@@ -1105,6 +1125,7 @@ class _PoiSheet extends ConsumerStatefulWidget {
 class _PoiSheetState extends ConsumerState<_PoiSheet> {
   /// POI ids in the exact order they were checked.
   final List<int> _checkedIds = [];
+  final ScrollController _poiScrollController = ScrollController();
 
   Future<void> _deletePoi(Poi poi) async {
     final ok = await showDialog<bool>(
@@ -1158,83 +1179,128 @@ class _PoiSheetState extends ConsumerState<_PoiSheet> {
   }
 
   @override
+  void dispose() {
+    _poiScrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final poisAsync = ref.watch(poisProvider);
     final status = ref.watch(deviceStatusProvider).valueOrNull;
     final localized = ref.watch(planningStreamProvider).valueOrNull?.localized ?? false;
     final canGo = status != null && status.online && localized;
 
-    return Padding(
-      padding: EdgeInsets.fromLTRB(
-          16, 12, 16, 24 + MediaQuery.of(context).viewInsets.bottom),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 36, height: 4,
-              margin: const EdgeInsets.only(bottom: 14),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
+    return SafeArea(
+      top: false,
+      child: FractionallySizedBox(
+        heightFactor: 0.9,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            16,
+            12,
+            16,
+            24 + MediaQuery.of(context).viewInsets.bottom,
           ),
-          // ── Header ──────────────────────────────────────────────────
-          Row(children: [
-            const Icon(Icons.place_outlined, size: 20),
-            const SizedBox(width: 8),
-            const Text('POIs', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-            const Spacer(),
-            FilledButton.icon(
-              onPressed: (canGo && _checkedIds.isNotEmpty)
-                  ? () => _startNav(poisAsync.valueOrNull ?? [])
-                  : null,
-              icon: const Icon(Icons.navigation_rounded, size: 16),
-              label: const Text('Go'),
-              style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                minimumSize: Size.zero,
-              ),
-            ),
-          ]),
-          const Divider(height: 20),
-          // ── POI list ────────────────────────────────────────────────
-          poisAsync.when(
-            data: (pois) => pois.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 20),
-                    child: Center(
-                      child: Text('No POIs yet', style: TextStyle(color: Colors.grey)),
-                    ),
-                  )
-                : Column(
-                    children: pois
-                        .map((poi) {
-                          final orderIndex = _checkedIds.indexOf(poi.id);
-                          return _PoiTile(
-                            poi: poi,
-                            checked: orderIndex != -1,
-                            orderNumber: orderIndex == -1 ? null : orderIndex + 1,
-                            onChecked: (v) => setState(() {
-                              if (v) {
-                                if (!_checkedIds.contains(poi.id)) {
-                                  _checkedIds.add(poi.id);
-                                }
-                              } else {
-                                _checkedIds.remove(poi.id);
-                              }
-                            }),
-                            onDelete: () => _deletePoi(poi),
-                          );
-                        })
-                        .toList(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 14),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
                   ),
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => Text('$e', style: const TextStyle(color: Colors.red)),
+                ),
+              ),
+              Row(children: [
+                const Icon(Icons.place_outlined, size: 20),
+                const SizedBox(width: 8),
+                const Text('POIs', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: (canGo && _checkedIds.isNotEmpty)
+                      ? () => _startNav(poisAsync.valueOrNull ?? [])
+                      : null,
+                  icon: const Icon(Icons.navigation_rounded, size: 16),
+                  label: const Text('Go'),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    minimumSize: Size.zero,
+                  ),
+                ),
+              ]),
+              const Divider(height: 20),
+              Expanded(
+                child: poisAsync.when(
+                  data: (pois) => pois.isEmpty
+                      ? const Center(
+                          child: Text('No POIs yet', style: TextStyle(color: Colors.grey)),
+                        )
+                      : ScrollConfiguration(
+                          behavior: ScrollConfiguration.of(context).copyWith(
+                            dragDevices: {
+                              PointerDeviceKind.touch,
+                              PointerDeviceKind.mouse,
+                              PointerDeviceKind.trackpad,
+                              PointerDeviceKind.stylus,
+                              PointerDeviceKind.unknown,
+                            },
+                          ),
+                          child: Scrollbar(
+                            thumbVisibility: pois.length > 8,
+                            controller: _poiScrollController,
+                            child: ListView.builder(
+                              controller: _poiScrollController,
+                              primary: false,
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              padding: EdgeInsets.zero,
+                              itemCount: pois.length,
+                              itemBuilder: (context, index) {
+                                final poi = pois[index];
+                                final orderIndex = _checkedIds.indexOf(poi.id);
+                                return _PoiTile(
+                                  poi: poi,
+                                  checked: orderIndex != -1,
+                                  orderNumber: orderIndex == -1 ? null : orderIndex + 1,
+                                  onChecked: (v) => setState(() {
+                                    if (v) {
+                                      if (!_checkedIds.contains(poi.id)) {
+                                        _checkedIds.add(poi.id);
+                                      }
+                                    } else {
+                                      _checkedIds.remove(poi.id);
+                                    }
+                                  }),
+                                  onDelete: () => _deletePoi(poi),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                  loading: () => ListView(
+                    controller: _poiScrollController,
+                    children: const [
+                      SizedBox(
+                        height: 180,
+                        child: Center(child: CircularProgressIndicator()),
+                      ),
+                    ],
+                  ),
+                  error: (e, _) => ListView(
+                    controller: _poiScrollController,
+                    children: [
+                      Text('$e', style: const TextStyle(color: Colors.red)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
