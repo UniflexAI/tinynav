@@ -343,8 +343,7 @@ class MapNode(Node):
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
-        self.global_plan_odom_pub = self.create_publisher(Path, '/mapping/global_plan_odom', 10)
-        self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        self.target_pose_pub = self.create_publisher(Odometry, "/mapping/lookahead_target", 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -761,7 +760,6 @@ class MapNode(Node):
             # use the max_speed to publish the position the robot should be after 5 seconds
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
-                target_idx = len(paths_in_map) - 1
                 if len(paths_in_map) > 1:
                     accumulated_distance = 0.0
                     start_point = pose_in_map_position[:3]
@@ -770,39 +768,18 @@ class MapNode(Node):
                         accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
                         if accumulated_distance > max_speed * 5:
                             target_position = paths_in_map[i]
-                            target_idx = i
                             break
                         start_point = paths_in_map[i]
                 else:
-                    target_idx = 0
                     target_position = paths_in_map[0]
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
-
-                # Path tangent at target (averaged over ±3 path-steps window)
-                tangent_map = np.array([1.0, 0.0])
-                if len(paths_in_map) >= 2:
-                    i0 = max(0, target_idx - 3)
-                    i1 = min(len(paths_in_map) - 1, target_idx + 3)
-                    if i1 > i0:
-                        d_xy = paths_in_map[i1][:2] - paths_in_map[i0][:2]
-                        n = float(np.linalg.norm(d_xy))
-                        if n > 1e-6:
-                            tangent_map = d_xy / n
-
                 pose_in_origin_odom = self.odom[timestamp]
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
-                tangent_odom = T[:2, :2] @ tangent_map
-                yaw = float(np.arctan2(tangent_odom[1], tangent_odom[0]))
-                cy_, sy_ = float(np.cos(yaw)), float(np.sin(yaw))
                 dummy_pose = np.eye(4)
                 dummy_pose[:3, 3] = target_position_in_odom
-                dummy_pose[:3, :3] = np.array([
-                    [cy_, -sy_, 0.0],
-                    [sy_,  cy_, 0.0],
-                    [0.0,  0.0, 1.0],
-                ])
-                print(f"target_position_in_odom: {target_position_in_odom}, yaw: {yaw:.3f}")
+                #logging.info(f"target_position_in_odom: {target_position_in_odom}")
+                print(f"target_position_in_odom: {target_position_in_odom}")
 
                 self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
                 path_msg = Path()
@@ -820,24 +797,6 @@ class MapNode(Node):
                     pose.pose.orientation.w = 1.0
                     path_msg.poses.append(pose)
                 self.global_plan_pub.publish(path_msg)
-
-                # Also publish path transformed to odom frame for planning_node to use as anchor
-                path_odom_msg = Path()
-                path_odom_msg.header.stamp = self.get_clock().now().to_msg()
-                path_odom_msg.header.frame_id = "world"
-                R_mo = T[:3, :3]
-                t_mo = T[:3, 3]
-                for x, y, z in paths_in_map:
-                    pt_odom = R_mo @ np.array([x, y, z]) + t_mo
-                    pose = PoseStamped()
-                    pose.header = path_odom_msg.header
-                    pose.pose.position.x = float(pt_odom[0])
-                    pose.pose.position.y = float(pt_odom[1])
-                    pose.pose.position.z = float(pt_odom[2])
-                    pose.pose.orientation.w = 1.0
-                    path_odom_msg.poses.append(pose)
-                self.global_plan_odom_pub.publish(path_odom_msg)
-
                 self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
             logging.info("No path found in map")
