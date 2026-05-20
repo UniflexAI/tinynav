@@ -168,6 +168,7 @@ class PerceptionNode(Node):
         self.imu_measurements = deque(maxlen=1000)
 
         self.keyframe_queue = []
+        self._async_loop = asyncio.new_event_loop()
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
@@ -218,10 +219,16 @@ class PerceptionNode(Node):
         self.last_processed_timestamp = image_timestamp
         loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            processed = asyncio.run(self.process(left_msg, right_msg))
+            processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
         if processed:
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
+
+    def destroy_node(self):
+        if self._async_loop is not None:
+            self._async_loop.close()
+            self._async_loop = None
+        return super().destroy_node()
 
     def imu_callback(self, imu_msg):
         self.input_aligner_imu_filter.signalMessage(imu_msg)
@@ -251,7 +258,7 @@ class PerceptionNode(Node):
             self.keyframe_queue.append(
                 Keyframe(
                     timestamp=current_timestamp,
-                    image=left_img,
+                    image=left_img.copy(),
                     disparity=disparity,
                     depth=depth,
                     pose=self.T_body_last,
@@ -327,7 +334,7 @@ class PerceptionNode(Node):
         self.keyframe_queue.append(
             Keyframe(
                 timestamp=current_timestamp,
-                image=left_img,
+                image=left_img.copy(),
                 disparity=disparity,
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
@@ -424,7 +431,8 @@ class PerceptionNode(Node):
                             prev_left_extract_result["mask"],
                             current_left_extract_result["mask"],
                             kf_prev.image.shape,
-                            kf_curr.image.shape)
+                            kf_curr.image.shape,
+                        )
                     with Timer(name="[cached result[2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
                         current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
@@ -585,11 +593,11 @@ def main(args=None):
     parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
-    imu_propagator_node = ImuPropagatorNode()
+    #imu_propagator_node = ImuPropagatorNode()
 
-    executor = rclpy.executors.MultiThreadedExecutor()
+    executor = rclpy.executors.MultiThreadedExecutor(1)
     executor.add_node(perception_node)
-    executor.add_node(imu_propagator_node)
+    #executor.add_node(imu_propagator_node)
     executor.spin()
     perception_node.destroy_node()
     imu_propagator_node.destroy_node()
