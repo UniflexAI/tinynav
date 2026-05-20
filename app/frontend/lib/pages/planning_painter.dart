@@ -9,7 +9,6 @@ import '../core/models.dart';
 /// Global path arrives pre-converted to odom frame by the backend.
 class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> trajectory;
-  final List<TrajPoint> centerline;
   final List<TrajPoint> globalPath;
   final List<TrajPoint> footprint;
   final GridInfo? gridInfo;
@@ -21,7 +20,6 @@ class LocalPlanningPainter extends CustomPainter {
 
   const LocalPlanningPainter({
     required this.trajectory,
-    this.centerline = const [],
     this.globalPath = const [],
     this.footprint = const [],
     this.gridInfo,
@@ -49,8 +47,6 @@ class LocalPlanningPainter extends CustomPainter {
     if (showGlobalPath) _drawGlobalPath(canvas, cx, cy, scaleX, scaleY, pose);
 
     if (showTrajectory) _drawTrajectory(canvas, cx, cy, scaleX, scaleY, pose);
-
-    _drawCenterline(canvas, cx, cy, scaleX, scaleY, pose);
 
     if (navTargetPose != null && pose != null)
       _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
@@ -92,30 +88,6 @@ class LocalPlanningPainter extends CustomPainter {
       5,
       Paint()..color = Colors.cyanAccent,
     );
-  }
-
-  void _drawCenterline(Canvas canvas, double cx, double cy,
-      double scaleX, double scaleY, Pose? pose) {
-    if (centerline.length < 2 || pose == null) return;
-    final paint = Paint()
-      ..color = const Color(0xFFFFEB3B).withOpacity(0.9)
-      ..strokeWidth = 2.0
-      ..style = PaintingStyle.stroke;
-    final dot = Paint()..color = const Color(0xFFFFEB3B);
-    final path = Path();
-    bool first = true;
-    for (final pt in centerline) {
-      final px = cx + (pt.x - pose.x) * scaleX;
-      final py = cy - (pt.y - pose.y) * scaleY;
-      if (first) {
-        path.moveTo(px, py);
-        first = false;
-      } else {
-        path.lineTo(px, py);
-      }
-      canvas.drawCircle(Offset(px, py), 2.0, dot);
-    }
-    canvas.drawPath(path, paint);
   }
 
   /// Global path is already in odom frame (backend transforms via exact T_odom_map).
@@ -236,7 +208,6 @@ class LocalPlanningPainter extends CustomPainter {
   @override
   bool shouldRepaint(LocalPlanningPainter old) =>
       trajectory != old.trajectory ||
-      centerline != old.centerline ||
       globalPath != old.globalPath ||
       footprint != old.footprint ||
       gridInfo != old.gridInfo ||

@@ -186,7 +186,6 @@ class PlanningState {
   final Uint8List? esdfImage;
   final Uint8List? obstacleImage;
   final List<TrajPoint> trajectory;
-  final List<TrajPoint> centerline;
   final List<TrajPoint> globalPath;
   final List<TrajPoint> mapGlobalPath;
   final GridInfo? gridInfo;
@@ -202,7 +201,6 @@ class PlanningState {
     this.esdfImage,
     this.obstacleImage,
     required this.trajectory,
-    this.centerline = const [],
     required this.globalPath,
     this.mapGlobalPath = const [],
     this.gridInfo,
@@ -236,7 +234,6 @@ class PlanningState {
       esdfImage: decodeImg(j['esdf_image'] as String?),
       obstacleImage: decodeImg(j['obstacle_image'] as String?),
       trajectory: parsePath('trajectory'),
-      centerline: parsePath('centerline'),
       globalPath: parsePath('global_path'),
       mapGlobalPath: parsePath('map_global_path'),
       gridInfo: j['grid_info'] != null
