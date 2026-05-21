@@ -99,72 +99,78 @@ def test_lightglue_cache_hit_with_consecutive_salted_pairs():
         salted = np.clip(base.astype(np.int16) + noise, 0, 255).astype(np.uint8)
         images.append(salted)
 
-    async def _one_perception_style_round():
-        n_window = 5
-        keyframe_queue = []
-        sp_s = 0.0
-        lg_s = 0.0
-        match_signatures = []
-        sliding_reuse_checks = 0
-        sliding_reuse_hits = 0
-        seen_pairs = set()
+    n_window = 5
+    keyframe_queue = []
+    sp_s = 0.0
+    lg_s = 0.0
+    match_signatures = []
+    sliding_reuse_checks = 0
+    sliding_reuse_hits = 0
+    seen_pairs = set()
+    loop = asyncio.new_event_loop()
 
-        async def _run_pair(img_a, img_b):
-            nonlocal sp_s, lg_s
-            t_sp = time.perf_counter()
-            r0 = await superpoint.infer(img_a)
-            r1 = await superpoint.infer(img_b)
-            sp_s += time.perf_counter() - t_sp
+    async def _infer_two_images_and_match(frame_idx, new_img):
+        nonlocal sliding_reuse_checks, sliding_reuse_hits
+        local_signatures = []
 
-            t_lg = time.perf_counter()
+        # 1) infer/match previous keyframe with new image
+        prev_idx, prev_img = keyframe_queue[-1]
+        process_key = (prev_idx, frame_idx)
+        r0 = await superpoint.infer(prev_img)
+        r1 = await superpoint.infer(new_img)
+        m = await lightglue.infer(
+            r0["kpts"], r1["kpts"],
+            r0["descps"], r1["descps"],
+            r0["mask"], r1["mask"],
+            prev_img.shape, new_img.shape,
+        )
+        local_signatures.append(int(np.sum(m["match_indices"] != -1)))
+        seen_pairs.add(process_key)
+
+        # 2) append new keyframe into sliding window
+        keyframe_queue.append((frame_idx, new_img))
+        if len(keyframe_queue) > n_window:
+            keyframe_queue.pop(0)
+
+        # 3) sliding-window consecutive pairs
+        start = max(0, len(keyframe_queue) - n_window)
+        window = keyframe_queue[start:]
+        for i in range(0, len(window) - 1):
+            info_before_window = lightglue.infer.cache_info()
+            idx_a, img_a_w = window[i]
+            idx_b, img_b_w = window[i + 1]
+            pair_key = (idx_a, idx_b)
+            r0 = await superpoint.infer(img_a_w)
+            r1 = await superpoint.infer(img_b_w)
             m = await lightglue.infer(
                 r0["kpts"], r1["kpts"],
                 r0["descps"], r1["descps"],
                 r0["mask"], r1["mask"],
-                img_a.shape, img_b.shape,
+                img_a_w.shape, img_b_w.shape,
             )
-            lg_s += time.perf_counter() - t_lg
-            return m
+            local_signatures.append(int(np.sum(m["match_indices"] != -1)))
 
-        for frame_idx, img in enumerate(images):
+            if pair_key in seen_pairs:
+                sliding_reuse_checks += 1
+                window_delta_hit = lightglue.infer.cache_info().hits - info_before_window.hits
+                if window_delta_hit >= 1:
+                    sliding_reuse_hits += 1
+            seen_pairs.add(pair_key)
+
+        return local_signatures
+
+    for frame_idx, img in enumerate(images):
+        if len(keyframe_queue) < 1:
             keyframe_queue.append((frame_idx, img))
-            if len(keyframe_queue) < 2:
-                continue
+            continue
 
-            # Perception process(): prev/current for newest frame.
-            prev_idx, prev_img = keyframe_queue[-2]
-            curr_idx, curr_img = keyframe_queue[-1]
-            process_key = (prev_idx, curr_idx)
-            m = await _run_pair(prev_img, curr_img)
-            match_signatures.append(int(np.sum(m["match_indices"] != -1)))
-            seen_pairs.add(process_key)
+        frame_signatures = loop.run_until_complete(_infer_two_images_and_match(frame_idx, img))
+        #frame_signatures = asyncio.run(_infer_two_images_and_match(frame_idx, img))
+        match_signatures.extend(frame_signatures)
 
-            # Perception cached association loop: adjacent pairs in last _N keyframes.
-            start = max(0, len(keyframe_queue) - n_window)
-            for i in range(start, len(keyframe_queue) - 1):
-                info_before_window = lightglue.infer.cache_info()
-                idx_a, img_a = keyframe_queue[i]
-                idx_b, img_b = keyframe_queue[i + 1]
-                pair_key = (idx_a, idx_b)
-                m2 = await _run_pair(img_a, img_b)
-                match_signatures.append(int(np.sum(m2["match_indices"] != -1)))
-
-                # Any pair already inferred earlier in this round should hit here.
-                if pair_key in seen_pairs:
-                    sliding_reuse_checks += 1
-                    window_delta_hit = lightglue.infer.cache_info().hits - info_before_window.hits
-                    if window_delta_hit >= 1:
-                        sliding_reuse_hits += 1
-                seen_pairs.add(pair_key)
-
-            if len(keyframe_queue) > n_window:
-                keyframe_queue.pop(0)
-
-        return match_signatures, sp_s, lg_s, sliding_reuse_checks, sliding_reuse_hits, lightglue.infer.cache_info()
-
-    (
-        sig, sp_s, lg_s, sliding_reuse_checks, sliding_reuse_hits, info_final
-    ) = asyncio.run(_one_perception_style_round())
+    sig = match_signatures
+    info_final = lightglue.infer.cache_info()
+    loop.close()
 
     assert sliding_reuse_checks > 0, "No sliding-window reuse checks were performed."
     assert sliding_reuse_hits == sliding_reuse_checks, (
