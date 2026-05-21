@@ -22,109 +22,8 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tinynav.core.build_map_node import TinyNavDB, find_loop, save_map_occupancy
 from tinynav.core.models_trt import LightGlueTRT
-from tool.video_db import VideoDB
-
-
-class IntKeyShelf:
-    def __init__(self, filename: str):
-        import shelve
-
-        self.db = shelve.open(filename)
-
-    def __getitem__(self, key: int):
-        return self.db[str(int(key))]
-
-    def __setitem__(self, key: int, value) -> None:
-        self.db[str(int(key))] = value
-
-    def keys(self) -> list[int]:
-        return [int(k) for k in self.db.keys()]
-
-    def close(self) -> None:
-        self.db.close()
-
-
-class TinyNavDB:
-    def __init__(self, map_save_path: str, is_scratch: bool = True):
-        self.map_save_path = map_save_path
-        self.is_scratch = is_scratch
-        mode = "write" if is_scratch else "read"
-        self.infra1_video_db = VideoDB(
-            dir_path=f"{map_save_path}/infra1_images_db",
-            mode=mode,
-            fps=30,
-        )
-        self.rgb_video_db = VideoDB(
-            dir_path=f"{map_save_path}/rgb_images_db",
-            mode=mode,
-            fps=30,
-        )
-        self.features = IntKeyShelf(f"{map_save_path}/features")
-        self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
-        self.depths = IntKeyShelf(f"{map_save_path}/depths")
-
-    def set_entry(
-        self,
-        key: int,
-        depth: np.ndarray | None = None,
-        embedding: np.ndarray | None = None,
-        features: dict | None = None,
-        infra1_image: np.ndarray | None = None,
-        rgb_image: np.ndarray | None = None,
-    ) -> None:
-        if infra1_image is not None:
-            self.infra1_video_db.write(key, infra1_image)
-        if rgb_image is not None:
-            self.rgb_video_db.write(key, rgb_image)
-        if depth is not None:
-            self.depths[key] = depth
-        if embedding is not None:
-            self.embeddings[key] = embedding
-        if features is not None:
-            self.features[key] = features
-
-    def get_depth_embedding_features_images(self, key: int):
-        key_int = int(key)
-
-        def rgb_loader():
-            if self.is_scratch:
-                return None
-            return self.rgb_video_db.read(key_int)
-
-        def infra1_loader():
-            if self.is_scratch:
-                return None
-            return self.infra1_video_db.read(key_int)
-
-        return self.depths[key_int], self.embeddings[key_int], self.features[key_int], rgb_loader, infra1_loader
-
-    def get_embedding(self, key: int):
-        return self.embeddings[key]
-
-    def close(self) -> None:
-        self.features.close()
-        self.embeddings.close()
-        self.depths.close()
-        self.infra1_video_db.close()
-        self.rgb_video_db.close()
-
-
-def find_loop(
-    target_embedding: np.ndarray,
-    embeddings: np.ndarray,
-    loop_similarity_threshold: float,
-    loop_top_k: int,
-) -> list[tuple[int, float]]:
-    if len(embeddings) == 0:
-        return []
-    similarity_array = embeddings @ target_embedding
-    top_k_indices = np.argsort(similarity_array, axis=0)
-    loop_list = []
-    for idx in top_k_indices:
-        if similarity_array[idx] > loop_similarity_threshold:
-            loop_list.append((int(idx), float(similarity_array[idx])))
-    return loop_list[-loop_top_k:]
 
 
 def parse_args() -> argparse.Namespace:
@@ -179,8 +78,6 @@ def match_keypoints(
     shape0: tuple[int, int],
     shape1: tuple[int, int],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    feats0 = truncate_features(feats0, matcher.inputs[0]["host"].shape[1])
-    feats1 = truncate_features(feats1, matcher.inputs[1]["host"].shape[1])
     match_result = loop.run_until_complete(
         matcher.infer(
             feats0["kpts"],
@@ -199,17 +96,6 @@ def match_keypoints(
     keypoints1 = feats1["kpts"][0][match_indices[valid_mask]]
     matches = np.column_stack((np.flatnonzero(valid_mask), match_indices[valid_mask])).astype(np.int64)
     return keypoints0, keypoints1, matches
-
-
-def truncate_features(features: dict, max_keypoints: int) -> dict:
-    truncated = dict(features)
-    for key in ("kpts", "scores", "descps", "mask"):
-        if key not in truncated:
-            continue
-        value = truncated[key]
-        if isinstance(value, np.ndarray) and value.ndim >= 2 and value.shape[1] > max_keypoints:
-            truncated[key] = value[:, :max_keypoints].copy()
-    return truncated
 
 
 def keypoints_to_world_points(
@@ -498,28 +384,7 @@ def write_merged_map(args: argparse.Namespace, T_map_b_to_map_a: np.ndarray, rep
     }
     (args.output / "merge_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    from tinynav.core.build_map_node import generate_occupancy_map
-
-    occupancy_db = TinyNavDB(str(args.output), is_scratch=False)
-    try:
-        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
-            merged_poses,
-            occupancy_db,
-            K_a,
-            baseline_a,
-            resolution=0.1,
-            step=10,
-        )
-    finally:
-        occupancy_db.close()
-    occupancy_meta = np.array(
-        [occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], 0.1],
-        dtype=np.float32,
-    )
-    np.save(args.output / "occupancy_grid.npy", occupancy_grid)
-    np.save(args.output / "occupancy_meta.npy", occupancy_meta)
-    np.save(args.output / "sdf_map.npy", sdf_map)
-    cv2.imwrite(str(args.output / "occupancy_2d_image.png"), occupancy_2d_image)
+    save_map_occupancy(str(args.output), merged_poses, K_a, baseline_a, resolution=0.1, step=10)
 
 
 def main() -> int:
