@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tinynav.core.build_map_node import TinyNavDB, find_loop, save_map_occupancy
+from tinynav.core.build_map_node import TinyNavDB, find_loop, generate_occupancy_map
 from tinynav.core.models_trt import LightGlueTRT
 
 
@@ -384,7 +384,23 @@ def write_merged_map(args: argparse.Namespace, T_map_b_to_map_a: np.ndarray, rep
     }
     (args.output / "merge_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    save_map_occupancy(str(args.output), merged_poses, K_a, baseline_a, resolution=0.1, step=10)
+    occupancy_resolution = 0.1
+    occupancy_step = 10
+    occupancy_db = TinyNavDB(str(args.output), is_scratch=False)
+    try:
+        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
+            merged_poses, occupancy_db, K_a, baseline_a, occupancy_resolution, occupancy_step
+        )
+    finally:
+        occupancy_db.close()
+    occupancy_meta = np.array(
+        [occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution],
+        dtype=np.float32,
+    )
+    np.save(args.output / "occupancy_grid.npy", occupancy_grid)
+    np.save(args.output / "occupancy_meta.npy", occupancy_meta)
+    np.save(args.output / "sdf_map.npy", sdf_map)
+    cv2.imwrite(str(args.output / "occupancy_2d_image.png"), occupancy_2d_image)
 
 
 def main() -> int:
