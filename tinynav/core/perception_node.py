@@ -258,7 +258,7 @@ class PerceptionNode(Node):
             self.keyframe_queue.append(
                 Keyframe(
                     timestamp=current_timestamp,
-                    image=left_img.copy(),
+                    image=left_img,
                     disparity=disparity,
                     depth=depth,
                     pose=self.T_body_last,
@@ -334,7 +334,7 @@ class PerceptionNode(Node):
         self.keyframe_queue.append(
             Keyframe(
                 timestamp=current_timestamp,
-                image=left_img.copy(),
+                image=left_img,
                 disparity=disparity,
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
@@ -404,7 +404,6 @@ class PerceptionNode(Node):
                 uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
-            
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
             # match by LightGlue, filter by geometric consistency (pose estimation), 
             # and build tracks via Union-Find
