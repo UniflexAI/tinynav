@@ -94,17 +94,27 @@ def _score_tracking(trajectory: np.ndarray, path: np.ndarray, path_s: np.ndarray
       - error_score uses exp(-RMSE / sigma), so smaller path deviation is better;
       - completion_score is the fraction of reference arclength reached.
     """
-    if len(trajectory) == 0 or len(path) == 0 or len(path_s) == 0:
+    n_samples = int(len(trajectory))
+    if n_samples == 0 or len(path) == 0 or len(path_s) == 0:
         return {
             "score": 0.0,
             "rmse_m": None,
             "mean_error_m": None,
             "max_error_m": None,
             "completion_percent": 0.0,
-            "samples": int(len(trajectory)),
+            "samples": n_samples,
         }
 
-    dists = _nearest_path_distances(trajectory, path)
+    # Downsample trajectory before the O(n×m) distance matrix to bound scoring time.
+    # Original last point is preserved separately for completion calculation.
+    _MAX_SCORING_SAMPLES = 2000
+    if n_samples > _MAX_SCORING_SAMPLES:
+        idx = np.round(np.linspace(0, n_samples - 1, _MAX_SCORING_SAMPLES)).astype(int)
+        traj_ds = trajectory[idx]
+    else:
+        traj_ds = trajectory
+
+    dists = _nearest_path_distances(traj_ds, path)
     rmse = float(np.sqrt(np.mean(np.square(dists))))
     mean = float(np.mean(dists))
     max_err = float(np.max(dists))
@@ -125,7 +135,7 @@ def _score_tracking(trajectory: np.ndarray, path: np.ndarray, path_s: np.ndarray
         "mean_error_m": round(mean, 3),
         "max_error_m": round(max_err, 3),
         "completion_percent": round(completion * 100.0, 1),
-        "samples": int(len(trajectory)),
+        "samples": n_samples,
     }
 
 
@@ -146,7 +156,7 @@ class BenchmarkNode(Node):
         super().__init__("benchmark_node")
         self.config = config
 
-        self.odom_sub = self.create_subscription(Odometry, config.odom_topic, self._odom_callback, 20)
+        self.odom_sub = self.create_subscription(Odometry, config.odom_topic, self._odom_callback, 10)
         self.cmd_sub = self.create_subscription(String, "/benchmark/cmd", self._cmd_callback, 10)
         self.global_plan_pub = self.create_publisher(Path, "/mapping/global_plan", 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
@@ -191,10 +201,6 @@ class BenchmarkNode(Node):
         elif action in {"stop", "cancel"}:
             if self.started and not self.completed:
                 self._finish("stopped")
-            else:
-                self.started = False
-                self.completed = True
-                self._publish_status("stopped")
         else:
             self.get_logger().warning("Unknown benchmark action: %s", action)
 
@@ -214,7 +220,8 @@ class BenchmarkNode(Node):
 
     def _record_odom(self, odom: Odometry):
         p = odom.pose.pose.position
-        self.trajectory.append([float(p.x), float(p.y), float(p.z)])
+        t = odom.header.stamp.sec + odom.header.stamp.nanosec * 1e-9
+        self.trajectory.append([t, float(p.x), float(p.y), float(p.z)])
 
     def _start_from_odom(self, odom: Odometry):
         p = odom.pose.pose.position
@@ -251,7 +258,8 @@ class BenchmarkNode(Node):
 
         self._update_progress(self.latest_odom)
         self._publish_global_plan()
-        self._publish_target_pose()
+        if self.path_world is not None and self.progress_idx < len(self.path_world) - 1:
+            self._publish_target_pose()
         self._publish_status("running")
 
     def _update_progress(self, odom: Odometry):
@@ -279,13 +287,14 @@ class BenchmarkNode(Node):
         if self.completed and self.result is not None:
             return
         self.completed = True
-        self.started = False
         if self.path_world is None or self.path_s is None:
             self.result = None
         else:
-            trajectory = np.asarray(self.trajectory, dtype=np.float64)
+            raw = np.asarray(self.trajectory, dtype=np.float64)
+            # trajectory is stored as [t, x, y, z]; drop timestamp for scoring
+            traj_xyz = raw[:, 1:] if raw.ndim == 2 and raw.shape[1] == 4 else raw
             self.result = _score_tracking(
-                trajectory,
+                traj_xyz,
                 self.path_world,
                 self.path_s,
                 self.config.score_sigma_m,

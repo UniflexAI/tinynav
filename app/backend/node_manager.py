@@ -145,6 +145,7 @@ class BackendNode(Ros2NodeManager):
         self._planning_proc: subprocess.Popen | None = None
         self._unitree_proc: subprocess.Popen | None = None
         self._benchmark_proc: subprocess.Popen | None = None
+        self._benchmark_cmd_vel_proc: subprocess.Popen | None = None
 
         # Battery level from /battery topic (published by unitree_control)
         self._battery: float | None = None
@@ -210,7 +211,10 @@ class BackendNode(Ros2NodeManager):
             data = json.loads(msg.data)
             with self._lock:
                 self._benchmark_result = data
-                self._benchmark_status = {**(self._benchmark_status or {}), 'result': data}
+                self._benchmark_status = {
+                    **(self._benchmark_status or {}),
+                    'state': data.get('state', 'completed'),
+                }
             for cb in self.benchmark_callbacks:
                 cb({'state': data.get('state', 'completed'), 'result': data})
         except json.JSONDecodeError:
@@ -620,6 +624,11 @@ class BackendNode(Ros2NodeManager):
             status['result'] = result
         return status
 
+    @property
+    def has_odom(self) -> bool:
+        with self._lock:
+            return self._odom_pose is not None
+
     @staticmethod
     def _derive_map_status(raw: str, pct: float, files_exist: bool) -> str:
         if raw == 'rosbag_build_map':
@@ -788,6 +797,9 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_start_benchmark(self):
         """Run planning + control against the synthetic benchmark node."""
+        if self.state == 'rosbag_build_map':
+            self.get_logger().warning('Cannot start benchmark while map build is in progress')
+            return
         if self._benchmark_proc is not None and self._benchmark_proc.poll() is None:
             self._benchmark_cmd_pub.publish(String(data=json.dumps({'action': 'restart'})))
             return
@@ -802,7 +814,7 @@ class BackendNode(Ros2NodeManager):
                 ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
                 env=_env,
             )
-        self._cmd_vel_proc = self._launch_proc(
+        self._benchmark_cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
             ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
             env=_env,
@@ -823,9 +835,9 @@ class BackendNode(Ros2NodeManager):
     def cmd_stop_benchmark(self):
         self._benchmark_cmd_pub.publish(String(data=json.dumps({'action': 'stop'})))
         self._kill_proc(self._benchmark_proc)
-        self._kill_proc(self._cmd_vel_proc)
+        self._kill_proc(self._benchmark_cmd_vel_proc)
         self._benchmark_proc = None
-        self._cmd_vel_proc = None
+        self._benchmark_cmd_vel_proc = None
         with self._lock:
             if self._benchmark_status is None:
                 self._benchmark_status = {'state': 'stopped'}
@@ -1159,7 +1171,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._benchmark_proc, self.node._benchmark_cmd_vel_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)

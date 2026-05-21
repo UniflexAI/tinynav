@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/models.dart';
 import '../core/providers.dart';
 
+const _kBenchmarkAccent = Color(0xFF7B61FF);
+
 class BenchmarkTab extends ConsumerWidget {
   const BenchmarkTab({super.key});
 
@@ -90,10 +92,10 @@ class _HeaderCard extends StatelessWidget {
                   width: 44,
                   height: 44,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF7B61FF).withOpacity(0.12),
+                    color: _kBenchmarkAccent.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: const Icon(Icons.analytics_outlined, color: Color(0xFF7B61FF)),
+                  child: const Icon(Icons.analytics_outlined, color: _kBenchmarkAccent),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -349,9 +351,13 @@ class _BenchmarkPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_BenchmarkPainter old) =>
-      old.globalPath != globalPath ||
-      old.trajectory != trajectory ||
-      old.currentPose != currentPose ||
-      old.targetPose != targetPose;
+  bool shouldRepaint(_BenchmarkPainter old) {
+    if (old.currentPose != currentPose || old.targetPose != targetPose) return true;
+    if (old.trajectory.length != trajectory.length) return true;
+    if (old.globalPath.length != globalPath.length) return true;
+    if (trajectory.isNotEmpty &&
+        (old.trajectory.last.x != trajectory.last.x ||
+            old.trajectory.last.y != trajectory.last.y)) return true;
+    return false;
+  }
 }

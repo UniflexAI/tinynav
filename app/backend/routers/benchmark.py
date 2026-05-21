@@ -14,7 +14,7 @@ def _require_node():
 @router.post('/start')
 def benchmark_start():
     node = _require_node()
-    if node._odom_pose is None:
+    if not node.has_odom:
         raise HTTPException(409, 'Odometry not ready')
     node.cmd_start_benchmark()
     return {'ok': True}
@@ -30,7 +30,7 @@ def benchmark_stop():
 @router.post('/restart')
 def benchmark_restart():
     node = _require_node()
-    if node._odom_pose is None:
+    if not node.has_odom:
         raise HTTPException(409, 'Odometry not ready')
     node.cmd_restart_benchmark()
     return {'ok': True}
