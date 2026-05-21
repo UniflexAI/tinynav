@@ -827,7 +827,6 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._benchmark_status = {'state': 'starting'}
             self._benchmark_result = None
-            self._nav_paused = False
         self.state = 'benchmark'
         self._pub_state()
         self.get_logger().info('Benchmark started')
@@ -843,9 +842,6 @@ class BackendNode(Ros2NodeManager):
                 self._benchmark_status = {'state': 'stopped'}
             else:
                 self._benchmark_status = {**self._benchmark_status, 'state': 'stopped'}
-            self._global_path = []
-            self._nav_target_pose = None
-            self._nav_paused = False
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Benchmark stopped')
