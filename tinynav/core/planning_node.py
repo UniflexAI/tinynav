@@ -592,12 +592,8 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(
-                init_p=init_p, init_q=init_q
-            )
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
-                init_p=init_p, init_q=init_q
-            )
+            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
             self.last_T = T
