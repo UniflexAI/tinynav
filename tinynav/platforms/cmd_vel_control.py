@@ -40,6 +40,7 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
+        self.max_angular_speed = 0.8  # rad/s
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -119,7 +120,7 @@ class CmdVelControlNode(Node):
         out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
         # Do not acceleration-limit yaw. The planner/control layer already decides the turn rate,
         # and forced rotate-in-place should take effect immediately.
-        out.angular.z = target_cmd.angular.z
+        out.angular.z = float(np.clip(target_cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
 
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
         # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
@@ -182,7 +183,7 @@ class CmdVelControlNode(Node):
         else:
             vx = float(np.clip(raw_vx, 0.0, 0.5))
         vy = 0.0
-        vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
+        vyaw = np.clip(angular_velocity_vec[2], -self.max_angular_speed, self.max_angular_speed)
         is_backward_segment = raw_vx < 0.0
         if is_backward_segment:
             vyaw = 0.0
@@ -192,11 +193,13 @@ class CmdVelControlNode(Node):
         # naturally has heading_err close to +/-pi.
         if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
-            vyaw = float(heading_err)
+            vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
         # Minimal rotate-first gate: apply only for forward motion.
         elif vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
+
+        vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
 
         # Store the latest target command directly. Smoothing is intentionally kept
         # only in cmd_timer_callback via acceleration limiting, so planner/control
