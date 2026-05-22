@@ -25,6 +25,7 @@ class BenchmarkConfig:
     odom_topic: str = "/slam/odometry_visual"
     publish_rate_hz: float = 10.0
     path_points: int = 500
+    waypoint_count: int = 20
     length_m: float = 4.0
     width_m: float = 2.0
     height_m: float = 0.0
@@ -32,7 +33,7 @@ class BenchmarkConfig:
     finish_radius_m: float = 0.35
     score_sigma_m: float = 0.5
     auto_start: bool = True
-    mode: str = "figure8"
+    mode: str = "siso_vx_sine"
     sine_amplitude_mps: float = 0.3
     sine_frequency_hz: float = 1.0
     sine_duration_s: float = 20.0
@@ -82,14 +83,50 @@ def _path_distances(path: np.ndarray) -> np.ndarray:
     return np.concatenate([[0.0], np.cumsum(seg)])
 
 
+def _sample_by_arclength(path: np.ndarray, count: int, include_start: bool = False) -> np.ndarray:
+    """Sample a path at equal arclength intervals.
+
+    For the waypoint benchmark we skip the starting pose and sample 20 targets at
+    1/20, 2/20, ... 20/20 of the full loop. That avoids wasting the first
+    command on the robot's current pose while still closing the 8-shape at the
+    origin.
+    """
+    n = max(1, int(count))
+    if len(path) == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    if len(path) == 1:
+        return np.repeat(path, n, axis=0)
+    s = _path_distances(path)
+    total = float(s[-1])
+    if total <= 1e-6:
+        return np.repeat(path[:1], n, axis=0)
+    start_frac = 0.0 if include_start else 1.0 / n
+    targets = np.linspace(start_frac * total, total, n, endpoint=True)
+    out = np.zeros((n, 3), dtype=np.float64)
+    for dim in range(3):
+        out[:, dim] = np.interp(targets, s, path[:, dim])
+    return out
+
+
 def _nearest_path_distances(points: np.ndarray, path: np.ndarray) -> np.ndarray:
-    """Return each point's nearest 2D distance to a polyline point set."""
+    """Return each point's nearest 2D distance to a polyline's line segments."""
     if len(points) == 0 or len(path) == 0:
         return np.zeros((0,), dtype=np.float64)
-    # Benchmark paths are intentionally small (default 500 points), so the dense
-    # point-to-path distance matrix is simple and stable here.
-    delta = points[:, None, :2] - path[None, :, :2]
-    return np.min(np.linalg.norm(delta, axis=2), axis=1)
+    if len(path) == 1:
+        delta = points[:, :2] - path[0, :2]
+        return np.linalg.norm(delta, axis=1)
+
+    pts = points[:, :2]
+    a = path[:-1, :2]
+    b = path[1:, :2]
+    ab = b - a
+    denom = np.sum(ab * ab, axis=1)
+    denom = np.where(denom < 1e-9, 1.0, denom)
+    ap = pts[:, None, :] - a[None, :, :]
+    t = np.sum(ap * ab[None, :, :], axis=2) / denom[None, :]
+    t = np.clip(t, 0.0, 1.0)
+    closest = a[None, :, :] + t[:, :, None] * ab[None, :, :]
+    return np.min(np.linalg.norm(pts[:, None, :] - closest, axis=2), axis=1)
 
 
 def _score_tracking(trajectory: np.ndarray, path: np.ndarray, path_s: np.ndarray, sigma_m: float) -> dict:
@@ -175,6 +212,8 @@ class BenchmarkNode(Node):
         self.latest_odom: Odometry | None = None
         self.path_world: np.ndarray | None = None
         self.path_s: np.ndarray | None = None
+        self.dense_path_world: np.ndarray | None = None
+        self.current_waypoint_idx = 0
         self.progress_idx = 0
         self.started = False
         self.completed = False
@@ -226,6 +265,8 @@ class BenchmarkNode(Node):
     def _reset_path(self):
         self.path_world = None
         self.path_s = None
+        self.dense_path_world = None
+        self.current_waypoint_idx = 0
         self.progress_idx = 0
         self.trajectory = []
         self.siso_samples = []
@@ -248,8 +289,12 @@ class BenchmarkNode(Node):
             self.config.height_m,
             self.config.path_points,
         )
-        self.path_world = _transform_path(local_path, origin, yaw)
+        self.dense_path_world = _transform_path(local_path, origin, yaw)
+        self.path_world = _sample_by_arclength(
+            self.dense_path_world, self.config.waypoint_count, include_start=False
+        )
         self.path_s = _path_distances(self.path_world)
+        self.current_waypoint_idx = 0
         self.progress_idx = 0
         self.started = True
         self.completed = False
@@ -266,7 +311,10 @@ class BenchmarkNode(Node):
                 f"f={self.config.sine_frequency_hz:.2f}Hz duration={self.config.sine_duration_s:.1f}s"
             )
         else:
-            self.get_logger().info(f"Started figure-eight benchmark with {len(self.path_world)} path points")
+            self.get_logger().info(
+                f"Started figure-eight benchmark with {len(self.path_world)} waypoints "
+                f"sampled from {len(self.dense_path_world) if self.dense_path_world is not None else 0} path points"
+            )
         self._publish_status("running")
 
     def _timer_callback(self):
@@ -285,9 +333,10 @@ class BenchmarkNode(Node):
 
         self._update_progress(self.latest_odom)
         self._publish_global_plan()
-        if self.path_world is not None and self.progress_idx < len(self.path_world) - 1:
+        if self.path_world is not None and not self.completed:
             self._publish_target_pose()
-        self._publish_status("running")
+        if not self.completed:
+            self._publish_status("running")
 
 
     def _timer_siso_vx_sine(self, odom: Odometry):
@@ -318,15 +367,54 @@ class BenchmarkNode(Node):
         if self.siso_origin is None:
             self.siso_origin = np.array([pos.x, pos.y, pos.z], dtype=np.float64)
             self.siso_yaw = yaw
-        x_rel = float(pos.x) - float(self.siso_origin[0])
-        y_rel = float(pos.y) - float(self.siso_origin[1])
+        # Store raw world positions. The reported SISO x/y trace is computed
+        # later by projecting onto the measured dominant motion axis, so the
+        # plot is independent of whether the run happens along world X, Y, or a
+        # diagonal direction.
         z_rel = float(pos.z) - float(self.siso_origin[2])
         yaw_rel = float(yaw - self.siso_yaw)
-        self.siso_samples.append([elapsed, float(cmd_vx), float(odom_vx), x_rel, y_rel, z_rel, yaw_rel, float(pos.x), float(pos.y)])
+        self.siso_samples.append([elapsed, float(cmd_vx), float(odom_vx), 0.0, 0.0, z_rel, yaw_rel, float(pos.x), float(pos.y)])
         self._publish_status("running")
 
-    def _score_siso_vx_sine(self) -> dict:
+    def _siso_projected_samples(self) -> np.ndarray:
         samples = np.asarray(self.siso_samples, dtype=np.float64)
+        if len(samples) == 0:
+            return samples
+        out = samples.copy()
+        if out.shape[1] < 9 or len(out) < 2:
+            return out
+
+        xy = out[:, 7:9]
+        origin = xy[0]
+        centered = xy - origin
+
+        # Use the dominant measured motion axis, not world X/Y and not the
+        # final displacement. A full sine run can end near the start, making
+        # endpoint-based axis/sign selection unstable exactly when the run
+        # completes.
+        cov = centered.T @ centered
+        vals, vecs = np.linalg.eigh(cov)
+        axis = vecs[:, int(np.argmax(vals))]
+        if float(np.linalg.norm(axis)) < 1e-6:
+            axis = np.array([1.0, 0.0], dtype=np.float64)
+
+        t = out[:, 0]
+        cmd = out[:, 1]
+        expected_x = np.cumsum(cmd * np.diff(t, prepend=t[0]))
+        proj = centered @ axis
+        rmse_pos = float(np.sqrt(np.mean(np.square(proj - expected_x))))
+        rmse_neg = float(np.sqrt(np.mean(np.square((-proj) - expected_x))))
+        if rmse_neg < rmse_pos:
+            axis = -axis
+            proj = -proj
+
+        lateral_axis = np.array([-axis[1], axis[0]], dtype=np.float64)
+        out[:, 3] = proj
+        out[:, 4] = centered @ lateral_axis
+        return out
+
+    def _score_siso_vx_sine(self) -> dict:
+        samples = self._siso_projected_samples()
         n = int(len(samples))
         if n < 2:
             return {"score": 0.0, "rmse_m": None, "mean_error_m": None, "max_error_m": None, "completion_percent": 0.0, "samples": n}
@@ -364,20 +452,22 @@ class BenchmarkNode(Node):
             [odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z],
             dtype=np.float64,
         )
-        # Monotonic nearest-point search in a bounded forward window. This keeps
-        # figure-eight self-crossings from jumping backwards while staying cheap.
-        start = self.progress_idx
-        end = min(len(self.path_world), start + 80)
-        window = self.path_world[start:end]
-        if len(window) > 0:
-            local_idx = int(np.argmin(np.linalg.norm(window[:, :2] - pos[:2], axis=1)))
-            self.progress_idx = max(self.progress_idx, start + local_idx)
-
-        is_near_end = self.progress_idx >= len(self.path_world) - 3
-        end_dist = float(np.linalg.norm(self.path_world[-1, :2] - pos[:2]))
-        if is_near_end and end_dist <= self.config.finish_radius_m:
+        if len(self.path_world) == 0:
             self._finish("completed")
-            self.get_logger().info("Figure-eight benchmark completed")
+            return
+
+        target = self.path_world[self.current_waypoint_idx]
+        dist = float(np.linalg.norm(target[:2] - pos[:2]))
+        while dist <= self.config.finish_radius_m:
+            if self.current_waypoint_idx >= len(self.path_world) - 1:
+                self.progress_idx = len(self.path_world) - 1
+                self._finish("completed")
+                self.get_logger().info("Figure-eight waypoint benchmark completed")
+                return
+            self.current_waypoint_idx += 1
+            self.progress_idx = self.current_waypoint_idx
+            target = self.path_world[self.current_waypoint_idx]
+            dist = float(np.linalg.norm(target[:2] - pos[:2]))
 
     def _finish(self, state: str):
         if self.completed and self.result is not None:
@@ -401,16 +491,14 @@ class BenchmarkNode(Node):
                 self.path_s,
                 self.config.score_sigma_m,
             )
+            self.result["waypoints"] = int(len(self.path_world))
         if self.result is not None and self.started_at is not None:
             self.result["duration_s"] = round(time.time() - self.started_at, 2)
         self._publish_status(state)
         self._publish_result(state)
 
     def _target_index(self) -> int:
-        assert self.path_s is not None
-        target_s = self.path_s[self.progress_idx] + float(self.config.lookahead_m)
-        idx = int(np.searchsorted(self.path_s, target_s, side="left"))
-        return min(idx, len(self.path_s) - 1)
+        return self.current_waypoint_idx
 
     def _publish_global_plan(self):
         assert self.path_world is not None
@@ -449,13 +537,16 @@ class BenchmarkNode(Node):
             "total_m": round(total, 3),
             "percent": round((progress / total * 100.0) if total > 0 else 0.0, 1),
             "progress_idx": self.progress_idx,
+            "current_waypoint_idx": self.current_waypoint_idx,
             "path_points": int(len(self.path_world)) if self.path_world is not None else 0,
+            "waypoints": int(len(self.path_world)) if self.path_world is not None else 0,
             "trajectory_samples": len(self.trajectory),
             "siso_samples": len(self.siso_samples),
         }
         if self.config.mode == "siso_vx_sine" and self.siso_samples:
             max_points = 400
             step = max(1, len(self.siso_samples) // max_points)
+            projected = self._siso_projected_samples()
             payload["siso_trace"] = [
                 {
                     "t": round(float(v[0]), 4),
@@ -468,7 +559,7 @@ class BenchmarkNode(Node):
                     "x": round(float(v[7]), 4) if len(v) > 7 else None,
                     "y": round(float(v[8]), 4) if len(v) > 8 else None,
                 }
-                for v in self.siso_samples[::step]
+                for v in projected[::step]
             ]
         if self.result is not None:
             payload["result"] = self.result
@@ -496,6 +587,7 @@ def main(args=None):
     parser.add_argument("--odom_topic", type=str, default=BenchmarkConfig.odom_topic)
     parser.add_argument("--publish_rate_hz", type=float, default=BenchmarkConfig.publish_rate_hz)
     parser.add_argument("--path_points", type=int, default=BenchmarkConfig.path_points)
+    parser.add_argument("--waypoint_count", type=int, default=BenchmarkConfig.waypoint_count)
     parser.add_argument("--length_m", type=float, default=BenchmarkConfig.length_m)
     parser.add_argument("--width_m", type=float, default=BenchmarkConfig.width_m)
     parser.add_argument("--height_m", type=float, default=BenchmarkConfig.height_m)

@@ -18,7 +18,7 @@ class BenchmarkTab extends ConsumerStatefulWidget {
 }
 
 class _BenchmarkTabState extends ConsumerState<BenchmarkTab> {
-  String _mode = 'figure8';
+  final String _mode = 'siso_vx_sine';
   double _scale = 1.0;
   double _sineAmplitude = 0.3;
   double _sineFrequency = 1.0;
@@ -92,22 +92,14 @@ class _BenchmarkTabState extends ConsumerState<BenchmarkTab> {
         ),
         const SizedBox(height: 12),
         _BenchmarkConfigCard(
-          mode: _mode,
-          scale: _scale,
           sineAmplitude: _sineAmplitude,
           sineFrequency: _sineFrequency,
           sineDuration: _sineDuration,
           enabled: !running,
-          onModeChanged: (v) => setState(() => _mode = v),
-          onScaleChanged: (v) => setState(() => _scale = v),
           onSineAmplitudeChanged: (v) => setState(() => _sineAmplitude = v),
           onSineFrequencyChanged: (v) => setState(() => _sineFrequency = v),
           onSineDurationChanged: (v) => setState(() => _sineDuration = v),
         ),
-        if (_mode == 'figure8') ...[
-          const SizedBox(height: 12),
-          _ResultCard(result: status?.result),
-        ],
         const SizedBox(height: 12),
         _VisualizationCard(
           planning: planning,
@@ -123,9 +115,6 @@ class _BenchmarkTabState extends ConsumerState<BenchmarkTab> {
 
   Map<String, dynamic> get _benchmarkPayload => {
         'mode': _mode,
-        'scale': _scale,
-        'length_m': 4.0 * _scale,
-        'width_m': 2.0 * _scale,
         'sine_amplitude_mps': _sineAmplitude,
         'sine_frequency_hz': _sineFrequency,
         'sine_duration_s': _sineDuration,
@@ -166,10 +155,10 @@ class _HeaderCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('PNC Benchmark',
+                      const Text('SISO Test',
                           style: TextStyle(
                               fontSize: 17, fontWeight: FontWeight.w800)),
-                      Text('Figure-eight tracking · $state',
+                      Text('Velocity response · $state',
                           style: const TextStyle(color: Colors.black54)),
                     ],
                   ),
@@ -278,27 +267,19 @@ class _Metric extends StatelessWidget {
 }
 
 class _BenchmarkConfigCard extends StatelessWidget {
-  final String mode;
-  final double scale;
   final double sineAmplitude;
   final double sineFrequency;
   final double sineDuration;
   final bool enabled;
-  final ValueChanged<String> onModeChanged;
-  final ValueChanged<double> onScaleChanged;
   final ValueChanged<double> onSineAmplitudeChanged;
   final ValueChanged<double> onSineFrequencyChanged;
   final ValueChanged<double> onSineDurationChanged;
 
   const _BenchmarkConfigCard({
-    required this.mode,
-    required this.scale,
     required this.sineAmplitude,
     required this.sineFrequency,
     required this.sineDuration,
     required this.enabled,
-    required this.onModeChanged,
-    required this.onScaleChanged,
     required this.onSineAmplitudeChanged,
     required this.onSineFrequencyChanged,
     required this.onSineDurationChanged,
@@ -312,78 +293,45 @@ class _BenchmarkConfigCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Benchmark resource',
+            const Text('SISO Test',
                 style: TextStyle(fontWeight: FontWeight.w800)),
-            const SizedBox(height: 10),
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(
-                    value: 'figure8',
-                    label: Text('PNC 8-shape'),
-                    icon: Icon(Icons.route_rounded)),
-                ButtonSegment(
-                    value: 'siso_vx_sine',
-                    label: Text('SISO vx sine'),
-                    icon: Icon(Icons.ssid_chart_rounded)),
-              ],
-              selected: {mode},
-              onSelectionChanged:
-                  enabled ? (v) => onModeChanged(v.first) : null,
+            const SizedBox(height: 6),
+            const Text(
+              'Directly publishes sine-wave /cmd_vel linear.x and compares odometry response. Planning / target_pose is not used.',
+              style: TextStyle(color: Colors.black54, fontSize: 12),
             ),
             const SizedBox(height: 12),
-            if (mode == 'figure8') ...[
-              Row(
-                children: [
-                  const Expanded(child: Text('Figure-eight size')),
-                  Text(
-                      '${scale.toStringAsFixed(2)}× · ${(4.0 * scale).toStringAsFixed(1)}m × ${(2.0 * scale).toStringAsFixed(1)}m'),
-                ],
-              ),
-              Slider(
-                value: scale,
-                min: 0.25,
-                max: 1.5,
-                divisions: 25,
-                label: '${scale.toStringAsFixed(2)}×',
-                onChanged: enabled ? onScaleChanged : null,
-              ),
-              const Text(
-                'Use a smaller scale when the site cannot fit the default 4m × 2m figure-eight.',
-                style: TextStyle(color: Colors.black54, fontSize: 12),
-              ),
-            ] else ...[
-              _SliderRow(
-                label: 'Amplitude',
-                valueText: '${sineAmplitude.toStringAsFixed(2)} m/s',
-                value: sineAmplitude,
-                min: 0.0,
-                max: 2.0,
-                divisions: 40,
-                onChanged: enabled ? onSineAmplitudeChanged : null,
-              ),
-              _SliderRow(
-                label: 'Frequency',
-                valueText: '${sineFrequency.toStringAsFixed(2)} Hz',
-                value: sineFrequency,
-                min: 0.1,
-                max: 20.0,
-                divisions: 199,
-                onChanged: enabled ? onSineFrequencyChanged : null,
-              ),
-              _SliderRow(
-                label: 'Duration',
-                valueText: '${sineDuration.toStringAsFixed(0)} s',
-                value: sineDuration,
-                min: 5,
-                max: 60,
-                divisions: 11,
-                onChanged: enabled ? onSineDurationChanged : null,
-              ),
-              const Text(
-                'Directly publishes /cmd_vel linear.x = A·sin(2πft), records odom, and scores velocity/position tracking.',
-                style: TextStyle(color: Colors.black54, fontSize: 12),
-              ),
-            ],
+            _SliderRow(
+              label: 'Amplitude',
+              valueText: '${sineAmplitude.toStringAsFixed(2)} m/s',
+              value: sineAmplitude,
+              min: 0.0,
+              max: 2.0,
+              divisions: 40,
+              onChanged: enabled ? onSineAmplitudeChanged : null,
+            ),
+            _SliderRow(
+              label: 'Frequency',
+              valueText: '${sineFrequency.toStringAsFixed(2)} Hz',
+              value: sineFrequency,
+              min: 0.1,
+              max: 20.0,
+              divisions: 199,
+              onChanged: enabled ? onSineFrequencyChanged : null,
+            ),
+            _SliderRow(
+              label: 'Duration',
+              valueText: '${sineDuration.toStringAsFixed(0)} s',
+              value: sineDuration,
+              min: 5,
+              max: 60,
+              divisions: 11,
+              onChanged: enabled ? onSineDurationChanged : null,
+            ),
+            const Text(
+              'Directly publishes /cmd_vel linear.x = A·sin(2πft), records odom, and scores velocity/position tracking.',
+              style: TextStyle(color: Colors.black54, fontSize: 12),
+            ),
           ],
         ),
       ),
@@ -442,7 +390,7 @@ class _VisualizationCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // UI selection is authoritative: after a SISO run stops, keep showing the
-    // PCA trace instead of falling back to the PNC local-planning view.
+    // SISO trace instead of falling back to the local-planning view.
     final mode = selectedMode;
     if (mode == 'siso_vx_sine') {
       final liveTrace = status?.sisoTrace ?? const <SisoTracePoint>[];
@@ -695,7 +643,7 @@ class _NotesCard extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.all(16),
         child: Text(
-          'PNC 8-shape measures the full planning-control loop. SISO vx sine bypasses planning, directly sends a sine-wave /cmd_vel linear.x, records odom, and checks whether the velocity/position response matches the commanded waveform.',
+          'SISO vx sine bypasses planning and target_pose: it directly sends a sine-wave /cmd_vel linear.x, records odom, and checks whether velocity/position response matches the commanded waveform.',
           style: TextStyle(color: Colors.black54, height: 1.35),
         ),
       ),

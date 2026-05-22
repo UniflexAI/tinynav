@@ -32,7 +32,10 @@ class HomePage extends ConsumerWidget {
         child: Column(
           children: [
             // ── Thin status bar ────────────────────────────────────────────
-            _StatusBar(ip: ip, isOnline: isOnline, onDisconnect: () => _disconnect(ref)),
+            _StatusBar(
+                ip: ip,
+                isOnline: isOnline,
+                onDisconnect: () => _disconnect(ref)),
             // ── Menu cards ─────────────────────────────────────────────────
             Expanded(
               child: ListView(
@@ -46,7 +49,9 @@ class HomePage extends ConsumerWidget {
                     iconColor: const Color(0xFF2B3A42),
                     title: 'Device',
                     subtitle: 'Status · Sensor · System info',
-                    badge: status?.rawState == 'realsense_bag_record' ? 'REC' : null,
+                    badge: status?.rawState == 'realsense_bag_record'
+                        ? 'REC'
+                        : null,
                     badgeColor: Colors.red,
                     onTap: () => _push(context, 'Device', const DeviceTab()),
                   ),
@@ -56,7 +61,9 @@ class HomePage extends ConsumerWidget {
                     iconColor: const Color(0xFF4A90D9),
                     title: 'Map',
                     subtitle: 'Bag recording · Map building · Files',
-                    badge: status?.rawState == 'rosbag_build_map' ? 'Building' : null,
+                    badge: status?.rawState == 'rosbag_build_map'
+                        ? 'Building'
+                        : null,
                     badgeColor: const Color(0xFF4A90D9),
                     onTap: () => _push(context, 'Map', const MapTab()),
                   ),
@@ -66,7 +73,8 @@ class HomePage extends ConsumerWidget {
                     iconColor: const Color(0xFF45C95A),
                     title: 'Operate',
                     subtitle: 'Live map · Camera · Teleop · POI',
-                    badge: status?.rawState == 'navigation' ? 'Navigating' : null,
+                    badge:
+                        status?.rawState == 'navigation' ? 'Navigating' : null,
                     badgeColor: const Color(0xFF45C95A),
                     onTap: () => _push(context, 'Operate', const OperateTab()),
                   ),
@@ -74,11 +82,12 @@ class HomePage extends ConsumerWidget {
                   _MenuCard(
                     icon: Icons.analytics_outlined,
                     iconColor: const Color(0xFF7B61FF),
-                    title: 'Benchmark',
-                    subtitle: 'Figure-eight PNC tracking score',
+                    title: 'SISO Test',
+                    subtitle: 'Velocity response test · no planning',
                     badge: status?.rawState == 'benchmark' ? 'Running' : null,
                     badgeColor: const Color(0xFF7B61FF),
-                    onTap: () => _push(context, 'Benchmark', const BenchmarkTab()),
+                    onTap: () =>
+                        _push(context, 'SISO Test', const BenchmarkTab()),
                   ),
                   const SizedBox(height: 24),
                   if (status != null) _QuickStatusCard(status: status),
@@ -138,7 +147,8 @@ class _StatusBar extends StatelessWidget {
   final String ip;
   final bool isOnline;
   final VoidCallback onDisconnect;
-  const _StatusBar({required this.ip, required this.isOnline, required this.onDisconnect});
+  const _StatusBar(
+      {required this.ip, required this.isOnline, required this.onDisconnect});
 
   @override
   Widget build(BuildContext context) {
@@ -149,7 +159,8 @@ class _StatusBar extends StatelessWidget {
       child: Row(
         children: [
           Container(
-            width: 7, height: 7,
+            width: 7,
+            height: 7,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: isOnline ? kGreen : Colors.red,
@@ -166,7 +177,8 @@ class _StatusBar extends StatelessWidget {
           ),
           const Spacer(),
           IconButton(
-            icon: const Icon(Icons.logout_rounded, size: 18, color: Colors.black38),
+            icon: const Icon(Icons.logout_rounded,
+                size: 18, color: Colors.black38),
             tooltip: 'Disconnect',
             onPressed: onDisconnect,
             padding: EdgeInsets.zero,
@@ -268,7 +280,8 @@ class _MenuCard extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(
                               horizontal: 7, vertical: 2),
                           decoration: BoxDecoration(
-                            color: (badgeColor ?? Colors.grey).withOpacity(0.15),
+                            color:
+                                (badgeColor ?? Colors.grey).withOpacity(0.15),
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(badge!,
@@ -316,7 +329,9 @@ class _QuickStatusCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('Quick Status',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13,
+              style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
                   color: Color(0xFF9E9E9E))),
           const SizedBox(height: 12),
           Row(
@@ -350,7 +365,8 @@ class _StatItem extends StatelessWidget {
   final String label;
   final String value;
   final Color color;
-  const _StatItem({required this.label, required this.value, required this.color});
+  const _StatItem(
+      {required this.label, required this.value, required this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -370,7 +386,8 @@ class _StatItem extends StatelessWidget {
             const SizedBox(height: 3),
             Text(value,
                 style: const TextStyle(
-                    fontSize: 12, fontWeight: FontWeight.w600,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
                     overflow: TextOverflow.ellipsis),
                 maxLines: 1),
           ],

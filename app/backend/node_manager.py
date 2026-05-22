@@ -623,6 +623,9 @@ class BackendNode(Ros2NodeManager):
             status = dict(self._benchmark_status or {'state': 'idle'})
             result = self._benchmark_result
         status.setdefault('state', 'running' if running else 'idle')
+        state = str(status.get('state', 'idle'))
+        if state in ('completed', 'stopped', 'failed', 'idle'):
+            running = False
         status['running'] = running
         if result is not None:
             status['result'] = result
@@ -825,23 +828,18 @@ class BackendNode(Ros2NodeManager):
             self.cmd_stop_benchmark()
 
         self.cmd_stop_nav_nodes()
+        with self._lock:
+            self._nav_target_pose = None
+            self._global_path = []
+            self._trajectory = []
+        self._cmd_vel_pub.publish(Twist())
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
 
         config = config or {}
-        mode = str(config.get('mode', 'figure8'))
-        if mode != 'siso_vx_sine':
-            if self._planning_proc is None or self._planning_proc.poll() is not None:
-                self._planning_proc = self._launch_proc(
-                    'planning',
-                    ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-                    env=_env,
-                )
-            self._benchmark_cmd_vel_proc = self._launch_proc(
-                'cmd_vel_control',
-                ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
-                env=_env,
-            )
+        # Benchmark UI is SISO-only for now. Do not start planning/cmd_vel_control
+        # from benchmark; SISO benchmark_node publishes /cmd_vel directly.
+        mode = 'siso_vx_sine'
         def _float_arg(name: str, default: float, min_v: float, max_v: float) -> float:
             try:
                 value = float(config.get(name, default))
@@ -849,8 +847,6 @@ class BackendNode(Ros2NodeManager):
                 value = default
             return max(min_v, min(max_v, value))
 
-        length_m = _float_arg('length_m', 4.0, 0.5, 10.0)
-        width_m = _float_arg('width_m', 2.0, 0.25, 6.0)
         amp = _float_arg('sine_amplitude_mps', 0.3, 0.0, 2.0)
         freq = _float_arg('sine_frequency_hz', 1.0, 0.1, 20.0)
         duration = _float_arg('sine_duration_s', 20.0, 2.0, 120.0)
@@ -859,8 +855,6 @@ class BackendNode(Ros2NodeManager):
             'uv', 'run', 'python', '/tinynav/tinynav/core/benchmark_node.py',
             '--mode', mode,
             '--publish_rate_hz', '10',
-            '--length_m', str(length_m),
-            '--width_m', str(width_m),
             '--sine_amplitude_mps', str(amp),
             '--sine_frequency_hz', str(freq),
             '--sine_duration_s', str(duration),
@@ -876,8 +870,6 @@ class BackendNode(Ros2NodeManager):
                 'state': 'starting',
                 'mode': mode,
                 'config': {
-                    'length_m': length_m,
-                    'width_m': width_m,
                     'sine_amplitude_mps': amp,
                     'sine_frequency_hz': freq,
                     'sine_duration_s': duration,
@@ -895,11 +887,13 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_stop_benchmark(self):
         self._benchmark_cmd_pub.publish(String(data=json.dumps({'action': 'stop'})))
+        self._cmd_vel_pub.publish(Twist())
         self._kill_proc(self._benchmark_proc)
         self._kill_proc(self._benchmark_cmd_vel_proc)
         self._benchmark_proc = None
         self._benchmark_cmd_vel_proc = None
         self._kill_benchmark_orphans()
+        self._cmd_vel_pub.publish(Twist())
         with self._lock:
             if self._benchmark_status is None:
                 self._benchmark_status = {'state': 'stopped'}
