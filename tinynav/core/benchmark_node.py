@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -32,6 +32,11 @@ class BenchmarkConfig:
     finish_radius_m: float = 0.35
     score_sigma_m: float = 0.5
     auto_start: bool = True
+    mode: str = "figure8"
+    sine_amplitude_mps: float = 0.3
+    sine_frequency_hz: float = 1.0
+    sine_duration_s: float = 20.0
+    sine_bias_mps: float = 0.0
 
 
 def _yaw_from_quat(q) -> float:
@@ -160,6 +165,7 @@ class BenchmarkNode(Node):
         self.cmd_sub = self.create_subscription(String, "/benchmark/cmd", self._cmd_callback, 10)
         self.global_plan_pub = self.create_publisher(Path, "/mapping/global_plan", 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.status_pub = self.create_publisher(String, "/benchmark/status", 10)
         self.result_pub = self.create_publisher(String, "/benchmark/result", 10)
 
@@ -175,11 +181,16 @@ class BenchmarkNode(Node):
         self.started_at: float | None = None
         self.trajectory: list[list[float]] = []
         self.result: dict | None = None
+        self.siso_samples: list[list[float]] = []  # [t_rel, cmd_vx, odom_vx, x_rel, y_rel, z_rel, yaw_rel, x, y]
+        self.siso_origin: np.ndarray | None = None
+        self.siso_yaw: float = 0.0
 
         self.get_logger().info(
             f"benchmark_node ready: odom_topic={config.odom_topic} "
             f"auto_start={config.auto_start} "
+            f"mode={config.mode} "
             f"figure8=({config.length_m:.2f}m x {config.width_m:.2f}m) "
+            f"siso_vx=A{config.sine_amplitude_mps:.2f} f{config.sine_frequency_hz:.2f}Hz "
             f"lookahead={config.lookahead_m:.2f}m"
         )
 
@@ -195,6 +206,7 @@ class BenchmarkNode(Node):
             self.completed = False
             self.started_at = None
             self.trajectory = []
+            self.siso_samples = []
             self.result = None
             if self.latest_odom is not None:
                 self._start_from_odom(self.latest_odom)
@@ -202,7 +214,7 @@ class BenchmarkNode(Node):
             if self.started and not self.completed:
                 self._finish("stopped")
         else:
-            self.get_logger().warning("Unknown benchmark action: %s", action)
+            self.get_logger().warning(f"Unknown benchmark action: {action}")
 
     def _odom_callback(self, msg: Odometry):
         self.latest_odom = msg
@@ -216,6 +228,8 @@ class BenchmarkNode(Node):
         self.path_s = None
         self.progress_idx = 0
         self.trajectory = []
+        self.siso_samples = []
+        self.siso_origin = None
         self.result = None
 
     def _record_odom(self, odom: Odometry):
@@ -242,8 +256,17 @@ class BenchmarkNode(Node):
         self.started_at = time.time()
         self.trajectory = []
         self.result = None
+        self.siso_samples = []
+        self.siso_origin = origin.copy()
+        self.siso_yaw = yaw
         self._record_odom(odom)
-        self.get_logger().info("Started figure-eight benchmark with %d path points", len(self.path_world))
+        if self.config.mode == "siso_vx_sine":
+            self.get_logger().info(
+                f"Started SISO vx sine benchmark: A={self.config.sine_amplitude_mps:.2f}m/s "
+                f"f={self.config.sine_frequency_hz:.2f}Hz duration={self.config.sine_duration_s:.1f}s"
+            )
+        else:
+            self.get_logger().info(f"Started figure-eight benchmark with {len(self.path_world)} path points")
         self._publish_status("running")
 
     def _timer_callback(self):
@@ -256,11 +279,84 @@ class BenchmarkNode(Node):
             self._start_from_odom(self.latest_odom)
             return
 
+        if self.config.mode == "siso_vx_sine":
+            self._timer_siso_vx_sine(self.latest_odom)
+            return
+
         self._update_progress(self.latest_odom)
         self._publish_global_plan()
         if self.path_world is not None and self.progress_idx < len(self.path_world) - 1:
             self._publish_target_pose()
         self._publish_status("running")
+
+
+    def _timer_siso_vx_sine(self, odom: Odometry):
+        if self.started_at is None:
+            return
+        elapsed = max(0.0, time.time() - self.started_at)
+        duration = max(0.1, float(self.config.sine_duration_s))
+        if elapsed >= duration:
+            self.cmd_vel_pub.publish(Twist())
+            self._finish("completed")
+            self.get_logger().info("SISO vx sine benchmark completed")
+            return
+
+        amp = float(self.config.sine_amplitude_mps)
+        freq = float(self.config.sine_frequency_hz)
+        bias = float(self.config.sine_bias_mps)
+        cmd_vx = bias + amp * math.sin(2.0 * math.pi * freq * elapsed)
+        cmd = Twist()
+        cmd.linear.x = float(cmd_vx)
+        self.cmd_vel_pub.publish(cmd)
+
+        q = odom.pose.pose.orientation
+        yaw = _yaw_from_quat(q)
+        vx_world = float(odom.twist.twist.linear.x)
+        vy_world = float(odom.twist.twist.linear.y)
+        odom_vx = math.cos(yaw) * vx_world + math.sin(yaw) * vy_world
+        pos = odom.pose.pose.position
+        if self.siso_origin is None:
+            self.siso_origin = np.array([pos.x, pos.y, pos.z], dtype=np.float64)
+            self.siso_yaw = yaw
+        x_rel = float(pos.x) - float(self.siso_origin[0])
+        y_rel = float(pos.y) - float(self.siso_origin[1])
+        z_rel = float(pos.z) - float(self.siso_origin[2])
+        yaw_rel = float(yaw - self.siso_yaw)
+        self.siso_samples.append([elapsed, float(cmd_vx), float(odom_vx), x_rel, y_rel, z_rel, yaw_rel, float(pos.x), float(pos.y)])
+        self._publish_status("running")
+
+    def _score_siso_vx_sine(self) -> dict:
+        samples = np.asarray(self.siso_samples, dtype=np.float64)
+        n = int(len(samples))
+        if n < 2:
+            return {"score": 0.0, "rmse_m": None, "mean_error_m": None, "max_error_m": None, "completion_percent": 0.0, "samples": n}
+        t = samples[:, 0]
+        cmd = samples[:, 1]
+        odom_vx = samples[:, 2]
+        actual_x = samples[:, 3]
+        dt = np.diff(t, prepend=t[0])
+        expected_x = np.cumsum(cmd * dt)
+        vel_err = odom_vx - cmd
+        pos_err = actual_x - expected_x
+        vel_rmse = float(np.sqrt(np.mean(np.square(vel_err))))
+        pos_rmse = float(np.sqrt(np.mean(np.square(pos_err))))
+        max_pos_err = float(np.max(np.abs(pos_err)))
+        if np.std(cmd) > 1e-6 and np.std(odom_vx) > 1e-6:
+            corr = float(np.corrcoef(cmd, odom_vx)[0, 1])
+        else:
+            corr = 0.0
+        denom = max(0.03, abs(float(self.config.sine_amplitude_mps)))
+        score = 100.0 * math.exp(-vel_rmse / denom) * max(0.0, corr)
+        return {
+            "score": round(max(0.0, min(100.0, score)), 1),
+            "rmse_m": round(pos_rmse, 3),
+            "mean_error_m": round(float(np.mean(np.abs(pos_err))), 3),
+            "max_error_m": round(max_pos_err, 3),
+            "velocity_rmse_mps": round(vel_rmse, 3),
+            "correlation": round(corr, 3),
+            "completion_percent": 100.0,
+            "samples": n,
+        }
 
     def _update_progress(self, odom: Odometry):
         assert self.path_world is not None
@@ -287,7 +383,13 @@ class BenchmarkNode(Node):
         if self.completed and self.result is not None:
             return
         self.completed = True
-        if self.path_world is None or self.path_s is None:
+        if self.config.mode == "siso_vx_sine":
+            self.cmd_vel_pub.publish(Twist())
+            self.result = self._score_siso_vx_sine()
+            self.result["mode"] = self.config.mode
+            self.result["amplitude_mps"] = round(float(self.config.sine_amplitude_mps), 3)
+            self.result["frequency_hz"] = round(float(self.config.sine_frequency_hz), 3)
+        elif self.path_world is None or self.path_s is None:
             self.result = None
         else:
             raw = np.asarray(self.trajectory, dtype=np.float64)
@@ -299,8 +401,8 @@ class BenchmarkNode(Node):
                 self.path_s,
                 self.config.score_sigma_m,
             )
-            if self.started_at is not None:
-                self.result["duration_s"] = round(time.time() - self.started_at, 2)
+        if self.result is not None and self.started_at is not None:
+            self.result["duration_s"] = round(time.time() - self.started_at, 2)
         self._publish_status(state)
         self._publish_result(state)
 
@@ -335,15 +437,39 @@ class BenchmarkNode(Node):
     def _publish_status(self, state: str):
         total = float(self.path_s[-1]) if self.path_s is not None and len(self.path_s) else 0.0
         progress = float(self.path_s[self.progress_idx]) if self.path_s is not None and len(self.path_s) else 0.0
+        if self.config.mode == "siso_vx_sine":
+            duration = max(0.1, float(self.config.sine_duration_s))
+            elapsed = max(0.0, time.time() - self.started_at) if self.started_at is not None else 0.0
+            progress = min(duration, elapsed)
+            total = duration
         payload = {
             "state": state,
+            "mode": self.config.mode,
             "progress_m": round(progress, 3),
             "total_m": round(total, 3),
             "percent": round((progress / total * 100.0) if total > 0 else 0.0, 1),
             "progress_idx": self.progress_idx,
             "path_points": int(len(self.path_world)) if self.path_world is not None else 0,
             "trajectory_samples": len(self.trajectory),
+            "siso_samples": len(self.siso_samples),
         }
+        if self.config.mode == "siso_vx_sine" and self.siso_samples:
+            max_points = 400
+            step = max(1, len(self.siso_samples) // max_points)
+            payload["siso_trace"] = [
+                {
+                    "t": round(float(v[0]), 4),
+                    "cmd_vx": round(float(v[1]), 4),
+                    "odom_vx": round(float(v[2]), 4),
+                    "x_rel": round(float(v[3]), 4),
+                    "y_rel": round(float(v[4]), 4),
+                    "z_rel": round(float(v[5]), 4),
+                    "yaw_rel": round(float(v[6]), 4),
+                    "x": round(float(v[7]), 4) if len(v) > 7 else None,
+                    "y": round(float(v[8]), 4) if len(v) > 8 else None,
+                }
+                for v in self.siso_samples[::step]
+            ]
         if self.result is not None:
             payload["result"] = self.result
         msg = String()
@@ -377,6 +503,11 @@ def main(args=None):
     parser.add_argument("--finish_radius_m", type=float, default=BenchmarkConfig.finish_radius_m)
     parser.add_argument("--score_sigma_m", type=float, default=BenchmarkConfig.score_sigma_m)
     parser.add_argument("--auto_start", action="store_true", default=BenchmarkConfig.auto_start)
+    parser.add_argument("--mode", type=str, default=BenchmarkConfig.mode)
+    parser.add_argument("--sine_amplitude_mps", type=float, default=BenchmarkConfig.sine_amplitude_mps)
+    parser.add_argument("--sine_frequency_hz", type=float, default=BenchmarkConfig.sine_frequency_hz)
+    parser.add_argument("--sine_duration_s", type=float, default=BenchmarkConfig.sine_duration_s)
+    parser.add_argument("--sine_bias_mps", type=float, default=BenchmarkConfig.sine_bias_mps)
     parser.add_argument("--no_auto_start", dest="auto_start", action="store_false")
     parsed_args, _ = parser.parse_known_args(sys.argv[1:])
 

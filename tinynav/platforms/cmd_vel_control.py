@@ -143,7 +143,11 @@ class CmdVelControlNode(Node):
         T2 = msg2np(self.path.poses[step_idx])
         T_robot_1 = T1 @ self.T_robot_to_camera
         T_robot_2 = T2 @ self.T_robot_to_camera
-        T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
+        try:
+            T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
+        except np.linalg.LinAlgError as e:
+            self.logger.warning(f"Skipping singular trajectory transform: {e}")
+            return
         p = T_robot_2_to_1[:3, 3]
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)

@@ -21,36 +21,83 @@ class NavProgress {
         percent: (json['percent'] as num?)?.toDouble() ?? 0.0,
         pathRemainingM: (json['path_remaining_m'] as num?)?.toDouble() ?? 0.0,
         pathTotalM: (json['path_total_m'] as num?)?.toDouble() ?? 0.0,
-        estimatedRemainingS: (json['estimated_remaining_s'] as num?)?.toDouble() ?? -1.0,
+        estimatedRemainingS:
+            (json['estimated_remaining_s'] as num?)?.toDouble() ?? -1.0,
+      );
+}
+
+class SisoTracePoint {
+  final double t;
+  final double cmdVx;
+  final double odomVx;
+  final double xRel;
+  final double yRel;
+  final double zRel;
+  final double yawRel;
+  final double? x;
+  final double? y;
+
+  const SisoTracePoint({
+    required this.t,
+    required this.cmdVx,
+    required this.odomVx,
+    required this.xRel,
+    this.yRel = 0.0,
+    this.zRel = 0.0,
+    this.yawRel = 0.0,
+    this.x,
+    this.y,
+  });
+
+  factory SisoTracePoint.fromJson(Map<String, dynamic> json) => SisoTracePoint(
+        t: (json['t'] as num?)?.toDouble() ?? 0.0,
+        cmdVx: (json['cmd_vx'] as num?)?.toDouble() ?? 0.0,
+        odomVx: (json['odom_vx'] as num?)?.toDouble() ?? 0.0,
+        xRel: (json['x_rel'] as num?)?.toDouble() ?? 0.0,
+        yRel: (json['y_rel'] as num?)?.toDouble() ?? 0.0,
+        zRel: (json['z_rel'] as num?)?.toDouble() ?? 0.0,
+        yawRel: (json['yaw_rel'] as num?)?.toDouble() ?? 0.0,
+        x: (json['x'] as num?)?.toDouble(),
+        y: (json['y'] as num?)?.toDouble(),
       );
 }
 
 class BenchmarkStatus {
   final String state;
+  final String mode;
   final bool running;
   final double progressM;
   final double totalM;
   final double percent;
   final int trajectorySamples;
+  final List<SisoTracePoint> sisoTrace;
   final BenchmarkResult? result;
 
   const BenchmarkStatus({
     required this.state,
+    required this.mode,
     required this.running,
     required this.progressM,
     required this.totalM,
     required this.percent,
     required this.trajectorySamples,
+    this.sisoTrace = const [],
     this.result,
   });
 
-  factory BenchmarkStatus.fromJson(Map<String, dynamic> json) => BenchmarkStatus(
+  factory BenchmarkStatus.fromJson(Map<String, dynamic> json) =>
+      BenchmarkStatus(
         state: json['state'] as String? ?? 'idle',
+        mode: json['mode'] as String? ?? 'figure8',
         running: json['running'] as bool? ?? (json['state'] == 'running'),
         progressM: (json['progress_m'] as num?)?.toDouble() ?? 0.0,
         totalM: (json['total_m'] as num?)?.toDouble() ?? 0.0,
         percent: (json['percent'] as num?)?.toDouble() ?? 0.0,
         trajectorySamples: (json['trajectory_samples'] as num?)?.toInt() ?? 0,
+        sisoTrace: (json['siso_trace'] as List? ?? [])
+            .whereType<Map<String, dynamic>>()
+            .map(SisoTracePoint.fromJson)
+            .toList(),
         result: json['result'] is Map<String, dynamic>
             ? BenchmarkResult.fromJson(json['result'] as Map<String, dynamic>)
             : null,
@@ -78,13 +125,15 @@ class BenchmarkResult {
     this.durationS,
   });
 
-  factory BenchmarkResult.fromJson(Map<String, dynamic> json) => BenchmarkResult(
+  factory BenchmarkResult.fromJson(Map<String, dynamic> json) =>
+      BenchmarkResult(
         state: json['state'] as String? ?? 'completed',
         score: (json['score'] as num?)?.toDouble() ?? 0.0,
         rmseM: (json['rmse_m'] as num?)?.toDouble(),
         meanErrorM: (json['mean_error_m'] as num?)?.toDouble(),
         maxErrorM: (json['max_error_m'] as num?)?.toDouble(),
-        completionPercent: (json['completion_percent'] as num?)?.toDouble() ?? 0.0,
+        completionPercent:
+            (json['completion_percent'] as num?)?.toDouble() ?? 0.0,
         samples: (json['samples'] as num?)?.toInt() ?? 0,
         durationS: (json['duration_s'] as num?)?.toDouble(),
       );
@@ -136,7 +185,12 @@ class Pose {
   final double? z;
   final double? timestamp;
 
-  const Pose({required this.x, required this.y, required this.yaw, this.z, this.timestamp});
+  const Pose(
+      {required this.x,
+      required this.y,
+      required this.yaw,
+      this.z,
+      this.timestamp});
 
   factory Pose.fromJson(Map<String, dynamic> json) => Pose(
         x: (json['x'] as num).toDouble(),
@@ -251,6 +305,7 @@ class PlanningState {
   final Uint8List? esdfImage;
   final Uint8List? obstacleImage;
   final List<TrajPoint> trajectory;
+  final List<TrajPoint> centerline;
   final List<TrajPoint> globalPath;
   final List<TrajPoint> mapGlobalPath;
   final GridInfo? gridInfo;
@@ -266,6 +321,7 @@ class PlanningState {
     this.esdfImage,
     this.obstacleImage,
     required this.trajectory,
+    this.centerline = const [],
     required this.globalPath,
     this.mapGlobalPath = const [],
     this.gridInfo,
@@ -285,10 +341,10 @@ class PlanningState {
       return Pose.fromJson(raw as Map<String, dynamic>);
     }
 
-    List<TrajPoint> parsePath(String key) =>
-        (j[key] as List? ?? []).map((p) {
+    List<TrajPoint> parsePath(String key) => (j[key] as List? ?? []).map((p) {
           final m = p as Map<String, dynamic>;
-          return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+          return TrajPoint(
+              (m['x'] as num).toDouble(), (m['y'] as num).toDouble());
         }).toList();
 
     return PlanningState(
@@ -299,6 +355,7 @@ class PlanningState {
       esdfImage: decodeImg(j['esdf_image'] as String?),
       obstacleImage: decodeImg(j['obstacle_image'] as String?),
       trajectory: parsePath('trajectory'),
+      centerline: parsePath('centerline'),
       globalPath: parsePath('global_path'),
       mapGlobalPath: parsePath('map_global_path'),
       gridInfo: j['grid_info'] != null
@@ -312,7 +369,8 @@ class PlanningState {
           : null,
       footprint: (j['footprint'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;
-        return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+        return TrajPoint(
+            (m['x'] as num).toDouble(), (m['y'] as num).toDouble());
       }).toList(),
       voxelPoints: (j['voxel_points'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;

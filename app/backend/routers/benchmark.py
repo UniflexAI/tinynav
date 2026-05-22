@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from ..state import runner
 
@@ -12,11 +12,11 @@ def _require_node():
 
 
 @router.post('/start')
-def benchmark_start():
+def benchmark_start(payload: dict | None = Body(default=None)):
     node = _require_node()
     if not node.has_odom:
         raise HTTPException(409, 'Odometry not ready')
-    node.cmd_start_benchmark()
+    node.cmd_start_benchmark(payload or {})
     return {'ok': True}
 
 
@@ -28,11 +28,11 @@ def benchmark_stop():
 
 
 @router.post('/restart')
-def benchmark_restart():
+def benchmark_restart(payload: dict | None = Body(default=None)):
     node = _require_node()
     if not node.has_odom:
         raise HTTPException(409, 'Odometry not ready')
-    node.cmd_restart_benchmark()
+    node.cmd_restart_benchmark(payload or {})
     return {'ok': True}
 
 
