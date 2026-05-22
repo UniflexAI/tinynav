@@ -375,8 +375,20 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
+        # Path-follow mode: set True to tightly follow global plan, False for standard DWA
+        self.path_follow_mode = True
+        self.global_plan = None  # np.array of Nx3 waypoints
+        self.global_plan_sub = self.create_subscription(Path, '/mapping/global_plan', self.global_plan_callback, 10)
+        self.get_logger().info(f"Path follow mode: {self.path_follow_mode}")
+
+    def global_plan_callback(self, msg):
+        """Store global plan waypoints from map_node."""
+        self.global_plan = np.array([[p.pose.position.x, p.pose.position.y, p.pose.position.z]
+                                     for p in msg.poses]) if msg.poses else None
+
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self.global_plan = None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -574,7 +586,42 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+                base_cost = score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1])
+
+                if self.path_follow_mode and self.global_plan is not None and len(self.global_plan) >= 2:
+                    # Lateral deviation: average lateral distance from trajectory points to global plan
+                    lateral_cost = 0.0
+                    heading_cost = 0.0
+                    n_check = min(len(traj), 20)  # sample up to 20 points along trajectory
+                    for j in range(0, n_check):
+                        idx = j * (len(traj) - 1) // max(n_check - 1, 1)
+                        pt = traj[idx, :2]  # x, y only
+                        # Find nearest point on global plan
+                        dists = np.linalg.norm(self.global_plan[:, :2] - pt, axis=1)
+                        nearest_idx = np.argmin(dists)
+                        nearest_pt = self.global_plan[nearest_idx, :2]
+                        # Lateral deviation
+                        lateral_cost += float(dists[nearest_idx])
+                        # Heading alignment
+                        if nearest_idx < len(self.global_plan) - 1:
+                            plan_dir = self.global_plan[nearest_idx + 1, :2] - self.global_plan[nearest_idx, :2]
+                            plan_dir_norm = np.linalg.norm(plan_dir)
+                            if plan_dir_norm > 1e-6:
+                                plan_dir = plan_dir / plan_dir_norm
+                                # Trajectory heading from quaternion
+                                qx, qy, qz, qw = traj[idx, 3:7]
+                                fwd_x = 2.0 * (qx * qz + qw * qy)
+                                fwd_y = 2.0 * (qy * qz - qw * qx)
+                                n = (fwd_x**2 + fwd_y**2) ** 0.5
+                                if n > 1e-6:
+                                    fwd_x /= n; fwd_y /= n
+                                heading_error = 1.0 - (fwd_x * plan_dir[0] + fwd_y * plan_dir[1])
+                                heading_cost += float(heading_error)
+                    lateral_cost /= n_check
+                    heading_cost /= n_check
+                    base_cost += 1000 * lateral_cost + 500 * heading_cost
+
+                return base_cost
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
