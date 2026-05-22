@@ -506,15 +506,27 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
         ClipRect(
           child: LayoutBuilder(
             builder: (context, constraints) {
-              final side = widget.fillViewport
-                  ? max(constraints.maxWidth, constraints.maxHeight)
-                  : min(constraints.maxWidth, constraints.maxHeight);
+              final gi = p?.gridInfo;
+              final contentAspect =
+                  (gi != null && gi.height > 0) ? gi.width / gi.height : 1.0;
+              final viewportAspect = constraints.maxWidth / constraints.maxHeight;
+              final useWidth = widget.fillViewport
+                  ? viewportAspect > contentAspect
+                  : viewportAspect < contentAspect;
+              final contentWidth = useWidth
+                  ? constraints.maxWidth
+                  : constraints.maxHeight * contentAspect;
+              final contentHeight = useWidth
+                  ? constraints.maxWidth / contentAspect
+                  : constraints.maxHeight;
+              final contentSize = Size(contentWidth, contentHeight);
               final targetPose = _pendingTarget != null
                   ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
                   : p?.navTargetPose;
               return Center(
-                child: SizedBox.square(
-                  dimension: side,
+                child: SizedBox(
+                  width: contentWidth,
+                  height: contentHeight,
                   child: Builder(
                     builder: (mapContext) {
                       final content = widget.show3d
@@ -568,7 +580,7 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                             );
                       return Listener(
                         behavior: HitTestBehavior.translucent,
-                        onPointerDown: (event) => _startManualTargetTimer(event, Size(side, side)),
+                        onPointerDown: (event) => _startManualTargetTimer(event, contentSize),
                         onPointerMove: _maybeCancelManualTargetTimer,
                         onPointerUp: (_) => _cancelManualTargetTimer(),
                         onPointerCancel: (_) => _cancelManualTargetTimer(),
