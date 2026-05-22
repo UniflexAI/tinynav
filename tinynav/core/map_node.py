@@ -199,7 +199,7 @@ def shortcut_prune_path(
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    sdf_bins = [0.5, 1.0, 2.0, 5.0, 10.0]
 
     def get_queue_index(sdf_value: float) -> int:
         for idx, threshold in enumerate(sdf_bins):
@@ -254,6 +254,57 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                         if neighbor not in parent:
                             parent[neighbor] = current
     return []
+
+
+def _object_points_planar_sv_ratio(object_points: np.ndarray) -> float:
+    """s_min / s_max from SVD of centered 3D points; near 0 means nearly coplanar."""
+    points = np.asarray(object_points, dtype=np.float64).reshape(-1, 3)
+    if points.shape[0] < 4:
+        return 1.0
+    centered = points - np.mean(points, axis=0)
+    try:
+        singular_values = np.linalg.svd(centered, full_matrices=False, compute_uv=False)
+        singular_values = np.maximum(singular_values, 1e-12)
+        return float(singular_values[-1] / singular_values[0])
+    except np.linalg.LinAlgError:
+        return 1.0
+
+
+def _relocalize_solve_pnp_ransac(
+    object_points: np.ndarray,
+    image_points: np.ndarray,
+    K: np.ndarray,
+    *,
+    planar_sv_ratio_max: float = 0.12,
+    iterations_count: int = 200,
+    reprojection_error_px: float = 4.0,
+) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray]:
+    """Handle planar-degenerate PnP by using IPPE when geometry is near-planar."""
+    sv_ratio = _object_points_planar_sv_ratio(object_points)
+    near_planar = sv_ratio < planar_sv_ratio_max
+    if near_planar and hasattr(cv2, "SOLVEPNP_IPPE"):
+        pnp_flag = int(cv2.SOLVEPNP_IPPE)
+    else:
+        pnp_flag = int(cv2.SOLVEPNP_EPNP)
+    try:
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            object_points.astype(np.float64),
+            image_points.astype(np.float64),
+            K.astype(np.float64),
+            None,
+            iterationsCount=iterations_count,
+            reprojectionError=reprojection_error_px,
+            confidence=0.995,
+            flags=pnp_flag,
+        )
+    except cv2.error:
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(
+            object_points.astype(np.float64),
+            image_points.astype(np.float64),
+            K.astype(np.float64),
+            None,
+        )
+    return success, rvec, tvec, inliers
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
@@ -548,8 +599,12 @@ class MapNode(Node):
                 point_3d_in_world_list = np.array(point_3d_in_world_list)
                 point_2d_in_keyframe_list = np.array(point_2d_in_keyframe_list)
 
-                success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
-                if success and len(inliers) >= 50:
+                success, rvec, tvec, inliers = _relocalize_solve_pnp_ransac(
+                    point_3d_in_world_list,
+                    point_2d_in_keyframe_list,
+                    self.map_K,
+                )
+                if success and inliers is not None and len(inliers) >= 50:
                     R, _ = cv2.Rodrigues(rvec)
                     T = np.eye(4)
                     T[:3, :3] = R
@@ -766,7 +821,7 @@ class MapNode(Node):
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
                         accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                        if accumulated_distance > max_speed * 5:
+                        if accumulated_distance > max_speed * 2:
                             target_position = paths_in_map[i]
                             break
                         start_point = paths_in_map[i]

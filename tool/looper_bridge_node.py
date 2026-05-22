@@ -33,6 +33,8 @@ class LooperBridgeNode(Node):
         self.last_pose = None
         self.last_pose_time = None
         self._missing_input_counter = 0
+        # Last keyframe bundle stamp only — skip immediate repeat (same stamp as previous keyframe).
+        self._last_published_keyframe_stamp: tuple[int, int] | None = None
 
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
         self.tf_static_qos = QoSProfile(
@@ -223,11 +225,20 @@ class LooperBridgeNode(Node):
         self.camera_info_alias_pub.publish(camera_info_out)
 
         if self.should_add_keyframe(T_world_camera, stamp):
-            self.keyframe_pose_visual_pub.publish(odom_msg)
-            self.keyframe_image_pub.publish(image_out)
-            self.keyframe_depth_pub.publish(depth_out)
-            self.last_keyframe_pose = T_world_camera.copy()
-            self.last_keyframe_time = self.stamp_to_sec(stamp)
+            stamp_key = (int(stamp.sec), int(stamp.nanosec))
+            if stamp_key == self._last_published_keyframe_stamp:
+                self.get_logger().warning(
+                    "Skipping keyframe bundle: duplicate stamp "
+                    f"{stamp.sec}.{stamp.nanosec:09d} (same as last published keyframe; downstream uses stamp as keyframe id).",
+                    throttle_duration_sec=5.0,
+                )
+            else:
+                self._last_published_keyframe_stamp = stamp_key
+                self.keyframe_pose_visual_pub.publish(odom_msg)
+                self.keyframe_image_pub.publish(image_out)
+                self.keyframe_depth_pub.publish(depth_out)
+                self.last_keyframe_pose = T_world_camera.copy()
+                self.last_keyframe_time = self.stamp_to_sec(stamp)
 
 
 def parse_args():

@@ -477,7 +477,7 @@ class BuildMapNode(Node):
 
         self.marker_id = 0
 
-        self.loop_similarity_threshold = 0.90
+        self.loop_similarity_threshold = 0.9
         self.loop_top_k = 1
 
         self.map_save_path = map_save_path

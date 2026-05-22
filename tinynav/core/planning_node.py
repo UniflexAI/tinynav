@@ -59,10 +59,10 @@ GO2_CONFIG = RobotConfig(
 
 B2_CONFIG = RobotConfig(
     name='b2', shape='square',
-    length=1.0, width=0.5,
-    camera_x=0.5, camera_y=0.0,
-    control_x=-0.5, control_y=0.0,
-    safety_radius=0.1,
+    length=0.6, width=0.3,
+    camera_x=0.3, camera_y=0.0,
+    control_x=-0.3, control_y=0.0,
+    safety_radius=0.3,
 )
 
 # === Helper functions ===
@@ -154,8 +154,8 @@ class ObstacleConfig:
     robot_z_bottom: float = -0.4
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    min_wall_span_m: float = 0.5
+    dilation_cells: int = 0
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
