@@ -144,6 +144,8 @@ class BackendNode(Ros2NodeManager):
         self._perception_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
         self._unitree_proc: subprocess.Popen | None = None
+        self._benchmark_proc: subprocess.Popen | None = None
+        self._benchmark_cmd_vel_proc: subprocess.Popen | None = None
 
         # Battery level from /battery topic (published by unitree_control)
         self._battery: float | None = None
@@ -158,10 +160,16 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
+        self._benchmark_status: dict | None = None
+        self._benchmark_result: dict | None = None
+        self.benchmark_callbacks: list = []
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
+        self.create_subscription(String, '/benchmark/status', self._on_benchmark_status, 10)
+        self.create_subscription(String, '/benchmark/result', self._on_benchmark_result, 10)
+        self._benchmark_cmd_pub = self.create_publisher(String, '/benchmark/cmd', 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -185,6 +193,34 @@ class BackendNode(Ros2NodeManager):
                 self._nav_progress = data
             for cb in self.nav_progress_callbacks:
                 cb(data)
+        except json.JSONDecodeError:
+            pass
+
+    def _on_benchmark_status(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            with self._lock:
+                self._benchmark_status = data
+            for cb in self.benchmark_callbacks:
+                cb(data)
+        except json.JSONDecodeError:
+            pass
+
+    def _on_benchmark_result(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            with self._lock:
+                self._benchmark_result = data
+                self._benchmark_status = {
+                    **(self._benchmark_status or {}),
+                    'state': data.get('state', 'completed'),
+                }
+                # Push full status (preserves siso_trace) so frontend can cache it
+                full_status = dict(self._benchmark_status)
+            full_status['result'] = data
+            full_status['running'] = False
+            for cb in self.benchmark_callbacks:
+                cb(full_status)
         except json.JSONDecodeError:
             pass
 
@@ -581,6 +617,26 @@ class BackendNode(Ros2NodeManager):
             'navPaused': nav_paused,
         }
 
+    def get_benchmark_status(self) -> dict:
+        with self._lock:
+            running = self._benchmark_proc is not None and self._benchmark_proc.poll() is None
+            status = dict(self._benchmark_status or {'state': 'idle'})
+            result = self._benchmark_result
+        status.setdefault('state', 'running' if running else 'idle')
+        state = str(status.get('state', 'idle'))
+        if state in ('completed', 'stopped', 'failed', 'idle'):
+            running = False
+        status['running'] = running
+        if result is not None:
+            status['result'] = result
+        # Preserve siso_trace in status so websocket initial push includes it
+        return status
+
+    @property
+    def has_odom(self) -> bool:
+        with self._lock:
+            return self._odom_pose is not None
+
     @staticmethod
     def _derive_map_status(raw: str, pct: float, files_exist: bool) -> str:
         if raw == 'rosbag_build_map':
@@ -742,6 +798,117 @@ class BackendNode(Ros2NodeManager):
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
+
+    # ------------------------------------------------------------------ #
+    # Benchmark                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _kill_benchmark_orphans(self):
+        """Best-effort cleanup for benchmark subprocesses orphaned by app restarts."""
+        patterns = [
+            '/tinynav/tool/benchmark_node.py',
+        ]
+        for pat in patterns:
+            try:
+                subprocess.run(['pkill', '-f', pat], timeout=2)
+            except Exception:
+                pass
+
+    def cmd_start_benchmark(self, config: dict | None = None):
+        """Run the SISO velocity-response benchmark tool."""
+        if self.state == 'rosbag_build_map':
+            self.get_logger().warning('Cannot start benchmark while map build is in progress')
+            return
+        # App restarts can leave benchmark children orphaned under pid 1.
+        self._kill_benchmark_orphans()
+        if self._benchmark_proc is not None and self._benchmark_proc.poll() is None:
+            # Restart with the new request payload; publishing a restart command
+            # would keep the old process argv and ignore updated sliders.
+            self.cmd_stop_benchmark()
+
+        self.cmd_stop_nav_nodes()
+        with self._lock:
+            self._nav_target_pose = None
+            self._global_path = []
+            self._trajectory = []
+        self._cmd_vel_pub.publish(Twist())
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+
+        config = config or {}
+        # Benchmark UI is SISO-only. Do not start planning or cmd_vel_control;
+        # the tool publishes /cmd_vel directly.
+        mode = 'siso_vx_sine'
+        def _float_arg(name: str, default: float, min_v: float, max_v: float) -> float:
+            try:
+                value = float(config.get(name, default))
+            except Exception:
+                value = default
+            return max(min_v, min(max_v, value))
+
+        amp = _float_arg('sine_amplitude_mps', 0.3, 0.0, 2.0)
+        freq = _float_arg('sine_frequency_hz', 1.0, 0.1, 20.0)
+        duration = _float_arg('sine_duration_s', 20.0, 2.0, 120.0)
+        bias = _float_arg('sine_bias_mps', 0.0, -0.3, 0.3)
+        benchmark_cmd = [
+            'uv', 'run', 'python', '/tinynav/tool/benchmark_node.py',
+            '--mode', mode,
+            '--publish_rate_hz', '10',
+            '--sine_amplitude_mps', str(amp),
+            '--sine_frequency_hz', str(freq),
+            '--sine_duration_s', str(duration),
+            '--sine_bias_mps', str(bias),
+        ]
+        self._benchmark_proc = self._launch_proc(
+            'benchmark_node',
+            benchmark_cmd,
+            env=_env,
+        )
+        with self._lock:
+            self._benchmark_status = {
+                'state': 'starting',
+                'mode': mode,
+                'config': {
+                    'sine_amplitude_mps': amp,
+                    'sine_frequency_hz': freq,
+                    'sine_duration_s': duration,
+                    'sine_bias_mps': bias,
+                    'publish_rate_hz': 10,
+                },
+            }
+            self._benchmark_result = None
+            start_status = dict(self._benchmark_status)
+        for cb in self.benchmark_callbacks:
+            cb({**start_status, 'running': True})
+        self.state = 'benchmark'
+        self._pub_state()
+        self.get_logger().info(f'Benchmark started: mode={mode} amp={amp} freq={freq} duration={duration}')
+
+    def cmd_stop_benchmark(self):
+        self._benchmark_cmd_pub.publish(String(data=json.dumps({'action': 'stop'})))
+        self._cmd_vel_pub.publish(Twist())
+        self._kill_proc(self._benchmark_proc)
+        self._kill_proc(self._benchmark_cmd_vel_proc)
+        self._benchmark_proc = None
+        self._benchmark_cmd_vel_proc = None
+        self._kill_benchmark_orphans()
+        self._cmd_vel_pub.publish(Twist())
+        with self._lock:
+            if self._benchmark_status is None:
+                self._benchmark_status = {'state': 'stopped'}
+            else:
+                self._benchmark_status = {**self._benchmark_status, 'state': 'stopped'}
+            stop_status = dict(self._benchmark_status)
+        # Push full stop_status (including siso_trace) so frontend can cache it
+        for cb in self.benchmark_callbacks:
+            cb({**stop_status, 'running': False})
+        self.state = 'idle'
+        self._pub_state()
+        self.get_logger().info('Benchmark stopped')
+
+    def cmd_restart_benchmark(self, config: dict | None = None):
+        self.cmd_stop_benchmark()
+        self.cmd_start_benchmark(config)
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
@@ -1067,7 +1234,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._benchmark_proc, self.node._benchmark_cmd_vel_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)

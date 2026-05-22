@@ -9,6 +9,7 @@ import '../core/models.dart';
 /// Global path arrives pre-converted to odom frame by the backend.
 class LocalPlanningPainter extends CustomPainter {
   final List<TrajPoint> trajectory;
+  final List<TrajPoint> centerline;
   final List<TrajPoint> globalPath;
   final List<TrajPoint> footprint;
   final GridInfo? gridInfo;
@@ -20,6 +21,7 @@ class LocalPlanningPainter extends CustomPainter {
 
   const LocalPlanningPainter({
     required this.trajectory,
+    this.centerline = const [],
     this.globalPath = const [],
     this.footprint = const [],
     this.gridInfo,
@@ -48,6 +50,8 @@ class LocalPlanningPainter extends CustomPainter {
 
     if (showTrajectory) _drawTrajectory(canvas, cx, cy, scaleX, scaleY, pose);
 
+    _drawCenterline(canvas, cx, cy, scaleX, scaleY, pose);
+
     if (navTargetPose != null && pose != null)
       _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
 
@@ -57,8 +61,8 @@ class LocalPlanningPainter extends CustomPainter {
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
   }
 
-  void _drawTrajectory(Canvas canvas, double cx, double cy,
-      double scaleX, double scaleY, Pose? pose) {
+  void _drawTrajectory(Canvas canvas, double cx, double cy, double scaleX,
+      double scaleY, Pose? pose) {
     if (trajectory.length < 2 || pose == null) return;
 
     final paint = Paint()
@@ -90,15 +94,39 @@ class LocalPlanningPainter extends CustomPainter {
     );
   }
 
+  void _drawCenterline(Canvas canvas, double cx, double cy, double scaleX,
+      double scaleY, Pose? pose) {
+    if (centerline.length < 2 || pose == null) return;
+    final paint = Paint()
+      ..color = const Color(0xFFFFEB3B).withOpacity(0.9)
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke;
+    final dot = Paint()..color = const Color(0xFFFFEB3B);
+    final path = Path();
+    bool first = true;
+    for (final pt in centerline) {
+      final px = cx + (pt.x - pose.x) * scaleX;
+      final py = cy - (pt.y - pose.y) * scaleY;
+      if (first) {
+        path.moveTo(px, py);
+        first = false;
+      } else {
+        path.lineTo(px, py);
+      }
+      canvas.drawCircle(Offset(px, py), 2.0, dot);
+    }
+    canvas.drawPath(path, paint);
+  }
+
   /// Global path is already in odom frame (backend transforms via exact T_odom_map).
-  void _drawGlobalPath(Canvas canvas, double cx, double cy,
-      double scaleX, double scaleY, Pose? odomPose) {
+  void _drawGlobalPath(Canvas canvas, double cx, double cy, double scaleX,
+      double scaleY, Pose? odomPose) {
     if (globalPath.length < 2 || odomPose == null) return;
 
     Offset toCanvas(TrajPoint pt) => Offset(
-      cx + (pt.x - odomPose.x) * scaleX,
-      cy - (pt.y - odomPose.y) * scaleY,
-    );
+          cx + (pt.x - odomPose.x) * scaleX,
+          cy - (pt.y - odomPose.y) * scaleY,
+        );
 
     final linePaint = Paint()
       ..color = const Color(0xFF69F0AE).withOpacity(0.9)
@@ -123,13 +151,18 @@ class LocalPlanningPainter extends CustomPainter {
     // Target marker at path end.
     final gc = toCanvas(globalPath.last);
     canvas.drawCircle(gc, 7, Paint()..color = const Color(0xFF69F0AE));
-    canvas.drawCircle(gc, 7,
-        Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 2.0);
+    canvas.drawCircle(
+        gc,
+        7,
+        Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.0);
     canvas.drawCircle(gc, 3, Paint()..color = Colors.white);
   }
 
-  void _drawNavTarget(Canvas canvas, double cx, double cy,
-      double scaleX, double scaleY, Pose odomPose, TrajPoint target) {
+  void _drawNavTarget(Canvas canvas, double cx, double cy, double scaleX,
+      double scaleY, Pose odomPose, TrajPoint target) {
     final px = cx + (target.x - odomPose.x) * scaleX;
     final py = cy - (target.y - odomPose.y) * scaleY;
     final c = Offset(px, py);
@@ -151,8 +184,8 @@ class LocalPlanningPainter extends CustomPainter {
     canvas.drawLine(Offset(px, py + r - arm), Offset(px, py + r + arm), cross);
   }
 
-  void _drawFootprint(Canvas canvas, double cx, double cy,
-      double scaleX, double scaleY, Pose? pose) {
+  void _drawFootprint(Canvas canvas, double cx, double cy, double scaleX,
+      double scaleY, Pose? pose) {
     if (footprint.isEmpty || pose == null) return;
 
     final pts = <Offset>[];
@@ -170,9 +203,11 @@ class LocalPlanningPainter extends CustomPainter {
     path.close();
 
     // Semi-transparent fill
-    canvas.drawPath(path, Paint()..color = const Color(0xFF64B5F6).withOpacity(0.25));
+    canvas.drawPath(
+        path, Paint()..color = const Color(0xFF64B5F6).withOpacity(0.25));
     // Bright solid border — thick enough to see at small scale
-    canvas.drawPath(path,
+    canvas.drawPath(
+        path,
         Paint()
           ..color = const Color(0xFF29B6F6)
           ..style = PaintingStyle.stroke
@@ -188,10 +223,10 @@ class LocalPlanningPainter extends CustomPainter {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
 
-    final tip   = Offset(center.dx + cosY * 8, center.dy - sinY * 8);
-    final left  = Offset(center.dx - sinY * 3.5, center.dy - cosY * 3.5);
+    final tip = Offset(center.dx + cosY * 8, center.dy - sinY * 8);
+    final left = Offset(center.dx - sinY * 3.5, center.dy - cosY * 3.5);
     final right = Offset(center.dx + sinY * 3.5, center.dy + cosY * 3.5);
-    final base  = Offset(center.dx - cosY * 3, center.dy + sinY * 3);
+    final base = Offset(center.dx - cosY * 3, center.dy + sinY * 3);
 
     final path = Path()
       ..moveTo(tip.dx, tip.dy)
@@ -201,13 +236,18 @@ class LocalPlanningPainter extends CustomPainter {
       ..close();
 
     canvas.drawPath(path, Paint()..color = Colors.white);
-    canvas.drawPath(path,
-        Paint()..color = Colors.black45..style = PaintingStyle.stroke..strokeWidth = 0.8);
+    canvas.drawPath(
+        path,
+        Paint()
+          ..color = Colors.black45
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8);
   }
 
   @override
   bool shouldRepaint(LocalPlanningPainter old) =>
       trajectory != old.trajectory ||
+      centerline != old.centerline ||
       globalPath != old.globalPath ||
       footprint != old.footprint ||
       gridInfo != old.gridInfo ||
