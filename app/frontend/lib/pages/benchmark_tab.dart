@@ -159,7 +159,7 @@ class _HeaderCard extends StatelessWidget {
                           style: TextStyle(
                               fontSize: 17, fontWeight: FontWeight.w800)),
                       Text('Velocity response · $state',
-                          style: const TextStyle(color: Colors.black54)),
+                          style: const TextStyle(color: Colors.white70)),
                     ],
                   ),
                 ),
@@ -206,7 +206,7 @@ class _ResultCard extends StatelessWidget {
                       const SizedBox(width: 8),
                       const Text('/ 100',
                           style: TextStyle(
-                              color: Colors.black45,
+                              color: Colors.white54,
                               fontWeight: FontWeight.w700)),
                       const Spacer(),
                       Chip(label: Text(r.state)),
@@ -250,7 +250,7 @@ class _Metric extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFFF5F6F8),
+        color: const Color(0xFF1A2532),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
@@ -258,7 +258,7 @@ class _Metric extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(label,
-              style: const TextStyle(fontSize: 11, color: Colors.black45)),
+              style: const TextStyle(fontSize: 11, color: Colors.white54)),
           Text(value, style: const TextStyle(fontWeight: FontWeight.w800)),
         ],
       ),
@@ -298,7 +298,7 @@ class _BenchmarkConfigCard extends StatelessWidget {
             const SizedBox(height: 6),
             const Text(
               'Directly publishes sine-wave /cmd_vel linear.x and compares odometry response. Planning / target_pose is not used.',
-              style: TextStyle(color: Colors.black54, fontSize: 12),
+              style: TextStyle(color: Colors.white70, fontSize: 12),
             ),
             const SizedBox(height: 12),
             _SliderRow(
@@ -330,7 +330,7 @@ class _BenchmarkConfigCard extends StatelessWidget {
             ),
             const Text(
               'Directly publishes /cmd_vel linear.x = A·sin(2πft), records odom, and scores velocity/position tracking.',
-              style: TextStyle(color: Colors.black54, fontSize: 12),
+              style: TextStyle(color: Colors.white70, fontSize: 12),
             ),
           ],
         ),
@@ -528,7 +528,7 @@ class _Legend extends StatelessWidget {
         Container(width: 10, height: 3, color: color),
         const SizedBox(width: 4),
         Text(label,
-            style: const TextStyle(fontSize: 11, color: Colors.black54)),
+            style: const TextStyle(fontSize: 11, color: Colors.white70)),
       ],
     );
   }
@@ -644,7 +644,7 @@ class _NotesCard extends StatelessWidget {
         padding: EdgeInsets.all(16),
         child: Text(
           'SISO vx sine bypasses planning and target_pose: it directly sends a sine-wave /cmd_vel linear.x, records odom, and checks whether velocity/position response matches the commanded waveform.',
-          style: TextStyle(color: Colors.black54, height: 1.35),
+          style: TextStyle(color: Colors.white70, height: 1.35),
         ),
       ),
     );
