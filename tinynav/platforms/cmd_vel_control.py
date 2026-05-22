@@ -40,6 +40,7 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
+        self.max_angular_speed = 0.8  # rad/s
         self.planner_dt = 0.1       # trajectory dt in planning_node
         # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
         self.path_pose_stride = 10
@@ -47,9 +48,13 @@ class CmdVelControlNode(Node):
         self.path_filter_tau = 0.30
         self.lookahead_steps = 1
         # Static-friction compensation: very small vx often cannot move the robot.
-        self.min_effective_linear_speed = 0.2
+        self.min_effective_linear_speed = 0.1
+        self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
+        # Hack: if path first segment points far away from robot heading,
+        # rotate in place instead of publishing near-zero cmd_vel.
+        self.force_turn_heading_threshold = np.deg2rad(80.0)
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -59,7 +64,7 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-        
+
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
         if not self._paused:
@@ -96,20 +101,40 @@ class CmdVelControlNode(Node):
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
 
-        # Acceleration limiting for smoother control.
-        max_dv = self.max_linear_acc * dt
-        max_dw = self.max_angular_acc * dt
         out = Twist()
-        out.linear.x = self._clamp_step(target_cmd.linear.x, self.prev_cmd.linear.x, max_dv)
-        out.angular.z = self._clamp_step(target_cmd.angular.z, self.prev_cmd.angular.z, max_dw)
         out.linear.y = 0.0
-        # Dead-band: < 0.05 → 0; small positive → snap to min effective speed.
-        if abs(out.linear.x) < 0.05:
-            out.linear.x = 0.0
-        elif 0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed
-        if abs(out.angular.z) < 0.05:
+
+        # Reverse is a predefined planner vocabulary: straight back at fixed speed.
+        # Do not smooth or re-lock it here; just pass it through while stale/paused guards still work.
+        if target_cmd.linear.x < 0.0:
+            out.linear.x = target_cmd.linear.x
             out.angular.z = 0.0
+            self.cmd_pub.publish(out)
+            self.prev_cmd = out
+            return
+
+        # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
+        max_dv = self.max_linear_acc * dt
+        # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
+        prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
+        out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
+        # Do not acceleration-limit yaw. The planner/control layer already decides the turn rate,
+        # and forced rotate-in-place should take effect immediately.
+        out.angular.z = float(np.clip(target_cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
+
+        # Linear x: robot cannot execute tiny non-zero speeds reliably.
+        # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
+        if 0.0 < out.linear.x < self.min_effective_linear_speed:
+            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
+        elif abs(out.linear.x) < self.min_effective_linear_speed:
+            out.linear.x = 0.0
+
+        # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
+        if 0.0 < abs(out.angular.z) < self.min_effective_angular_speed:
+            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed:
+                out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
+            else:
+                out.angular.z = 0.0
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
@@ -143,29 +168,45 @@ class CmdVelControlNode(Node):
         T2 = msg2np(self.path.poses[step_idx])
         T_robot_1 = T1 @ self.T_robot_to_camera
         T_robot_2 = T2 @ self.T_robot_to_camera
-        try:
-            T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
-        except np.linalg.LinAlgError as e:
-            self.logger.warning(f"Skipping singular trajectory transform: {e}")
-            return
+        T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
         p = T_robot_2_to_1[:3, 3]
+        heading_err = float(np.arctan2(p[1], p[0]))
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
-        vx = np.clip(linear_velocity_vec[0], -0.1, 0.5)
-        if vx < 0.0:
+        raw_vx = float(linear_velocity_vec[0])
+        if raw_vx < 0.0:
             vx = -self.fixed_reverse_speed
+        else:
+            vx = float(np.clip(raw_vx, 0.0, 0.5))
         vy = 0.0
-        vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
+        vyaw = np.clip(angular_velocity_vec[2], -self.max_angular_speed, self.max_angular_speed)
+        is_backward_segment = raw_vx < 0.0
+        if is_backward_segment:
+            vyaw = 0.0
 
-        # Filter planner updates to reduce visible jitter from 7-10 Hz updates.
-        alpha = np.clip(self.path_period_ema / (self.path_filter_tau + self.path_period_ema), 0.15, 0.75)
-        self.latest_cmd.linear.x = float((1.0 - alpha) * self.latest_cmd.linear.x + alpha * vx)
+        # Hack: if path first segment points >80 deg away from robot heading,
+        # force an in-place turn. Skip explicit backward segments because reverse
+        # naturally has heading_err close to +/-pi.
+        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+            vx = 0.0
+            vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
+        # Minimal rotate-first gate: apply only for forward motion.
+        elif vx > 0.0 and abs(heading_err) > 0.45:
+            vx = 0.0
+            vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
+
+        vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
+
+        # Store the latest target command directly. Smoothing is intentionally kept
+        # only in cmd_timer_callback via acceleration limiting, so planner/control
+        # behavior stays easy to reason about during tuning.
+        self.latest_cmd.linear.x = float(vx)
         self.latest_cmd.linear.y = float(vy)
-        self.latest_cmd.angular.z = float((1.0 - alpha) * self.latest_cmd.angular.z + alpha * vyaw)
+        self.latest_cmd.angular.z = float(vyaw)
         age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
         self.logger.debug(
             f"cmd vx={self.latest_cmd.linear.x:.3f} vyaw={self.latest_cmd.angular.z:.3f} "
