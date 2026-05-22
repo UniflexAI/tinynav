@@ -16,8 +16,9 @@ from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
 import os
-import argparse
-import sys
+from dataclasses import dataclass
+
+import tyro
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
@@ -45,6 +46,14 @@ from rclpy.serialization import deserialize_message
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BuildMapArgs:
+    bag_file: str = "tinynav_db"
+    map_save_path: str = "tinynav_db"
+    verbose_timer: bool = True
+
 
 def z_value_to_color(z, z_min, z_max):
     color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)
@@ -837,21 +846,15 @@ class ImageTransportsNode(Node):
         image_msg.header.frame_id = msg.header.frame_id
         self.image_pub.publish(image_msg)
 
-def main(args=None):
+if __name__ == '__main__':
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    rclpy.init(args=args)
+    rclpy.init()
 
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bag_file", type=str, default="tinynav_db")
-    parser.add_argument("--map_save_path", type=str, default="tinynav_db")
-    parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
-    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
-    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+    parsed_args = tyro.cli(BuildMapArgs, use_underscores=True)
 
     exec_ = SingleThreadedExecutor()
     player_node = BagPlayer(parsed_args.bag_file)
@@ -864,6 +867,3 @@ def main(args=None):
         exec_.spin_once(timeout_sec=0.001)
     player_node._publish_percent(100.0)
     map_node.save_mapping()
-
-if __name__ == '__main__':
-    main()

@@ -76,6 +76,9 @@ RUN apt-get update && apt-get install -y ros-humble-desktop \
 
 # env
 ENV RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
+# Limit OpenBLAS worker threads globally to avoid high CPU on small NumPy/SciPy
+# workloads on Jetson. See OpenBLAS fix context: https://github.com/OpenMathLib/OpenBLAS/pull/4388
+ENV OPENBLAS_NUM_THREADS=1
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 ENV CYCLONEDDS_URI=/tinynav/scripts/cyclone_dds_localhost.xml
 ENV PATH=$PATH:/usr/src/tensorrt/bin/

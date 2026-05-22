@@ -16,7 +16,7 @@ from sensor_msgs.msg import Image, Imu, CameraInfo
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.duration import Duration
-from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
+from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
 import asyncio
@@ -40,7 +40,7 @@ logger.setLevel(logging.INFO)
 
 
 def keyframe_check(T_i, T_j):
-    T_ij = se3_inv(T_i) @ T_j
+    T_ij = np.linalg.inv(T_i) @ T_j
     t_diff = np.linalg.norm(T_ij[:3, 3])
     cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
     r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
@@ -130,7 +130,7 @@ class PerceptionNode(Node):
         self.input_aligner.registerCallback(1, self._aligned_stereo_callback)
         self.input_aligner_seen_imu = False
         self.input_aligner_seen_stereo = False
-        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
+        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
@@ -168,6 +168,7 @@ class PerceptionNode(Node):
         self.imu_measurements = deque(maxlen=1000)
 
         self.keyframe_queue = []
+        self._async_loop = asyncio.new_event_loop()
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
@@ -218,10 +219,16 @@ class PerceptionNode(Node):
         self.last_processed_timestamp = image_timestamp
         loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            processed = asyncio.run(self.process(left_msg, right_msg))
+            processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
         if processed:
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
+
+    def destroy_node(self):
+        if self._async_loop is not None:
+            self._async_loop.close()
+            self._async_loop = None
+        return super().destroy_node()
 
     def imu_callback(self, imu_msg):
         self.input_aligner_imu_filter.signalMessage(imu_msg)
@@ -397,7 +404,6 @@ class PerceptionNode(Node):
                 uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
-            
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
             # match by LightGlue, filter by geometric consistency (pose estimation), 
             # and build tracks via Union-Find
@@ -424,7 +430,8 @@ class PerceptionNode(Node):
                             prev_left_extract_result["mask"],
                             current_left_extract_result["mask"],
                             kf_prev.image.shape,
-                            kf_curr.image.shape)
+                            kf_curr.image.shape,
+                        )
                     with Timer(name="[cached result[2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
                         current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
