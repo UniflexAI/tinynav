@@ -806,8 +806,7 @@ class BackendNode(Ros2NodeManager):
     def _kill_benchmark_orphans(self):
         """Best-effort cleanup for benchmark subprocesses orphaned by app restarts."""
         patterns = [
-            '/tinynav/tinynav/core/benchmark_node.py',
-            '/tinynav/tinynav/platforms/cmd_vel_control.py',
+            '/tinynav/tool/benchmark_node.py',
         ]
         for pat in patterns:
             try:
@@ -816,7 +815,7 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def cmd_start_benchmark(self, config: dict | None = None):
-        """Run planning + control against the synthetic benchmark node."""
+        """Run the SISO velocity-response benchmark tool."""
         if self.state == 'rosbag_build_map':
             self.get_logger().warning('Cannot start benchmark while map build is in progress')
             return
@@ -837,8 +836,8 @@ class BackendNode(Ros2NodeManager):
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
 
         config = config or {}
-        # Benchmark UI is SISO-only for now. Do not start planning/cmd_vel_control
-        # from benchmark; SISO benchmark_node publishes /cmd_vel directly.
+        # Benchmark UI is SISO-only. Do not start planning or cmd_vel_control;
+        # the tool publishes /cmd_vel directly.
         mode = 'siso_vx_sine'
         def _float_arg(name: str, default: float, min_v: float, max_v: float) -> float:
             try:
@@ -852,7 +851,7 @@ class BackendNode(Ros2NodeManager):
         duration = _float_arg('sine_duration_s', 20.0, 2.0, 120.0)
         bias = _float_arg('sine_bias_mps', 0.0, -0.3, 0.3)
         benchmark_cmd = [
-            'uv', 'run', 'python', '/tinynav/tinynav/core/benchmark_node.py',
+            'uv', 'run', 'python', '/tinynav/tool/benchmark_node.py',
             '--mode', mode,
             '--publish_rate_hz', '10',
             '--sine_amplitude_mps', str(amp),
