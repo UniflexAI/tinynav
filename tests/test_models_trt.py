@@ -9,6 +9,7 @@ from codetiming import Timer
 from tinynav.core.models_trt import SuperPointTRT, LightGlueTRT, StereoEngineTRT
 import asyncio
 import cv2
+import yaml
 
 def test_superpoint_trt_with_cache():
     superpoint = SuperPointTRT()
@@ -355,6 +356,49 @@ def _load_looper_calib(calib_path: str):
     return K, baseline
 
 
+def _rectify_euroc_stereo_pair(
+    img0: np.ndarray, img1: np.ndarray, cam0_yaml: str, cam1_yaml: str
+):
+    with open(cam0_yaml, "r") as f:
+        cam0 = yaml.safe_load(f)
+    with open(cam1_yaml, "r") as f:
+        cam1 = yaml.safe_load(f)
+
+    fx0, fy0, cx0, cy0 = cam0["intrinsics"]
+    fx1, fy1, cx1, cy1 = cam1["intrinsics"]
+    K0 = np.array([[fx0, 0.0, cx0], [0.0, fy0, cy0], [0.0, 0.0, 1.0]], dtype=np.float64)
+    K1 = np.array([[fx1, 0.0, cx1], [0.0, fy1, cy1], [0.0, 0.0, 1.0]], dtype=np.float64)
+    D0 = np.array(cam0["distortion_coefficients"], dtype=np.float64)
+    D1 = np.array(cam1["distortion_coefficients"], dtype=np.float64)
+
+    T_BS0 = np.array(cam0["T_BS"]["data"], dtype=np.float64).reshape(4, 4)
+    T_BS1 = np.array(cam1["T_BS"]["data"], dtype=np.float64).reshape(4, 4)
+    T_C0_C1 = np.linalg.inv(T_BS0) @ T_BS1
+    R = T_C0_C1[:3, :3]
+    T = T_C0_C1[:3, 3]
+
+    h, w = img0.shape
+    R0, R1, P0, P1, _, _, _ = cv2.stereoRectify(
+        K0,
+        D0,
+        K1,
+        D1,
+        (w, h),
+        R,
+        T,
+        flags=cv2.CALIB_ZERO_DISPARITY,
+        alpha=0,
+    )
+    map0_x, map0_y = cv2.initUndistortRectifyMap(K0, D0, R0, P0, (w, h), cv2.CV_32FC1)
+    map1_x, map1_y = cv2.initUndistortRectifyMap(K1, D1, R1, P1, (w, h), cv2.CV_32FC1)
+    rect0 = cv2.remap(img0, map0_x, map0_y, cv2.INTER_LINEAR)
+    rect1 = cv2.remap(img1, map1_x, map1_y, cv2.INTER_LINEAR)
+
+    fx_rect = float(P0[0, 0])
+    baseline_rect = abs(float(P1[0, 3]) / float(P1[0, 0]))
+    return rect0, rect1, fx_rect, baseline_rect
+
+
 def test_stereo_engine_trt_with_looper_data():
     """
     Run StereoEngineTRT on the Looper stereo pair stored under tests/data/looper.
@@ -498,6 +542,85 @@ def test_stereo_engine_trt_with_realsense_data():
     depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_VIRIDIS)
     cv2.imwrite(os.path.join(rs_dir, "depth_vis.png"), depth_color)
 
+
+def test_superpoint_and_retinify_with_cam0_cam1():
+    """
+    Run SuperPoint+LightGlue and Retinify on cam_stereo, and save outputs
+    the same way as Looper/RealSense tests.
+    """
+    stereo_dir = "/tinynav/tests/data/cam_stereo"
+    cam0_path = os.path.join(stereo_dir, "cam0.png")
+    cam1_path = os.path.join(stereo_dir, "cam1.png")
+    cam0_yaml = os.path.join(stereo_dir, "cam0_sensor.yaml")
+    cam1_yaml = os.path.join(stereo_dir, "cam1_sensor.yaml")
+
+    assert os.path.exists(cam0_path), f"Missing cam0 image at {cam0_path}"
+    assert os.path.exists(cam1_path), f"Missing cam1 image at {cam1_path}"
+    assert os.path.exists(cam0_yaml), f"Missing cam0 sensor yaml at {cam0_yaml}"
+    assert os.path.exists(cam1_yaml), f"Missing cam1 sensor yaml at {cam1_yaml}"
+
+    cam0 = cv2.imread(cam0_path, cv2.IMREAD_GRAYSCALE)
+    cam1 = cv2.imread(cam1_path, cv2.IMREAD_GRAYSCALE)
+    assert cam0 is not None and cam1 is not None, "Failed to load cam0/cam1 images"
+    assert cam0.shape == cam1.shape, "cam0/cam1 shapes do not match"
+
+    cam0_rect, cam1_rect, fx_rect, baseline_rect = _rectify_euroc_stereo_pair(
+        cam0, cam1, cam0_yaml, cam1_yaml
+    )
+    cv2.imwrite(os.path.join(stereo_dir, "cam0_rect.png"), cam0_rect)
+    cv2.imwrite(os.path.join(stereo_dir, "cam1_rect.png"), cam1_rect)
+
+    # SuperPoint + LightGlue visualization on rectified images.
+    out_matches = os.path.join(stereo_dir, "matches.png")
+    _superpoint_lightglue_matches(cam0_rect, cam1_rect, out_matches)
+
+    # Retinify disparity/depth.
+    stereo_engine = StereoEngineTRT()
+    disp, depth = asyncio.run(
+        stereo_engine.infer(
+            cam0_rect,
+            cam1_rect,
+            np.array([[baseline_rect]], dtype=np.float32),
+            np.array([[fx_rect]], dtype=np.float32),
+        )
+    )
+
+    assert disp.shape == cam0_rect.shape, f"Disparity shape {disp.shape} != input shape {cam0_rect.shape}"
+    assert depth.shape == cam0_rect.shape, f"Depth shape {depth.shape} != input shape {cam0_rect.shape}"
+    assert np.isfinite(disp).any(), "Retinify disparity has no finite values"
+    assert np.isfinite(depth).any(), "Retinify depth has no finite values"
+
+    # Save raw outputs and visualizations.
+    np.save(os.path.join(stereo_dir, "disp.npy"), disp)
+    np.save(os.path.join(stereo_dir, "depth.npy"), depth)
+
+    disp_vis = disp.copy()
+    if np.isfinite(disp_vis).any():
+        disp_min = np.nanmin(disp_vis[np.isfinite(disp_vis)])
+        disp_max = np.nanmax(disp_vis[np.isfinite(disp_vis)])
+        if disp_max > disp_min:
+            disp_norm = (disp_vis - disp_min) / (disp_max - disp_min)
+        else:
+            disp_norm = np.zeros_like(disp_vis, dtype=np.float32)
+    else:
+        disp_norm = np.zeros_like(disp_vis, dtype=np.float32)
+    disp_u8 = np.clip(disp_norm * 255.0, 0, 255).astype(np.uint8)
+    disp_color = cv2.applyColorMap(disp_u8, cv2.COLORMAP_PLASMA)
+    cv2.imwrite(os.path.join(stereo_dir, "disp_vis.png"), disp_color)
+
+    depth_vis = depth.copy()
+    valid = np.isfinite(depth_vis) & (depth_vis > 0)
+    if valid.any():
+        depth_min = np.nanmin(depth_vis[valid])
+        depth_max = np.nanmax(depth_vis[valid])
+        depth_clip = np.clip(depth_vis, depth_min, depth_max)
+        depth_norm = (depth_clip - depth_min) / (depth_max - depth_min)
+    else:
+        depth_norm = np.zeros_like(depth_vis, dtype=np.float32)
+    depth_u8 = np.clip(depth_norm * 255.0, 0, 255).astype(np.uint8)
+    depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_VIRIDIS)
+    cv2.imwrite(os.path.join(stereo_dir, "depth_vis.png"), depth_color)
+
 if __name__ == "__main__":
     test_superpoint_trt_with_cache()
     print("SuperPoint TRT with cache test passed.")
@@ -511,3 +634,5 @@ if __name__ == "__main__":
     print("StereoEngine TRT with Looper data test passed.")
     test_stereo_engine_trt_with_realsense_data()
     print("StereoEngine TRT with RealSense data test passed.")
+    test_superpoint_and_retinify_with_cam0_cam1()
+    print("SuperPoint+Retinify cam0/cam1 test passed.")
