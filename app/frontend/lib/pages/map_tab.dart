@@ -55,6 +55,11 @@ class MapTab extends ConsumerWidget {
               ),
             ),
           ),
+          const SizedBox(height: 20),
+          // ── Debug recording files ──────────────────────────────────────
+          _DebugBagFileListCard(
+            onRefresh: () => ref.invalidate(debugBagFilesProvider),
+          ),
           const SizedBox(height: 24),
         ],
       ),
@@ -219,6 +224,176 @@ class _MapBuildCardState extends ConsumerState<_MapBuildCard> {
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Debug bag file list card (with info & delete) ──────────────────────────
+
+class _DebugBagFileListCard extends ConsumerWidget {
+  final VoidCallback onRefresh;
+  const _DebugBagFileListCard({required this.onRefresh});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final filesAsync = ref.watch(debugBagFilesProvider);
+
+    return _SectionCard(
+      icon: Icons.bug_report_outlined,
+      iconColor: const Color(0xFFE53935),
+      title: 'Debug Record Files',
+      trailing: IconButton(
+        icon: const Icon(Icons.refresh_rounded, size: 18),
+        onPressed: onRefresh,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(),
+        tooltip: 'Refresh',
+      ),
+      child: filesAsync.when(
+        data: (files) => files.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Center(
+                  child: Text('No recordings', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                ),
+              )
+            : Column(
+                children: files.map((f) => _DebugBagFileRow(
+                  file: f,
+                  onInfo: () => _showBagInfo(context, ref, f),
+                  onDelete: () => _deleteFile(
+                    context,
+                    ref,
+                    file: f,
+                    deletePath: '/files/debug-bags/${Uri.encodeComponent(f.name)}',
+                    onDeleted: () {
+                      ref.invalidate(debugBagFilesProvider);
+                    },
+                  ),
+                )).toList(),
+              ),
+        loading: () => const Padding(
+          padding: EdgeInsets.symmetric(vertical: 12),
+          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        ),
+        error: (e, _) => Text('$e', style: const TextStyle(color: Colors.red, fontSize: 12)),
+      ),
+    );
+  }
+
+  void _showBagInfo(BuildContext context, WidgetRef ref, FileEntry file) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+    );
+    try {
+      final dio = ref.read(dioProvider);
+      final resp = await dio.get('/files/debug-bags/${Uri.encodeComponent(file.name)}/info');
+      final info = resp.data['info'] as String? ?? 'No info available';
+      if (context.mounted) {
+        Navigator.pop(context); // dismiss loading
+        showDialog(
+          context: context,
+          builder: (_) => _BagInfoDialog(name: file.name, info: info),
+        );
+      }
+    } on DioException catch (e) {
+      if (context.mounted) {
+        Navigator.pop(context); // dismiss loading
+        _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Failed to get bag info');
+      }
+    }
+  }
+}
+
+class _DebugBagFileRow extends StatelessWidget {
+  final FileEntry file;
+  final VoidCallback onInfo;
+  final VoidCallback onDelete;
+  const _DebugBagFileRow({
+    required this.file,
+    required this.onInfo,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dt = DateTime.fromMillisecondsSinceEpoch((file.mtime * 1000).toInt());
+    final dateStr =
+        '${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+      child: Row(
+        children: [
+          const Icon(Icons.folder_rounded, size: 16, color: Color(0xFFFFB300)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              file.name,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text('${file.sizeLabel}  $dateStr',
+              style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+          const SizedBox(width: 4),
+          IconButton(
+            onPressed: onInfo,
+            icon: const Icon(Icons.info_outline, size: 17),
+            color: const Color(0xFF4A90D9),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            tooltip: 'Topic Info',
+          ),
+          IconButton(
+            onPressed: onDelete,
+            icon: const Icon(Icons.delete_outline, size: 17),
+            color: Colors.red.shade600,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            tooltip: 'Delete',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BagInfoDialog extends StatelessWidget {
+  final String name;
+  final String info;
+  const _BagInfoDialog({required this.name, required this.info});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Icon(Icons.info_outline, size: 20, color: Color(0xFF4A90D9)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(name,
+                style: const TextStyle(fontSize: 14),
+                overflow: TextOverflow.ellipsis),
+          ),
+        ],
+      ),
+      content: SingleChildScrollView(
+        child: SelectableText(
+          info,
+          style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
     );
   }
 }

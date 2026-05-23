@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -63,6 +64,39 @@ async def list_bags():
 @router.get('/maps')
 async def list_maps():
     return {'files': _list_dir(_db_root() / 'maps')}
+
+
+@router.get('/debug-bags')
+async def list_debug_bags():
+    return {'files': _list_dir(_db_root() / 'debug_bags')}
+
+
+@router.get('/debug-bags/{bag_name}/info')
+async def debug_bag_info(bag_name: str):
+    """Return ros2 bag info output for a debug bag."""
+    path = _safe_child(_db_root() / 'debug_bags', bag_name)
+    if not path.exists():
+        raise HTTPException(404, f'{bag_name!r} not found')
+    try:
+        result = subprocess.run(
+            ['ros2', 'bag', 'info', str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            raise HTTPException(500, f'ros2 bag info failed: {result.stderr}')
+        return {'info': result.stdout}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, 'ros2 bag info timed out')
+    except FileNotFoundError:
+        raise HTTPException(500, 'ros2 CLI not found')
+
+
+@router.delete('/debug-bags/{bag_name}')
+async def delete_debug_bag(bag_name: str):
+    node = runner.node
+    if node is not None and node.debug_recording:
+        raise HTTPException(409, 'Cannot delete debug bag while recording')
+    return _delete_dir(_db_root() / 'debug_bags', bag_name)
 
 
 @router.delete('/bags/{bag_name}')

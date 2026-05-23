@@ -1761,7 +1761,7 @@ class _JoystickPanel extends ConsumerWidget {
             ),
           ),
           const SizedBox(width: 12),
-          // ── Center: STOP + Sit / Stand ───────────────────────────────
+          // ── Center: STOP + Sit / Stand+Record ────────────────
           Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -1773,10 +1773,36 @@ class _JoystickPanel extends ConsumerWidget {
               const SizedBox(height: 8),
               _EStopButton(onStop: onStop),
               const SizedBox(height: 8),
-              _ActionButton(
-                icon: Icons.directions_walk_rounded,
-                label: 'Stand',
-                onTap: () => _sendAction(ref, context, 'stand'),
+              // Stand + Record side by side
+              SizedBox(
+                width: 56,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    GestureDetector(
+                      onTap: () => _sendAction(ref, context, 'stand'),
+                      child: Container(
+                        width: 36,
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFFE0E0E0)),
+                          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 1))],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.directions_walk_rounded, size: 18, color: const Color(0xFF2B3A42)),
+                            const SizedBox(height: 2),
+                            Text('Stand', style: TextStyle(fontSize: 7, fontWeight: FontWeight.w600, color: Color(0xFF2B3A42))),
+                          ],
+                        ),
+                      ),
+                    ),
+                    _RecordButton(),
+                  ],
+                ),
               ),
             ],
           ),
@@ -1873,6 +1899,76 @@ class _EStopButtonState extends State<_EStopButton> {
             Text('STOP', style: TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w800, letterSpacing: 0.5)),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _RecordButton extends ConsumerStatefulWidget {
+  @override
+  ConsumerState<_RecordButton> createState() => _RecordButtonState();
+}
+
+class _RecordButtonState extends ConsumerState<_RecordButton> {
+  bool _loading = false;
+
+  Future<void> _toggle() async {
+    setState(() => _loading = true);
+    try {
+      final dio = ref.read(dioProvider);
+      final status = ref.read(deviceStatusProvider).valueOrNull;
+      final isRecording = status?.debugRecording ?? false;
+      if (isRecording) {
+        await dio.post('/debug-record/stop');
+      } else {
+        await dio.post('/debug-record/start');
+      }
+      await Future.delayed(const Duration(milliseconds: 300));
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = ref.watch(deviceStatusProvider).valueOrNull;
+    final isRecording = status?.debugRecording ?? false;
+
+    return GestureDetector(
+      onTap: _loading ? null : _toggle,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        width: 16,
+        height: 16,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: isRecording ? const Color(0xFFE53935) : const Color(0xFF9E9E9E),
+          boxShadow: isRecording
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFFE53935).withOpacity(0.6),
+                    blurRadius: 6,
+                    spreadRadius: 1,
+                  ),
+                ]
+              : null,
+        ),
+        child: _loading
+            ? const Padding(
+                padding: EdgeInsets.all(3),
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.5,
+                  color: Colors.white,
+                ),
+              )
+            : null,
       ),
     );
   }
