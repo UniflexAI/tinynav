@@ -111,6 +111,10 @@ class BackendNode(Ros2NodeManager):
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
+        # Debug recording (independent of main state machine)
+        self._debug_record_proc: subprocess.Popen | None = None
+        self._debug_record_path: str | None = None
+
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
         self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
         self.create_subscription(
@@ -622,6 +626,7 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
+            'debugRecording': self.debug_recording,
         }
 
     @staticmethod
@@ -811,6 +816,72 @@ class BackendNode(Ros2NodeManager):
                 ).start()
             else:
                 threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
+
+    # ── Debug recording (runs alongside navigation, independent state) ── #
+
+    _DEBUG_RECORD_TOPICS = [
+        '/camera/camera/infra1/image_rect_raw',
+        '/camera/camera/depth/image_rect_raw',
+        '/camera/camera/infra1/camera_info',
+        '/insight/vio_100hz',
+        '/insight/vio_20hz',
+        '/tf_static',
+        '/slam/odometry_visual',
+        '/slam/depth',
+        '/mapping/global_plan',
+        '/control/target_pose',
+        '/planning/trajectory_path',
+        '/planning/occupied_voxels',
+        '/planning/footprint',
+    ]
+
+    def cmd_debug_record_start(self):
+        """Start a debug rosbag recording (independent of main state machine)."""
+        with self._lock:
+            if self._debug_record_proc is not None and self._debug_record_proc.poll() is None:
+                return  # already recording
+            from datetime import datetime
+            debug_bags_dir = os.path.join(self.tinynav_db_path, 'debug_bags')
+            os.makedirs(debug_bags_dir, exist_ok=True)
+            ts = datetime.now().strftime('debug_%Y_%m_%d_%H_%M_%S')
+            output_dir = os.path.join(debug_bags_dir, ts)
+            cmd = (
+                ['ros2', 'bag', 'record',
+                 '--output', output_dir,
+                 '--max-cache-size', '2147483648']
+                + self._DEBUG_RECORD_TOPICS
+            )
+            self._debug_record_proc = self._spawn(cmd)
+            self._debug_record_path = output_dir
+            self.get_logger().info(f'Debug recording started → {output_dir}')
+
+    def cmd_debug_record_stop(self):
+        """Stop the debug rosbag recording."""
+        with self._lock:
+            proc = self._debug_record_proc
+            self._debug_record_proc = None
+            path = self._debug_record_path
+            self._debug_record_path = None
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), 15)
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            self.get_logger().info(f'Debug recording stopped → {path}')
+
+    @property
+    def debug_recording(self) -> bool:
+        with self._lock:
+            return self._debug_record_proc is not None and self._debug_record_proc.poll() is None
+
+    @property
+    def debug_record_path(self) -> str | None:
+        with self._lock:
+            return self._debug_record_path
 
 
     def _finalize_bag(self, bag_path: str):

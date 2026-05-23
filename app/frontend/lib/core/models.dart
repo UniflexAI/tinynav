@@ -36,6 +36,7 @@ class DeviceStatus {
   final String rawState;
   final bool navNodesRunning;
   final bool navPaused;
+  final bool debugRecording;
 
   const DeviceStatus({
     required this.online,
@@ -48,6 +49,7 @@ class DeviceStatus {
     required this.rawState,
     required this.navNodesRunning,
     required this.navPaused,
+    required this.debugRecording,
   });
 
   factory DeviceStatus.fromJson(Map<String, dynamic> json) => DeviceStatus(
@@ -61,6 +63,7 @@ class DeviceStatus {
         rawState: json['rawState'] as String? ?? 'unknown',
         navNodesRunning: json['navNodesRunning'] as bool? ?? false,
         navPaused: json['navPaused'] as bool? ?? false,
+        debugRecording: json['debugRecording'] as bool? ?? false,
       );
 }
 

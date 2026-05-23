@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .state import runner
-from .routers import action, bag, device, files, nav, sensor
+from .routers import action, bag, debug_record, device, files, nav, sensor
 from .routers import map as map_router
 from .routers import poi
 from . import ws
@@ -35,6 +35,7 @@ app.add_middleware(
 
 app.include_router(device.router, prefix='/device')
 app.include_router(bag.router, prefix='/bag')
+app.include_router(debug_record.router, prefix='/debug-record')
 app.include_router(map_router.router, prefix='/map')
 app.include_router(poi.router)
 app.include_router(nav.router, prefix='/nav')
