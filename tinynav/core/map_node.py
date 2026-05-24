@@ -19,7 +19,7 @@ from codetiming import Timer
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT, YOLO11TRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
@@ -189,6 +189,7 @@ class MapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
+        self.yolo11_model = YOLO11TRT()
         self.tinynav_db_path = tinynav_db_path
 
         self.bridge = CvBridge()
@@ -267,6 +268,54 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+        self._map_yolo_labels_cache = {}
+
+    def _infer_yolo_labels(self, image: np.ndarray) -> tuple[set[int], dict[int, float]]:
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        det = asyncio.run(self.yolo11_model.infer(image))
+        labels = set()
+        max_scores = {}
+        classes = det["classes"].tolist()
+        scores = det["scores"].tolist()
+        for cls, score in zip(classes, scores):
+            cls_i = int(cls)
+            score_f = float(score)
+            labels.add(cls_i)
+            prev = max_scores.get(cls_i, -1.0)
+            if score_f > prev:
+                max_scores[cls_i] = score_f
+        return labels, max_scores
+
+    def _filter_relocalization_candidates_by_label(
+        self,
+        query_labels: set[int],
+        query_label_scores: dict[int, float],
+        idx_and_similarity_array: list[tuple[int, float]],
+    ) -> list[tuple[int, float]]:
+        if query_label_scores.get(6, 0.0) <= 0.7:
+            return idx_and_similarity_array
+
+        query_base_labels = {
+            l for l in query_labels
+            if 0 <= l <= 4 and query_label_scores.get(l, 0.0) > 0.7
+        }
+        filtered = []
+        for idx_in_map, similarity in idx_and_similarity_array:
+            timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
+            if timestamp_in_map in self._map_yolo_labels_cache:
+                ref_labels, _ = self._map_yolo_labels_cache[timestamp_in_map]
+            else:
+                _, _, _, infra1_image, rgb_image = self.db.get_depth_embedding_features_images(timestamp_in_map)
+                ref_labels, ref_scores = self._infer_yolo_labels(infra1_image)
+                self._map_yolo_labels_cache[timestamp_in_map] = (ref_labels, ref_scores)
+
+            if 6 not in ref_labels:
+                continue
+            if len(query_base_labels) > 0 and len(query_base_labels.intersection(ref_labels)) == 0:
+                continue
+            filtered.append((idx_in_map, similarity))
+        return filtered
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -398,8 +447,8 @@ class MapNode(Node):
                                 #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-            find_loop_and_pose_graph(keyframe_image_timestamp)
-            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+            #find_loop_and_pose_graph(keyframe_image_timestamp)
+            #self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
@@ -447,6 +496,8 @@ class MapNode(Node):
         query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
 
         idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
+        query_labels, query_label_scores = self._infer_yolo_labels(keyframe)
+        idx_and_similarity_array = self._filter_relocalization_candidates_by_label(query_labels, query_label_scores, idx_and_similarity_array)
         max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
         if len(idx_and_similarity_array) > 0:
             point_3d_in_world_list = []
