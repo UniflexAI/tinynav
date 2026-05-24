@@ -26,7 +26,7 @@ import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import CompressedImage, Image, PointCloud
+from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
@@ -56,6 +56,29 @@ _IMAGE_TOPICS_LOOPER = [
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
 _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
+_PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
+_PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
+
+
+def _resize_preview_frame(arr: np.ndarray, max_edge_px: int = _PREVIEW_MAX_EDGE_PX) -> np.ndarray:
+    """Downscale preview frame so the longest side is <= max_edge_px."""
+    if max_edge_px <= 0 or arr is None or arr.size == 0:
+        return arr
+    height, width = arr.shape[:2]
+    longest = max(height, width)
+    if longest <= max_edge_px:
+        return arr
+    scale = max_edge_px / float(longest)
+    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+    return cv2.resize(arr, new_size, interpolation=cv2.INTER_AREA)
+
+
+def _encode_preview_jpeg(arr: np.ndarray) -> bytes:
+    arr = _resize_preview_frame(arr)
+    ok, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, _PREVIEW_JPEG_QUALITY])
+    if not ok:
+        raise RuntimeError('failed to encode preview jpeg')
+    return buf.tobytes()
 
 
 class BackendNode(Ros2NodeManager):
@@ -84,6 +107,7 @@ class BackendNode(Ros2NodeManager):
         self._trajectory: list = []
         self._global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
+        self._voxel_points: list = []
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
@@ -113,6 +137,12 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             PointCloud, '/planning/footprint', self._on_footprint, 1
         )
+        self.create_subscription(
+            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+        )
+
+        # Manual local target for planning_node, used by the operate tab long-press tool.
+        self._target_pose_pub = self.create_publisher(Odometry, '/control/target_pose', 10)
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -312,6 +342,21 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._footprint = corners
 
+    def _on_occupied_voxels(self, msg):
+        """Store a downsampled local 3D occupied voxel cloud for the web UI."""
+        try:
+            step = max(1, len(msg.data) // max(1, msg.point_step) // 2500)
+            points = []
+            import sensor_msgs_py.point_cloud2 as pc2
+            for i, p in enumerate(pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True)):
+                points.append({"x": float(p[0]), "y": float(p[1]), "z": float(p[2])})
+                if i >= 2500:
+                    break
+            with self._lock:
+                self._voxel_points = points
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
@@ -443,7 +488,15 @@ class BackendNode(Ros2NodeManager):
         if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
             return
         self._last_frame_time[topic] = now
-        frame = bytes(msg.data)
+
+        try:
+            arr = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if arr is None:
+                return
+            frame = _encode_preview_jpeg(arr)
+        except Exception:
+            return
+
         with self._lock:
             self._last_frame[topic] = frame
         for cb in self.preview_callbacks.get(topic, []):
@@ -504,6 +557,7 @@ class BackendNode(Ros2NodeManager):
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
                 'footprint': list(self._footprint),
+                'voxel_points': list(self._voxel_points),
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot
@@ -997,6 +1051,19 @@ class BackendNode(Ros2NodeManager):
         payload = {'0': pois[key]}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         return True
+
+    def cmd_manual_target_pose(self, x: float, y: float, z: float):
+        """Publish a manually selected local-planner target pose."""
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.position.z = float(z)
+        msg.pose.pose.orientation.w = 1.0
+        self._target_pose_pub.publish(msg)
+        with self._lock:
+            self._nav_target_pose = {'x': float(x), 'y': float(y)}
 
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""

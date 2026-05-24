@@ -71,14 +71,16 @@ class Pose {
   final double x;
   final double y;
   final double yaw;
+  final double? z;
   final double? timestamp;
 
-  const Pose({required this.x, required this.y, required this.yaw, this.timestamp});
+  const Pose({required this.x, required this.y, required this.yaw, this.z, this.timestamp});
 
   factory Pose.fromJson(Map<String, dynamic> json) => Pose(
         x: (json['x'] as num).toDouble(),
         y: (json['y'] as num).toDouble(),
         yaw: (json['yaw'] as num).toDouble(),
+        z: (json['z'] as num?)?.toDouble(),
         timestamp: (json['timestamp'] as num?)?.toDouble(),
       );
 }
@@ -148,6 +150,13 @@ class TrajPoint {
   const TrajPoint(this.x, this.y);
 }
 
+class VoxelPoint {
+  final double x;
+  final double y;
+  final double z;
+  const VoxelPoint(this.x, this.y, this.z);
+}
+
 class GridInfo {
   final double originX;
   final double originY;
@@ -185,6 +194,7 @@ class PlanningState {
   final GridInfo? gridInfo;
   final TrajPoint? navTargetPose;
   final List<TrajPoint> footprint;
+  final List<VoxelPoint> voxelPoints;
 
   const PlanningState({
     required this.localized,
@@ -199,6 +209,7 @@ class PlanningState {
     this.gridInfo,
     this.navTargetPose,
     this.footprint = const [],
+    this.voxelPoints = const [],
   });
 
   factory PlanningState.fromJson(Map<String, dynamic> j) {
@@ -240,6 +251,14 @@ class PlanningState {
       footprint: (j['footprint'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;
         return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
+      }).toList(),
+      voxelPoints: (j['voxel_points'] as List? ?? []).map((p) {
+        final m = p as Map<String, dynamic>;
+        return VoxelPoint(
+          (m['x'] as num).toDouble(),
+          (m['y'] as num).toDouble(),
+          (m['z'] as num).toDouble(),
+        );
       }).toList(),
     );
   }

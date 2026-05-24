@@ -592,7 +592,7 @@ def main(
 
     fx, _, cx, cy = camera_K[0, 0], camera_K[1, 1], camera_K[0, 2], camera_K[1, 2]
     with server.gui.add_folder("cameras") as _:
-        for timestamp, camera_pose in poses.items():
+        for timestamp, camera_pose in list(poses.items())[::8]:
             R = vtf.SO3.from_matrix(camera_pose[:3, :3])
             t = camera_pose[:3, 3]
             _ = server.scene.add_camera_frustum(
