@@ -5,7 +5,11 @@
 
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
-    "GDK_SCALE": "2"
+    "GDK_SCALE": "2",
+    "ROS_DOMAIN_ID": "42",
+    "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp",
+    "ROS_LOCALHOST_ONLY": "0",
+    "FASTDDS_BUILTIN_TRANSPORTS": "UDPv4"
   },
 
   "runArgs": [
@@ -15,6 +19,7 @@
     "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
     "-v", "/dev:/dev",
     "-v", "/etc/localtime:/etc/localtime",
+    "-v", "/mnt/nas:/mnt/nas",
     "--device-cgroup-rule=c 81:* rwm",
     "--device-cgroup-rule=c 234:* rwm",
     "--shm-size=16gb",
@@ -29,4 +34,3 @@
   "postCreateCommand": "echo 'Devcontainer ready.'",
   "postStartCommand": "/usr/local/bin/entrypoint.sh"
 }
-

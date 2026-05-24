@@ -1,5 +1,15 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
+
+# Ensure ROS 2 CLI is available even when called from non-interactive services.
+if [ -f /opt/ros/humble/setup.bash ]; then
+    # shellcheck disable=SC1091
+    source /opt/ros/humble/setup.bash
+fi
+if [ -f /3rdparty/message_filters_ws/install/local_setup.bash ]; then
+    # shellcheck disable=SC1091
+    source /3rdparty/message_filters_ws/install/local_setup.bash
+fi
 
 # Usage: run_rosbag_record.sh [--output DIR]
 #   If --output is not given, a timestamped dir is created under XDG_DATA_HOME/tinynav/rosbags.
