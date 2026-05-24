@@ -1,15 +1,33 @@
-import tensorrt as trt
 import numpy as np
 import cv2
-from codetiming import Timer
 import platform
 import asyncio
 from tinynav.core.func import alru_cache_numpy
 
-from cuda import cudart
 import ctypes
 import einops
 import logging
+import os
+try:
+    import tensorrt as trt
+except ImportError:
+    trt = None
+
+try:
+    from cuda import cudart
+except ImportError:
+    cudart = None
+
+try:
+    from codetiming import Timer
+except ImportError:
+    class Timer:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
@@ -39,6 +57,8 @@ def disparity_to_depth(disparity: np.ndarray, baseline: float, focal_length: flo
 
 class TRTBase:
     def __init__(self, engine_path):
+        if trt is None or cudart is None:
+            raise ImportError("TensorRT and cuda-python are required for TRT models.")
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
@@ -312,6 +332,113 @@ class StereoEngineTRT(TRTBase):
         disp = disp.astype(np.float32)
         depth = disparity_to_depth(disp, baseline, focal_length)
         return disp, depth
+
+
+class YOLO11TRT(TRTBase):
+    def __init__(self, engine_path=None):
+        if engine_path is None:
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            candidates = [
+                f"/tinynav/tinynav/models/hf_trained_{platform.machine()}.plan",
+                os.path.join(repo_root, "tinynav", "models", f"hf_trained_{platform.machine()}.plan"),
+            ]
+            engine_path = next((p for p in candidates if os.path.exists(p)), candidates[-1])
+        super().__init__(engine_path)
+        self.input_shape = self.inputs[0]["shape"]
+        self.output_name = self.outputs[0]["name"]
+
+    @staticmethod
+    def _nms(boxes_xyxy: np.ndarray, scores: np.ndarray, iou_thresh: float, max_det: int) -> np.ndarray:
+        if boxes_xyxy.shape[0] == 0:
+            return np.empty((0,), dtype=np.int32)
+        b = boxes_xyxy.astype(np.float32)
+        s = scores.astype(np.float32)
+        order = np.argsort(s)[::-1]
+        keep = []
+        x1, y1, x2, y2 = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
+        areas = np.maximum(0.0, x2 - x1) * np.maximum(0.0, y2 - y1)
+        while order.size > 0 and len(keep) < max_det:
+            i = order[0]
+            keep.append(i)
+            rest = order[1:]
+            if rest.size == 0:
+                break
+            xx1 = np.maximum(x1[i], x1[rest])
+            yy1 = np.maximum(y1[i], y1[rest])
+            xx2 = np.minimum(x2[i], x2[rest])
+            yy2 = np.minimum(y2[i], y2[rest])
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            inter = w * h
+            union = areas[i] + areas[rest] - inter + 1e-7
+            iou = inter / union
+            order = rest[iou < iou_thresh]
+        return np.array(keep, dtype=np.int32)
+
+    async def infer(self, image: np.ndarray, conf: float = 0.25, iou: float = 0.7, max_det: int = 300):
+        if image is None:
+            raise ValueError("image is None")
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(f"expected image shape [H, W, 3], got {image.shape}")
+
+        h_in, w_in = image.shape[:2]
+        _, c, h_net, w_net = self.input_shape
+        if c != 3:
+            raise RuntimeError(f"expected YOLO input channels=3, got {c}")
+        inp = cv2.resize(image, (w_net, h_net), interpolation=cv2.INTER_LINEAR)
+        inp = cv2.cvtColor(inp, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        inp = np.transpose(inp, (2, 0, 1))[None, :, :, :]
+        np.copyto(self.inputs[0]["host"], inp)
+        results = await self.run_graph()
+
+        pred = np.asarray(results[self.output_name]).squeeze()
+        if pred.ndim == 3:
+            pred = pred[0]
+        if pred.ndim != 2:
+            raise RuntimeError(f"unexpected YOLO output shape: {results[self.output_name].shape}")
+        if pred.shape[0] < pred.shape[1] and pred.shape[0] <= 128:
+            pred = pred.T
+
+        if pred.shape[1] == 6:
+            boxes_xyxy = pred[:, :4]
+            scores = pred[:, 4]
+            classes = pred[:, 5].astype(np.int32)
+        elif pred.shape[1] > 6:
+            xywh = pred[:, :4]
+            cls_prob = pred[:, 4:]
+            classes = np.argmax(cls_prob, axis=1).astype(np.int32)
+            scores = cls_prob[np.arange(cls_prob.shape[0]), classes]
+            cx, cy, bw, bh = xywh[:, 0], xywh[:, 1], xywh[:, 2], xywh[:, 3]
+            boxes_xyxy = np.stack([cx - bw / 2.0, cy - bh / 2.0, cx + bw / 2.0, cy + bh / 2.0], axis=1)
+        else:
+            raise RuntimeError(f"unsupported YOLO output layout: {pred.shape}")
+
+        valid = scores >= conf
+        boxes_xyxy = boxes_xyxy[valid]
+        scores = scores[valid]
+        classes = classes[valid]
+        if boxes_xyxy.shape[0] == 0:
+            return {
+                "boxes_xyxy": np.empty((0, 4), dtype=np.float32),
+                "scores": np.empty((0,), dtype=np.float32),
+                "classes": np.empty((0,), dtype=np.int32),
+            }
+
+        sx = w_in / float(w_net)
+        sy = h_in / float(h_net)
+        boxes_xyxy[:, [0, 2]] *= sx
+        boxes_xyxy[:, [1, 3]] *= sy
+        boxes_xyxy[:, [0, 2]] = np.clip(boxes_xyxy[:, [0, 2]], 0, w_in - 1)
+        boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0, h_in - 1)
+
+        keep = self._nms(boxes_xyxy, scores, iou, max_det)
+        return {
+            "boxes_xyxy": boxes_xyxy[keep].astype(np.float32),
+            "scores": scores[keep].astype(np.float32),
+            "classes": classes[keep].astype(np.int32),
+        }
 
 
 if __name__ == "__main__":
