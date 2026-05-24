@@ -14,6 +14,7 @@ SUPERPOINT_ONNX  := superpoint_fp16_dynamic.onnx
 LIGHTGLUE_ONNX   := lightglue_fp16.onnx
 RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
 FOUNDATION_STEREO_ONNX := foundation_stereo.onnx
+YOLO11_ONNX := hf_trained.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -25,8 +26,9 @@ LIGHTGLUE_ENGINE  := $(basename $(LIGHTGLUE_ONNX))_$(ARCH).plan
 SUPERPOINT_ENGINE := $(basename $(SUPERPOINT_ONNX))_$(ARCH).plan
 RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
 FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
+YOLO11_ENGINE := $(basename $(YOLO11_ONNX))_$(ARCH).plan
 
-ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE)
+ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(YOLO11_ENGINE)
 
 .PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo clean
 
@@ -41,6 +43,7 @@ superpoint: $(SUPERPOINT_ENGINE) ## Build SuperPoint engine
 lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
 retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
+yolo11: $(YOLO11_ENGINE) ## Build YOLO11 engine
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -75,6 +78,9 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
 #   --valid_iters 8
 #   --max_disp 192
 $(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
+
+$(YOLO11_ENGINE): $(YOLO11_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
 
 

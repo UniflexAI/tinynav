@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'cor
 import numpy as np
 import platform
 from codetiming import Timer
-from tinynav.core.models_trt import SuperPointTRT, LightGlueTRT, StereoEngineTRT
+from tinynav.core.models_trt import SuperPointTRT, LightGlueTRT, StereoEngineTRT, YOLO11TRT
 import asyncio
 import cv2
 
@@ -498,6 +498,42 @@ def test_stereo_engine_trt_with_realsense_data():
     depth_color = cv2.applyColorMap(depth_u8, cv2.COLORMAP_VIRIDIS)
     cv2.imwrite(os.path.join(rs_dir, "depth_vis.png"), depth_color)
 
+
+def test_yolo11_infer_on_frame_000200():
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    image_path = os.path.join(repo_root, "tests", "data", "frame_000200.jpg")
+    assert os.path.exists(image_path), f"Missing image at {image_path}"
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    assert image is not None, f"Failed to load {image_path}"
+
+    yolo11 = YOLO11TRT()
+    result = asyncio.run(yolo11.infer(image))
+
+    boxes = result["boxes_xyxy"]
+    scores = result["scores"]
+    classes = result["classes"]
+    assert boxes.ndim == 2 and boxes.shape[1] == 4, f"unexpected boxes shape: {boxes.shape}"
+    assert scores.ndim == 1 and classes.ndim == 1, "unexpected scores/classes shape"
+    assert boxes.shape[0] == scores.shape[0] == classes.shape[0], "detections count mismatch"
+
+    vis = image.copy()
+    for i in range(boxes.shape[0]):
+        x1, y1, x2, y2 = boxes[i].astype(np.int32).tolist()
+        cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(
+            vis,
+            f"{int(classes[i])}:{scores[i]:.2f}",
+            (x1, max(0, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 0),
+            1,
+            cv2.LINE_AA,
+        )
+    out_path = os.path.join(repo_root, "tests", "data", "frame_000200_yolo11.jpg")
+    cv2.imwrite(out_path, vis)
+    print(f"YOLO11 detections: {boxes.shape[0]}, visualization saved to {out_path}")
+
 if __name__ == "__main__":
     test_superpoint_trt_with_cache()
     print("SuperPoint TRT with cache test passed.")
@@ -511,3 +547,5 @@ if __name__ == "__main__":
     print("StereoEngine TRT with Looper data test passed.")
     test_stereo_engine_trt_with_realsense_data()
     print("StereoEngine TRT with RealSense data test passed.")
+    test_yolo11_infer_on_frame_000200()
+    print("YOLO11 inference test passed.")
