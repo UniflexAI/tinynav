@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, se3_inv
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -115,91 +115,10 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
                             parent[neighbor] = current
     return []
 
-def _segment_is_shortcut_safe(
-    start: tuple,
-    goal: tuple,
-    sdf_map: np.ndarray,
-    occupancy_map: np.ndarray,
-    resolution: float,
-    max_segment_m: float = 1.0,
-    sdf_margin_m: float = 0.2,
-) -> bool:
-    """Return whether a straight shortcut stays in known-safe map cells.
-
-    Keep this deliberately conservative: bound segment length so DWA does not see
-    huge sparse path jumps, reject occupied voxels, and avoid shortcuts that cut
-    far away from the demonstrated/odom corridor encoded by sdf_map.
-    """
-    start_np = np.asarray(start, dtype=np.float32)
-    goal_np = np.asarray(goal, dtype=np.float32)
-    delta = goal_np - start_np
-    distance_m = float(np.linalg.norm(delta) * resolution)
-    if distance_m <= 1e-6:
-        return True
-    if distance_m > max_segment_m:
-        return False
-
-    steps = max(1, int(np.ceil(float(np.max(np.abs(delta))))))
-    max_allowed_sdf = max(float(sdf_map[start]), float(sdf_map[goal]), 0.5) + sdf_margin_m
-    for t in np.linspace(0.0, 1.0, steps + 1):
-        idx = tuple(np.rint(start_np + delta * t).astype(np.int32).tolist())
-        if (
-            idx[0] < 0
-            or idx[0] >= occupancy_map.shape[0]
-            or idx[1] < 0
-            or idx[1] >= occupancy_map.shape[1]
-            or idx[2] < 0
-            or idx[2] >= occupancy_map.shape[2]
-        ):
-            return False
-        if occupancy_map[idx] == 2:
-            return False
-        if not np.isfinite(sdf_map[idx]) or float(sdf_map[idx]) > max_allowed_sdf:
-            return False
-    return True
-
-
-def shortcut_prune_path(
-    path: list,
-    sdf_map: np.ndarray,
-    occupancy_map: np.ndarray,
-    resolution: float,
-    max_segment_m: float = 1.0,
-    max_skip_nodes: int = 30,
-) -> list:
-    """Greedily remove small zig-zags from a voxel path using local line-of-sight.
-
-    This is intentionally low-cost and local: from each kept point, look ahead at
-    most max_skip_nodes / max_segment_m and keep the farthest safe shortcut.
-    """
-    if len(path) <= 2:
-        return path
-
-    pruned = [path[0]]
-    i = 0
-    while i < len(path) - 1:
-        farthest = i + 1
-        upper = min(len(path) - 1, i + max_skip_nodes)
-        for j in range(upper, i, -1):
-            if _segment_is_shortcut_safe(
-                path[i],
-                path[j],
-                sdf_map,
-                occupancy_map,
-                resolution,
-                max_segment_m=max_segment_m,
-            ):
-                farthest = j
-                break
-        pruned.append(path[farthest])
-        i = farthest
-    return pruned
-
-
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    sdf_bins = [0.5, 1.0, 2.0, 5.0, 10.0]
+    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
 
     def get_queue_index(sdf_value: float) -> int:
         for idx, threshold in enumerate(sdf_bins):
@@ -254,57 +173,6 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                         if neighbor not in parent:
                             parent[neighbor] = current
     return []
-
-
-def _object_points_planar_sv_ratio(object_points: np.ndarray) -> float:
-    """s_min / s_max from SVD of centered 3D points; near 0 means nearly coplanar."""
-    points = np.asarray(object_points, dtype=np.float64).reshape(-1, 3)
-    if points.shape[0] < 4:
-        return 1.0
-    centered = points - np.mean(points, axis=0)
-    try:
-        singular_values = np.linalg.svd(centered, full_matrices=False, compute_uv=False)
-        singular_values = np.maximum(singular_values, 1e-12)
-        return float(singular_values[-1] / singular_values[0])
-    except np.linalg.LinAlgError:
-        return 1.0
-
-
-def _relocalize_solve_pnp_ransac(
-    object_points: np.ndarray,
-    image_points: np.ndarray,
-    K: np.ndarray,
-    *,
-    planar_sv_ratio_max: float = 0.12,
-    iterations_count: int = 200,
-    reprojection_error_px: float = 4.0,
-) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray]:
-    """Handle planar-degenerate PnP by using IPPE when geometry is near-planar."""
-    sv_ratio = _object_points_planar_sv_ratio(object_points)
-    near_planar = sv_ratio < planar_sv_ratio_max
-    if near_planar and hasattr(cv2, "SOLVEPNP_IPPE"):
-        pnp_flag = int(cv2.SOLVEPNP_IPPE)
-    else:
-        pnp_flag = int(cv2.SOLVEPNP_EPNP)
-    try:
-        success, rvec, tvec, inliers = cv2.solvePnPRansac(
-            object_points.astype(np.float64),
-            image_points.astype(np.float64),
-            K.astype(np.float64),
-            None,
-            iterationsCount=iterations_count,
-            reprojectionError=reprojection_error_px,
-            confidence=0.995,
-            flags=pnp_flag,
-        )
-    except cv2.error:
-        success, rvec, tvec, inliers = cv2.solvePnPRansac(
-            object_points.astype(np.float64),
-            image_points.astype(np.float64),
-            K.astype(np.float64),
-            None,
-        )
-    return success, rvec, tvec, inliers
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
@@ -505,7 +373,7 @@ class MapNode(Node):
             self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
-            T_prev_curr = se3_inv(last_keyframe_odom_pose) @ odom
+            T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
@@ -581,8 +449,9 @@ class MapNode(Node):
         idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
         max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
         if len(idx_and_similarity_array) > 0:
-            point_3d_in_world_list = []
-            point_2d_in_keyframe_list = []
+            best_pose_in_camera = None
+            best_inlier_count = 0
+            best_point_count = 0
             for idx_in_map, similarity in idx_and_similarity_array:
                 timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
                 reference_keyframe_pose = self.map_poses[timestamp_in_map]
@@ -594,25 +463,30 @@ class MapNode(Node):
                     point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
                 else:
                     print(f"not enough matched features to relocalize, {len(matches)} < 50")
+                    continue
 
-            if len(point_3d_in_world_list) > 80:
-                point_3d_in_world_list = np.array(point_3d_in_world_list)
-                point_2d_in_keyframe_list = np.array(point_2d_in_keyframe_list)
-
-                success, rvec, tvec, inliers = _relocalize_solve_pnp_ransac(
-                    point_3d_in_world_list,
-                    point_2d_in_keyframe_list,
-                    self.map_K,
-                )
+                if len(point_3d_in_world_list) <= 80:
+                    print(f"not enough landmarks to relocalize, {len(point_3d_in_world_list)}")
+                    continue
+                success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
                 if success and inliers is not None and len(inliers) >= 50:
-                    R, _ = cv2.Rodrigues(rvec)
-                    T = np.eye(4)
-                    T[:3, :3] = R
-                    T[:3, 3] = tvec.reshape(3)
-                    print(f"relocalization pose : {T}")
-                    return True, T, len(inliers) / len(point_2d_in_keyframe_list)
+                    inlier_count = len(inliers)
+                    if inlier_count > best_inlier_count:
+                        best_inlier_count = inlier_count
+                        best_point_count = len(point_2d_in_keyframe_list)
+                        best_pose_in_camera = np.eye(4)
+                        R, _ = cv2.Rodrigues(rvec)
+                        best_pose_in_camera[:3, :3] = R
+                        best_pose_in_camera[:3, 3] = tvec.reshape(3)
+                else:
+                    inlier_count = 0 if inliers is None else len(inliers)
+                    print(f"not enough PnP inliers to relocalize, {inlier_count} < 50")
+
+            if best_pose_in_camera is not None:
+                print(f"relocalization pose : {best_pose_in_camera}")
+                return True, best_pose_in_camera, best_inlier_count / best_point_count
             else:
-                print(f"not enough landmarks to relocalize, {len(point_3d_in_world_list)}")
+                print("no valid PnP relocalization candidate found")
                 return False, np.eye(4), -np.inf
         else:
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
@@ -653,7 +527,7 @@ class MapNode(Node):
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug
-            pose_in_world = se3_inv(pose_in_camera)
+            pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
@@ -710,7 +584,7 @@ class MapNode(Node):
             if timestamp in self.pose_graph_used_pose:
                 camera_in_map_world = pose
                 camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-                observation_T_from_map_to_odom =  camera_in_odom_world @ se3_inv(camera_in_map_world)
+                observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
@@ -738,7 +612,7 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         # get the pose from the map to the odom
-        pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
@@ -829,7 +703,7 @@ class MapNode(Node):
                     target_position = paths_in_map[0]
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 pose_in_origin_odom = self.odom[timestamp]
-                T = pose_in_origin_odom @ se3_inv(pose_in_map)
+                T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
                 dummy_pose = np.eye(4)
                 dummy_pose[:3, 3] = target_position_in_odom
@@ -891,12 +765,6 @@ class MapNode(Node):
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
 
-        if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
-            self.get_logger().warning(
-                f"search_close_to_sdf_map returned empty path: start_idx={tuple(start_idx)}, goal_idx={tuple(poi_goal_idx)}"
-            )
-            return None
-
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
@@ -906,10 +774,7 @@ class MapNode(Node):
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
-            pruned_path = shortcut_prune_path(path, self.sdf_map, self.occupancy_map, resolution)
-            if len(pruned_path) < len(path):
-                self.get_logger().info(f"shortcut pruned nav path: {len(path)} -> {len(pruned_path)} points")
-            converted_path = np.array(pruned_path) * resolution + occupancy_map_origin
+            converted_path = np.array(path) * resolution + occupancy_map_origin
             return converted_path
         return None
 
