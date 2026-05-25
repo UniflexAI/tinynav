@@ -92,7 +92,7 @@ class TRTBase:
             bindings.append(int(device_ptr))
 
             if is_input:
-                inputs.append({"host": host_mem, "device": device_ptr, "shape": shape, "nbytes": nbytes})
+                inputs.append({"host": host_mem, "device": device_ptr, "shape": shape, "name": name, "nbytes": nbytes})
             else:
                 outputs.append({"host": host_mem, "device": device_ptr, "name": name, "nbytes": nbytes})
 
@@ -223,7 +223,69 @@ class Dinov2TRT(TRTBase):
         return results["last_hidden_state"][:, 0, :].squeeze(0)
 
 
-class StereoEngineTRT(TRTBase):
+class FoundationStereoTRT(TRTBase):
+    def __init__(
+        self,
+        engine_path=f"/tinynav/tinynav/models/foundation_stereo_11-33-40_256x320_4_{platform.machine()}.plan",
+    ):
+        super().__init__(engine_path)
+        if len(self.inputs) != 2:
+            raise RuntimeError(f"FoundationStereo engine must have 2 inputs, got {len(self.inputs)}")
+        if len(self.outputs) != 1:
+            raise RuntimeError(f"FoundationStereo engine must have 1 output, got {len(self.outputs)}")
+
+        self.left_idx = 0 if self.inputs[0]["name"] == "left" else 1
+        self.right_idx = 1 - self.left_idx
+        self.output_name = self.outputs[0]["name"]
+        self.net_h = int(self.inputs[self.left_idx]["shape"][2])
+        self.net_w = int(self.inputs[self.left_idx]["shape"][3])
+
+    def _to_three_channel_float(self, image: np.ndarray) -> np.ndarray:
+        if image.ndim == 2:
+            image = np.repeat(image[:, :, None], 3, axis=2)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            image = np.repeat(image, 3, axis=2)
+        elif image.ndim == 3 and image.shape[2] >= 3:
+            image = image[:, :, :3]
+        else:
+            raise ValueError(f"Unsupported image shape: {image.shape}")
+        image = image.astype(np.float32, copy=False)
+        return np.transpose(image, (2, 0, 1))[None, ...]
+
+    def _resize_for_engine(self, image: np.ndarray) -> np.ndarray:
+        if image.shape[:2] == (self.net_h, self.net_w):
+            return image
+        return cv2.resize(image, (self.net_w, self.net_h), interpolation=cv2.INTER_LINEAR)
+
+    async def infer(self, left_img, right_img, baseline, focal_length):
+        if left_img.shape[:2] != right_img.shape[:2]:
+            raise ValueError(f"Left/right shape mismatch: {left_img.shape} vs {right_img.shape}")
+
+        h_in, w_in = left_img.shape[:2]
+        left_tensor = self._to_three_channel_float(self._resize_for_engine(left_img))
+        right_tensor = self._to_three_channel_float(self._resize_for_engine(right_img))
+
+        np.copyto(self.inputs[self.left_idx]["host"], left_tensor)
+        np.copyto(self.inputs[self.right_idx]["host"], right_tensor)
+
+        results = await self.run_graph()
+        disp_net = np.asarray(results[self.output_name], dtype=np.float32).reshape(self.net_h, self.net_w)
+        disp_net = np.clip(disp_net, 0.0, None)
+        if (h_in, w_in) == (self.net_h, self.net_w):
+            disp = disp_net
+        else:
+            disp = cv2.resize(disp_net, (w_in, h_in), interpolation=cv2.INTER_LINEAR)
+            disp *= float(w_in) / float(self.net_w)
+            disp = np.clip(disp, 0.0, None)
+
+        # hack
+        disp[300:,:] = 0.0
+
+        depth = disparity_to_depth(disp, baseline, focal_length)
+        return disp, depth
+
+
+class RetinifyTRT(TRTBase):
     def _get_static_shape(self, name):
         """Ensure the stereo output gets a valid max shape for buffer allocation.
 
@@ -307,11 +369,14 @@ class StereoEngineTRT(TRTBase):
         disp = results[self.output_name]
         if disp.shape != (h_in, w_in):
             raise RuntimeError(
-                f"StereoEngine output shape mismatch: got disp {disp.shape}, expected ({h_in}, {w_in})"
+                f"RetinifyTRT output shape mismatch: got disp {disp.shape}, expected ({h_in}, {w_in})"
             )
         disp = disp.astype(np.float32)
         depth = disparity_to_depth(disp, baseline, focal_length)
         return disp, depth
+
+
+StereoEngineTRT = FoundationStereoTRT  # Alias for easier use in tests; can switch to RetinifyTRT if desired.
 
 
 if __name__ == "__main__":
