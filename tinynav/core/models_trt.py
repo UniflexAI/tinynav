@@ -376,7 +376,7 @@ class RetinifyTRT(TRTBase):
         return disp, depth
 
 
-StereoEngineTRT = FoundationStereoTRT  # Alias for easier use in tests; can switch to RetinifyTRT if desired.
+StereoEngineTRT = RetinifyTRT
 
 
 if __name__ == "__main__":
