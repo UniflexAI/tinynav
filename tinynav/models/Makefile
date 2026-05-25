@@ -13,7 +13,7 @@ DINO_ONNX        := dinov2_base_224x224_fp16.onnx
 SUPERPOINT_ONNX  := superpoint_fp16_dynamic.onnx
 LIGHTGLUE_ONNX   := lightglue_fp16.onnx
 RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
-FOUNDATION_STEREO_ONNX := foundation_stereo.onnx
+FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -72,10 +72,10 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
         --fp16
 
 # foundation_stereo.onnx export settings:
-#   --valid_iters 8
+#   --valid_iters 4
 #   --max_disp 192
 $(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
-	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --builderOptimizationLevel=1
 
 
 clean: ## Remove generated TensorRT plans for this architecture
