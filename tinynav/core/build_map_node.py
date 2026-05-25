@@ -26,6 +26,7 @@ from tinynav.core.planning_node import run_raycasting_loopy
 import logging
 import asyncio
 import shelve
+import time
 from tqdm import tqdm
 import einops
 from tf2_msgs.msg import TFMessage
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 class BuildMapArgs:
     bag_file: str = "tinynav_db"
     map_save_path: str = "tinynav_db"
+    play_rate: float = 1.0
     verbose_timer: bool = True
 
 
@@ -316,9 +318,16 @@ class TinyNavDB():
         self.rgb_video_db.close()
 
 class BagPlayer(Node):
-    def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
+    def __init__(
+        self,
+        bag_uri: str,
+        storage_id: str = "sqlite3",
+        serialization_format: str = "cdr",
+        play_rate: float = 1.0,
     ):
         super().__init__("rosbag_player")
+        if play_rate <= 0.0:
+            raise ValueError(f"play_rate must be > 0, got {play_rate}")
 
         self._storage_options = StorageOptions(uri=bag_uri, storage_id="sqlite3",)
         self._converter_options = ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr",)
@@ -328,6 +337,9 @@ class BagPlayer(Node):
 
         self.start_timestamp_ns = None
         self.end_timestamp_ns = None
+        self.play_rate = play_rate
+        self._playback_start_timestamp_ns = None
+        self._playback_start_wall_time_s = None
 
         topic_infos = self._reader.get_all_topics_and_types()
         if len(topic_infos) == 0:
@@ -356,7 +368,7 @@ class BagPlayer(Node):
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
         self._mapping_percent_pub = self.create_publisher(Float32, "/mapping/percent", 10)
 
-        self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
+        self.get_logger().info(f"BagPlayer opened bag: {bag_uri}, play_rate={play_rate}")
 
     def _scan_bag_time_range(self, bag_uri: str, storage_id: str, serialization_format: str) -> tuple[int, int]:
         # We have not found a rosbag2_py API that exposes the bag time range directly,
@@ -404,6 +416,18 @@ class BagPlayer(Node):
         percent = 100.0 * (timestamp_ns - self.start_timestamp_ns) / (self.end_timestamp_ns - self.start_timestamp_ns)
         self._publish_percent(percent)
 
+    def _pace_to_timestamp(self, timestamp_ns: int) -> None:
+        if self._playback_start_timestamp_ns is None:
+            self._playback_start_timestamp_ns = timestamp_ns
+            self._playback_start_wall_time_s = time.monotonic()
+            return
+
+        elapsed_bag_s = (timestamp_ns - self._playback_start_timestamp_ns) * 1e-9
+        target_wall_time_s = self._playback_start_wall_time_s + elapsed_bag_s / self.play_rate
+        sleep_s = target_wall_time_s - time.monotonic()
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+
     def play_next(self) -> bool:
         """
         Publish the next message from the bag.
@@ -413,7 +437,9 @@ class BagPlayer(Node):
             return False
 
         topic, serialized_msg, timestamp_ns = self._reader.read_next()
-        self._publish_percent_from_timestamp(int(timestamp_ns))
+        timestamp_ns = int(timestamp_ns)
+        self._pace_to_timestamp(timestamp_ns)
+        self._publish_percent_from_timestamp(timestamp_ns)
 
         # Find publisher + msg type for this topic
         pub_and_type = self._topic_publishers.get(topic)
@@ -857,7 +883,7 @@ if __name__ == '__main__':
     parsed_args = tyro.cli(BuildMapArgs, use_underscores=True)
 
     exec_ = SingleThreadedExecutor()
-    player_node = BagPlayer(parsed_args.bag_file)
+    player_node = BagPlayer(parsed_args.bag_file, play_rate=parsed_args.play_rate)
     map_node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)
