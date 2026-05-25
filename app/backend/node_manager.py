@@ -814,11 +814,14 @@ class BackendNode(Ros2NodeManager):
 
     _DEBUG_RECORD_TOPICS = [
         '/camera/camera/infra1/image_rect_raw',
-        '/camera/camera/depth/image_rect_raw',
-        '/camera/camera/infra1/camera_info',
+        '/camera/camera/infra2/image_rect_raw',
+        '/camera/camera/infra2/camera_info',
+	'/camera/camera/infra1/camera_info',
         '/insight/vio_100hz',
         '/insight/vio_20hz',
+	'/insight/vio_status',
         '/tf_static',
+	'/tf',
         '/slam/odometry_visual',
         '/slam/depth',
         '/mapping/global_plan',
