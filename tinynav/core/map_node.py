@@ -456,7 +456,9 @@ class MapNode(Node):
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
             return False, np.eye(4), -np.inf
 
-        candidates = []
+        best_pose_in_camera = None
+        best_score = -np.inf
+        best_inlier_ratio = -np.inf
         for idx_in_map, similarity in idx_and_similarity_array:
             timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
@@ -493,14 +495,7 @@ class MapNode(Node):
                 print(f"PnP inlier ratio too low, {inlier_ratio:.2f} < {self.relocalization_min_inlier_ratio:.2f}")
                 continue
 
-            reprojection_error = self.compute_reprojection_error(
-                point_3d_in_world_list,
-                point_2d_in_keyframe_list,
-                rvec,
-                tvec,
-                inliers,
-                self.map_K,
-            )
+            reprojection_error = self.compute_reprojection_error(point_3d_in_world_list, point_2d_in_keyframe_list, rvec, tvec, inliers, self.map_K)
             if reprojection_error > self.relocalization_max_reprojection_error_px:
                 print(f"PnP reprojection error too high, {reprojection_error:.2f}px > {self.relocalization_max_reprojection_error_px:.2f}px")
                 continue
@@ -509,36 +504,21 @@ class MapNode(Node):
             R, _ = cv2.Rodrigues(rvec)
             pose_in_camera[:3, :3] = R
             pose_in_camera[:3, 3] = tvec.reshape(3)
-
             if not self.is_relocalization_consistent_with_odom(pose_in_camera, timestamp_ns):
                 continue
 
             score = similarity * inlier_ratio * inlier_count / max(reprojection_error, 1.0)
-            candidates.append({
-                "pose_in_camera": pose_in_camera,
-                "score": score,
-                "similarity": similarity,
-                "inlier_count": inlier_count,
-                "point_count": point_count,
-                "inlier_ratio": inlier_ratio,
-                "reprojection_error": reprojection_error,
-                "timestamp_in_map": timestamp_in_map,
-            })
+            if score > best_score:
+                best_score = score
+                best_pose_in_camera = pose_in_camera
+                best_inlier_ratio = inlier_ratio
 
-        if len(candidates) == 0:
+        if best_pose_in_camera is not None:
+            print(f"relocalization pose : {best_pose_in_camera}")
+            return True, best_pose_in_camera, best_inlier_ratio
+        else:
             print("no valid PnP relocalization candidate found")
             return False, np.eye(4), -np.inf
-
-        best = max(candidates, key=lambda candidate: candidate["score"])
-        print(
-            "relocalization pose : "
-            f"{best['pose_in_camera']}, "
-            f"map_timestamp: {best['timestamp_in_map']}, "
-            f"similarity: {best['similarity']:.3f}, "
-            f"inliers: {best['inlier_count']}/{best['point_count']}, "
-            f"reprojection_error: {best['reprojection_error']:.2f}px"
-        )
-        return True, best["pose_in_camera"], best["inlier_ratio"]
 
     def compute_reprojection_error(self, points_3d: np.ndarray, points_2d: np.ndarray, rvec: np.ndarray, tvec: np.ndarray, inliers: np.ndarray, K: np.ndarray) -> float:
         inlier_indices = inliers.reshape(-1)
