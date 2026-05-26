@@ -25,6 +25,166 @@ def test_superpoint_trt_with_cache():
     assert np.array_equal(extract_result_origin['kpts'], extract_result_first['kpts']), "Cached first kpts result does not match original result."
     assert np.array_equal(extract_result_origin['descps'], extract_result_first['descps']), "Cached first descps result does not match original result."
 
+
+def test_superpoint_trt_cache_hit_with_32_salted_images():
+    """
+    Build 32 salted variants from tests/data/000000.png and run SuperPoint twice.
+    Verify second pass hits async LRU cache.
+    """
+    superpoint = SuperPointTRT()
+    superpoint.infer.cache_clear()
+
+    base_path = "/tinynav/tests/data/000000.png"
+    base = cv2.imread(base_path, cv2.IMREAD_GRAYSCALE)
+    assert base is not None, f"Failed to load {base_path}"
+
+    rng = np.random.default_rng(42)
+    images = []
+    for _ in range(32):
+        noise = rng.integers(-8, 9, size=base.shape, dtype=np.int16)
+        salted = np.clip(base.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        images.append(salted)
+
+    async def _run_two_pass():
+        t0 = time.perf_counter()
+        first = [await superpoint.infer(img) for img in images]
+        first_elapsed_local = time.perf_counter() - t0
+        info_first = superpoint.infer.cache_info()
+
+        t1 = time.perf_counter()
+        second = [await superpoint.infer(img) for img in images]
+        second_elapsed_local = time.perf_counter() - t1
+        info_second = superpoint.infer.cache_info()
+        return first, second, first_elapsed_local, second_elapsed_local, info_first, info_second
+
+    first_results, second_results, first_elapsed, second_elapsed, info_after_first, info_after_second = asyncio.run(_run_two_pass())
+
+    for r0, r1 in zip(first_results, second_results):
+        assert np.array_equal(r0["kpts"], r1["kpts"])
+        assert np.array_equal(r0["descps"], r1["descps"])
+        assert np.array_equal(r0["mask"], r1["mask"])
+
+    hits_gained = info_after_second.hits - info_after_first.hits
+    assert hits_gained >= len(images), (
+        f"Expected at least {len(images)} cache hits on second pass, got {hits_gained}. "
+        f"cache_info after first={info_after_first}, after second={info_after_second}"
+    )
+
+    print(
+        f"SuperPoint cache test: first={first_elapsed:.3f}s second={second_elapsed:.3f}s "
+        f"hits_gained={hits_gained}"
+    )
+
+
+def test_lightglue_cache_hit_with_consecutive_salted_pairs():
+    """
+    Follow perception_node infer pattern:
+      1) current-frame prev/current matching
+      2) sliding-window (_N=5) adjacent-pair association loop
+    Run two rounds and verify LightGlue cache hits on round 2.
+    """
+    superpoint = SuperPointTRT()
+    lightglue = LightGlueTRT()
+    superpoint.infer.cache_clear()
+    lightglue.infer.cache_clear()
+
+    base_path = "/tinynav/tests/data/000000.png"
+    base = cv2.imread(base_path, cv2.IMREAD_GRAYSCALE)
+    assert base is not None, f"Failed to load {base_path}"
+
+    rng = np.random.default_rng(123)
+    images = []
+    for _ in range(500):
+        noise = rng.integers(-8, 9, size=base.shape, dtype=np.int16)
+        salted = np.clip(base.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        images.append(salted)
+
+    n_window = 5
+    keyframe_queue = []
+    sp_s = 0.0
+    lg_s = 0.0
+    match_signatures = []
+    sliding_reuse_checks = 0
+    sliding_reuse_hits = 0
+    seen_pairs = set()
+    loop = asyncio.new_event_loop()
+
+    async def _infer_two_images_and_match(frame_idx, new_img):
+        nonlocal sliding_reuse_checks, sliding_reuse_hits
+        local_signatures = []
+
+        # 1) infer/match previous keyframe with new image
+        prev_idx, prev_img = keyframe_queue[-1]
+        process_key = (prev_idx, frame_idx)
+        r0 = await superpoint.infer(prev_img)
+        r1 = await superpoint.infer(new_img)
+        m = await lightglue.infer(
+            r0["kpts"], r1["kpts"],
+            r0["descps"], r1["descps"],
+            r0["mask"], r1["mask"],
+            prev_img.shape, new_img.shape,
+        )
+        local_signatures.append(int(np.sum(m["match_indices"] != -1)))
+        seen_pairs.add(process_key)
+
+        # 2) append new keyframe into sliding window
+        keyframe_queue.append((frame_idx, new_img))
+        if len(keyframe_queue) > n_window:
+            keyframe_queue.pop(0)
+
+        # 3) sliding-window consecutive pairs
+        start = max(0, len(keyframe_queue) - n_window)
+        window = keyframe_queue[start:]
+        for i in range(0, len(window) - 1):
+            info_before_window = lightglue.infer.cache_info()
+            idx_a, img_a_w = window[i]
+            idx_b, img_b_w = window[i + 1]
+            pair_key = (idx_a, idx_b)
+            r0 = await superpoint.infer(img_a_w)
+            r1 = await superpoint.infer(img_b_w)
+            m = await lightglue.infer(
+                r0["kpts"], r1["kpts"],
+                r0["descps"], r1["descps"],
+                r0["mask"], r1["mask"],
+                img_a_w.shape, img_b_w.shape,
+            )
+            local_signatures.append(int(np.sum(m["match_indices"] != -1)))
+
+            if pair_key in seen_pairs:
+                sliding_reuse_checks += 1
+                window_delta_hit = lightglue.infer.cache_info().hits - info_before_window.hits
+                if window_delta_hit >= 1:
+                    sliding_reuse_hits += 1
+            seen_pairs.add(pair_key)
+
+        return local_signatures
+
+    for frame_idx, img in enumerate(images):
+        if len(keyframe_queue) < 1:
+            keyframe_queue.append((frame_idx, img))
+            continue
+
+        frame_signatures = loop.run_until_complete(_infer_two_images_and_match(frame_idx, img))
+        #frame_signatures = asyncio.run(_infer_two_images_and_match(frame_idx, img))
+        match_signatures.extend(frame_signatures)
+
+    sig = match_signatures
+    info_final = lightglue.infer.cache_info()
+    loop.close()
+
+    assert sliding_reuse_checks > 0, "No sliding-window reuse checks were performed."
+    assert sliding_reuse_hits == sliding_reuse_checks, (
+        f"Expected all reused sliding-window pairs to hit cache, got "
+        f"{sliding_reuse_hits}/{sliding_reuse_checks}. cache_info={info_final}"
+    )
+
+    print(
+        "LightGlue cache test: "
+        f"sliding_reuse_hits={sliding_reuse_hits}/{sliding_reuse_checks} "
+        f"superpoint_total={sp_s:.3f}s lightglue_total={lg_s:.3f}s "
+        f"cache_info={info_final}"
+    )
+
 def test_lightglue_trt_with_cache():
     lightglue = LightGlueTRT()
 
