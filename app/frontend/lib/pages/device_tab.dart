@@ -122,9 +122,10 @@ class _SectionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       elevation: 0,
+      color: const Color(0xFF111A24),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: Colors.grey.shade200),
+        side: const BorderSide(color: Color(0xFF2A3B4D)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -132,13 +133,15 @@ class _SectionCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(children: [
-              Icon(icon, size: 18, color: const Color(0xFF2B3A42)),
+              Icon(icon, size: 18, color: const Color(0xFF9EC7E8)),
               const SizedBox(width: 8),
               Text(title,
                   style: const TextStyle(
-                      fontWeight: FontWeight.w700, fontSize: 14)),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                      color: Color(0xFFE8F2FF))),
             ]),
-            const Divider(height: 20),
+            const Divider(height: 20, color: Color(0xFF243446)),
             ...children,
           ],
         ),
@@ -162,19 +165,38 @@ class _InfoRow extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label,
-              style: const TextStyle(
-                  fontSize: 13, color: Color(0xFF9E9E9E))),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: dimmed
-                  ? Colors.grey.shade400
-                  : (valueColor ?? Colors.black87),
+          Expanded(
+            flex: 3,
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: Color(0xFF9FB0C3))),
+          ),
+          Expanded(
+            flex: 5,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A2532),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  value,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: dimmed
+                        ? const Color(0xFF77889A)
+                        : (valueColor ?? const Color(0xFFE6EEF7)),
+                  ),
+                ),
+              ),
             ),
           ),
         ],

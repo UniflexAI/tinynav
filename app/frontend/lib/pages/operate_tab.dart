@@ -499,91 +499,166 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
   @override
   Widget build(BuildContext context) {
     final p = widget.planning;
+
     return Stack(
       fit: StackFit.expand,
       children: [
         Container(color: const Color(0xFF0D1117)),
-        ClipRect(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final side = widget.fillViewport
-                  ? max(constraints.maxWidth, constraints.maxHeight)
-                  : min(constraints.maxWidth, constraints.maxHeight);
-              final targetPose = _pendingTarget != null
-                  ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
-                  : p?.navTargetPose;
-              return Center(
-                child: SizedBox.square(
-                  dimension: side,
-                  child: Builder(
-                    builder: (mapContext) {
-                      final content = widget.show3d
-                          ? _Local3dPlanningView(planning: p)
-                          : InteractiveViewer(
-                              transformationController: _txCtrl,
-                              minScale: 0.5,
-                              maxScale: 8.0,
-                              boundaryMargin: const EdgeInsets.all(double.infinity),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: ClipRect(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final gi = p?.gridInfo;
+                final contentAspect =
+                    (gi != null && gi.height > 0) ? gi.width / gi.height : 1.0;
+                final viewportAspect = constraints.maxWidth / constraints.maxHeight;
+                final useWidth = widget.fillViewport
+                    ? viewportAspect > contentAspect
+                    : viewportAspect < contentAspect;
+                final contentWidth = useWidth
+                    ? constraints.maxWidth
+                    : constraints.maxHeight * contentAspect;
+                final contentHeight = useWidth
+                    ? constraints.maxWidth / contentAspect
+                    : constraints.maxHeight;
+                final contentSize = Size(contentWidth, contentHeight);
+                final targetPose = _pendingTarget != null
+                    ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
+                    : p?.navTargetPose;
+
+                return Center(
+                  child: SizedBox(
+                    width: contentWidth,
+                    height: contentHeight,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.white.withOpacity(0.12), width: 1),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x55000000),
+                            blurRadius: 14,
+                            offset: Offset(0, 6),
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: Builder(
+                          builder: (mapContext) {
+                            final content = widget.show3d
+                                ? _Local3dPlanningView(planning: p)
+                                : InteractiveViewer(
+                                    transformationController: _txCtrl,
+                                    minScale: 0.5,
+                                    maxScale: 8.0,
+                                    boundaryMargin: const EdgeInsets.all(double.infinity),
+                                    child: Stack(
+                                      fit: StackFit.expand,
+                                      children: [
+                                        const ColoredBox(color: Color(0xFF0F1621)),
+                                        if (widget.showEsdf && p?.esdfImage != null)
+                                          Opacity(
+                                            opacity: 0.85,
+                                            child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                          ),
+                                        if (widget.showObstacle && p?.obstacleImage != null)
+                                          Opacity(
+                                            opacity: 0.45,
+                                            child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                          ),
+                                        if (p != null)
+                                          CustomPaint(
+                                            painter: LocalPlanningPainter(
+                                              trajectory: p.trajectory,
+                                              globalPath: p.globalPath,
+                                              footprint: p.footprint,
+                                              gridInfo: p.gridInfo,
+                                              odomPose: p.odomPose,
+                                              showTrajectory: widget.showTrajectory,
+                                              showGlobalPath: widget.showGlobalPath,
+                                              showFootprint: widget.showFootprint,
+                                              navTargetPose: targetPose,
+                                            ),
+                                          )
+                                        else
+                                          Center(
+                                            child: Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                              decoration: BoxDecoration(
+                                                color: Colors.black.withOpacity(0.45),
+                                                borderRadius: BorderRadius.circular(12),
+                                                border: Border.all(color: Colors.white.withOpacity(0.12)),
+                                              ),
+                                              child: const Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(Icons.map_outlined, size: 40, color: Colors.white38),
+                                                  SizedBox(height: 8),
+                                                  Text(
+                                                    'Waiting for planning data…',
+                                                    style: TextStyle(
+                                                      color: Colors.white70,
+                                                      fontSize: 13,
+                                                      fontWeight: FontWeight.w500,
+                                                    ),
+                                                  ),
+                                                  SizedBox(height: 2),
+                                                  Text(
+                                                    'Connect device and start local planning',
+                                                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                            return Listener(
+                              behavior: HitTestBehavior.translucent,
+                              onPointerDown: (event) => _startManualTargetTimer(event, contentSize),
+                              onPointerMove: _maybeCancelManualTargetTimer,
+                              onPointerUp: (_) => _cancelManualTargetTimer(),
+                              onPointerCancel: (_) => _cancelManualTargetTimer(),
                               child: Stack(
                                 fit: StackFit.expand,
                                 children: [
-                                  if (widget.showEsdf && p?.esdfImage != null)
-                                    Opacity(
-                                      opacity: 0.85,
-                                      child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                                    ),
-                                  if (widget.showObstacle && p?.obstacleImage != null)
-                                    Opacity(
-                                      opacity: 0.45,
-                                      child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
-                                    ),
-                                  if (p != null)
-                                    CustomPaint(
-                                      painter: LocalPlanningPainter(
-                                        trajectory: p.trajectory,
-                                        globalPath: p.globalPath,
-                                        footprint: p.footprint,
-                                        gridInfo: p.gridInfo,
-                                        odomPose: p.odomPose,
-                                        showTrajectory: widget.showTrajectory,
-                                        showGlobalPath: widget.showGlobalPath,
-                                        showFootprint: widget.showFootprint,
-                                        navTargetPose: targetPose,
+                                  content,
+                                  IgnorePointer(
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        gradient: LinearGradient(
+                                          begin: Alignment.topCenter,
+                                          end: Alignment.bottomCenter,
+                                          colors: [
+                                            Colors.white.withOpacity(0.04),
+                                            Colors.transparent,
+                                            Colors.black.withOpacity(0.08),
+                                          ],
+                                          stops: const [0.0, 0.35, 1.0],
+                                        ),
                                       ),
                                     ),
-                                  if (p == null)
-                                    const Center(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(Icons.map_outlined, size: 48, color: Colors.white24),
-                                          SizedBox(height: 8),
-                                          Text('Waiting for planning data…',
-                                              style: TextStyle(color: Colors.white38, fontSize: 13)),
-                                        ],
-                                      ),
-                                    ),
+                                  ),
                                 ],
                               ),
                             );
-                      return Listener(
-                        behavior: HitTestBehavior.translucent,
-                        onPointerDown: (event) => _startManualTargetTimer(event, Size(side, side)),
-                        onPointerMove: _maybeCancelManualTargetTimer,
-                        onPointerUp: (_) => _cancelManualTargetTimer(),
-                        onPointerCancel: (_) => _cancelManualTargetTimer(),
-                        child: content,
-                      );
-                    },
+                          },
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-              );
-            },
+                );
+              },
+            ),
           ),
         ),
       ],
     );
   }
+
 }
 
 class _Local3dPlanningView extends StatefulWidget {

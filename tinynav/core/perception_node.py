@@ -168,6 +168,7 @@ class PerceptionNode(Node):
         self.imu_measurements = deque(maxlen=1000)
 
         self.keyframe_queue = []
+        self._async_loop = asyncio.new_event_loop()
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
@@ -220,10 +221,16 @@ class PerceptionNode(Node):
         self.last_processed_timestamp = image_timestamp
         loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            processed = asyncio.run(self.process(left_msg, right_msg))
+            processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
         if processed:
             processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
             self.stats_pub.publish(String(data=json.dumps(processed)))
+
+    def destroy_node(self):
+        if self._async_loop is not None:
+            self._async_loop.close()
+            self._async_loop = None
+        return super().destroy_node()
 
     def imu_callback(self, imu_msg):
         #print(f"imu callback at {imu_msg.header.stamp}")
@@ -401,7 +408,6 @@ class PerceptionNode(Node):
                 uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
-            
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
             # match by LightGlue, filter by geometric consistency (pose estimation), 
             # and build tracks via Union-Find
@@ -428,7 +434,8 @@ class PerceptionNode(Node):
                             prev_left_extract_result["mask"],
                             current_left_extract_result["mask"],
                             kf_prev.image.shape,
-                            kf_curr.image.shape)
+                            kf_curr.image.shape,
+                        )
                     with Timer(name="[cached result[2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
                         current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)

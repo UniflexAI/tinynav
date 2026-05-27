@@ -13,7 +13,7 @@ DINO_ONNX        := dinov2_base_224x224_fp16.onnx
 SUPERPOINT_ONNX  := superpoint_fp16_dynamic.onnx
 LIGHTGLUE_ONNX   := lightglue_fp16.onnx
 RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
-FOUNDATION_STEREO_ONNX := foundation_stereo.onnx
+FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -28,25 +28,19 @@ FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
 
 ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE)
 
-.PHONY: all dinov2 superpoint lightglue retinify foundation_stereo clean help
+.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo clean
 
-all: $(ENGINES)
+help: ## Show this help
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-dinov2: $(DINO_ENGINE)
-superpoint: $(SUPERPOINT_ENGINE)
-lightglue: $(LIGHTGLUE_ENGINE)
-retinify: $(RETINIFY_ENGINE)
-foundation_stereo: $(FOUNDATION_STEREO_ENGINE)
+all: $(ENGINES) ## Build all TensorRT engines
 
-help:
-    @echo "Targets:"
-	@echo "  make all          # Build all engines"
-	@echo "  make dinov2       # Build DINOv2"
-	@echo "  make superpoint   # Build SuperPoint"
-	@echo "  make lightglue    # Build LightGlue"
-	@echo "  make retinify     # Build Retinify (dynamic, RealSense+Looper)"
-	@echo "  make foundation_stereo # Build foundation stereo"
-	@echo "  make clean        # Remove *_$(ARCH).plan"
+dinov2: $(DINO_ENGINE) ## Build DINOv2 engine
+superpoint: $(SUPERPOINT_ENGINE) ## Build SuperPoint engine
+lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
+retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
+foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -78,11 +72,11 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
         --fp16
 
 # foundation_stereo.onnx export settings:
-#   --valid_iters 8
+#   --valid_iters 4
 #   --max_disp 192
 $(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
-	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --builderOptimizationLevel=1
 
 
-clean:
+clean: ## Remove generated TensorRT plans for this architecture
 	rm -f *_$(ARCH).plan
