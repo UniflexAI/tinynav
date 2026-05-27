@@ -61,7 +61,7 @@ B2_CONFIG = RobotConfig(
     name='b2', shape='square',
     length=0.8, width=0.4,
     camera_x=0.5, camera_y=0.0,
-    control_x=-0.5, control_y=0.0,
+    control_x=0.0, control_y=0.0,
     safety_radius=0.2,
 )
 
@@ -151,8 +151,8 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.5
-    robot_z_top: float = 0.4
+    robot_z_bottom: float = -0.6
+    robot_z_top: float = 0.8
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.3
     dilation_cells: int = 2

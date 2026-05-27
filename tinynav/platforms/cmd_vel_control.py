@@ -53,7 +53,7 @@ class CmdVelControlNode(Node):
         self.fixed_reverse_speed = 0.2
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
-        self.force_turn_heading_threshold = np.deg2rad(80.0)
+        self.force_turn_heading_threshold = np.deg2rad(30.0)
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
