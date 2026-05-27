@@ -335,6 +335,12 @@ class MapNode(Node):
         self._leg_initial_length: float | None = None
         self._leg_start_time: float | None = None
         self._speed_estimate: float | None = None
+        self._cached_global_path: np.ndarray | None = None
+        self._cached_global_path_poi_index: int | None = None
+        self._cached_global_path_T: np.ndarray | None = None
+        self._replan_tf_translation_threshold = 0.3
+        self._replan_tf_yaw_threshold = np.deg2rad(10.0)
+        self._replan_path_deviation_threshold = 0.8
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -362,6 +368,7 @@ class MapNode(Node):
 
             if not self.pois:
                 self.poi_index = -1
+                self._clear_global_path_cache()
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -373,10 +380,17 @@ class MapNode(Node):
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None
+            self._clear_global_path_cache()
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
+            self._clear_global_path_cache()
+
+    def _clear_global_path_cache(self):
+        self._cached_global_path = None
+        self._cached_global_path_poi_index = None
+        self._cached_global_path_T = None
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -716,6 +730,7 @@ class MapNode(Node):
                 self.poi_index += 1
                 self._leg_initial_length = None
                 self._leg_start_time = None
+                self._clear_global_path_cache()
                 dummy_pose = np.eye(4)
 
                 stamp_msg = self.get_clock().now().to_msg()
@@ -734,14 +749,10 @@ class MapNode(Node):
             return
 
         target_poi = self.pois[self.poi_index]
-        with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
+        paths_in_map = self._get_or_replan_global_path(pose_in_map, target_poi)
 
         if paths_in_map is not None:
-            remaining_length = sum(
-                np.linalg.norm(paths_in_map[i + 1] - paths_in_map[i])
-                for i in range(len(paths_in_map) - 1)
-            ) if len(paths_in_map) > 1 else 0.0
+            closest_position, remaining_length = self._path_progress(paths_in_map, pose_in_map_position[:3])
 
             now = time.time()
             if self._leg_initial_length is None:
@@ -770,18 +781,7 @@ class MapNode(Node):
             # use the max_speed to publish the position the robot should be after 5 seconds
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
-                if len(paths_in_map) > 1:
-                    accumulated_distance = 0.0
-                    start_point = pose_in_map_position[:3]
-                    target_position = paths_in_map[-1]
-                    for i in range(len(paths_in_map) - 1):
-                        accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                        if accumulated_distance > max_speed * 5:
-                            target_position = paths_in_map[i]
-                            break
-                        start_point = paths_in_map[i]
-                else:
-                    target_position = paths_in_map[0]
+                target_position = self._point_ahead_on_path(paths_in_map, closest_position, max_speed * 5)
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 pose_in_origin_odom = self.odom[timestamp]
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
@@ -810,6 +810,81 @@ class MapNode(Node):
                 self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
             logging.info("No path found in map")
+
+    def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
+        position = pose_in_map[:3, 3]
+        cached_path = self._cached_global_path
+        if cached_path is not None and self._cached_global_path_poi_index == self.poi_index:
+            _, _, deviation = self._closest_point_on_path(cached_path, position)
+            tf_translation_delta = 0.0
+            tf_yaw_delta = 0.0
+            if self._cached_global_path_T is not None and self.T_from_map_to_odom is not None:
+                dT = np.linalg.inv(self._cached_global_path_T) @ self.T_from_map_to_odom
+                tf_translation_delta = np.linalg.norm(dT[:2, 3])
+                tf_yaw_delta = abs(np.arctan2(dT[1, 0], dT[0, 0]))
+
+            if (
+                deviation <= self._replan_path_deviation_threshold
+                and tf_translation_delta <= self._replan_tf_translation_threshold
+                and tf_yaw_delta <= self._replan_tf_yaw_threshold
+            ):
+                return cached_path
+
+            self.get_logger().info(
+                "Replanning global path: "
+                f"deviation={deviation:.2f}m, "
+                f"tf_translation_delta={tf_translation_delta:.2f}m, "
+                f"tf_yaw_delta={np.rad2deg(tf_yaw_delta):.1f}deg"
+            )
+
+        with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+
+        if path is not None:
+            self._cached_global_path = path
+            self._cached_global_path_poi_index = self.poi_index
+            self._cached_global_path_T = None if self.T_from_map_to_odom is None else self.T_from_map_to_odom.copy()
+        return path
+
+    def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
+        if len(path) == 1:
+            return 0, path[0], np.linalg.norm(path[0] - position)
+
+        best_index = 0
+        best_point = path[0]
+        best_distance = np.inf
+        for i in range(len(path) - 1):
+            a = path[i]
+            b = path[i + 1]
+            ab = b - a
+            denom = float(np.dot(ab, ab))
+            ratio = 0.0 if denom <= 1e-9 else np.clip(np.dot(position - a, ab) / denom, 0.0, 1.0)
+            point = a + ratio * ab
+            distance = np.linalg.norm(point - position)
+            if distance < best_distance:
+                best_index = i
+                best_point = point
+                best_distance = distance
+        return best_index, best_point, best_distance
+
+    def _path_progress(self, path: np.ndarray, position: np.ndarray) -> tuple[np.ndarray, float]:
+        closest_index, closest_position, _ = self._closest_point_on_path(path, position)
+        remaining = np.linalg.norm(path[closest_index + 1] - closest_position) if closest_index + 1 < len(path) else 0.0
+        for i in range(closest_index + 1, len(path) - 1):
+            remaining += np.linalg.norm(path[i + 1] - path[i])
+        return closest_position, remaining
+
+    def _point_ahead_on_path(self, path: np.ndarray, start_position: np.ndarray, distance_ahead: float) -> np.ndarray:
+        closest_index, current, _ = self._closest_point_on_path(path, start_position)
+        for i in range(closest_index + 1, len(path)):
+            next_point = path[i]
+            segment_length = np.linalg.norm(next_point - current)
+            if segment_length >= distance_ahead:
+                ratio = distance_ahead / segment_length if segment_length > 1e-9 else 0.0
+                return current + ratio * (next_point - current)
+            distance_ahead -= segment_length
+            current = next_point
+        return path[-1]
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
