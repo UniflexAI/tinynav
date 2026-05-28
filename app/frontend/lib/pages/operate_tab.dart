@@ -509,163 +509,167 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
         Container(color: const Color(0xFF0D1117)),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          child: Center(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final maxW = constraints.maxWidth;
-                final maxH = constraints.maxHeight;
-                final aspect = localAspectRatio.isFinite && localAspectRatio > 0
-                    ? localAspectRatio
-                    : 1.0;
-                final containW = maxW / maxH > aspect ? maxH * aspect : maxW;
-                final containH = containW / aspect;
-                final viewportSize = widget.fillViewport
-                    ? Size(maxW, maxH)
-                    : Size(containW, containH);
-                final targetPose = _pendingTarget != null
-                    ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
-                    : p?.navTargetPose;
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final maxW = constraints.maxWidth;
+              final maxH = constraints.maxHeight;
+              final aspect = localAspectRatio.isFinite && localAspectRatio > 0
+                  ? localAspectRatio
+                  : 1.0;
+              final viewportAspect = maxW / maxH;
+              final useWidth = widget.fillViewport
+                  ? viewportAspect > aspect
+                  : viewportAspect < aspect;
+              final contentWidth = useWidth ? maxW : maxH * aspect;
+              final contentHeight = useWidth ? maxW / aspect : maxH;
+              final contentSize = Size(contentWidth, contentHeight);
+              final targetPose = _pendingTarget != null
+                  ? TrajPoint(_pendingTarget!.x, _pendingTarget!.y)
+                  : p?.navTargetPose;
 
-                final content = widget.show3d
-                    ? _Local3dPlanningView(planning: p)
-                    : InteractiveViewer(
-                        transformationController: _txCtrl,
-                        minScale: 0.5,
-                        maxScale: 8.0,
-                        boundaryMargin: const EdgeInsets.all(double.infinity),
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            const ColoredBox(color: Color(0xFF0F1621)),
-                            if (widget.showEsdf && p?.esdfImage != null)
-                              Opacity(
-                                opacity: 0.85,
-                                child: Image.memory(
-                                  p!.esdfImage!,
-                                  fit: BoxFit.fill,
-                                  gaplessPlayback: true,
-                                ),
+              final content = widget.show3d
+                  ? _Local3dPlanningView(planning: p)
+                  : InteractiveViewer(
+                      transformationController: _txCtrl,
+                      minScale: 0.5,
+                      maxScale: 8.0,
+                      boundaryMargin: const EdgeInsets.all(double.infinity),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          const ColoredBox(color: Color(0xFF0F1621)),
+                          if (widget.showEsdf && p?.esdfImage != null)
+                            Opacity(
+                              opacity: 0.85,
+                              child: Image.memory(
+                                p!.esdfImage!,
+                                fit: BoxFit.fill,
+                                gaplessPlayback: true,
                               ),
-                            if (widget.showObstacle && p?.obstacleImage != null)
-                              Opacity(
-                                opacity: 0.45,
-                                child: Image.memory(
-                                  p!.obstacleImage!,
-                                  fit: BoxFit.fill,
-                                  gaplessPlayback: true,
-                                ),
+                            ),
+                          if (widget.showObstacle && p?.obstacleImage != null)
+                            Opacity(
+                              opacity: 0.45,
+                              child: Image.memory(
+                                p!.obstacleImage!,
+                                fit: BoxFit.fill,
+                                gaplessPlayback: true,
                               ),
-                            if (p != null)
-                              CustomPaint(
-                                painter: LocalPlanningPainter(
-                                  trajectory: p.trajectory,
-                                  globalPath: p.globalPath,
-                                  footprint: p.footprint,
-                                  gridInfo: p.gridInfo,
-                                  odomPose: p.odomPose,
-                                  showTrajectory: widget.showTrajectory,
-                                  showGlobalPath: widget.showGlobalPath,
-                                  showFootprint: widget.showFootprint,
-                                  navTargetPose: targetPose,
-                                ),
-                              )
-                            else
-                              Center(
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 14,
-                                    vertical: 10,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.black.withOpacity(0.45),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: Colors.white.withOpacity(0.12),
-                                    ),
-                                  ),
-                                  child: const Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        Icons.map_outlined,
-                                        size: 40,
-                                        color: Colors.white38,
-                                      ),
-                                      SizedBox(height: 8),
-                                      Text(
-                                        'Waiting for planning data…',
-                                        style: TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                      SizedBox(height: 2),
-                                      Text(
-                                        'Connect device and start local planning',
-                                        style: TextStyle(
-                                          color: Colors.white38,
-                                          fontSize: 11,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
+                            ),
+                          if (p != null)
+                            CustomPaint(
+                              painter: LocalPlanningPainter(
+                                trajectory: p.trajectory,
+                                globalPath: p.globalPath,
+                                footprint: p.footprint,
+                                gridInfo: p.gridInfo,
+                                odomPose: p.odomPose,
+                                showTrajectory: widget.showTrajectory,
+                                showGlobalPath: widget.showGlobalPath,
+                                showFootprint: widget.showFootprint,
+                                navTargetPose: targetPose,
                               ),
-                            IgnorePointer(
-                              child: DecoratedBox(
+                            )
+                          else
+                            Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 10,
+                                ),
                                 decoration: BoxDecoration(
-                                  gradient: LinearGradient(
-                                    begin: Alignment.topCenter,
-                                    end: Alignment.bottomCenter,
-                                    colors: [
-                                      Colors.white.withOpacity(0.04),
-                                      Colors.transparent,
-                                      Colors.black.withOpacity(0.08),
-                                    ],
-                                    stops: const [0.0, 0.35, 1.0],
+                                  color: Colors.black.withOpacity(0.45),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: Colors.white.withOpacity(0.12),
                                   ),
+                                ),
+                                child: const Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.map_outlined,
+                                      size: 40,
+                                      color: Colors.white38,
+                                    ),
+                                    SizedBox(height: 8),
+                                    Text(
+                                      'Waiting for planning data…',
+                                      style: TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                    SizedBox(height: 2),
+                                    Text(
+                                      'Connect device and start local planning',
+                                      style: TextStyle(
+                                        color: Colors.white38,
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),
-                          ],
-                        ),
-                      );
-
-                return SizedBox(
-                  width: viewportSize.width,
-                  height: viewportSize.height,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: Colors.white.withOpacity(0.12),
-                        width: 1,
+                          IgnorePointer(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.white.withOpacity(0.04),
+                                    Colors.transparent,
+                                    Colors.black.withOpacity(0.08),
+                                  ],
+                                  stops: const [0.0, 0.35, 1.0],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x55000000),
-                          blurRadius: 14,
-                          offset: Offset(0, 6),
+                    );
+
+              return ClipRect(
+                child: Center(
+                  child: SizedBox(
+                    width: contentSize.width,
+                    height: contentSize.height,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.12),
+                          width: 1,
                         ),
-                      ],
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: Listener(
-                        behavior: HitTestBehavior.translucent,
-                        onPointerDown: (event) =>
-                            _startManualTargetTimer(event, viewportSize),
-                        onPointerMove: _maybeCancelManualTargetTimer,
-                        onPointerUp: (_) => _cancelManualTargetTimer(),
-                        onPointerCancel: (_) => _cancelManualTargetTimer(),
-                        child: content,
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x55000000),
+                            blurRadius: 14,
+                            offset: Offset(0, 6),
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: Listener(
+                          behavior: HitTestBehavior.translucent,
+                          onPointerDown: (event) =>
+                              _startManualTargetTimer(event, contentSize),
+                          onPointerMove: _maybeCancelManualTargetTimer,
+                          onPointerUp: (_) => _cancelManualTargetTimer(),
+                          onPointerCancel: (_) => _cancelManualTargetTimer(),
+                          child: content,
+                        ),
                       ),
                     ),
                   ),
-                );
-              },
-            ),
+                ),
+              );
+            },
           ),
         ),
       ],
