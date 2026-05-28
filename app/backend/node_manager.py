@@ -56,6 +56,29 @@ _IMAGE_TOPICS_LOOPER = [
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
 _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
+_PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
+_PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
+
+
+def _resize_preview_frame(arr: np.ndarray, max_edge_px: int = _PREVIEW_MAX_EDGE_PX) -> np.ndarray:
+    """Downscale preview frame so the longest side is <= max_edge_px."""
+    if max_edge_px <= 0 or arr is None or arr.size == 0:
+        return arr
+    height, width = arr.shape[:2]
+    longest = max(height, width)
+    if longest <= max_edge_px:
+        return arr
+    scale = max_edge_px / float(longest)
+    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+    return cv2.resize(arr, new_size, interpolation=cv2.INTER_AREA)
+
+
+def _encode_preview_jpeg(arr: np.ndarray) -> bytes:
+    arr = _resize_preview_frame(arr)
+    ok, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, _PREVIEW_JPEG_QUALITY])
+    if not ok:
+        raise RuntimeError('failed to encode preview jpeg')
+    return buf.tobytes()
 
 
 class BackendNode(Ros2NodeManager):
@@ -453,7 +476,15 @@ class BackendNode(Ros2NodeManager):
         if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
             return
         self._last_frame_time[topic] = now
-        frame = bytes(msg.data)
+
+        try:
+            arr = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if arr is None:
+                return
+            frame = _encode_preview_jpeg(arr)
+        except Exception:
+            return
+
         with self._lock:
             self._last_frame[topic] = frame
         for cb in self.preview_callbacks.get(topic, []):
@@ -484,8 +515,7 @@ class BackendNode(Ros2NodeManager):
                     arr = arr[:, :, 0]
                 elif msg.encoding == 'rgb8':
                     arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 50])
-            frame = buf.tobytes()
+            frame = _encode_preview_jpeg(arr)
         except Exception:
             return
 
