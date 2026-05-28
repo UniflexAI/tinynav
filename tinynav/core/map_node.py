@@ -664,6 +664,8 @@ class MapNode(Node):
 
         target_poi = self.pois[self.poi_index]
         paths_in_map = self._get_or_replan_global_path(pose_in_map, target_poi)
+        if paths_in_map is None:
+            paths_in_map = self._cached_global_path
 
         if paths_in_map is not None:
             closest_position, remaining_length = self._path_progress(paths_in_map, pose_in_map_position[:3])
