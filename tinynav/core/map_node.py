@@ -353,6 +353,9 @@ class MapNode(Node):
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
+            # T may jump after relocalization; force the odometry-driven navigation loop
+            # to replan and publish a fresh global path on the next /slam/odometry tick.
+            self._clear_global_path_cache()
 
         # Navigation is driven by continuous /slam/odometry once T_from_map_to_odom is available.
         # Keep this callback focused on keyframe mapping/relocalization and T updates.
