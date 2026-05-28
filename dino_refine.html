@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TinyNav DINOv2 Refinement Plan and Status</title>
+  <style>
+    :root {
+      --bg: #f4f7f8;
+      --paper: #ffffff;
+      --ink: #0f172a;
+      --muted: #475569;
+      --accent: #0e7490;
+      --line: #dbe3e8;
+      --soft: #f0f9ff;
+      --ok: #166534;
+      --run: #0369a1;
+      --todo: #92400e;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 600px at 100% -10%, #dff6ff 0%, transparent 50%),
+        radial-gradient(800px 500px at -10% 0%, #e6fffa 0%, transparent 45%),
+        var(--bg);
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.58;
+    }
+
+    .wrap {
+      max-width: 1060px;
+      margin: 28px auto 44px;
+      padding: 0 16px;
+    }
+
+    .hero {
+      background: linear-gradient(120deg, #083344 0%, #155e75 55%, #0f766e 100%);
+      color: #ecfeff;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 14px 32px rgba(8, 51, 68, 0.28);
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 2rem;
+      letter-spacing: 0.2px;
+    }
+
+    .hero p {
+      margin: 0;
+      color: #dff7fb;
+    }
+
+    .card {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px;
+      margin-top: 16px;
+      box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 1.22rem;
+      color: #0b3a4a;
+      padding-left: 10px;
+      border-left: 4px solid var(--accent);
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 1.03rem;
+      color: #134e4a;
+    }
+
+    p { margin: 0 0 12px; }
+    ul, ol { margin: 8px 0 14px 22px; }
+
+    .grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+
+    .panel {
+      background: #fcfeff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+
+    .pill {
+      display: inline-block;
+      font-size: 0.82rem;
+      border-radius: 999px;
+      padding: 2px 10px;
+      margin: 0 8px 8px 0;
+      border: 1px solid;
+    }
+
+    .ok { color: var(--ok); border-color: #86efac; background: #f0fdf4; }
+    .run { color: var(--run); border-color: #7dd3fc; background: #f0f9ff; }
+    .todo { color: var(--todo); border-color: #fcd34d; background: #fffbeb; }
+    .info { color: #0c4a6e; border-color: #bae6fd; background: var(--soft); }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-size: 0.92em;
+      color: #0f172a;
+    }
+
+    .schema {
+      background: #0b1220;
+      color: #d9e2f2;
+      border-radius: 10px;
+      padding: 12px;
+      overflow-x: auto;
+      border: 1px solid #1e293b;
+    }
+
+    .muted { color: var(--muted); }
+
+    .footer {
+      margin-top: 20px;
+      text-align: right;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <h1>DINOv2 Refinement for TinyNav</h1>
+      <p>Unified document: implementation status + training/retrieval proposal + deployment path.</p>
+    </section>
+
+    <section class="card">
+      <h2>1. Objective</h2>
+      <p>Add a reproducible DINOv2 LoRA refinement workflow for TinyNav and use retrieval-debug data from <code>map_node.py</code> for hard-negative mining and manual review.</p>
+      <span class="pill ok">LoRA Train: Done</span>
+      <span class="pill ok">Merge: Done</span>
+      <span class="pill ok">Eval: Done</span>
+      <span class="pill run">TRT Export: Ready</span>
+    </section>
+
+    <section class="card">
+      <h2>2. Current Run Snapshot</h2>
+      <ul>
+        <li>Training pairs: <code>18</code> (<code>3</code> positive, <code>15</code> negative)</li>
+        <li>LoRA checkpoint: <code>/tinynav/tinynav_temp/lora/run_20260528/lora_ckpt</code></li>
+        <li>Merged model: <code>/tinynav/tinynav_temp/lora/run_20260528/merged_model</code></li>
+        <li>Eval (base): <code>accuracy@0.5 = 0.1667</code>, <code>mean_similarity = 0.8488</code></li>
+        <li>Eval (merged): <code>accuracy@0.5 = 1.0000</code>, <code>mean_similarity = 0.2162</code></li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>3. Scope</h2>
+      <div class="grid">
+        <article class="panel">
+          <h3>Training and Evaluation Tooling</h3>
+          <ul>
+            <li><code>scripts/train_dinov2_lora.py</code></li>
+            <li><code>scripts/eval_dinov2_retrieval.py</code></li>
+            <li><code>scripts/merge_dinov2_lora.py</code></li>
+            <li><code>scripts/export_dinov2_lora_onnx.py</code></li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>Runtime and Data Pipeline</h3>
+          <ul>
+            <li>Debug switches in <code>tinynav/core/map_node.py</code></li>
+            <li>Retrieval sample capture (query + retrieved + metadata)</li>
+            <li>Manual review UI: <code>scripts/review_retrieval_labels.py</code></li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4. map_node Retrieval Debug Design</h2>
+      <h3>4.1 CLI Switches</h3>
+      <ul>
+        <li><code>--debug_retrieval_dataset</code></li>
+        <li><code>--debug_retrieval_dir</code> (default <code>tinynav_temp/retrieval_debug</code>)</li>
+        <li><code>--debug_retrieval_topk</code></li>
+        <li><code>--debug_save_images</code></li>
+        <li><code>--debug_save_every_n_keyframes</code></li>
+        <li><code>--debug_max_samples</code></li>
+      </ul>
+
+      <h3>4.2 Session Layout</h3>
+      <div class="schema"><pre>{
+retrieval_debug/
+  session_YYYYmmdd_HHMMSS/
+    index.jsonl
+    sample_000001_&lt;query_ts&gt;/
+      query.png
+      retrieved_000.png
+      retrieved_001.png
+      ...
+      sample.json
+}</pre></div>
+
+      <h3>4.3 sample.json (required fields)</h3>
+      <div class="schema"><pre>{
+  "query_timestamp_ns": 0,
+  "retrieved_timestamps_ns": [],
+  "similarities": [],
+  "selected_idx": -1,
+  "pnp_success": false,
+  "inlier_count": 0,
+  "inlier_ratio": 0.0,
+  "relocalization_success": false,
+  "false_case": false,
+  "odom_pose": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+  "map_pose_estimate": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+  "review_label": "unreviewed"
+}</pre></div>
+    </section>
+
+    <section class="card">
+      <h2>5. Training and Deployment Path</h2>
+      <ol>
+        <li>Label retrieval samples in WebUI and export reviewed pairs.</li>
+        <li>Fine-tune LoRA using reviewed pairs.</li>
+        <li>Merge LoRA into base DINOv2 model.</li>
+        <li>Export merged model to ONNX.</li>
+        <li>Build TensorRT engine with <code>make dinov2</code>.</li>
+      </ol>
+      <p><b>Commands:</b></p>
+      <ul>
+        <li><code>python3 scripts/train_dinov2_lora.py --config &lt;config.yaml&gt;</code></li>
+        <li><code>python3 scripts/merge_dinov2_lora.py --base_model facebook/dinov2-base --lora_path &lt;lora_ckpt&gt; --out_dir &lt;merged_model&gt;</code></li>
+        <li><code>python3 scripts/export_dinov2_lora_onnx.py --model_path &lt;merged_model&gt; --out_onnx /tinynav/tinynav/models/dinov2_base_224x224_fp16.onnx</code></li>
+        <li><code>cd /tinynav/tinynav/models &amp;&amp; make dinov2</code></li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>6. Risks and Controls</h2>
+      <ul>
+        <li>Small reviewed dataset can overfit. Control: expand positives and hard negatives.</li>
+        <li>TRT conversion can fail on graph mismatch. Control: validate ONNX and tensor names early.</li>
+        <li>Runtime compatibility depends on <code>last_hidden_state</code> output shape and naming.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>7. Next Actions</h2>
+      <span class="pill todo">Review more samples</span>
+      <span class="pill todo">Retrain with larger set</span>
+      <span class="pill run">Export ONNX + TRT</span>
+      <span class="pill run">A/B test in map_node</span>
+      <p class="muted">This document is now the single source; <code>dino_refine_v2.html</code> is merged and removed.</p>
+    </section>
+
+    <p class="footer">TinyNav · DINOv2 refinement plan and status</p>
+  </main>
+</body>
+</html>

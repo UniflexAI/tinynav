@@ -1,6 +1,7 @@
 import rclpy
 import os
 import time
+from datetime import datetime
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -28,6 +29,62 @@ from tinynav.core.build_map_node import find_loop, solve_pose_graph
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
+
+def _pose_delta(T_a: np.ndarray, T_b: np.ndarray) -> tuple[float, float]:
+    """Return translation delta (m) and rotation delta (deg) between two 4x4 poses."""
+    dT = np.linalg.inv(T_a) @ T_b
+    trans = float(np.linalg.norm(dT[:3, 3]))
+    trace = float(np.clip((np.trace(dT[:3, :3]) - 1.0) * 0.5, -1.0, 1.0))
+    rot_deg = float(np.degrees(np.arccos(trace)))
+    return trans, rot_deg
+
+
+class RetrievalDebugRecorder:
+    def __init__(self, root_dir: str, enabled: bool, save_images: bool, save_every_n_keyframes: int, max_samples: int):
+        self.enabled = enabled
+        self.save_images = save_images
+        self.save_every_n_keyframes = max(1, int(save_every_n_keyframes))
+        self.max_samples = max(1, int(max_samples))
+        self.sample_count = 0
+        self.keyframe_counter = 0
+        self.session_dir = None
+        self.index_jsonl_path = None
+        if enabled:
+            session_name = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+            self.session_dir = os.path.join(root_dir, session_name)
+            os.makedirs(self.session_dir, exist_ok=True)
+            self.index_jsonl_path = os.path.join(self.session_dir, "index.jsonl")
+            logger.info(f"[retrieval-debug] session dir: {self.session_dir}")
+
+    def should_save(self) -> bool:
+        if not self.enabled:
+            return False
+        if self.sample_count >= self.max_samples:
+            return False
+        self.keyframe_counter += 1
+        return (self.keyframe_counter % self.save_every_n_keyframes) == 0
+
+    def save_sample(self, timestamp_ns: int, query_image: np.ndarray, retrieved_images: list, sample_meta: dict):
+        if not self.enabled:
+            return
+        sample_name = f"sample_{self.sample_count:06d}_{timestamp_ns}"
+        sample_dir = os.path.join(self.session_dir, sample_name)
+        os.makedirs(sample_dir, exist_ok=True)
+        if self.save_images:
+            cv2.imwrite(os.path.join(sample_dir, "query.png"), query_image)
+            for i, image in enumerate(retrieved_images):
+                if image is not None:
+                    cv2.imwrite(os.path.join(sample_dir, f"retrieved_{i:03d}.png"), image)
+        sample_json_path = os.path.join(sample_dir, "sample.json")
+        with open(sample_json_path, "w", encoding="utf-8") as f:
+            json.dump(sample_meta, f, ensure_ascii=True, indent=2)
+        with open(self.index_jsonl_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "sample_id": sample_name,
+                "query_timestamp_ns": int(timestamp_ns),
+                "sample_json": sample_json_path,
+            }, ensure_ascii=True) + "\n")
+        self.sample_count += 1
 
 
 
@@ -175,7 +232,18 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
     return []
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
+    def __init__(
+        self,
+        tinynav_db_path: str,
+        tinynav_map_path: str,
+        verbose_timer: bool = True,
+        debug_retrieval_dataset: bool = False,
+        debug_retrieval_dir: str = "tinynav_temp/retrieval_debug",
+        debug_retrieval_topk: int = 3,
+        debug_save_images: bool = True,
+        debug_save_every_n_keyframes: int = 5,
+        debug_max_samples: int = 10000,
+    ):
         """Initialization
 
         Args:
@@ -228,6 +296,11 @@ class MapNode(Node):
 
         self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
+        self.debug_retrieval_topk = max(1, int(debug_retrieval_topk))
+        self.false_case_odom_trans_m = 0.5
+        self.false_case_odom_rot_deg = 8.0
+        self.false_case_map_trans_m = 2.0
+        self.false_case_map_rot_deg = 25.0
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -268,9 +341,20 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+        self.retrieval_debug = RetrievalDebugRecorder(
+            root_dir=debug_retrieval_dir,
+            enabled=debug_retrieval_dataset,
+            save_images=debug_save_images,
+            save_every_n_keyframes=debug_save_every_n_keyframes,
+            max_samples=debug_max_samples,
+        )
         self._map_yolo_labels_cache = {}
 
     def _infer_yolo_labels(self, image: np.ndarray) -> tuple[set[int], dict[int, float]]:
+        if callable(image):
+            image = image()
+        if image is None or not isinstance(image, np.ndarray):
+            return set(), {}
         if image.ndim == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         det = asyncio.run(self.yolo11_model.infer(image))
@@ -306,8 +390,8 @@ class MapNode(Node):
             if timestamp_in_map in self._map_yolo_labels_cache:
                 ref_labels, _ = self._map_yolo_labels_cache[timestamp_in_map]
             else:
-                _, _, _, infra1_image, rgb_image = self.db.get_depth_embedding_features_images(timestamp_in_map)
-                ref_labels, ref_scores = self._infer_yolo_labels(infra1_image)
+                _, _, _, _, infra1_loader = self.db.get_depth_embedding_features_images(timestamp_in_map)
+                ref_labels, ref_scores = self._infer_yolo_labels(infra1_loader)
                 self._map_yolo_labels_cache[timestamp_in_map] = (ref_labels, ref_scores)
 
             if 6 not in ref_labels:
@@ -489,19 +573,32 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
-    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float, dict]:
         if K is None:
-            return False, np.eye(4), -np.inf
+            return False, np.eye(4), -np.inf, {"retrieved": [], "pnp_success": False, "inlier_count": 0, "inlier_ratio": 0.0}
         query_embedding = self.get_embeddings(keyframe)
         query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
 
         idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
         query_labels, query_label_scores = self._infer_yolo_labels(keyframe)
         idx_and_similarity_array = self._filter_relocalization_candidates_by_label(query_labels, query_label_scores, idx_and_similarity_array)
+        idx_and_similarity_array = idx_and_similarity_array[: self.debug_retrieval_topk]
+        retrieved_debug = []
+        for idx_in_map, similarity in idx_and_similarity_array:
+            timestamp_in_map = int(self.map_embeddings_idx_to_timestamp[idx_in_map])
+            retrieved_debug.append({
+                "idx_in_map": int(idx_in_map),
+                "timestamp_ns": timestamp_in_map,
+                "similarity": float(similarity),
+            })
+
         max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
         if len(idx_and_similarity_array) > 0:
             point_3d_in_world_list = []
             point_2d_in_keyframe_list = []
+            pnp_success = False
+            inlier_count = 0
+            inlier_ratio = 0.0
             for idx_in_map, similarity in idx_and_similarity_array:
                 timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
                 reference_keyframe_pose = self.map_poses[timestamp_in_map]
@@ -519,19 +616,32 @@ class MapNode(Node):
                 point_2d_in_keyframe_list = np.array(point_2d_in_keyframe_list)
 
                 success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
+                pnp_success = bool(success)
+                inlier_count = int(len(inliers)) if inliers is not None else 0
+                inlier_ratio = float(inlier_count / max(1, len(point_2d_in_keyframe_list)))
                 if success and len(inliers) >= 50:
                     R, _ = cv2.Rodrigues(rvec)
                     T = np.eye(4)
                     T[:3, :3] = R
                     T[:3, 3] = tvec.reshape(3)
                     print(f"relocalization pose : {T}")
-                    return True, T, len(inliers) / len(point_2d_in_keyframe_list)
+                    return True, T, inlier_ratio, {
+                        "retrieved": retrieved_debug,
+                        "pnp_success": pnp_success,
+                        "inlier_count": inlier_count,
+                        "inlier_ratio": inlier_ratio,
+                    }
             else:
                 print(f"not enough landmarks to relocalize, {len(point_3d_in_world_list)}")
-                return False, np.eye(4), -np.inf
+                return False, np.eye(4), -np.inf, {
+                    "retrieved": retrieved_debug,
+                    "pnp_success": pnp_success,
+                    "inlier_count": inlier_count,
+                    "inlier_ratio": inlier_ratio,
+                }
         else:
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
-        return False, np.eye(4), -np.inf
+        return False, np.eye(4), -np.inf, {"retrieved": retrieved_debug, "pnp_success": False, "inlier_count": 0, "inlier_ratio": 0.0}
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
         point_in_camera = []
@@ -565,18 +675,67 @@ class MapNode(Node):
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
-        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
+        res, pose_in_camera, pose_cov_weight, debug_info = self.relocalize_with_depth(image, features, self.K)
+        timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
-            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
+            self._maybe_save_retrieval_debug_sample(timestamp_ns, image, pose_in_world, True, debug_info)
             return True, pose_in_world
         else:
             self.failed_relocalizations.append(timestamp)
+            self._maybe_save_retrieval_debug_sample(timestamp_ns, image, np.eye(4), False, debug_info)
             return False, np.eye(4)
+
+    def _maybe_save_retrieval_debug_sample(self, timestamp_ns: int, query_image: np.ndarray, map_pose_estimate: np.ndarray, relocalization_success: bool, debug_info: dict):
+        if not self.retrieval_debug.should_save():
+            return
+        if timestamp_ns not in self.pose_graph_used_pose:
+            self.get_logger().warning(f"[retrieval-debug] missing odom pose for timestamp={timestamp_ns}, skipping sample")
+            return
+        odom_pose = self.pose_graph_used_pose[timestamp_ns]
+        odom_trans, odom_rot = _pose_delta(np.eye(4), odom_pose)
+        map_trans, map_rot = _pose_delta(np.eye(4), map_pose_estimate)
+        false_case = (
+            odom_trans <= self.false_case_odom_trans_m
+            and odom_rot <= self.false_case_odom_rot_deg
+            and (map_trans >= self.false_case_map_trans_m or map_rot >= self.false_case_map_rot_deg)
+        )
+
+        retrieved_images = []
+        retrieved_timestamps = []
+        similarities = []
+        for item in debug_info.get("retrieved", []):
+            retrieved_timestamps.append(int(item["timestamp_ns"]))
+            similarities.append(float(item["similarity"]))
+            _, _, _, _, infra1_loader = self.db.get_depth_embedding_features_images(item["timestamp_ns"])
+            ref_img = infra1_loader() if infra1_loader is not None else None
+            retrieved_images.append(ref_img)
+
+        sample_meta = {
+            "query_timestamp_ns": int(timestamp_ns),
+            "retrieved_timestamps_ns": retrieved_timestamps,
+            "similarities": similarities,
+            "selected_idx": -1,
+            "pnp_success": bool(debug_info.get("pnp_success", False)),
+            "inlier_count": int(debug_info.get("inlier_count", 0)),
+            "inlier_ratio": float(debug_info.get("inlier_ratio", 0.0)),
+            "relocalization_success": bool(relocalization_success),
+            "false_case": bool(false_case),
+            "false_case_reason": "pose_inconsistency" if false_case else "none",
+            "odom_delta_trans_m": float(odom_trans),
+            "odom_delta_rot_deg": float(odom_rot),
+            "map_delta_trans_m": float(map_trans),
+            "map_delta_rot_deg": float(map_rot),
+            "odom_pose": odom_pose.tolist(),
+            "map_pose_estimate": map_pose_estimate.tolist(),
+            "review_label": "unreviewed",
+            "review_note": "",
+        }
+        self.retrieval_debug.save_sample(timestamp_ns, query_image, retrieved_images, sample_meta)
 
     def save_relocalization_poses(self):
         if self._save_completed:
@@ -831,10 +990,23 @@ def main(args=None):
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument("--debug_retrieval_dataset", action="store_true", default=False, help="Enable retrieval debug dataset capture")
+    parser.add_argument("--debug_retrieval_dir", type=str, default="tinynav_temp/retrieval_debug")
+    parser.add_argument("--debug_retrieval_topk", type=int, default=3)
+    parser.add_argument("--debug_save_images", action="store_true", default=True, help="Save query/retrieved images")
+    parser.add_argument("--no_debug_save_images", dest="debug_save_images", action="store_false")
+    parser.add_argument("--debug_save_every_n_keyframes", type=int, default=5)
+    parser.add_argument("--debug_max_samples", type=int, default=10000)
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
-                   verbose_timer=parsed_args.verbose_timer)
+                   verbose_timer=parsed_args.verbose_timer,
+                   debug_retrieval_dataset=parsed_args.debug_retrieval_dataset,
+                   debug_retrieval_dir=parsed_args.debug_retrieval_dir,
+                   debug_retrieval_topk=parsed_args.debug_retrieval_topk,
+                   debug_save_images=parsed_args.debug_save_images,
+                   debug_save_every_n_keyframes=parsed_args.debug_save_every_n_keyframes,
+                   debug_max_samples=parsed_args.debug_max_samples)
 
     rclpy.spin(node)
     node.destroy_node()
