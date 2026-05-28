@@ -257,6 +257,7 @@ class MapNode(Node):
         self._cached_global_path: np.ndarray | None = None
         self._cached_global_path_poi_index: int | None = None
         self._cached_global_path_T: np.ndarray | None = None
+        self._global_plan_dirty = False
         self._replan_tf_translation_threshold = 0.3
         self._replan_tf_yaw_threshold = np.deg2rad(10.0)
         self._replan_path_deviation_threshold = 0.8
@@ -310,6 +311,7 @@ class MapNode(Node):
         self._cached_global_path = None
         self._cached_global_path_poi_index = None
         self._cached_global_path_T = None
+        self._global_plan_dirty = True
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -322,6 +324,7 @@ class MapNode(Node):
 
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+        self.try_publish_nav_path_from_odom_msg(odom_msg)
 
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
@@ -347,17 +350,12 @@ class MapNode(Node):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
 
-        with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.try_publish_nav_path(keyframe_image_timestamp_ns)
-            # timer or queue for publish the nav path
-            # and record the map pose
-            # compute the coordinate transform from the map pose to the keyframe pose
-            # publish the nav path from the map pose to the keyframe pose with the cost map
+        # Navigation is driven by continuous /slam/odometry once T_from_map_to_odom is available.
+        # Keep this callback focused on keyframe mapping/relocalization and T updates.
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -596,30 +594,33 @@ class MapNode(Node):
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
-    def try_publish_nav_path(self, timestamp: int):
-        self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
+    def try_publish_nav_path_from_odom_msg(self, odom_msg: Odometry):
+        pose_in_odom, _ = msg2np(odom_msg)
+        timestamp = int(odom_msg.header.stamp.sec * 1e9) + int(odom_msg.header.stamp.nanosec)
+        self.try_publish_nav_path(pose_in_odom, timestamp)
+
+    def try_publish_nav_path(self, pose_in_odom: np.ndarray, timestamp: int | None = None):
         if self.T_from_map_to_odom is None:
-            self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
             return
 
+        now_msg = self.get_clock().now().to_msg()
+        # Update current map pose from continuous odometry using the latest relocalized T.
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_odom
+        pose_in_map_position = pose_in_map[:3, 3]
+        T = pose_in_odom @ np.linalg.inv(pose_in_map)
+        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, now_msg, "world", "map"))
+        self.tf_broadcaster.sendTransform(np2tf(T, now_msg, "world", "map"))
+
         if self.poi_index == -1:
-            self.get_logger().info("No POI found, skip publishing nav path")
             return
 
         if self.poi_index >= len(self.pois):
-            self.get_logger().info("All POIs have been visited, skip publishing nav path")
             return
 
         poi = self.pois[self.poi_index]
-        print(f"poi: {poi}")
         poi_pose = np.eye(4)
         poi_pose[:3, 3] = poi
-        self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
-        # get the pose from the map to the odom
-        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
-        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
-
-        pose_in_map_position = pose_in_map[:3, 3]
+        self.poi_pub.publish(np2msg(poi_pose, now_msg, "world", "map"))
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
@@ -643,8 +644,9 @@ class MapNode(Node):
                 dummy_pose = np.eye(4)
 
                 stamp_msg = self.get_clock().now().to_msg()
-                stamp_msg.sec = int(timestamp / 1e9)
-                stamp_msg.nanosec = int(timestamp % 1e9)
+                if timestamp is not None:
+                    stamp_msg.sec = int(timestamp / 1e9)
+                    stamp_msg.nanosec = int(timestamp % 1e9)
                 self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
                 continue
             else:
@@ -692,31 +694,30 @@ class MapNode(Node):
                 max_speed = 0.5
                 target_position = self._point_ahead_on_path(paths_in_map, closest_position, max_speed * 5)
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
-                pose_in_origin_odom = self.odom[timestamp]
-                T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
                 dummy_pose = np.eye(4)
                 dummy_pose[:3, 3] = target_position_in_odom
                 #logging.info(f"target_position_in_odom: {target_position_in_odom}")
                 print(f"target_position_in_odom: {target_position_in_odom}")
 
-                self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-                path_msg = Path()
-                path_msg.header.stamp = self.get_clock().now().to_msg()
-                path_msg.header.frame_id = "map"
-                for x, y, z in paths_in_map:
-                    pose = PoseStamped()
-                    pose.header = path_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = 0.0
-                    pose.pose.orientation.y = 0.0
-                    pose.pose.orientation.z = 0.0
-                    pose.pose.orientation.w = 1.0
-                    path_msg.poses.append(pose)
-                self.global_plan_pub.publish(path_msg)
-                self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+                self.target_pose_pub.publish(np2msg(dummy_pose, now_msg, "world", "camera"))
+                if self._global_plan_dirty:
+                    path_msg = Path()
+                    path_msg.header.stamp = now_msg
+                    path_msg.header.frame_id = "map"
+                    for x, y, z in paths_in_map:
+                        pose = PoseStamped()
+                        pose.header = path_msg.header
+                        pose.pose.position.x = x
+                        pose.pose.position.y = y
+                        pose.pose.position.z = z
+                        pose.pose.orientation.x = 0.0
+                        pose.pose.orientation.y = 0.0
+                        pose.pose.orientation.z = 0.0
+                        pose.pose.orientation.w = 1.0
+                        path_msg.poses.append(pose)
+                    self.global_plan_pub.publish(path_msg)
+                    self._global_plan_dirty = False
         else:
             logging.info("No path found in map")
 
@@ -753,6 +754,7 @@ class MapNode(Node):
             self._cached_global_path = path
             self._cached_global_path_poi_index = self.poi_index
             self._cached_global_path_T = None if self.T_from_map_to_odom is None else self.T_from_map_to_odom.copy()
+            self._global_plan_dirty = True
         return path
 
     def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
