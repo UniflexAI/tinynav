@@ -2,10 +2,12 @@ from __future__ import annotations
 import sys
 sys.path.append("/tinynav/tinynav/core")
 import time
+import heapq
 from pathlib import Path
 from typing import TypedDict
 import shelve
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 import nav_msgs
 import numpy as np
 import numpy.typing as npt
@@ -21,6 +23,127 @@ import rclpy
 import os
 from math_utils import msg2np, matrix_to_quat
 from tool.video_db import VideoDB
+
+
+def heuristic(start, goal, resolution):
+    vec_start = np.array(start)
+    vec_goal = np.array(goal)
+    return np.linalg.norm((vec_start - vec_goal) * resolution) + 20 * np.abs(vec_start[2] - vec_goal[2]) * resolution
+
+
+def reconstruct_path_sdf(parent: dict, current: tuple):
+    path = []
+    while current in parent:
+        path.append(current)
+        if current == parent[current]:
+            break
+        current = parent[current]
+    return path[::-1]
+
+
+def search_close_to_sdf_map(start_index: tuple, sdf_map: np.ndarray, occupancy_map: np.ndarray, stop_distance: float):
+    start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else tuple(start_index)
+    open_heap = [(float(sdf_map[start_index]), start_index)]
+    open_heap_set = {start_index}
+    parent = {start_index: start_index}
+    visited = set()
+    while open_heap:
+        current_sdf, current = heapq.heappop(open_heap)
+        open_heap_set.remove(current)
+        visited.add(current)
+        if current_sdf < stop_distance:
+            return reconstruct_path_sdf(parent, current)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if (0 <= neighbor[0] < sdf_map.shape[0] and
+                            0 <= neighbor[1] < sdf_map.shape[1] and
+                            0 <= neighbor[2] < sdf_map.shape[2]):
+                        if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
+                            open_heap_set.add(neighbor)
+                            heapq.heappush(open_heap, (float(sdf_map[neighbor]), neighbor))
+                            parent[neighbor] = current
+    return []
+
+
+def search_within_sdf_map(start: tuple, goal: tuple, sdf_map: np.ndarray, occupancy_map: np.ndarray, resolution: float):
+    start = tuple(start.flatten()) if isinstance(start, np.ndarray) else tuple(start)
+    goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else tuple(goal)
+    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+    def get_queue_index(sdf_value: float) -> int:
+        for idx, threshold in enumerate(sdf_bins):
+            if sdf_value < threshold:
+                return idx
+        return len(sdf_bins)
+
+    open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
+    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
+    start_queue_idx = get_queue_index(float(sdf_map[start]))
+    heapq.heappush(open_heaps[start_queue_idx], (heuristic(start, goal, resolution), start))
+    open_sets[start_queue_idx].add(start)
+    parent = {start: start}
+    visited = set()
+
+    while True:
+        queue_idx = -1
+        for i, q in enumerate(open_heaps):
+            if q:
+                queue_idx = i
+                break
+        if queue_idx == -1:
+            break
+
+        _, current = heapq.heappop(open_heaps[queue_idx])
+        open_sets[queue_idx].remove(current)
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == goal:
+            return reconstruct_path_sdf(parent, current)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if (0 <= neighbor[0] < sdf_map.shape[0] and
+                            0 <= neighbor[1] < sdf_map.shape[1] and
+                            0 <= neighbor[2] < sdf_map.shape[2]):
+                        if neighbor in visited or occupancy_map[neighbor] == 2:
+                            continue
+                        neighbor_sdf = float(sdf_map[neighbor])
+                        neighbor_queue_idx = get_queue_index(neighbor_sdf)
+                        if neighbor in open_sets[neighbor_queue_idx]:
+                            continue
+                        open_sets[neighbor_queue_idx].add(neighbor)
+                        heapq.heappush(open_heaps[neighbor_queue_idx], (heuristic(neighbor, goal, resolution), neighbor))
+                        if neighbor not in parent:
+                            parent[neighbor] = current
+    return []
+
+
+def generate_sdf_leg(start: np.ndarray, goal: np.ndarray, sdf_map: np.ndarray, occupancy_map: np.ndarray, occupancy_meta: np.ndarray) -> np.ndarray | None:
+    origin = occupancy_meta[:3]
+    resolution = float(occupancy_meta[3])
+    start_idx = ((start[:3] - origin) / resolution).astype(np.int32)
+    goal_idx = ((goal[:3] - origin) / resolution).astype(np.int32)
+    for idx in (start_idx, goal_idx):
+        if np.any(idx < 0) or np.any(idx >= np.array(occupancy_map.shape)):
+            return None
+    sdf_start_path = search_close_to_sdf_map(start_idx, sdf_map, occupancy_map, 0.2)
+    sdf_goal_path = search_close_to_sdf_map(goal_idx, sdf_map, occupancy_map, 0.2)
+    if not sdf_start_path or not sdf_goal_path:
+        return None
+    path_sdf = search_within_sdf_map(sdf_start_path[-1], sdf_goal_path[-1], sdf_map, occupancy_map, resolution)
+    path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
+    if not path:
+        return None
+    return np.array(path, dtype=np.float32) * resolution + origin
+
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -215,6 +338,8 @@ class RelocalizationPose(Node):
     def __init__(self, viser_server: viser.ViserServer):
         super().__init__('relocalization_pose')
         self.viser_server = viser_server
+        self.current_pose_in_map: np.ndarray | None = None
+        self.cmd_pois_pub = self.create_publisher(String, '/mapping/cmd_pois', 10)
         self.relocalization_pose_sub = self.create_subscription(Odometry, '/map/relocalization', self.relocalization_pose_callback, 10)
         self.global_plan_sub = self.create_subscription(nav_msgs.msg.Path, '/mapping/global_plan', self.global_plan_callback, 10)
         self.planning_path_sub = self.create_subscription(nav_msgs.msg.Path, '/planning/trajectory_path', self.planning_path_callback, 10)
@@ -293,6 +418,7 @@ class RelocalizationPose(Node):
 
     def current_pose_in_map_callback(self, msg: Odometry):
         odom, _ = msg2np(msg)
+        self.current_pose_in_map = odom
         xyzw = matrix_to_quat(odom[:3, :3])
         position = odom[:3, 3]
         self.viser_server.scene.add_transform_controls(
@@ -301,6 +427,18 @@ class RelocalizationPose(Node):
             wxyz=(xyzw[3], xyzw[0], xyzw[1], xyzw[2]),
         )
 
+    def publish_route_pois(self, route_points: list[dict]) -> None:
+        payload = {
+            str(index): {
+                'id': index,
+                'name': point.get('name', f'road_{index}'),
+                'position': [float(v) for v in point['position']],
+            }
+            for index, point in enumerate(route_points)
+        }
+        self.cmd_pois_pub.publish(String(data=json.dumps(payload, separators=(",", ":"))))
+        self.get_logger().info(f"Published {len(payload)} roadline POIs to /mapping/cmd_pois")
+
 
 def main(
     tinynav_map_path: Path,
@@ -308,6 +446,8 @@ def main(
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
+    rclpy.init()
+    relocalization_pose_node = RelocalizationPose(server)
     
     # POI management
     poi_points = {}
@@ -369,6 +509,8 @@ def main(
     occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
     occupancy_meta_path = tinynav_map_path / "occupancy_meta.npy"
     sdf_map_path = tinynav_map_path / "sdf_map.npy"
+    occupancy_grid = None
+    occupancy_meta = None
     
     if occupancy_grid_path.exists() and occupancy_meta_path.exists():
         print(f"Loading occupancy grid from {tinynav_map_path}")
@@ -558,6 +700,206 @@ def main(
         if not occupancy_meta_path.exists():
             print(f"  Missing: {occupancy_meta_path}")
     
+    # Roadline editor: edit an ordered waypoint chain, preview the same SDF search
+    # used by map_node, and publish it as normal /mapping/cmd_pois payload. This
+    # keeps tinynav/core/map_node.py unchanged.
+    roadline_path = tinynav_map_path / "roadline.json"
+    route_points: dict[int, dict] = {}
+    route_id_counter = 0
+    route_line_handle = None
+    route_preview_handle = None
+
+    if roadline_path.exists():
+        try:
+            loaded = json.loads(roadline_path.read_text())
+            if isinstance(loaded, dict):
+                loaded_points = loaded.get("points", [])
+            else:
+                loaded_points = loaded
+            for i, point in enumerate(loaded_points):
+                pid = int(point.get("id", i))
+                route_points[pid] = {
+                    "id": pid,
+                    "name": point.get("name", f"road_{pid}"),
+                    "position": np.array(point["position"], dtype=np.float32),
+                }
+            if route_points:
+                route_id_counter = max(route_points.keys()) + 1
+        except Exception as e:
+            print(f"Warning: failed to load {roadline_path}: {e}")
+
+    def _ordered_route_points() -> list[dict]:
+        return [route_points[k] for k in sorted(route_points.keys())]
+
+    def _route_positions() -> list[np.ndarray]:
+        return [np.array(p["position"], dtype=np.float32) for p in _ordered_route_points()]
+
+    def _line_segments(points: list[np.ndarray]) -> np.ndarray:
+        return np.array([[points[i - 1], points[i]] for i in range(1, len(points))], dtype=np.float32)
+
+    def _redraw_route_line() -> None:
+        nonlocal route_line_handle
+        if route_line_handle is not None:
+            route_line_handle.remove()
+            route_line_handle = None
+        points = _route_positions()
+        if len(points) < 2:
+            return
+        segments = _line_segments(points)
+        colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
+        colors[:, :, :] = np.array([1.0, 0.55, 0.0], dtype=np.float32)
+        route_line_handle = server.scene.add_line_segments(
+            "/roadline/editor_line",
+            points=segments,
+            colors=colors,
+            line_width=5,
+        )
+
+    def _save_roadline() -> None:
+        data = {
+            "points": [
+                {
+                    "id": int(point["id"]),
+                    "name": point.get("name", f"road_{point['id']}"),
+                    "position": [float(v) for v in point["position"]],
+                }
+                for point in _ordered_route_points()
+            ]
+        }
+        roadline_path.write_text(json.dumps(data, indent=2))
+        print(f"Saved roadline: {roadline_path}")
+
+    def _draw_sdf_preview(path_points: np.ndarray | None) -> None:
+        nonlocal route_preview_handle
+        if route_preview_handle is not None:
+            route_preview_handle.remove()
+            route_preview_handle = None
+        if path_points is None or len(path_points) < 2:
+            print("No SDF preview path generated")
+            return
+        segments = _line_segments([p for p in path_points])
+        colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
+        colors[:, :, :] = np.array([0.0, 1.0, 1.0], dtype=np.float32)
+        route_preview_handle = server.scene.add_line_segments(
+            "/roadline/sdf_preview",
+            points=segments,
+            colors=colors,
+            line_width=4,
+        )
+
+    def _preview_route_sdf() -> None:
+        if occupancy_grid is None or occupancy_meta is None or not sdf_map_path.exists():
+            print("Cannot preview route: occupancy_grid.npy / occupancy_meta.npy / sdf_map.npy missing")
+            return
+        route = _route_positions()
+        if not route:
+            print("Cannot preview route: no roadline points")
+            return
+        sdf_map = np.load(sdf_map_path).astype(np.float32)
+        start = (
+            relocalization_pose_node.current_pose_in_map[:3, 3]
+            if relocalization_pose_node.current_pose_in_map is not None
+            else route[0]
+        )
+        targets = route if relocalization_pose_node.current_pose_in_map is not None else route[1:]
+        full_path: list[np.ndarray] = []
+        current = np.array(start, dtype=np.float32)
+        for target in targets:
+            leg = generate_sdf_leg(current, np.array(target, dtype=np.float32), sdf_map, occupancy_grid, occupancy_meta)
+            if leg is None:
+                print(f"Failed to generate SDF leg: {current} -> {target}")
+                _draw_sdf_preview(None)
+                return
+            if full_path:
+                full_path.extend(leg[1:])
+            else:
+                full_path.extend(leg)
+            current = np.array(target, dtype=np.float32)
+        _draw_sdf_preview(np.array(full_path, dtype=np.float32))
+        print(f"Previewed SDF route with {len(full_path)} points")
+
+    def _create_route_point_ui(point_id: int, point: dict, route_list_container, sphere_handle) -> None:
+        with route_list_container:
+            with server.gui.add_folder(point.get("name", f"road_{point_id}")) as point_container:
+                gui_vector3 = server.gui.add_vector3("Position", initial_value=point["position"], step=0.25)
+                delete_button = server.gui.add_button("Delete Road Point", color=(255, 0, 0))
+        gizmo = server.scene.add_transform_controls(
+            f"/roadline/{point.get('name', f'road_{point_id}')}_gizmo",
+            position=point["position"],
+            wxyz=(1.0, 0.0, 0.0, 0.0),
+        )
+
+        def on_gizmo_update(event):
+            sphere_handle.position = event.target.position
+            gui_vector3.value = event.target.position
+            route_points[point_id]["position"] = np.array(event.target.position, dtype=np.float32)
+            _redraw_route_line()
+
+        gizmo.on_update(on_gizmo_update)
+
+        @delete_button.on_click
+        def _(_) -> None:
+            del route_points[point_id]
+            point_container.remove()
+            sphere_handle.remove()
+            gizmo.remove()
+            _redraw_route_line()
+
+    with server.gui.add_folder("Roadline Route Editor") as _:
+        add_route_point_button = server.gui.add_button("Add Road Point")
+        save_route_button = server.gui.add_button("Save Roadline")
+        preview_route_button = server.gui.add_button("Preview SDF Route")
+        publish_route_button = server.gui.add_button("Publish Roadline to MapNode")
+        route_list_container = server.gui.add_folder("Road Point List")
+
+        for point_id, point in route_points.items():
+            sphere_handle = server.scene.add_icosphere(
+                f"/roadline/{point['name']}",
+                radius=0.12,
+                color=(255, 140, 0),
+                position=point["position"],
+            )
+            _create_route_point_ui(point_id, point, route_list_container, sphere_handle)
+        _redraw_route_line()
+
+        @add_route_point_button.on_click
+        def _(_) -> None:
+            nonlocal route_id_counter
+            point_id = route_id_counter
+            route_id_counter += 1
+            if relocalization_pose_node.current_pose_in_map is not None:
+                position = relocalization_pose_node.current_pose_in_map[:3, 3].astype(np.float32)
+            elif route_points:
+                position = _route_positions()[-1] + np.array([0.5, 0.0, 0.0], dtype=np.float32)
+            else:
+                position = np.zeros(3, dtype=np.float32)
+            point = {"id": point_id, "name": f"road_{point_id}", "position": position}
+            route_points[point_id] = point
+            sphere_handle = server.scene.add_icosphere(
+                f"/roadline/{point['name']}",
+                radius=0.12,
+                color=(255, 140, 0),
+                position=position,
+            )
+            _create_route_point_ui(point_id, point, route_list_container, sphere_handle)
+            _redraw_route_line()
+
+        @save_route_button.on_click
+        def _(_) -> None:
+            _save_roadline()
+
+        @preview_route_button.on_click
+        def _(_) -> None:
+            _preview_route_sdf()
+
+        @publish_route_button.on_click
+        def _(_) -> None:
+            points = _ordered_route_points()
+            if not points:
+                print("Cannot publish roadline: no road points")
+                return
+            relocalization_pose_node.publish_route_pois(points)
+
     poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
     if (tinynav_map_path / "intrinsics.npy").exists():
         camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
@@ -662,8 +1004,6 @@ def main(
     else:
         print(f"Warning: Neither {splat_path} nor {pointcloud_path} exists. No 3D representation loaded.")
 
-    rclpy.init()
-    relocalization_pose_node = RelocalizationPose(server)
     try:
         rclpy.spin(relocalization_pose_node)
         relocalization_pose_node.destroy_node()
