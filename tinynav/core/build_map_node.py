@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import time
@@ -59,51 +58,37 @@ class StageTimer:
         finally:
             self.record(name, time.perf_counter() - t0)
 
-    def report(self) -> dict:
+    def log_summary(self, log_fn: Callable[[str], None]) -> None:
+        if not self._stats:
+            log_fn("No stage timing data collected.")
+            return
+
         grand_total = sum(s.total_s for s in self._stats.values())
-        stages = []
+        rows = []
         for name, stats in sorted(self._stats.items(), key=lambda item: -item[1].total_s):
             mean_s = stats.total_s / stats.count if stats.count else 0.0
             min_ms = stats.min_s * 1000 if stats.count else 0.0
             pct = (100.0 * stats.total_s / grand_total) if grand_total > 0 else 0.0
-            stages.append({
-                "stage": name,
-                "count": stats.count,
-                "total_s": round(stats.total_s, 3),
-                "mean_ms": round(mean_s * 1000, 1),
-                "min_ms": round(min_ms, 1),
-                "max_ms": round(stats.max_s * 1000, 1),
-                "pct": round(pct, 1),
-            })
-        return {
-            "stages": stages,
-            "grand_total_s": round(grand_total, 3),
-            "note": "pct is each stage total_s / sum of all stage totals (non-overlapping leaf stages)",
-        }
+            rows.append([
+                name,
+                stats.count,
+                round(stats.total_s, 3),
+                round(mean_s * 1000, 1),
+                round(min_ms, 1),
+                round(stats.max_s * 1000, 1),
+                round(pct, 1),
+            ])
 
-    def log_summary(self, log_fn: Callable[[str], None]) -> None:
-        data = self.report()
-        if not data["stages"]:
-            log_fn("No stage timing data collected.")
-            return
-        rows = [
-            [r["stage"], r["count"], r["total_s"], r["mean_ms"], r["min_ms"], r["max_ms"], r["pct"]]
-            for r in data["stages"]
-        ]
         table = tabulate(
             rows,
             headers=["stage", "count", "total_s", "mean_ms", "min_ms", "max_ms", "pct"],
             tablefmt="simple",
         )
+        note = "pct is each stage total_s / sum of all stage totals (non-overlapping leaf stages)"
         log_fn(
             f"=== Build map stage timing ===\n{table}\n"
-            f"Grand total: {data['grand_total_s']} s ({data['note']})"
+            f"Grand total: {round(grand_total, 3)} s ({note})"
         )
-
-    def save_json(self, path: str, metadata: dict) -> None:
-        payload = {"metadata": metadata, **self.report()}
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
 
 
 import rclpy
@@ -887,6 +872,7 @@ class BuildMapNode(Node):
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
+        self.stage_timer.log_summary(self.get_logger().info)
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
         marker_array = MarkerArray()
