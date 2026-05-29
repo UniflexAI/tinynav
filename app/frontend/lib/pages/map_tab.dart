@@ -220,12 +220,115 @@ class _MapBuildCardState extends ConsumerState<_MapBuildCard> {
 
 // ── Bag file list card (with selection) ──────────────────────────────────────
 
-class _BagFileListCard extends ConsumerWidget {
+class _BagFileListCard extends ConsumerStatefulWidget {
   final VoidCallback onRefresh;
   const _BagFileListCard({required this.onRefresh});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_BagFileListCard> createState() => _BagFileListCardState();
+}
+
+class _BagFileListCardState extends ConsumerState<_BagFileListCard> {
+  final Set<String> _busyBags = <String>{};
+
+  Future<void> _saveDescriptor(FileEntry file, String descriptor) async {
+    if (_busyBags.contains(file.name)) return;
+    setState(() => _busyBags.add(file.name));
+    try {
+      await ref.read(dioProvider).patch(
+        '/files/bags/${file.name}',
+        data: {'descriptor': descriptor},
+      );
+      if (!mounted) return;
+      ref.invalidate(bagFilesProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Descriptor saved')),
+      );
+    } on DioException catch (e) {
+      if (mounted) _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
+    } finally {
+      if (mounted) {
+        setState(() => _busyBags.remove(file.name));
+      }
+    }
+  }
+
+  Future<void> _deleteBag(FileEntry file) async {
+    if (_busyBags.contains(file.name)) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete bag?'),
+        content: Text('Delete "${file.name}" permanently?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    setState(() => _busyBags.add(file.name));
+    try {
+      await ref.read(dioProvider).delete('/files/bags/${file.name}');
+      if (!mounted) return;
+      if (ref.read(selectedBagProvider) == file.name) {
+        ref.read(selectedBagProvider.notifier).state = null;
+      }
+      ref.invalidate(bagFilesProvider);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Bag deleted')),
+      );
+    } on DioException catch (e) {
+      if (mounted) _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
+    } finally {
+      if (mounted) {
+        setState(() => _busyBags.remove(file.name));
+      }
+    }
+  }
+
+  Future<void> _editDescriptor(FileEntry file) async {
+    final ctl = TextEditingController(text: file.descriptor);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Descriptor: ${file.name}'),
+        content: TextField(
+          controller: ctl,
+          autofocus: true,
+          maxLength: 200,
+          decoration: const InputDecoration(
+            hintText: 'Add a short description',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(ctl.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    ctl.dispose();
+    if (result == null) return;
+    await _saveDescriptor(file, result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final filesAsync = ref.watch(bagFilesProvider);
     final selected = ref.watch(selectedBagProvider);
 
@@ -235,7 +338,7 @@ class _BagFileListCard extends ConsumerWidget {
       title: 'Bag Files',
       trailing: IconButton(
         icon: const Icon(Icons.refresh_rounded, size: 18),
-        onPressed: onRefresh,
+        onPressed: widget.onRefresh,
         padding: EdgeInsets.zero,
         constraints: const BoxConstraints(),
         tooltip: 'Refresh',
@@ -254,10 +357,13 @@ class _BagFileListCard extends ConsumerWidget {
                   return _BagFileRow(
                     file: f,
                     isSelected: isSelected,
+                    busy: _busyBags.contains(f.name),
                     onTap: () {
                       ref.read(selectedBagProvider.notifier).state =
                           isSelected ? null : f.name;
                     },
+                    onEditDescriptor: () => _editDescriptor(f),
+                    onDelete: () => _deleteBag(f),
                   );
                 }).toList(),
               ),
@@ -274,8 +380,18 @@ class _BagFileListCard extends ConsumerWidget {
 class _BagFileRow extends StatelessWidget {
   final FileEntry file;
   final bool isSelected;
+  final bool busy;
   final VoidCallback onTap;
-  const _BagFileRow({required this.file, required this.isSelected, required this.onTap});
+  final VoidCallback onEditDescriptor;
+  final VoidCallback onDelete;
+  const _BagFileRow({
+    required this.file,
+    required this.isSelected,
+    required this.busy,
+    required this.onTap,
+    required this.onEditDescriptor,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -285,7 +401,7 @@ class _BagFileRow extends StatelessWidget {
         '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
     return InkWell(
-      onTap: onTap,
+      onTap: busy ? null : onTap,
       borderRadius: BorderRadius.circular(8),
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
@@ -296,30 +412,67 @@ class _BagFileRow extends StatelessWidget {
                 border: Border.all(color: const Color(0xFF4A90D9).withOpacity(0.4)),
               )
             : null,
-        child: Row(
+        child: Column(
           children: [
-            Icon(Icons.folder_rounded, size: 16,
-                color: isSelected ? const Color(0xFF4A90D9) : const Color(0xFFFFB300)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                file.name,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                  color: isSelected ? const Color(0xFF4A90D9) : null,
+            Row(
+              children: [
+                Icon(Icons.folder_rounded, size: 16,
+                    color: isSelected ? const Color(0xFF4A90D9) : const Color(0xFFFFB300)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    file.name,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: isSelected ? const Color(0xFF4A90D9) : null,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-                overflow: TextOverflow.ellipsis,
-              ),
+                const SizedBox(width: 8),
+                Text('${file.sizeLabel}  $dateStr',
+                    style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+                IconButton(
+                  onPressed: busy ? null : onEditDescriptor,
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  tooltip: 'Edit descriptor',
+                  visualDensity: VisualDensity.compact,
+                ),
+                IconButton(
+                  onPressed: busy ? null : onDelete,
+                  icon: const Icon(Icons.delete_outline, size: 16, color: Colors.red),
+                  tooltip: 'Delete bag',
+                  visualDensity: VisualDensity.compact,
+                ),
+                if (busy)
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                else
+                  Icon(
+                    isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+                    size: 16,
+                    color: isSelected ? const Color(0xFF4A90D9) : Colors.grey.shade400,
+                  ),
+              ],
             ),
-            const SizedBox(width: 8),
-            Text('${file.sizeLabel}  $dateStr',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
-            const SizedBox(width: 4),
-            Icon(
-              isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
-              size: 16,
-              color: isSelected ? const Color(0xFF4A90D9) : Colors.grey.shade400,
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 24, right: 6, bottom: 2),
+                child: Text(
+                  file.descriptor.isEmpty ? 'No description' : file.descriptor,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: file.descriptor.isEmpty ? Colors.grey.shade500 : const Color(0xFF616161),
+                    fontStyle: file.descriptor.isEmpty ? FontStyle.italic : FontStyle.normal,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ),
           ],
         ),

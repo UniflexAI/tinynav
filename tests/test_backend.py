@@ -256,24 +256,33 @@ def _run_router_tests():
             self._stopped = True
 
     with tempfile.TemporaryDirectory() as tmp:
-        map_path = os.path.join(tmp, 'map')
-        bag_path = os.path.join(tmp, 'bag')
+        db_root = os.path.join(tmp, 'tinynav_db')
+        map_path = os.path.join(db_root, 'map')
+        bag_path = os.path.join(db_root, 'bag')
+        rosbags_path = os.path.join(db_root, 'rosbags')
         os.makedirs(map_path)
         os.makedirs(bag_path)
+        os.makedirs(rosbags_path)
         node = FakeNode(map_path=map_path, bag_path=bag_path)
 
         original = app_state.runner.node
+        original_db_root = os.environ.get('TINYNAV_DB_PATH')
+        os.environ['TINYNAV_DB_PATH'] = db_root
         app_state.runner.node = node
         # TestClient without context manager skips the lifespan (no rclpy.init)
         client = TestClient(app, raise_server_exceptions=True)
 
         try:
-            _run_router_suite(client, node, map_path, bag_path)
+            _run_router_suite(client, node, map_path, bag_path, rosbags_path)
         finally:
             app_state.runner.node = original
+            if original_db_root is None:
+                os.environ.pop('TINYNAV_DB_PATH', None)
+            else:
+                os.environ['TINYNAV_DB_PATH'] = original_db_root
 
 
-def _run_router_suite(client, node, map_path, bag_path):
+def _run_router_suite(client, node, map_path, bag_path, rosbags_path):
     def reset():
         node.state = 'idle'
         node._started.clear()
@@ -283,6 +292,15 @@ def _run_router_suite(client, node, map_path, bag_path):
         pois_file = os.path.join(map_path, 'pois.json')
         if os.path.exists(pois_file):
             os.remove(pois_file)
+        # clear rosbags
+        if os.path.exists(rosbags_path):
+            for name in os.listdir(rosbags_path):
+                p = os.path.join(rosbags_path, name)
+                if os.path.isdir(p):
+                    import shutil
+                    shutil.rmtree(p)
+                elif os.path.isfile(p):
+                    os.remove(p)
 
     # -- device --
     def test_device_info():
@@ -323,6 +341,35 @@ def _run_router_suite(client, node, map_path, bag_path):
         reset()
         node.state = 'realsense_bag_record'
         assert client.get('/bag/status').json()['status'] == 'recording'
+
+    # -- files/bags --
+    def test_files_bags_descriptor_default_empty():
+        reset()
+        os.makedirs(os.path.join(rosbags_path, 'bag_a'))
+        r = client.get('/files/bags')
+        assert r.status_code == 200
+        assert len(r.json()['files']) == 1
+        assert r.json()['files'][0]['name'] == 'bag_a'
+        assert r.json()['files'][0]['descriptor'] == ''
+
+    def test_files_bags_descriptor_patch_and_delete():
+        reset()
+        bag_name = 'bag_a'
+        os.makedirs(os.path.join(rosbags_path, bag_name))
+        r = client.patch(f'/files/bags/{bag_name}', json={'descriptor': '  test bag  '})
+        assert r.status_code == 200
+        assert r.json()['descriptor'] == 'test bag'
+        files = client.get('/files/bags').json()['files']
+        assert files[0]['descriptor'] == 'test bag'
+        assert client.delete(f'/files/bags/{bag_name}').status_code == 200
+        assert client.get('/files/bags').json()['files'] == []
+
+    def test_files_bags_descriptor_too_long():
+        reset()
+        bag_name = 'bag_a'
+        os.makedirs(os.path.join(rosbags_path, bag_name))
+        r = client.patch(f'/files/bags/{bag_name}', json={'descriptor': 'x' * 201})
+        assert r.status_code == 400
 
     # -- map --
     def test_map_build_no_bag():
@@ -423,6 +470,8 @@ def _run_router_suite(client, node, map_path, bag_path):
         test_device_info, test_device_status_online,
         test_bag_start_from_idle, test_bag_start_already_recording,
         test_bag_stop, test_bag_stop_when_idle, test_bag_status_recording,
+        test_files_bags_descriptor_default_empty, test_files_bags_descriptor_patch_and_delete,
+        test_files_bags_descriptor_too_long,
         test_map_build_no_bag, test_map_build_with_bag,
         test_map_current_no_map, test_map_current_and_image,
         test_poi_list_empty, test_poi_create_and_list, test_poi_delete,

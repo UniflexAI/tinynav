@@ -250,12 +250,14 @@ class FileEntry {
   final int size;
   final double mtime;
   final bool isDir;
+  final String descriptor;
 
   const FileEntry({
     required this.name,
     required this.size,
     required this.mtime,
     required this.isDir,
+    this.descriptor = '',
   });
 
   factory FileEntry.fromJson(Map<String, dynamic> j) => FileEntry(
@@ -263,6 +265,7 @@ class FileEntry {
         size: (j['size'] as num).toInt(),
         mtime: (j['mtime'] as num).toDouble(),
         isDir: j['is_dir'] as bool? ?? false,
+        descriptor: j['descriptor'] as String? ?? '',
       );
 
   String get sizeLabel {
