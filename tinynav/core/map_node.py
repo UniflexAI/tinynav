@@ -207,7 +207,7 @@ def shortcut_prune_path(
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    sdf_bins = [0.5, 1.0, 2.0, 5.0, 10.0]
+    sdf_bins = [0.3, 0.5, 1.0, 2.0, 5.0, 10.0]
 
     def get_queue_index(sdf_value: float) -> int:
         for idx, threshold in enumerate(sdf_bins):
@@ -820,39 +820,8 @@ class MapNode(Node):
             logging.info("No path found in map")
 
     def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
-        position = pose_in_map[:3, 3]
-        cached_path = self._cached_global_path
-        if cached_path is not None and self._cached_global_path_poi_index == self.poi_index:
-            _, _, deviation = self._closest_point_on_path(cached_path, position)
-            tf_translation_delta = 0.0
-            tf_yaw_delta = 0.0
-            if self._cached_global_path_T is not None and self.T_from_map_to_odom is not None:
-                dT = np.linalg.inv(self._cached_global_path_T) @ self.T_from_map_to_odom
-                tf_translation_delta = np.linalg.norm(dT[:2, 3])
-                tf_yaw_delta = abs(np.arctan2(dT[1, 0], dT[0, 0]))
-
-            if (
-                deviation <= self._replan_path_deviation_threshold
-                and tf_translation_delta <= self._replan_tf_translation_threshold
-                and tf_yaw_delta <= self._replan_tf_yaw_threshold
-            ):
-                return cached_path
-
-            self.get_logger().info(
-                "Replanning global path: "
-                f"deviation={deviation:.2f}m, "
-                f"tf_translation_delta={tf_translation_delta:.2f}m, "
-                f"tf_yaw_delta={np.rad2deg(tf_yaw_delta):.1f}deg"
-            )
-
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
-
-        if path is not None:
-            self._cached_global_path = path
-            self._cached_global_path_poi_index = self.poi_index
-            self._cached_global_path_T = None if self.T_from_map_to_odom is None else self.T_from_map_to_odom.copy()
-        return path
+            return self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
 
     def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
         if len(path) == 1:
