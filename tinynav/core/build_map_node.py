@@ -1,3 +1,113 @@
+import json
+import logging
+import os
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from math import inf
+from typing import Callable, Dict, Optional
+
+from tabulate import tabulate
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BuildMapArgs:
+    bag_file: str = "tinynav_db"
+    map_save_path: str = "tinynav_db"
+    play_rate: float = 1.0
+    verbose_timer: bool = True
+    timing_stats: bool = True
+    global_frames_ratio: float = 1.1
+
+
+def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
+    return num_frames >= frames_ratio * prev_num_frames
+
+
+@dataclass
+class StageStats:
+    count: int = 0
+    total_s: float = 0.0
+    min_s: float = inf
+    max_s: float = 0.0
+
+    def record(self, duration_s: float) -> None:
+        self.count += 1
+        self.total_s += duration_s
+        self.min_s = min(self.min_s, duration_s)
+        self.max_s = max(self.max_s, duration_s)
+
+
+class StageTimer:
+    def __init__(self, verbose_logger: Optional[Callable[[str], None]] = None):
+        self._stats: Dict[str, StageStats] = {}
+        self.verbose_logger = verbose_logger
+
+    def record(self, name: str, duration_s: float) -> None:
+        if name not in self._stats:
+            self._stats[name] = StageStats()
+        self._stats[name].record(duration_s)
+        if self.verbose_logger is not None:
+            self.verbose_logger(f"[{name}] Elapsed time: {duration_s * 1000:.0f} ms")
+
+    @contextmanager
+    def timed(self, name: str):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record(name, time.perf_counter() - t0)
+
+    def report(self) -> dict:
+        grand_total = sum(s.total_s for s in self._stats.values())
+        stages = []
+        for name, stats in sorted(self._stats.items(), key=lambda item: -item[1].total_s):
+            mean_s = stats.total_s / stats.count if stats.count else 0.0
+            min_ms = stats.min_s * 1000 if stats.count else 0.0
+            pct = (100.0 * stats.total_s / grand_total) if grand_total > 0 else 0.0
+            stages.append({
+                "stage": name,
+                "count": stats.count,
+                "total_s": round(stats.total_s, 3),
+                "mean_ms": round(mean_s * 1000, 1),
+                "min_ms": round(min_ms, 1),
+                "max_ms": round(stats.max_s * 1000, 1),
+                "pct": round(pct, 1),
+            })
+        return {
+            "stages": stages,
+            "grand_total_s": round(grand_total, 3),
+            "note": "pct is each stage total_s / sum of all stage totals (non-overlapping leaf stages)",
+        }
+
+    def log_summary(self, log_fn: Callable[[str], None]) -> None:
+        data = self.report()
+        if not data["stages"]:
+            log_fn("No stage timing data collected.")
+            return
+        rows = [
+            [r["stage"], r["count"], r["total_s"], r["mean_ms"], r["min_ms"], r["max_ms"], r["pct"]]
+            for r in data["stages"]
+        ]
+        table = tabulate(
+            rows,
+            headers=["stage", "count", "total_s", "mean_ms", "min_ms", "max_ms", "pct"],
+            tablefmt="simple",
+        )
+        log_fn(
+            f"=== Build map stage timing ===\n{table}\n"
+            f"Grand total: {data['grand_total_s']} s ({data['note']})"
+        )
+
+    def save_json(self, path: str, metadata: dict) -> None:
+        payload = {"metadata": metadata, **self.report()}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
@@ -14,25 +124,17 @@ from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 from cv_bridge import CvBridge
 import cv2
-import os
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
 
 import tyro
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.stage_timer import StageTimer, check_global_frames_ratio
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
-import logging
 import asyncio
 import shelve
-import time
 from tqdm import tqdm
 import einops
 from tf2_msgs.msg import TFMessage
-from typing import Dict
 from tool.video_db import VideoDB
 
 from tf2_ros import TransformBroadcaster
@@ -45,20 +147,6 @@ from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
 from rosidl_runtime_py.utilities import get_message
 from rosgraph_msgs.msg import Clock
 from rclpy.serialization import deserialize_message
-
-
-
-logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class BuildMapArgs:
-    bag_file: str = "tinynav_db"
-    map_save_path: str = "tinynav_db"
-    play_rate: float = 1.0
-    verbose_timer: bool = True
-    timing_stats: bool = True
-    global_frames_ratio: float = 1.1
 
 
 def z_value_to_color(z, z_min, z_max):
