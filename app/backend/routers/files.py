@@ -65,6 +65,12 @@ def _validate_bag_name(name: str) -> str:
     return name
 
 
+def _validate_map_name(name: str) -> str:
+    if not re.fullmatch(r'[a-zA-Z0-9_\-]+', name):
+        raise HTTPException(400, 'Invalid map name')
+    return name
+
+
 def _clean_descriptor(text: str) -> str:
     descriptor = text.strip()
     if len(descriptor) > 200:
@@ -115,3 +121,21 @@ async def delete_bag(bag_name: str):
 @router.get('/maps')
 async def list_maps():
     return {'files': _list_dir(_db_root() / 'maps')}
+
+
+@router.delete('/maps/{map_name}')
+async def delete_map(map_name: str):
+    map_name = _validate_map_name(map_name)
+    root = _db_root()
+    map_path = root / 'maps' / map_name
+    if not map_path.is_dir():
+        raise HTTPException(404, f'Map {map_name!r} not found')
+
+    active_link = root / 'map'
+    if active_link.is_symlink():
+        active_target = active_link.resolve()
+        if active_target == map_path.resolve():
+            raise HTTPException(409, f"Map {map_name!r} is active; set another active map first")
+
+    shutil.rmtree(map_path)
+    return {'ok': True}

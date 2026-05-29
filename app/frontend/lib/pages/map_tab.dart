@@ -49,6 +49,21 @@ class MapTab extends ConsumerWidget {
                 builder: (_) => MapPreviewPage(mapName: f.name),
               ),
             ),
+            onDeleteFile: (f) async {
+              try {
+                await ref.read(dioProvider).delete('/files/maps/${f.name}');
+                ref.invalidate(mapFilesProvider);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Map deleted')),
+                  );
+                }
+              } on DioException catch (e) {
+                if (context.mounted) {
+                  _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
+                }
+              }
+            },
           ),
           const SizedBox(height: 24),
         ],
@@ -483,12 +498,13 @@ class _BagFileRow extends StatelessWidget {
 
 // ── Generic file list card ────────────────────────────────────────────────────
 
-class _FileListCard extends ConsumerWidget {
+class _FileListCard extends ConsumerStatefulWidget {
   final String title;
   final IconData icon;
   final ProviderListenable<AsyncValue<List<FileEntry>>> provider;
   final VoidCallback onRefresh;
   final void Function(FileEntry)? onTapFile;
+  final Future<void> Function(FileEntry)? onDeleteFile;
 
   const _FileListCard({
     required this.title,
@@ -496,19 +512,58 @@ class _FileListCard extends ConsumerWidget {
     required this.provider,
     required this.onRefresh,
     this.onTapFile,
+    this.onDeleteFile,
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final filesAsync = ref.watch(provider);
+  ConsumerState<_FileListCard> createState() => _FileListCardState();
+}
+
+class _FileListCardState extends ConsumerState<_FileListCard> {
+  final Set<String> _busyFiles = <String>{};
+
+  Future<void> _delete(FileEntry file) async {
+    if (widget.onDeleteFile == null || _busyFiles.contains(file.name)) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete file?'),
+        content: Text('Delete "${file.name}" permanently?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _busyFiles.add(file.name));
+    try {
+      await widget.onDeleteFile!(file);
+    } finally {
+      if (mounted) {
+        setState(() => _busyFiles.remove(file.name));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filesAsync = ref.watch(widget.provider);
 
     return _SectionCard(
-      icon: icon,
+      icon: widget.icon,
       iconColor: Colors.grey.shade600,
-      title: title,
+      title: widget.title,
       trailing: IconButton(
         icon: const Icon(Icons.refresh_rounded, size: 18),
-        onPressed: onRefresh,
+        onPressed: widget.onRefresh,
         padding: EdgeInsets.zero,
         constraints: const BoxConstraints(),
         tooltip: 'Refresh',
@@ -523,7 +578,13 @@ class _FileListCard extends ConsumerWidget {
               )
             : Column(
                 children: files
-                    .map((f) => _FileRow(file: f, onTap: onTapFile != null ? () => onTapFile!(f) : null))
+                    .map((f) => _FileRow(
+                          file: f,
+                          busy: _busyFiles.contains(f.name),
+                          onTap: widget.onTapFile != null ? () => widget.onTapFile!(f) : null,
+                          onDelete:
+                              widget.onDeleteFile != null ? () => _delete(f) : null,
+                        ))
                     .toList(),
               ),
         loading: () => const Padding(
@@ -538,8 +599,10 @@ class _FileListCard extends ConsumerWidget {
 
 class _FileRow extends StatelessWidget {
   final FileEntry file;
+  final bool busy;
   final VoidCallback? onTap;
-  const _FileRow({required this.file, this.onTap});
+  final VoidCallback? onDelete;
+  const _FileRow({required this.file, this.busy = false, this.onTap, this.onDelete});
 
   @override
   Widget build(BuildContext context) {
@@ -570,6 +633,19 @@ class _FileRow extends StatelessWidget {
             '${file.sizeLabel}  $dateStr',
             style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
           ),
+          if (onDelete != null)
+            IconButton(
+              onPressed: busy ? null : onDelete,
+              icon: const Icon(Icons.delete_outline, size: 16, color: Colors.red),
+              tooltip: 'Delete',
+              visualDensity: VisualDensity.compact,
+            ),
+          if (busy)
+            const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
           if (onTap != null) ...[
             const SizedBox(width: 4),
             const Icon(Icons.chevron_right_rounded, size: 16, color: Color(0xFFBDBDBD)),
@@ -579,7 +655,7 @@ class _FileRow extends StatelessWidget {
     );
 
     if (onTap == null) return row;
-    return InkWell(onTap: onTap, borderRadius: BorderRadius.circular(8), child: row);
+    return InkWell(onTap: busy ? null : onTap, borderRadius: BorderRadius.circular(8), child: row);
   }
 }
 

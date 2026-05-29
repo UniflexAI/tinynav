@@ -371,6 +371,37 @@ def _run_router_suite(client, node, map_path, bag_path, rosbags_path):
         r = client.patch(f'/files/bags/{bag_name}', json={'descriptor': 'x' * 201})
         assert r.status_code == 400
 
+    def test_files_maps_delete_success():
+        reset()
+        map_name = 'map_a'
+        os.makedirs(os.path.join(os.path.dirname(map_path), 'maps', map_name), exist_ok=True)
+        r = client.delete(f'/files/maps/{map_name}')
+        assert r.status_code == 200
+        assert not os.path.exists(os.path.join(os.path.dirname(map_path), 'maps', map_name))
+
+    def test_files_maps_delete_active_conflict():
+        reset()
+        map_name = 'map_a'
+        maps_dir = os.path.join(os.path.dirname(map_path), 'maps')
+        target = os.path.join(maps_dir, map_name)
+        os.makedirs(target, exist_ok=True)
+        # Make tinynav_db/map symlink point to this map as active.
+        if os.path.lexists(map_path):
+            if os.path.islink(map_path) or os.path.isfile(map_path):
+                os.remove(map_path)
+            else:
+                import shutil
+                shutil.rmtree(map_path)
+        os.symlink(target, map_path)
+        r = client.delete(f'/files/maps/{map_name}')
+        assert r.status_code == 409
+        assert os.path.exists(target)
+
+    def test_files_maps_delete_not_found_and_invalid():
+        reset()
+        assert client.delete('/files/maps/not_exist').status_code == 404
+        assert client.delete('/files/maps/../bad').status_code == 400
+
     # -- map --
     def test_map_build_no_bag():
         reset()
@@ -472,6 +503,8 @@ def _run_router_suite(client, node, map_path, bag_path, rosbags_path):
         test_bag_stop, test_bag_stop_when_idle, test_bag_status_recording,
         test_files_bags_descriptor_default_empty, test_files_bags_descriptor_patch_and_delete,
         test_files_bags_descriptor_too_long,
+        test_files_maps_delete_success, test_files_maps_delete_active_conflict,
+        test_files_maps_delete_not_found_and_invalid,
         test_map_build_no_bag, test_map_build_with_bag,
         test_map_current_no_map, test_map_current_and_image,
         test_poi_list_empty, test_poi_create_and_list, test_poi_delete,
