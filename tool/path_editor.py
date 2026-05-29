@@ -27,13 +27,13 @@ class Args:
     """Editable path control-point file saved under tinynav_map_path."""
 
     sdf_map_name: str = "sdf_map.npy"
-    """SDF map file to preview and overwrite when Save SDF Map is clicked."""
+    """Active SDF path-map file used by Tinynav; Replace Current SDF Map overwrites this file."""
+
+    default_sdf_map_name: str = "sdf_map.default.npy"
+    """Backup of the original/default SDF path-map, used by Restore Default SDF Map."""
 
     path_radius_m: float = 0.2
     """SDF distance threshold used by map_node; voxels near edited paths become low-SDF corridor."""
-
-    merge_with_existing_sdf: bool = True
-    """If true, save min(existing_sdf, edited_path_sdf); otherwise replace SDF from edited paths."""
 
     max_preview_points: int = 300_000
     """Maximum number of low-SDF voxels rendered in the Viser preview."""
@@ -153,18 +153,18 @@ class PathEditor:
         self.map_dir = args.tinynav_map_path
         self.paths_json_path = self.map_dir / args.paths_json_name
         self.sdf_map_path = self.map_dir / args.sdf_map_name
+        self.default_sdf_map_path = self.map_dir / args.default_sdf_map_name
 
         self.occupancy_grid = np.load(self.map_dir / "occupancy_grid.npy")
         self.occupancy_meta = np.load(self.map_dir / "occupancy_meta.npy")
         self.origin = self.occupancy_meta[:3].astype(np.float32)
         self.resolution = float(self.occupancy_meta[3])
         self.shape = tuple(int(v) for v in self.occupancy_grid.shape)
-        self.original_sdf_map = np.load(self.sdf_map_path).astype(np.float32) if self.sdf_map_path.exists() else None
-        if self.original_sdf_map is not None and self.original_sdf_map.shape != self.occupancy_grid.shape:
-            raise ValueError(
-                f"{self.sdf_map_path} shape {self.original_sdf_map.shape} does not match "
-                f"occupancy_grid shape {self.occupancy_grid.shape}"
-            )
+        self.current_sdf_map = self._load_sdf_file(self.sdf_map_path)
+        self.default_sdf_map = self._load_sdf_file(self.default_sdf_map_path)
+        if self.default_sdf_map is None:
+            # Before the first replacement there is no separate backup, so the active file is the default map.
+            self.default_sdf_map = self.current_sdf_map
 
         self.paths = _load_json(self.paths_json_path)
         self.path_id_counter = (max(self.paths.keys()) + 1) if self.paths else 0
@@ -178,7 +178,38 @@ class PathEditor:
         self.point_handles: dict[tuple[int, int], viser.SceneHandle] = {}
         self.gizmo_handles: dict[tuple[int, int], viser.SceneHandle] = {}
         self.sdf_preview_handle: viser.SceneHandle | None = None
+        # current = active sdf_map.npy; default = original backup; edited = freshly generated from editable paths only.
+        self.preview_source = "current"
         self.status = None
+
+    def _load_sdf_file(self, path: Path) -> np.ndarray | None:
+        if not path.exists():
+            return None
+        sdf_map = np.load(path).astype(np.float32)
+        if sdf_map.shape != self.occupancy_grid.shape:
+            raise ValueError(
+                f"{path} shape {sdf_map.shape} does not match occupancy_grid shape {self.occupancy_grid.shape}"
+            )
+        return sdf_map
+
+    def _edited_sdf_map(self) -> np.ndarray:
+        return build_sdf_from_paths(self.paths, self.origin, self.resolution, self.shape)
+
+    def _preview_sdf_map(self) -> np.ndarray | None:
+        if self.preview_source == "default":
+            return self.default_sdf_map
+        if self.preview_source == "edited":
+            return self._edited_sdf_map()
+        return self.current_sdf_map
+
+    def _ensure_default_backup(self) -> None:
+        if self.default_sdf_map_path.exists():
+            return
+        if self.current_sdf_map is None:
+            return
+        np.save(self.default_sdf_map_path, self.current_sdf_map)
+        self.default_sdf_map = self.current_sdf_map.copy()
+        print(f"Saved default SDF backup to {self.default_sdf_map_path}")
 
     def run(self) -> None:
         self._add_static_map_layers()
@@ -285,8 +316,12 @@ class PathEditor:
             delete_last_waypoint = self.server.gui.add_button("Delete Last Waypoint")
             delete_path = self.server.gui.add_button("Delete Selected Path", color=(255, 80, 80))
             save_paths = self.server.gui.add_button("Save Paths JSON")
-            rebuild_preview = self.server.gui.add_button("Rebuild SDF Preview")
-            save_sdf = self.server.gui.add_button("Save SDF Map", color=(80, 200, 80))
+            show_current_sdf = self.server.gui.add_button("Show Current SDF Map")
+            show_default_sdf = self.server.gui.add_button("Show Default SDF Map")
+            show_edited_sdf = self.server.gui.add_button("Show Edited Path Map")
+            rebuild_preview = self.server.gui.add_button("Rebuild Preview")
+            replace_sdf = self.server.gui.add_button("Replace Current SDF Map", color=(80, 200, 80))
+            restore_default_sdf = self.server.gui.add_button("Restore Default SDF Map", color=(80, 120, 255))
 
             @selected.on_update
             def _(_) -> None:
@@ -351,28 +386,58 @@ class PathEditor:
                 _save_json(self.paths_json_path, self.paths)
                 self._set_status(f"Saved {self.paths_json_path}")
 
+            @show_current_sdf.on_click
+            def _(_) -> None:
+                self.preview_source = "current"
+                self._refresh_sdf_preview()
+                self._set_status("Showing current active SDF map")
+
+            @show_default_sdf.on_click
+            def _(_) -> None:
+                self.preview_source = "default"
+                self._refresh_sdf_preview()
+                self._set_status("Showing default SDF map")
+
+            @show_edited_sdf.on_click
+            def _(_) -> None:
+                self.preview_source = "edited"
+                self._refresh_sdf_preview()
+                self._set_status("Showing edited path map only")
+
             @rebuild_preview.on_click
             def _(_) -> None:
                 self._refresh_sdf_preview()
-                self._set_status("Rebuilt SDF preview")
+                self._set_status(f"Rebuilt {self.preview_source} preview")
 
-            @save_sdf.on_click
+            @replace_sdf.on_click
             def _(_) -> None:
+                # Save a permanent default backup before the first replacement, then write a fully new path map.
                 _save_json(self.paths_json_path, self.paths)
-                edited_sdf = build_sdf_from_paths(self.paths, self.origin, self.resolution, self.shape)
-                if self.args.merge_with_existing_sdf and self.original_sdf_map is not None:
-                    saved_sdf = np.minimum(self.original_sdf_map, edited_sdf).astype(np.float32)
-                else:
-                    saved_sdf = edited_sdf
+                self._ensure_default_backup()
                 if self.sdf_map_path.exists():
                     backup_path = self.sdf_map_path.with_suffix(f".bak-{time.strftime('%Y%m%d-%H%M%S')}.npy")
                     shutil.copy2(self.sdf_map_path, backup_path)
-                    print(f"Backed up existing SDF map to {backup_path}")
-                np.save(self.sdf_map_path, saved_sdf)
-                self.original_sdf_map = saved_sdf
+                    print(f"Backed up active SDF map to {backup_path}")
+                self.current_sdf_map = self._edited_sdf_map()
+                np.save(self.sdf_map_path, self.current_sdf_map)
+                self.preview_source = "current"
                 self._refresh_sdf_preview()
-                mode = "merged" if self.args.merge_with_existing_sdf else "replaced"
-                self._set_status(f"Saved {mode} SDF map and {self.paths_json_path.name}")
+                self._set_status(f"Replaced active SDF map with edited path map; saved {self.paths_json_path.name}")
+
+            @restore_default_sdf.on_click
+            def _(_) -> None:
+                if self.default_sdf_map is None:
+                    self._set_status("No default SDF map available to restore")
+                    return
+                if self.sdf_map_path.exists():
+                    backup_path = self.sdf_map_path.with_suffix(f".bak-{time.strftime('%Y%m%d-%H%M%S')}.npy")
+                    shutil.copy2(self.sdf_map_path, backup_path)
+                    print(f"Backed up active SDF map to {backup_path}")
+                np.save(self.sdf_map_path, self.default_sdf_map)
+                self.current_sdf_map = self.default_sdf_map.copy()
+                self.preview_source = "current"
+                self._refresh_sdf_preview()
+                self._set_status("Restored default SDF map to active sdf_map.npy")
 
     def _default_new_point(self) -> np.ndarray:
         traversable = np.argwhere(self.occupancy_grid != 2)
@@ -447,11 +512,10 @@ class PathEditor:
         if self.sdf_preview_handle is not None:
             self.sdf_preview_handle.remove()
             self.sdf_preview_handle = None
-        edited_sdf = build_sdf_from_paths(self.paths, self.origin, self.resolution, self.shape)
-        if self.args.merge_with_existing_sdf and self.original_sdf_map is not None:
-            preview_sdf = np.minimum(self.original_sdf_map, edited_sdf)
-        else:
-            preview_sdf = edited_sdf
+        preview_sdf = self._preview_sdf_map()
+        if preview_sdf is None:
+            print(f"No SDF map available for preview source '{self.preview_source}'")
+            return
         traversable_mask = self.occupancy_grid != 2
         mask = np.logical_and.reduce((traversable_mask, np.isfinite(preview_sdf), preview_sdf < self.args.path_radius_m))
         indices_all = np.argwhere(mask)
@@ -472,7 +536,7 @@ class PathEditor:
             point_shape="rounded",
         )
         print(
-            f"Previewing {len(points)} low-SDF voxels "
+            f"Previewing {len(points)} low-SDF voxels from {self.preview_source} SDF map "
             f"(threshold={self.args.path_radius_m:.3f}m, total={len(indices_all)})"
         )
 
