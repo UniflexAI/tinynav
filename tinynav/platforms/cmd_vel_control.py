@@ -78,7 +78,9 @@ class CmdVelControlNode(Node):
         self.last_cmd_pub_time = now
 
         if self._paused:
-            self.cmd_pub.publish(Twist())
+            stop_cmd = Twist()
+            self.cmd_pub.publish(stop_cmd)
+            self.logger.info(f"sent cmd_vel vx={stop_cmd.linear.x:.3f} vyaw={stop_cmd.angular.z:.3f}")
             self.prev_cmd = Twist()
             return
 
@@ -112,6 +114,7 @@ class CmdVelControlNode(Node):
             out.angular.z = 0.0
 
         self.cmd_pub.publish(out)
+        self.logger.info(f"sent cmd_vel vx={out.linear.x:.3f} vyaw={out.angular.z:.3f}")
         self.prev_cmd = out
         
     def path_callback(self, msg):
