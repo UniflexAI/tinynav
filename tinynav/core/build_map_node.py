@@ -1,14 +1,43 @@
+import asyncio
 import logging
 import os
+import shelve
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from math import inf
 from typing import Callable, Dict, Optional
 
+import cv2
+import einops
+import numpy as np
+import rclpy
+import tyro
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PoseStamped, TransformStamped, Point
+from message_filters import Subscriber, ApproximateTimeSynchronizer
+from nav_msgs.msg import Path, Odometry
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.serialization import deserialize_message
+from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
+from rosgraph_msgs.msg import Clock
+from rosidl_runtime_py.utilities import get_message
+from scipy.ndimage import distance_transform_edt
+from scipy.spatial.transform import Rotation as R
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage, PointCloud2
+from std_msgs.msg import Bool, Float32, Header, ColorRGBA
 from tabulate import tabulate
+from tf2_msgs.msg import TFMessage
+from tf2_ros import TransformBroadcaster
+from tqdm import tqdm
+from visualization_msgs.msg import Marker, MarkerArray
 
-logger = logging.getLogger(__name__)
+from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.planning_node import run_raycasting_loopy
+from tinynav.tinynav_cpp_bind import pose_graph_solve
+from tool.video_db import VideoDB
 
 
 @dataclass(frozen=True)
@@ -99,47 +128,6 @@ class StageTimer:
             f"=== Build map stage timing ===\n{table}\n"
             f"Grand total: {round(grand_total, 3)} s ({note})"
         )
-
-
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool, Float32
-import numpy as np
-
-from sensor_msgs.msg import PointCloud2
-from std_msgs.msg import Header
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
-from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from sensor_msgs.msg import Image, CameraInfo, CompressedImage
-from message_filters import Subscriber, ApproximateTimeSynchronizer
-from cv_bridge import CvBridge
-import cv2
-
-import tyro
-
-from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
-from tinynav.core.planning_node import run_raycasting_loopy
-import asyncio
-import shelve
-from tqdm import tqdm
-import einops
-from tf2_msgs.msg import TFMessage
-from tool.video_db import VideoDB
-
-from tf2_ros import TransformBroadcaster
-from geometry_msgs.msg import TransformStamped,Point
-from scipy.spatial.transform import Rotation as R
-from scipy.ndimage import distance_transform_edt
-
-from rclpy.executors import SingleThreadedExecutor
-from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
-from rosidl_runtime_py.utilities import get_message
-from rosgraph_msgs.msg import Clock
-from rclpy.serialization import deserialize_message
 
 
 def z_value_to_color(z, z_min, z_max):
