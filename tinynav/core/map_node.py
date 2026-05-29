@@ -86,11 +86,43 @@ def _interpolate_polyline(nodes: np.ndarray, cumulative: np.ndarray, distance: f
     return nodes[idx] + ratio * (nodes[idx + 1] - nodes[idx])
 
 
+def _drop_reversal_cusps(nodes: np.ndarray, reversal_angle_threshold_rad: float) -> np.ndarray:
+    """Remove obvious backtrack-then-forward cusps from the target-selection path.
+
+    These cusps can appear in the global SDF path as a short reverse step followed by
+    a hard turn. They are bad local targets: stopping before them makes the robot aim
+    at the backtrack, while following them can induce a sharp correction. For target
+    pose selection we skip over them; the published global plan is left unchanged for
+    debugging.
+    """
+    pruned = np.asarray(nodes, dtype=np.float64).copy()
+    changed = True
+    while changed and len(pruned) > 2:
+        changed = False
+        keep = np.ones(len(pruned), dtype=bool)
+        for i in range(1, len(pruned) - 1):
+            v_prev = pruned[i] - pruned[i - 1]
+            v_next = pruned[i + 1] - pruned[i]
+            prev_norm = float(np.linalg.norm(v_prev))
+            next_norm = float(np.linalg.norm(v_next))
+            if prev_norm < 1e-6 or next_norm < 1e-6:
+                keep[i] = False
+                changed = True
+                continue
+            cos_angle = float(np.clip(np.dot(v_prev, v_next) / (prev_norm * next_norm), -1.0, 1.0))
+            if float(np.arccos(cos_angle)) >= reversal_angle_threshold_rad:
+                keep[i] = False
+                changed = True
+        pruned = pruned[keep]
+    return pruned
+
+
 def select_target_position_on_path(
     path_points: np.ndarray,
     current_position: np.ndarray,
     lookahead_distance: float,
-    turn_angle_threshold_rad: float = np.deg2rad(35.0),
+    turn_angle_threshold_rad: float = np.deg2rad(70.0),
+    reversal_angle_threshold_rad: float = np.deg2rad(120.0),
     turn_stop_margin: float = 0.15,
     min_turn_distance: float = 0.3,
     turn_window_distance: float = 0.4,
@@ -111,7 +143,10 @@ def select_target_position_on_path(
     if len(pts) == 1:
         return pts[0]
 
-    nodes = np.vstack([curr, pts])
+    nodes = _drop_reversal_cusps(
+        np.vstack([curr, pts]),
+        reversal_angle_threshold_rad=reversal_angle_threshold_rad,
+    )
     seg_lengths = np.linalg.norm(np.diff(nodes, axis=0), axis=1)
     keep = np.concatenate([[True], seg_lengths > 1e-6])
     nodes = nodes[keep]
@@ -316,6 +351,9 @@ class MapNode(Node):
         self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
+        self.latest_odom_pose = None
+        self.latest_odom_stamp_msg = None
+        self.nav_refresh_timer = self.create_timer(0.5, self.nav_refresh_timer_callback)
 
         self.pois = {}
         self.poi_index = -1
@@ -377,6 +415,17 @@ class MapNode(Node):
 
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+        self.latest_odom_pose, _ = msg2np(odom_msg)
+        self.latest_odom_stamp_msg = odom_msg.header.stamp
+
+    def nav_refresh_timer_callback(self):
+        if self.latest_odom_pose is None:
+            return
+        self.try_publish_nav_path(
+            timestamp=None,
+            pose_in_origin_odom=self.latest_odom_pose,
+            stamp_msg=self.latest_odom_stamp_msg,
+        )
 
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
@@ -651,28 +700,33 @@ class MapNode(Node):
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
-    def try_publish_nav_path(self, timestamp: int):
-        self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
+    def try_publish_nav_path(self, timestamp: int | None, pose_in_origin_odom: np.ndarray | None = None, stamp_msg=None):
+        self.get_logger().debug(f"try_publish_nav_path, timestamp: {timestamp}")
         if self.T_from_map_to_odom is None:
-            self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
+            self.get_logger().debug("Relocalization not successful yet, skip publishing nav path")
             return
 
         if self.poi_index == -1:
-            self.get_logger().info("No POI found, skip publishing nav path")
+            self.get_logger().debug("No POI found, skip publishing nav path")
             return
 
         if self.poi_index >= len(self.pois):
-            self.get_logger().info("All POIs have been visited, skip publishing nav path")
+            self.get_logger().debug("All POIs have been visited, skip publishing nav path")
             return
 
         poi = self.pois[self.poi_index]
-        print(f"poi: {poi}")
+        self.get_logger().debug(f"poi: {poi}")
         poi_pose = np.eye(4)
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         # get the pose from the map to the odom
-        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
-        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
+        if pose_in_origin_odom is None:
+            if timestamp not in self.pose_graph_used_pose:
+                return
+            pose_in_origin_odom = self.pose_graph_used_pose[timestamp]
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
+        publish_stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
+        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, publish_stamp, "world", "map"))
 
         pose_in_map_position = pose_in_map[:3, 3]
 
@@ -696,10 +750,11 @@ class MapNode(Node):
                 self._leg_start_time = None
                 dummy_pose = np.eye(4)
 
-                stamp_msg = self.get_clock().now().to_msg()
-                stamp_msg.sec = int(timestamp / 1e9)
-                stamp_msg.nanosec = int(timestamp % 1e9)
-                self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
+                poi_change_stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
+                if timestamp is not None:
+                    poi_change_stamp.sec = int(timestamp / 1e9)
+                    poi_change_stamp.nanosec = int(timestamp % 1e9)
+                self.poi_change_pub.publish(np2msg(dummy_pose, poi_change_stamp, "world", "map"))
                 continue
             else:
                 break
@@ -756,13 +811,13 @@ class MapNode(Node):
                     paths_in_map,
                     pose_in_map_position[:3],
                     lookahead_distance=lookahead_distance,
-                    turn_angle_threshold_rad=np.deg2rad(35.0),
+                    turn_angle_threshold_rad=np.deg2rad(70.0),
+                    reversal_angle_threshold_rad=np.deg2rad(120.0),
                     turn_stop_margin=0.15,
                     min_turn_distance=0.3,
                     turn_window_distance=0.4,
                 )
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
-                pose_in_origin_odom = self.odom[timestamp]
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
                 dummy_pose = np.eye(4)
@@ -788,7 +843,7 @@ class MapNode(Node):
                 self.global_plan_pub.publish(path_msg)
                 self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
-            logging.info("No path found in map")
+            self.get_logger().debug("No path found in map")
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
