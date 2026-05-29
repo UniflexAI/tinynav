@@ -43,6 +43,11 @@ HTML = """
       {% if query_path %}<img src=\"{{ url_for('media', relpath=query_path) }}\" />{% else %}<p>No query image</p>{% endif %}
     </div>
     <div class=\"card\">
+      <h3>PnP / Inliers</h3>
+      <p>pnp_success={{ pnp_success }} | inliers={{ inlier_count }} | inlier_ratio={{ '%.4f'|format(inlier_ratio) }}</p>
+      {% if pnp_match_path %}<img src=\"{{ url_for('media', relpath=pnp_match_path) }}\" />{% else %}<p>No PnP match image</p>{% endif %}
+    </div>
+    <div class=\"card\">
       <h3>Retrieved</h3>
       {% for item in retrieved_items %}
         <div class=\"retrieval-item\">
@@ -148,7 +153,14 @@ def make_app(session_dir: str):
     @app.route("/media/<path:relpath>")
     def media(relpath):
         from flask import send_file
-        abspath = os.path.abspath(relpath)
+        # Accept both absolute paths and container-relative paths like
+        # "tinynav/..." produced by url_for path encoding.
+        if os.path.isabs(relpath):
+            abspath = relpath
+        elif relpath.startswith("tinynav/"):
+            abspath = os.path.join("/", relpath)
+        else:
+            abspath = os.path.abspath(relpath)
         return send_file(abspath)
 
     @app.route("/")
@@ -165,6 +177,8 @@ def make_app(session_dir: str):
         sample_dir = os.path.dirname(sample_json)
         query_path = os.path.join(sample_dir, "query.png")
         query_path = query_path if os.path.exists(query_path) else None
+        pnp_match_path = os.path.join(sample_dir, "pnp_match.png")
+        pnp_match_path = pnp_match_path if os.path.exists(pnp_match_path) else None
         retrieved_paths = []
         retrieved_items = []
         retrieved_ts = meta.get("retrieved_timestamps_ns", [])
@@ -193,6 +207,10 @@ def make_app(session_dir: str):
             total=len(rows),
             sample_id=row.get("sample_id", ""),
             query_path=query_path,
+            pnp_match_path=pnp_match_path,
+            pnp_success=bool(meta.get("pnp_success", False)),
+            inlier_count=int(meta.get("inlier_count", 0)),
+            inlier_ratio=float(meta.get("inlier_ratio", 0.0)),
             retrieved_paths=retrieved_paths,
             retrieved_items=retrieved_items,
             meta=json.dumps(meta, ensure_ascii=True, indent=2),

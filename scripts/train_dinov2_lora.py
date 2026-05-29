@@ -6,7 +6,6 @@ import random
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
 from huggingface_hub import snapshot_download
@@ -85,6 +84,14 @@ def batch_iter(rows, bs):
         yield rows[i:i+bs]
 
 
+def contrastive_pair_loss(sim: torch.Tensor, y: torch.Tensor, margin: float) -> torch.Tensor:
+    # sim in [-1, 1], convert to distance in [0, 2]
+    dist = 1.0 - sim
+    pos = y * (dist ** 2)
+    neg = (1.0 - y) * (torch.clamp(margin - dist, min=0.0) ** 2)
+    return torch.mean(pos + neg)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="")
@@ -104,6 +111,7 @@ def main():
     parser.add_argument("--image_width", type=int, default=224)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument("--contrastive_margin", type=float, default=0.8)
     args = parser.parse_args()
     cfg = {}
     if args.config:
@@ -155,7 +163,7 @@ def main():
     bs = int(get_cfg("batch_size", 8))
     epochs = int(get_cfg("num_epochs", 1))
 
-    loss_fn = nn.BCEWithLogitsLoss()
+    margin = float(get_cfg("contrastive_margin", 0.8))
 
     for epoch in range(epochs):
         random.shuffle(train)
@@ -183,7 +191,7 @@ def main():
             r_out = F.normalize(r_out, dim=1)
             sim = torch.sum(q_out * r_out, dim=1)
 
-            loss = loss_fn(sim, y)
+            loss = contrastive_pair_loss(sim, y, margin=margin)
             opt.zero_grad()
             loss.backward()
             opt.step()
