@@ -4,7 +4,6 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from math import inf
 from typing import Callable, Dict, Optional
 
@@ -19,7 +18,6 @@ class BuildMapArgs:
     map_save_path: str = "tinynav_db"
     play_rate: float = 1.0
     verbose_timer: bool = True
-    timing_stats: bool = True
     global_frames_ratio: float = 1.1
 
 
@@ -573,16 +571,12 @@ class BuildMapNode(Node):
         self,
         map_save_path: str,
         verbose_timer: bool = True,
-        timing_stats: bool = True,
-        bag_file: str = "",
         global_frames_ratio: float = 1.1,
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
             raise ValueError(f"global_frames_ratio must be >= 1.0, got {global_frames_ratio}")
         self.verbose_timer = verbose_timer
-        self.timing_stats = timing_stats
-        self.bag_file = bag_file
         self.global_frames_ratio = global_frames_ratio
         self._global_prev_num_frames = 0
         self.logger = logging.getLogger(__name__)
@@ -893,20 +887,6 @@ class BuildMapNode(Node):
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
-        if self.timing_stats:
-            self._emit_timing_report()
-
-    def _emit_timing_report(self) -> None:
-        metadata = {
-            "bag_file": self.bag_file,
-            "map_save_path": self.map_save_path,
-            "keyframe_count": len(self.pose_graph_used_pose),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        self.stage_timer.log_summary(self.get_logger().info)
-        timing_path = f"{self.map_save_path}/timing_stats.json"
-        self.stage_timer.save_json(timing_path, metadata)
-        self.get_logger().info(f"Wrote stage timing stats to {timing_path}")
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
         marker_array = MarkerArray()
@@ -1039,8 +1019,6 @@ if __name__ == '__main__':
     map_node = BuildMapNode(
         parsed_args.map_save_path,
         verbose_timer=parsed_args.verbose_timer,
-        timing_stats=parsed_args.timing_stats,
-        bag_file=parsed_args.bag_file,
         global_frames_ratio=parsed_args.global_frames_ratio,
     )
     image_transports_node = ImageTransportsNode()
