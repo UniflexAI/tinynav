@@ -17,10 +17,20 @@ class BuildMapArgs:
     map_save_path: str = "tinynav_db"
     play_rate: float = 1.0
     verbose_timer: bool = True
+    # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
+    # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
+    """Return whether to run global refinement (pose graph + TF), using COLMAP's frames-ratio rule.
+
+    Adapted from COLMAP ``IncrementalPipeline::CheckRunGlobalRefinement`` (frames branch only):
+    ``NumRegFrames() >= ba_global_frames_ratio * ba_prev_num_reg_frames``.
+
+    Here ``num_frames`` is the current keyframe count and ``prev_num_frames`` is the count at the
+    last global refinement. Set ``frames_ratio`` to 1.0 to refine on every keyframe.
+    """
     return num_frames >= frames_ratio * prev_num_frames
 
 
@@ -563,6 +573,7 @@ class BuildMapNode(Node):
             raise ValueError(f"global_frames_ratio must be >= 1.0, got {global_frames_ratio}")
         self.verbose_timer = verbose_timer
         self.global_frames_ratio = global_frames_ratio
+        # Keyframe count at the last global refinement (COLMAP: ba_prev_num_reg_frames).
         self._global_prev_num_frames = 0
         self.logger = logging.getLogger(__name__)
         self.stage_timer = StageTimer(
@@ -774,6 +785,12 @@ class BuildMapNode(Node):
                     print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
 
     def maybe_run_global_refinement(self) -> None:
+        """Run pose-graph optimization and full TF publish when the map has grown enough.
+
+        Loop detection still runs every keyframe; this batches the expensive global steps using
+        COLMAP's ``ba_global_frames_ratio`` policy (see ``check_global_frames_ratio``).
+        A final full solve runs in ``save_mapping`` regardless of this gate.
+        """
         num_frames = len(self.pose_graph_used_pose)
         if not check_global_frames_ratio(num_frames, self._global_prev_num_frames, self.global_frames_ratio):
             return
