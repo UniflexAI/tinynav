@@ -73,6 +73,75 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
     transformed_points = homogeneous_points @ T.T
     return transformed_points[:, :3]
 
+
+
+def _interpolate_polyline(nodes: np.ndarray, cumulative: np.ndarray, distance: float) -> np.ndarray:
+    distance = float(np.clip(distance, 0.0, cumulative[-1]))
+    idx = int(np.searchsorted(cumulative, distance, side="right") - 1)
+    idx = min(max(idx, 0), len(nodes) - 2)
+    seg_len = cumulative[idx + 1] - cumulative[idx]
+    if seg_len < 1e-6:
+        return nodes[idx].copy()
+    ratio = (distance - cumulative[idx]) / seg_len
+    return nodes[idx] + ratio * (nodes[idx + 1] - nodes[idx])
+
+
+def select_target_position_on_path(
+    path_points: np.ndarray,
+    current_position: np.ndarray,
+    lookahead_distance: float,
+    turn_angle_threshold_rad: float = np.deg2rad(35.0),
+    turn_stop_margin: float = 0.15,
+    min_turn_distance: float = 0.3,
+    turn_window_distance: float = 0.4,
+) -> np.ndarray:
+    """Pick a local-planner target on the global path without looking past sharp turns.
+
+    The local planner only receives a point target, not the whole global plan. If the
+    target is placed beyond a stair landing / corridor corner, it can cut the corner
+    toward unseen rails or walls. This helper caps the target before the first strong
+    direction change, while keeping the old distance-based lookahead on straight
+    segments. Turn detection uses a short polyline window so voxel-level zigzags do
+    not look like real corners.
+    """
+    pts = np.asarray(path_points, dtype=np.float64)
+    curr = np.asarray(current_position, dtype=np.float64)
+    if len(pts) == 0:
+        return curr
+    if len(pts) == 1:
+        return pts[0]
+
+    nodes = np.vstack([curr, pts])
+    seg_lengths = np.linalg.norm(np.diff(nodes, axis=0), axis=1)
+    keep = np.concatenate([[True], seg_lengths > 1e-6])
+    nodes = nodes[keep]
+    if len(nodes) == 1:
+        return nodes[0]
+    seg_lengths = np.linalg.norm(np.diff(nodes, axis=0), axis=1)
+    cumulative = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    total_length = float(cumulative[-1])
+    target_distance = min(float(lookahead_distance), total_length)
+
+    for i in range(1, len(nodes) - 1):
+        d = float(cumulative[i])
+        if d < min_turn_distance or d >= target_distance:
+            continue
+        prev_point = _interpolate_polyline(nodes, cumulative, max(0.0, d - turn_window_distance))
+        next_point = _interpolate_polyline(nodes, cumulative, min(total_length, d + turn_window_distance))
+        v_prev = nodes[i] - prev_point
+        v_next = next_point - nodes[i]
+        prev_norm = float(np.linalg.norm(v_prev))
+        next_norm = float(np.linalg.norm(v_next))
+        if prev_norm < turn_window_distance * 0.5 or next_norm < turn_window_distance * 0.5:
+            continue
+        cos_angle = float(np.clip(np.dot(v_prev, v_next) / (prev_norm * next_norm), -1.0, 1.0))
+        angle = float(np.arccos(cos_angle))
+        if angle >= turn_angle_threshold_rad:
+            stop_distance = max(0.0, d - turn_stop_margin)
+            return _interpolate_polyline(nodes, cumulative, stop_distance)
+
+    return _interpolate_polyline(nodes, cumulative, target_distance)
+
 def heuristic(start, goal, resolution):
     vec_start = np.array(start)
     vec_goal = np.array(goal)
@@ -676,21 +745,22 @@ class MapNode(Node):
             })
             self.nav_progress_pub.publish(progress_msg)
 
-            # use the max_speed to publish the position the robot should be after 5 seconds
+            # Publish the local-planner target. Keep the normal lookahead on straight
+            # paths, but do not place the target beyond the first sharp turn. On stairs /
+            # landings, looking past the corner pulls the local planner into cutting the
+            # turn before the railing is visible.
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
-                if len(paths_in_map) > 1:
-                    accumulated_distance = 0.0
-                    start_point = pose_in_map_position[:3]
-                    target_position = paths_in_map[-1]
-                    for i in range(len(paths_in_map) - 1):
-                        accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                        if accumulated_distance > max_speed * 5:
-                            target_position = paths_in_map[i]
-                            break
-                        start_point = paths_in_map[i]
-                else:
-                    target_position = paths_in_map[0]
+                lookahead_distance = max_speed * 5
+                target_position = select_target_position_on_path(
+                    paths_in_map,
+                    pose_in_map_position[:3],
+                    lookahead_distance=lookahead_distance,
+                    turn_angle_threshold_rad=np.deg2rad(35.0),
+                    turn_stop_margin=0.15,
+                    min_turn_distance=0.3,
+                    turn_window_distance=0.4,
+                )
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 pose_in_origin_odom = self.odom[timestamp]
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
