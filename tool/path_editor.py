@@ -178,8 +178,6 @@ class PathEditor:
         self.point_handles: dict[tuple[int, int], viser.SceneHandle] = {}
         self.gizmo_handles: dict[tuple[int, int], viser.SceneHandle] = {}
         self.sdf_preview_handle: viser.SceneHandle | None = None
-        # current = active sdf_map.npy; default = original backup; edited = freshly generated from editable paths only.
-        self.preview_source = "current"
         self.status = None
 
     def _load_sdf_file(self, path: Path) -> np.ndarray | None:
@@ -194,13 +192,6 @@ class PathEditor:
 
     def _edited_sdf_map(self) -> np.ndarray:
         return build_sdf_from_paths(self.paths, self.origin, self.resolution, self.shape)
-
-    def _preview_sdf_map(self) -> np.ndarray | None:
-        if self.preview_source == "default":
-            return self.default_sdf_map
-        if self.preview_source == "edited":
-            return self._edited_sdf_map()
-        return self.current_sdf_map
 
     def _ensure_default_backup(self) -> None:
         if self.default_sdf_map_path.exists():
@@ -315,11 +306,6 @@ class PathEditor:
             add_waypoint = self.server.gui.add_button("Add Waypoint To Selected")
             delete_last_waypoint = self.server.gui.add_button("Delete Last Waypoint")
             delete_path = self.server.gui.add_button("Delete Selected Path", color=(255, 80, 80))
-            save_paths = self.server.gui.add_button("Save Paths JSON")
-            show_current_sdf = self.server.gui.add_button("Show Current SDF Map")
-            show_default_sdf = self.server.gui.add_button("Show Default SDF Map")
-            show_edited_sdf = self.server.gui.add_button("Show Edited Path Map")
-            rebuild_preview = self.server.gui.add_button("Rebuild Preview")
             replace_sdf = self.server.gui.add_button("Replace Current SDF Map", color=(80, 200, 80))
             restore_default_sdf = self.server.gui.add_button("Restore Default SDF Map", color=(80, 120, 255))
 
@@ -381,34 +367,6 @@ class PathEditor:
                 selected.value = self.selected_path_id or 0
                 self._set_status(f"Deleted Path_{path_id}")
 
-            @save_paths.on_click
-            def _(_) -> None:
-                _save_json(self.paths_json_path, self.paths)
-                self._set_status(f"Saved {self.paths_json_path}")
-
-            @show_current_sdf.on_click
-            def _(_) -> None:
-                self.preview_source = "current"
-                self._refresh_sdf_preview()
-                self._set_status("Showing current active SDF map")
-
-            @show_default_sdf.on_click
-            def _(_) -> None:
-                self.preview_source = "default"
-                self._refresh_sdf_preview()
-                self._set_status("Showing default SDF map")
-
-            @show_edited_sdf.on_click
-            def _(_) -> None:
-                self.preview_source = "edited"
-                self._refresh_sdf_preview()
-                self._set_status("Showing edited path map only")
-
-            @rebuild_preview.on_click
-            def _(_) -> None:
-                self._refresh_sdf_preview()
-                self._set_status(f"Rebuilt {self.preview_source} preview")
-
             @replace_sdf.on_click
             def _(_) -> None:
                 # Save a permanent default backup before the first replacement, then write a fully new path map.
@@ -420,7 +378,6 @@ class PathEditor:
                     print(f"Backed up active SDF map to {backup_path}")
                 self.current_sdf_map = self._edited_sdf_map()
                 np.save(self.sdf_map_path, self.current_sdf_map)
-                self.preview_source = "current"
                 self._refresh_sdf_preview()
                 self._set_status(f"Replaced active SDF map with edited path map; saved {self.paths_json_path.name}")
 
@@ -435,7 +392,6 @@ class PathEditor:
                     print(f"Backed up active SDF map to {backup_path}")
                 np.save(self.sdf_map_path, self.default_sdf_map)
                 self.current_sdf_map = self.default_sdf_map.copy()
-                self.preview_source = "current"
                 self._refresh_sdf_preview()
                 self._set_status("Restored default SDF map to active sdf_map.npy")
 
@@ -512,9 +468,9 @@ class PathEditor:
         if self.sdf_preview_handle is not None:
             self.sdf_preview_handle.remove()
             self.sdf_preview_handle = None
-        preview_sdf = self._preview_sdf_map()
+        preview_sdf = self.current_sdf_map
         if preview_sdf is None:
-            print(f"No SDF map available for preview source '{self.preview_source}'")
+            print("No active SDF map available for preview")
             return
         traversable_mask = self.occupancy_grid != 2
         mask = np.logical_and.reduce((traversable_mask, np.isfinite(preview_sdf), preview_sdf < self.args.path_radius_m))
@@ -536,7 +492,7 @@ class PathEditor:
             point_shape="rounded",
         )
         print(
-            f"Previewing {len(points)} low-SDF voxels from {self.preview_source} SDF map "
+            f"Previewing {len(points)} low-SDF voxels from active SDF map "
             f"(threshold={self.args.path_radius_m:.3f}m, total={len(indices_all)})"
         )
 
