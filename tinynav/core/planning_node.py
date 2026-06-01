@@ -151,10 +151,10 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.4
-    robot_z_top: float = 0.4
+    robot_z_bottom: float = -0.7
+    robot_z_top: float = 0.3
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.3
+    min_wall_span_m: float = 0.4
     dilation_cells: int = 2
 
 
@@ -372,7 +372,7 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 30)
+        self.grid_shape = (100, 100, 40)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 5

@@ -26,10 +26,23 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client = SportClientB2()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        self.sport_client.SwitchGait(1)
-        # 启动时执行一次站立
+        time.sleep(1.0)
+
         self.sport_client.StandUp()
+        time.sleep(2.0)
+
         self.sport_client.BalanceStand()
+        time.sleep(1.0)
+
+        self.sport_client.StopMove()
+        time.sleep(0.5)
+
+        self.sport_client.ContinuousGait(0)
+        time.sleep(0.5)
+
+        ret = self.sport_client.ClassicWalk(True)
+        print("ClassicWalk ret:", ret)
+
         self._robot_status = RobotStatus.STANDUP
         self.battery = 0.0
         self.last_twist_time = None

@@ -75,6 +75,10 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
 
 
 
+def _xy_segment_lengths(nodes: np.ndarray) -> np.ndarray:
+    return np.linalg.norm(np.diff(nodes, axis=0)[:, :2], axis=1)
+
+
 def _interpolate_polyline(nodes: np.ndarray, cumulative: np.ndarray, distance: float) -> np.ndarray:
     distance = float(np.clip(distance, 0.0, cumulative[-1]))
     idx = int(np.searchsorted(cumulative, distance, side="right") - 1)
@@ -101,8 +105,8 @@ def _drop_reversal_cusps(nodes: np.ndarray, reversal_angle_threshold_rad: float)
         changed = False
         keep = np.ones(len(pruned), dtype=bool)
         for i in range(1, len(pruned) - 1):
-            v_prev = pruned[i] - pruned[i - 1]
-            v_next = pruned[i + 1] - pruned[i]
+            v_prev = pruned[i, :2] - pruned[i - 1, :2]
+            v_next = pruned[i + 1, :2] - pruned[i, :2]
             prev_norm = float(np.linalg.norm(v_prev))
             next_norm = float(np.linalg.norm(v_next))
             if prev_norm < 1e-6 or next_norm < 1e-6:
@@ -147,12 +151,12 @@ def select_target_position_on_path(
         np.vstack([curr, pts]),
         reversal_angle_threshold_rad=reversal_angle_threshold_rad,
     )
-    seg_lengths = np.linalg.norm(np.diff(nodes, axis=0), axis=1)
+    seg_lengths = _xy_segment_lengths(nodes)
     keep = np.concatenate([[True], seg_lengths > 1e-6])
     nodes = nodes[keep]
     if len(nodes) == 1:
         return nodes[0]
-    seg_lengths = np.linalg.norm(np.diff(nodes, axis=0), axis=1)
+    seg_lengths = _xy_segment_lengths(nodes)
     cumulative = np.concatenate([[0.0], np.cumsum(seg_lengths)])
     total_length = float(cumulative[-1])
     target_distance = min(float(lookahead_distance), total_length)
@@ -163,8 +167,8 @@ def select_target_position_on_path(
             continue
         prev_point = _interpolate_polyline(nodes, cumulative, max(0.0, d - turn_window_distance))
         next_point = _interpolate_polyline(nodes, cumulative, min(total_length, d + turn_window_distance))
-        v_prev = nodes[i] - prev_point
-        v_next = next_point - nodes[i]
+        v_prev = nodes[i, :2] - prev_point[:2]
+        v_next = next_point[:2] - nodes[i, :2]
         prev_norm = float(np.linalg.norm(v_prev))
         next_norm = float(np.linalg.norm(v_next))
         if prev_norm < turn_window_distance * 0.5 or next_norm < turn_window_distance * 0.5:
@@ -916,7 +920,7 @@ class MapNode(Node):
             # turn before the railing is visible.
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
-                lookahead_distance = max_speed * 5
+                lookahead_distance = max_speed * 4
                 target_position = select_target_position_on_path(
                     paths_in_map,
                     pose_in_map_position[:3],
@@ -927,6 +931,20 @@ class MapNode(Node):
                     min_turn_distance=0.3,
                     turn_window_distance=0.4,
                 )
+
+                # if len(paths_in_map) > 1:
+                #     accumulated_distance = 0.0
+                #     start_point = pose_in_map_position[:3]
+                #     target_position = paths_in_map[-1]
+                #     for i in range(len(paths_in_map) - 1):
+                #         accumulated_distance += np.linalg.norm((paths_in_map[i] - start_point)[:2])
+                #         if accumulated_distance > max_speed * 5:
+                #             target_position = paths_in_map[i]
+                #             break
+                #         start_point = paths_in_map[i]
+                # else:
+                #     target_position = paths_in_map[0]
+
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
