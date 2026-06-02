@@ -545,11 +545,11 @@ class PlanningNode(Node):
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
-            self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
+            #self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
+            #self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
-            self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
-            self.publish_footprint(T, depth_msg.header.stamp)
+            #self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
+            #self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             v_dir = T[:3, :3] @ np.array([0, 0, 1])
