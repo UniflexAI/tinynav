@@ -576,6 +576,29 @@ class PlanningNode(Node):
         v = np.asarray(v, dtype=np.float64)
         return p, v, q, seed_stamp
 
+    def _make_static_path(self, init_p, init_q, header, base_time, num_steps):
+        """Build a fresh zero-motion path so controllers receive an explicit stop."""
+        path = Path()
+        path.header = header
+        path.header.frame_id = "world"
+        num_steps = max(2, int(num_steps))
+        static_traj = np.empty((num_steps, 7), dtype=np.float64)
+        static_traj[:, :3] = init_p
+        static_traj[:, 3:7] = init_q
+        for j in range(num_steps):
+            pose = PoseStamped()
+            pose.header = header
+            pose.header.stamp = (base_time + Duration(seconds=float(j) * self.dt)).to_msg()
+            pose.pose.position.x = float(init_p[0])
+            pose.pose.position.y = float(init_p[1])
+            pose.pose.position.z = float(init_p[2])
+            pose.pose.orientation.x = float(init_q[0])
+            pose.pose.orientation.y = float(init_q[1])
+            pose.pose.orientation.z = float(init_q[2])
+            pose.pose.orientation.w = float(init_q[3])
+            path.poses.append(pose)
+        return path, static_traj
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
@@ -685,13 +708,6 @@ class PlanningNode(Node):
 
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
-            top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
-            self.last_param = params[top_indices[0]]
-            best_idx = int(top_indices[0])
-            self.last_planned_traj = trajectories[best_idx].copy()
-            self.last_planned_traj_base_stamp = planning_base_stamp
-
             # path
             path = Path()
             path.header = depth_msg.header
@@ -702,8 +718,21 @@ class PlanningNode(Node):
                 return
 
             if all(s == float('inf') for s in scores):
-                self.get_logger().info('All trajectories in collision, stopping path.')
+                path, static_traj = self._make_static_path(
+                    init_p, init_q, depth_msg.header, base_time, len(trajectories[0])
+                )
+                self.last_planned_traj = static_traj.copy()
+                self.last_planned_traj_base_stamp = planning_base_stamp
+                self.path_pub.publish(path)
+                self.get_logger().info('All trajectories in collision, publishing static path.')
                 return
+
+            top_k = 1
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            self.last_param = params[top_indices[0]]
+            best_idx = int(top_indices[0])
+            self.last_planned_traj = trajectories[best_idx].copy()
+            self.last_planned_traj_base_stamp = planning_base_stamp
 
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 1):
