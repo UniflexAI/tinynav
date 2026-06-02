@@ -15,6 +15,7 @@ import json
 import os
 import time
 
+from starlette.websockets import WebSocketState
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
 from .state import runner
@@ -30,6 +31,13 @@ def _safe_put(queue: asyncio.Queue, item):
         except asyncio.QueueEmpty:
             pass
     queue.put_nowait(item)
+
+
+def _connected(ws: WebSocket) -> bool:
+    return (
+        ws.client_state == WebSocketState.CONNECTED
+        and ws.application_state == WebSocketState.CONNECTED
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -75,7 +83,12 @@ async def ws_pose(ws: WebSocket):
     node.pose_callbacks.append(_on_pose)
     try:
         while True:
-            pose = await queue.get()
+            try:
+                pose = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if not _connected(ws):
+                    break
+                continue
             await ws.send_text(json.dumps(pose))
     except WebSocketDisconnect:
         pass
@@ -164,7 +177,12 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
         return
     try:
         while True:
-            frame = await queue.get()
+            try:
+                frame = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if not _connected(ws):
+                    break
+                continue
             await ws.send_text(base64.b64encode(frame).decode('ascii'))
     except WebSocketDisconnect:
         pass

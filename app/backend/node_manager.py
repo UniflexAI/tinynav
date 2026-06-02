@@ -1056,3 +1056,12 @@ class NodeRunner:
                             proc.kill()
                         except Exception:
                             pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
+        self.node = None
+        self._thread = None
+        self._ready.clear()
