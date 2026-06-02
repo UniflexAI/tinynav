@@ -114,7 +114,7 @@ class CmdVelControlNode(Node):
 
     def _control_loop(self):
         if self._path_ref is None:
-            self._publish_zero()
+            self._publish_zero("no /planning/trajectory_path arrived yet")
             return
 
         # Keep this consistent with planning_node.camera_to_robot_center().
@@ -125,7 +125,7 @@ class CmdVelControlNode(Node):
 
         target = self._find_tracking_target(robot_pos, robot_yaw, self._now_sec())
         if target is None:
-            self._publish_zero()
+            self._publish_zero("no valid tracking target")
             return
 
         tx, ty, heading_err = self._target_error(robot_pos, robot_yaw, target)
@@ -145,7 +145,7 @@ class CmdVelControlNode(Node):
             np.linalg.norm(robot_pos[:2] - self._path_ref[-1, :2]) < 0.1
             and abs(heading_to_goal) < 0.1
         ):
-            self._publish_zero()
+            self._publish_zero("target reached")
             return
 
         cmd = Twist()
@@ -153,7 +153,7 @@ class CmdVelControlNode(Node):
         cmd.angular.z = wz
         self.cmd_pub.publish(cmd)
 
-        self.logger.info("sent cmd_vel vx=%.3f vyaw=%.3f", v, wz)
+        self.logger.info(f"sent cmd_vel vx={v:.3f} vyaw={wz:.3f}")
 
     def _find_tracking_target(self, robot_pos, robot_yaw, now_sec):
         if self._path_ref is None or len(self._path_ref) == 0:
@@ -202,10 +202,10 @@ class CmdVelControlNode(Node):
             return 1.0
         return math.sin(a) / a
 
-    def _publish_zero(self):
+    def _publish_zero(self, reason):
         cmd = Twist()
         self.cmd_pub.publish(cmd)
-        self.logger.info("sent cmd_vel vx=%.3f vyaw=%.3f", 0.0, 0.0)
+        self.logger.info(f"sent cmd_vel vx=0.000 vyaw=0.000 reason={reason}")
 
     def _now_sec(self):
         if self._odom_stamp_sec is not None:
