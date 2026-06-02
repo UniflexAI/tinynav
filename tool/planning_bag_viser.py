@@ -86,6 +86,7 @@ class TrajectoryFrame:
     candidates: list[np.ndarray]
     selected: np.ndarray | None
     selected_param: np.ndarray | None
+    status: str
 
 
 @dataclass
@@ -420,6 +421,7 @@ def _build_trajectory_frame(
 
     selected = None
     selected_param = None
+    status = "no_target" if target is None else "all_collision" if np.all(np.isinf(scores)) else "selected"
     next_last_traj = last_traj
     next_last_base_stamp = last_traj_base_stamp
     next_last_param = last_param
@@ -456,6 +458,7 @@ def _build_trajectory_frame(
             candidates=[trajectories[int(i)].copy() for i in esdf_top],
             selected=selected,
             selected_param=selected_param,
+            status=status,
         ),
         next_last_param,
         next_last_traj,
@@ -615,6 +618,23 @@ def _trajectory_segments(trajectories: list[np.ndarray]) -> np.ndarray:
     return np.concatenate(segments, axis=0)
 
 
+def _footprint_segments(T: np.ndarray) -> np.ndarray:
+    forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+    left = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
+    center = _camera_to_robot_center(T)
+    front_len, rear_len, half_w = GO2_CONFIG.footprint_from_control()
+    corners = np.asarray(
+        [
+            center + forward * front_len + left * half_w,
+            center + forward * front_len - left * half_w,
+            center - forward * rear_len - left * half_w,
+            center - forward * rear_len + left * half_w,
+        ],
+        dtype=np.float32,
+    )
+    return np.stack([corners, np.roll(corners, -1, axis=0)], axis=1)
+
+
 def run_viewer(
     data: BagData,
     port: int,
@@ -649,13 +669,14 @@ def run_viewer(
         show_candidates = server.gui.add_checkbox("Show Candidate Trajectories", initial_value=True)
         show_selected = server.gui.add_checkbox("Show Selected Trajectory", initial_value=True)
         show_target = server.gui.add_checkbox("Show Target", initial_value=True)
+        show_footprint = server.gui.add_checkbox("Show Footprint", initial_value=True)
         selected_param_text = server.gui.add_markdown("**Selected Trajectory**\n\nNo selected trajectory.")
 
     def render(idx: int) -> None:
         if not data.poses:
             return
         handles = state["handles"]
-        for name in ("current", "trail", "target", "depth", "occupancy", "candidates", "selected"):
+        for name in ("current", "trail", "target", "depth", "occupancy", "candidates", "selected", "footprint"):
             handle = handles.pop(name, None)
             if handle is not None:
                 try:
@@ -667,6 +688,17 @@ def run_viewer(
         pose = data.poses[idx]
         state["idx"] = idx
         handles["current"] = server.scene.add_transform_controls("/odom/current", position=pose.position, wxyz=pose.wxyz)
+        if show_footprint.value:
+            footprint = _footprint_segments(pose.matrix)
+            handles["footprint"] = server.scene.add_line_segments(
+                "/robot/footprint",
+                points=footprint,
+                colors=np.tile(
+                    np.array([[[1.0, 0.62, 0.0], [1.0, 0.62, 0.0]]], dtype=np.float32),
+                    (len(footprint), 1, 1),
+                ),
+                line_width=3,
+            )
 
         trail = np.stack([p.position for p in data.poses[: idx + 1]]).astype(np.float32)
         if len(trail) > 1:
@@ -716,7 +748,20 @@ def run_viewer(
                 f"`omega_y`: `{traj_frame.selected_param[1]:.3f}`"
             )
         else:
-            selected_param_text.content = "**Selected Trajectory**\n\nNo selected trajectory."
+            if traj_frame is not None and traj_frame.status == "all_collision":
+                selected_param_text.content = (
+                    "**Selected Trajectory**\n\n"
+                    f"`t`: `{traj_frame.timestamp_ns / 1e9:.3f}`  \n"
+                    "**All candidate trajectories are in collision.**"
+                )
+            elif traj_frame is not None and traj_frame.status == "no_target":
+                selected_param_text.content = (
+                    "**Selected Trajectory**\n\n"
+                    f"`t`: `{traj_frame.timestamp_ns / 1e9:.3f}`  \n"
+                    "No active target pose."
+                )
+            else:
+                selected_param_text.content = "**Selected Trajectory**\n\nNo selected trajectory."
         if traj_frame is not None and show_candidates.value:
             candidate_segments = _trajectory_segments(traj_frame.candidates)
             if len(candidate_segments) > 0:
@@ -764,6 +809,10 @@ def run_viewer(
         render(state["idx"])
 
     @show_target.on_update
+    def _(_) -> None:
+        render(state["idx"])
+
+    @show_footprint.on_update
     def _(_) -> None:
         render(state["idx"])
 
