@@ -28,6 +28,8 @@ ros2 bag record \
     /slam/depth \
     /slam/odometry \
     /slam/odometry_visual \
+    /planning/trajectory_path \
+    /cmd_vel \
     /camera/camera/infra2/camera_info \
     /control/target_pose \
     /mapping/poi_change
