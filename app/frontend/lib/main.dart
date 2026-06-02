@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -33,41 +34,70 @@ class TinyNavApp extends ConsumerWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF45C95A),
-          primary: const Color(0xFF45C95A),
+          seedColor: const Color(0xFF38D3FF),
+          primary: const Color(0xFF38D3FF),
+          brightness: Brightness.dark,
         ),
         useMaterial3: true,
         fontFamily: 'RobotoLocal',
-        scaffoldBackgroundColor: const Color(0xFFF2F3F5),
+        scaffoldBackgroundColor: const Color(0xFF0B1118),
         appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.white,
-          foregroundColor: Color(0xFF2B3A42),
+          backgroundColor: Color(0xFF0F1822),
+          foregroundColor: Color(0xFFE6EEF7),
           elevation: 0,
           surfaceTintColor: Colors.transparent,
         ),
         filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(
-            backgroundColor: const Color(0xFF45C95A),
-            foregroundColor: Colors.white,
+            backgroundColor: const Color(0xFF38D3FF),
+            foregroundColor: const Color(0xFF04131B),
             shape: const StadiumBorder(),
           ),
         ),
         outlinedButtonTheme: OutlinedButtonThemeData(
           style: OutlinedButton.styleFrom(
-            foregroundColor: const Color(0xFF2B3A42),
-            side: const BorderSide(color: Color(0xFF2B3A42)),
+            foregroundColor: const Color(0xFFB8C8D9),
+            side: const BorderSide(color: Color(0xFF2D3E50)),
             shape: const StadiumBorder(),
           ),
         ),
         cardTheme: CardThemeData(
           elevation: 0,
           margin: EdgeInsets.zero,
-          color: Colors.white,
+          color: const Color(0xFF111A24),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
           ),
         ),
       ),
+      builder: (context, child) {
+        if (!kIsWeb || child == null) return child ?? const SizedBox.shrink();
+
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final viewportAspect = constraints.maxWidth / constraints.maxHeight;
+
+            // Portrait (< 1:1): keep default stretch/fill behavior.
+            if (viewportAspect < 1.0) {
+              return child;
+            }
+
+            // Landscape (>= 1:1): lock app content to 1:1, top-aligned.
+            final side = constraints.maxHeight;
+            return ColoredBox(
+              color: const Color(0xFF11161C),
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: SizedBox(
+                  width: side,
+                  height: side,
+                  child: ClipRect(child: child),
+                ),
+              ),
+            );
+          },
+        );
+      },
       // Switches automatically when deviceIpProvider changes.
       home: ip == null ? const SetupPage() : const HomePage(),
     );
