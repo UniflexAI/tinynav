@@ -26,6 +26,7 @@ ros2 bag record \
     --output "${output_dir}" \
     --max-cache-size 2147483648 \
     /slam/depth \
+    /slam/odometry \
     /slam/odometry_visual \
     /camera/camera/infra2/camera_info \
     /control/target_pose \
