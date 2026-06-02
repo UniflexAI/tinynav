@@ -9,9 +9,13 @@ from std_msgs.msg import Float32, String
 from enum import Enum
 import logging
 import time
+import threading
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+MAX_DEVICE_CMD_HZ = 50.0
+MIN_DEVICE_CMD_INTERVAL_S = 1.0 / MAX_DEVICE_CMD_HZ
 
 
 class RobotStatus(Enum):
@@ -34,6 +38,9 @@ class Ros2UnitreeManagerNode(Node):
         self.battery = 0.0
         self.last_twist_time = None
         self.logger = logging.getLogger(__name__)
+        self._cmd_lock = threading.Lock()
+        self._pending_twist = None
+        self._last_device_cmd_time = 0.0
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -48,21 +55,56 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+        self._cmd_flush_timer = self.create_timer(MIN_DEVICE_CMD_INTERVAL_S, self._flush_pending_twist)
+        self.logger.info(f"Unitree device command rate limited to {MAX_DEVICE_CMD_HZ:.0f} Hz.")
+        self.get_logger().info("Unitree control initialization finished.")
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
-        current_time = time.time()
+        current_time = time.monotonic()
         if self.last_twist_time is not None:
             time_interval = current_time - self.last_twist_time
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_twist_time = current_time
-        
-        if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
-            self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
-            self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
+
+        command = (float(msg.linear.x), float(msg.linear.y), float(msg.angular.z))
+        self._queue_or_send_twist(command, current_time)
+
+    def _queue_or_send_twist(self, command, current_time):
+        send_now = False
+        with self._cmd_lock:
+            if current_time - self._last_device_cmd_time >= MIN_DEVICE_CMD_INTERVAL_S:
+                self._last_device_cmd_time = current_time
+                self._pending_twist = None
+                send_now = True
+            else:
+                self._pending_twist = command
+
+        if send_now:
+            self._send_twist_command(command)
+
+    def _flush_pending_twist(self):
+        command = None
+        current_time = time.monotonic()
+        with self._cmd_lock:
+            if (
+                self._pending_twist is not None
+                and current_time - self._last_device_cmd_time >= MIN_DEVICE_CMD_INTERVAL_S
+            ):
+                command = self._pending_twist
+                self._pending_twist = None
+                self._last_device_cmd_time = current_time
+
+        if command is not None:
+            self._send_twist_command(command)
+
+    def _send_twist_command(self, command):
+        vx, vy, wz = command
+        if vx != 0.0 or vy != 0.0 or wz != 0.0:
+            self.logger.debug(f"Moving with velocity: {vx}, {vy}, {wz}")
+            self.sport_client.Move(vx, vy, wz)
         else:
             self.sport_client.StopMove()
-        time.sleep(0.02)
 
     def ActionMessageHandler(self, msg: String_):
         if msg.data.split(" ")[0] == "play":
