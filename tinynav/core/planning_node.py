@@ -260,6 +260,14 @@ def generate_predefined_trajectory_vocabularies(
 
     return np.asarray(trajectories), np.asarray(params)
 
+
+def normalize_pose_trajectories(trajectories):
+    if trajectories.ndim != 3:
+        return np.zeros((0, 0, 7), dtype=np.float64)
+    if trajectories.shape[2] >= 7:
+        return trajectories[:, :, :7].astype(np.float64)
+    return np.zeros((0, 0, 7), dtype=np.float64)
+
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
@@ -566,7 +574,7 @@ class PlanningNode(Node):
         idx = max(0, min(idx, len(traj) - 1))
         seed_stamp = self.last_planned_traj_base_stamp + float(idx) * self.dt
         p = traj[idx, :3].copy()
-        q = traj[idx, 3:].copy()
+        q = traj[idx, 3:7].copy()
         if len(traj) == 1:
             v = np.zeros(3, dtype=np.float64)
         elif idx < len(traj) - 1:
@@ -671,13 +679,15 @@ class PlanningNode(Node):
                 ])
             trajectories, params = generate_trajectory_library_3d(
                 init_p = init_p,
-                init_v = init_v,
                 init_q = init_q,
                 dt = self.dt
             )
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-            trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-            params = np.concatenate([params, vocab_params], axis=0)
+            trajectories = normalize_pose_trajectories(trajectories)
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q, dt=self.dt)
+            vocab_trajs = normalize_pose_trajectories(vocab_trajs)
+            if len(vocab_trajs) > 0:
+                trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+                params = np.concatenate([params, vocab_params], axis=0)
             self.last_T = T
             self.last_stamp = stamp
 
@@ -736,7 +746,7 @@ class PlanningNode(Node):
 
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 1):
-                    x,y,z,qx,qy,qz,qw = trajectories[i][j]
+                    x,y,z,qx,qy,qz,qw = trajectories[i][j, :7]
                     pose = PoseStamped()
                     pose.header = depth_msg.header
                     pose.header.stamp = (base_time + Duration(seconds=float(j) * self.dt)).to_msg()
