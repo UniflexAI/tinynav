@@ -75,6 +75,9 @@ class OccupancyFrame:
     timestamp_ns: int
     points: np.ndarray
     colors: np.ndarray
+    obstacle_points: np.ndarray
+    obstacle_mask: np.ndarray
+    front_clearance: float
     origin: np.ndarray
     grid: np.ndarray
     pose: PoseFrame
@@ -289,6 +292,22 @@ def _occupancy_to_points(grid: np.ndarray, origin: np.ndarray, resolution: float
     return points.astype(np.float32), colors
 
 
+def _obstacle_mask_to_points(
+    obstacle_mask: np.ndarray,
+    origin: np.ndarray,
+    resolution: float,
+    z: float,
+) -> np.ndarray:
+    cells = np.argwhere(obstacle_mask)
+    if len(cells) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    points = np.empty((len(cells), 3), dtype=np.float64)
+    points[:, 0] = origin[0] + (cells[:, 0].astype(np.float64) + 0.5) * resolution
+    points[:, 1] = origin[1] + (cells[:, 1].astype(np.float64) + 0.5) * resolution
+    points[:, 2] = z
+    return points.astype(np.float32)
+
+
 def build_occupancy_frames(
     raycast_inputs: list[RaycastInputFrame],
     max_frames: int,
@@ -325,11 +344,28 @@ def build_occupancy_frames(
         cloud = _occupancy_to_points(grid, origin, resolution)
         if cloud is not None:
             points, colors = cloud
+            obstacle_mask = build_obstacle_map(
+                grid,
+                origin,
+                resolution,
+                robot_z=frame.pose.matrix[2, 3],
+                config=ObstacleConfig(),
+            )
+            obstacle_points = _obstacle_mask_to_points(
+                obstacle_mask,
+                origin,
+                resolution,
+                frame.pose.matrix[2, 3],
+            )
+            front_clearance = _front_obstacle_dist(frame.pose.matrix, obstacle_mask, origin, resolution)
             frames.append(
                 OccupancyFrame(
                     timestamp_ns=frame.timestamp_ns,
                     points=points,
                     colors=colors,
+                    obstacle_points=obstacle_points,
+                    obstacle_mask=obstacle_mask.copy(),
+                    front_clearance=front_clearance,
                     origin=origin.copy(),
                     grid=grid.copy(),
                     pose=frame.pose,
@@ -635,6 +671,27 @@ def _footprint_segments(T: np.ndarray) -> np.ndarray:
     return np.stack([corners, np.roll(corners, -1, axis=0)], axis=1)
 
 
+def _front_clearance_segments(T: np.ndarray, clearance: float, max_dist: float = 0.5) -> tuple[np.ndarray, np.ndarray]:
+    center = _camera_to_robot_center(T)
+    forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+    left = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
+    front_len, _, half_w = GO2_CONFIG.footprint_from_control()
+    start_center = center + forward * front_len
+    line_len = min(clearance, max_dist)
+    end_center = start_center + forward * line_len
+    segments = np.asarray(
+        [
+            [start_center - left * half_w, start_center + left * half_w],
+            [start_center, end_center],
+            [end_center - left * half_w, end_center + left * half_w],
+        ],
+        dtype=np.float32,
+    )
+    color = np.array([1.0, 0.05, 0.0], dtype=np.float32) if clearance <= 0.30 else np.array([0.0, 0.9, 0.25], dtype=np.float32)
+    colors = np.tile(color.reshape(1, 1, 3), (len(segments), 2, 1))
+    return segments, colors
+
+
 def run_viewer(
     data: BagData,
     port: int,
@@ -666,17 +723,25 @@ def run_viewer(
         rate_slider = server.gui.add_slider("Rate", min=0.1, max=max(5.0, initial_rate), step=0.1, initial_value=initial_rate)
         show_depth = server.gui.add_checkbox("Show Depth Points", initial_value=False)
         show_occupancy = server.gui.add_checkbox("Show Occupancy Grid", initial_value=True)
+        show_obstacles = server.gui.add_checkbox("Show Planner Obstacles", initial_value=True)
         show_candidates = server.gui.add_checkbox("Show Candidate Trajectories", initial_value=True)
         show_selected = server.gui.add_checkbox("Show Selected Trajectory", initial_value=True)
         show_target = server.gui.add_checkbox("Show Target", initial_value=True)
         show_footprint = server.gui.add_checkbox("Show Footprint", initial_value=True)
+        obstacle_text = server.gui.add_markdown(
+            "**Obstacle Judgement**\n\n"
+            "`occupied`: grid value `> 0.1`  \n"
+            "`z band`: robot z `[-0.4, 0.4] m`  \n"
+            "`wall span`: `>= 0.2 m`  \n"
+            "`dilation`: `1` cell"
+        )
         selected_param_text = server.gui.add_markdown("**Selected Trajectory**\n\nNo selected trajectory.")
 
     def render(idx: int) -> None:
         if not data.poses:
             return
         handles = state["handles"]
-        for name in ("current", "trail", "target", "depth", "occupancy", "candidates", "selected", "footprint"):
+        for name in ("current", "trail", "target", "depth", "occupancy", "obstacles", "front_clearance", "candidates", "selected", "footprint"):
             handle = handles.pop(name, None)
             if handle is not None:
                 try:
@@ -738,6 +803,39 @@ def run_viewer(
                 point_size=occupancy_point_size,
                 point_shape="square",
             )
+        if occupancy is not None:
+            reverse_gate = occupancy.front_clearance <= 0.30
+            obstacle_text.content = (
+                "**Obstacle Judgement**\n\n"
+                "`occupied`: grid value `> 0.1`  \n"
+                "`z band`: robot z `[-0.4, 0.4] m`  \n"
+                "`wall span`: `>= 0.2 m`  \n"
+                "`dilation`: `1` cell  \n"
+                f"`obstacle cells`: `{len(occupancy.obstacle_points)}`  \n"
+                f"`front clearance`: `{occupancy.front_clearance:.2f} m`  \n"
+                f"`reverse gate`: `{'ON' if reverse_gate else 'OFF'}`"
+            )
+        else:
+            obstacle_text.content = (
+                "**Obstacle Judgement**\n\n"
+                "No occupancy frame available for this pose."
+            )
+        if show_obstacles.value and occupancy is not None:
+            if len(occupancy.obstacle_points) > 0:
+                handles["obstacles"] = server.scene.add_point_cloud(
+                    "/planning/obstacle_mask",
+                    points=occupancy.obstacle_points,
+                    colors=np.tile(np.array([[1.0, 0.05, 0.0]], dtype=np.float32), (len(occupancy.obstacle_points), 1)),
+                    point_size=max(occupancy_point_size * 1.6, 0.055),
+                    point_shape="square",
+                )
+            clearance_segments, clearance_colors = _front_clearance_segments(pose.matrix, occupancy.front_clearance)
+            handles["front_clearance"] = server.scene.add_line_segments(
+                "/planning/front_clearance",
+                points=clearance_segments,
+                colors=clearance_colors,
+                line_width=5,
+            )
 
         traj_frame = _latest_before(data.trajectory_frames, pose.timestamp_ns)
         if traj_frame is not None and traj_frame.selected_param is not None:
@@ -797,6 +895,10 @@ def run_viewer(
         render(state["idx"])
 
     @show_occupancy.on_update
+    def _(_) -> None:
+        render(state["idx"])
+
+    @show_obstacles.on_update
     def _(_) -> None:
         render(state["idx"])
 
