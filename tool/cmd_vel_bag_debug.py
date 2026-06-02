@@ -13,7 +13,7 @@ import numpy as np
 
 
 DEBUG_TOPICS = {
-    "/slam/odometry",
+    "/insight/vio_100hz",
     "/planning/trajectory_path",
     "/cmd_vel",
 }
@@ -89,8 +89,8 @@ def pose_to_matrix(pose) -> np.ndarray:
     return T
 
 
-def odom_to_matrix(msg) -> np.ndarray:
-    return pose_to_matrix(msg.pose.pose)
+def pose_stamped_to_matrix(msg) -> np.ndarray:
+    return pose_to_matrix(msg.pose)
 
 
 def yaw_from_rotation(rotation: np.ndarray) -> float:
@@ -128,7 +128,7 @@ class OfflineCmdVelController:
         return float(fallback_timestamp_ns) * 1e-9
 
     def odom_callback(self, msg, timestamp_ns: int) -> DebugFrame:
-        measured_pose = odom_to_matrix(msg)
+        measured_pose = pose_stamped_to_matrix(msg)
         measured_position = measured_pose[:3, 3]
         measured_rotation = measured_pose[:3, :3]
 
@@ -408,7 +408,7 @@ def simulate(events: list[BagEvent], cmd_frames: list[CmdFrame], match_window_s:
     for event in events:
         if event.topic == "/planning/trajectory_path":
             controller.path_callback(event.msg, event.timestamp_ns)
-        elif event.topic == "/slam/odometry":
+        elif event.topic == "/insight/vio_100hz":
             frames.append(controller.odom_callback(event.msg, event.timestamp_ns))
             if max_odom_frames > 0 and len(frames) >= max_odom_frames:
                 break

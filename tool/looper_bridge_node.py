@@ -45,10 +45,7 @@ class LooperBridgeNode(Node):
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
 
-        self.vio_100hz_sub = self.create_subscription(
-            PoseStamped, "/insight/vio_100hz", self.vio_100hz_callback, 50
-        )
-
+        # Keep /insight/vio_100hz unbridged; cmd_vel_control consumes it directly.
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/insight/vio_20hz")
         self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
@@ -57,7 +54,6 @@ class LooperBridgeNode(Node):
         )
         self.sync.registerCallback(self.sync_callback)
 
-        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
         self.odom_visual_pub = self.create_publisher(
             Odometry, "/slam/odometry_visual", 10
         )
@@ -75,20 +71,6 @@ class LooperBridgeNode(Node):
 
         self.get_logger().info(
             "Bridging /insight/vio_20hz + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
-        )
-        self.get_logger().info(
-            "Bridging /insight/vio_100hz into /slam/odometry."
-        )
-
-    def vio_100hz_callback(self, pose_msg: PoseStamped):
-        # /insight/vio_100hz already reports T_world_camera.
-        T_world_camera = pose_msg2np(pose_msg)
-        odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
-        self.odom_pub.publish(odom_msg)
-        self.get_logger().info(
-            f"Bridged first /insight/vio_100hz message at "
-            f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry.",
-            once=True,
         )
 
     def camera_info_callback(self, msg: CameraInfo):

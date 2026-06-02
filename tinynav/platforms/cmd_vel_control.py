@@ -3,9 +3,9 @@ import logging
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
-from nav_msgs.msg import Path, Odometry
-from tinynav.core.math_utils import msg2np, pose_msg2np
+from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Path
+from tinynav.core.math_utils import pose_msg2np
 
 
 class CmdVelControlNode(Node):
@@ -25,12 +25,12 @@ class CmdVelControlNode(Node):
         self._last_traj_update_sec = None
         self._time_lookahead_s = 0.1
 
-        self.create_subscription(Odometry, "/slam/odometry", self._odom_cb, 10)
+        self.create_subscription(PoseStamped, "/insight/vio_100hz", self._odom_cb, 50)
         self.create_subscription(Path, "/planning/trajectory_path", self._traj_cb, 10)
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
-    def _odom_cb(self, msg: Odometry):
-        measured_pose, _ = msg2np(msg)
+    def _odom_cb(self, msg: PoseStamped):
+        measured_pose = pose_msg2np(msg)
         measured_position = measured_pose[:3, 3]
         measured_rotation = measured_pose[:3, :3]
 
@@ -48,6 +48,16 @@ class CmdVelControlNode(Node):
 
     def _traj_cb(self, msg: Path):
         now = self._now_sec()
+        if msg.poses and self._odom_stamp_sec is not None:
+            path_start_sec = msg.poses[0].header.stamp.sec + msg.poses[0].header.stamp.nanosec * 1e-9
+            path_lag_s = self._odom_stamp_sec - path_start_sec
+            if path_lag_s > 0.0:
+                self.logger.warning(
+                    f"received stale /planning/trajectory_path: first pose stamp is "
+                    f"{path_lag_s:.3f}s behind latest /insight/vio_100hz "
+                    f"(path={path_start_sec:.3f}, odom={self._odom_stamp_sec:.3f}); "
+                    "planning_node may be taking too long."
+                )
         if (
             self._last_traj_update_sec is not None
             and now - self._last_traj_update_sec < 0.2  # Drop path updates faster than 5 Hz.
