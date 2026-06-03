@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 import cv2
 import numpy as np
@@ -75,6 +76,7 @@ class BackendNode(Ros2NodeManager):
         super().__init__(tinynav_db_path=tinynav_db_path)
 
         self._lock = threading.Lock()
+        self._destroyed = False
         self.mapping_percent: float = 0.0
         self.current_pose: dict | None = None   # latest pose from SLAM or map
 
@@ -363,7 +365,15 @@ class BackendNode(Ros2NodeManager):
             self.preview_callbacks[topic].append(cb)
             first = len(self.preview_callbacks[topic]) == 1
         if first:
-            self._create_image_sub(topic)
+            try:
+                self._create_image_sub(topic)
+            except Exception:
+                with self._lock:
+                    try:
+                        self.preview_callbacks[topic].remove(cb)
+                    except ValueError:
+                        pass
+                raise
         return True
 
     def remove_preview_callback(self, topic: str, cb):
@@ -398,7 +408,10 @@ class BackendNode(Ros2NodeManager):
     def _destroy_image_sub(self, topic: str):
         sub = self._image_subs.pop(topic, None)
         if sub is not None:
-            self.destroy_subscription(sub)
+            try:
+                self.destroy_subscription(sub)
+            except Exception as e:
+                self.get_logger().warn(f'Failed to destroy preview subscription {topic}: {e}')
 
     def _on_compressed_image(self, msg: CompressedImage, topic: str):
         now = time.time()
@@ -408,7 +421,7 @@ class BackendNode(Ros2NodeManager):
         frame = bytes(msg.data)
         with self._lock:
             self._last_frame[topic] = frame
-        for cb in self.preview_callbacks.get(topic, []):
+        for cb in list(self.preview_callbacks.get(topic, [])):
             try:
                 cb(frame)
             except Exception:
@@ -444,7 +457,7 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._last_frame[topic] = frame
 
-        for cb in self.preview_callbacks.get(topic, []):
+        for cb in list(self.preview_callbacks.get(topic, [])):
             try:
                 cb(frame)
             except Exception:
@@ -603,6 +616,26 @@ class BackendNode(Ros2NodeManager):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
+
+    def _stop_backend_procs(self):
+        for attr in (
+            '_looper_bridge_proc', '_realsense_proc', '_perception_proc',
+            '_planning_proc', '_unitree_proc', '_map_node_proc', '_cmd_vel_proc',
+        ):
+            self._kill_proc(getattr(self, attr, None))
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+        if hasattr(self, '_lock'):
+            with self._lock:
+                self._nav_nodes_running = False
+                self._nav_paused = False
+
+    def destroy_node(self):
+        if getattr(self, '_destroyed', False):
+            return
+        self._destroyed = True
+        self._stop_backend_procs()
+        super().destroy_node()
 
     @staticmethod
     def _proc_alive(proc: subprocess.Popen | None) -> bool:
@@ -1015,47 +1048,82 @@ class NodeRunner:
         self.node: BackendNode | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
+        self._stopping = threading.Event()
+        self._lock = threading.Lock()
+        self._restart_delay_sec = 2.0
 
     def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stopping.clear()
+        self._ready.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name='rclpy-spin')
         self._thread.start()
         if not self._ready.wait(timeout=15.0):
             raise RuntimeError('rclpy node did not start in time')
 
     def _run(self):
-        rclpy.init()
-        self.node = BackendNode(tinynav_db_path=self._db_path)
-        self._ready.set()
-        try:
-            rclpy.spin(self.node)
-        except Exception:
-            pass
-        finally:
+        restart_nav_nodes = False
+        while not self._stopping.is_set():
+            node: BackendNode | None = None
             try:
-                self.node.destroy_node()
+                rclpy.init()
+                node = BackendNode(tinynav_db_path=self._db_path)
+                if restart_nav_nodes:
+                    try:
+                        node.cmd_start_nav_nodes()
+                    except Exception:
+                        print('Failed to restore nav nodes after backend restart', flush=True)
+                        traceback.print_exc()
+                    restart_nav_nodes = False
+                with self._lock:
+                    self.node = node
+                    self._ready.set()
+                rclpy.spin(node)
+                if not self._stopping.is_set():
+                    print('BackendNode rclpy spin returned unexpectedly; restarting', flush=True)
             except Exception:
-                pass
-            try:
-                rclpy.shutdown()
-            except Exception:
-                pass
+                if not self._stopping.is_set():
+                    print('BackendNode rclpy spin failed; restarting', flush=True)
+                    traceback.print_exc()
+            finally:
+                with self._lock:
+                    if self.node is node:
+                        self.node = None
+                        self._ready.clear()
+                if node is not None:
+                    if not self._stopping.is_set():
+                        try:
+                            with node._lock:
+                                restart_nav_nodes = bool(node._nav_nodes_running)
+                        except Exception:
+                            restart_nav_nodes = False
+                    try:
+                        node.destroy_node()
+                    except Exception:
+                        if not self._stopping.is_set():
+                            print('BackendNode destroy failed during restart', flush=True)
+                            traceback.print_exc()
+                try:
+                    rclpy.shutdown()
+                except Exception:
+                    if not self._stopping.is_set():
+                        print('rclpy shutdown failed during backend restart', flush=True)
+                        traceback.print_exc()
+            if not self._stopping.is_set():
+                time.sleep(self._restart_delay_sec)
 
     def stop(self):
-        if self.node:
+        self._stopping.set()
+        with self._lock:
+            node = self.node
+            self.node = None
+            self._ready.clear()
+        if node:
             try:
-                self.node.destroy_node()
+                node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
-                if proc and proc.poll() is None:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), 15)
-                        proc.wait(timeout=2)
-                    except Exception:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
         try:
             rclpy.shutdown()
         except Exception:

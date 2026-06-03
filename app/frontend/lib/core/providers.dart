@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -107,18 +108,45 @@ final previewStreamProvider =
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final encoded = Uri.encodeQueryComponent(topic);
-  final channel =
-      WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/preview?topic=$encoded'));
-  ref.onDispose(() => channel.sink.close());
+  var disposed = false;
+  WebSocketChannel? channel;
+  ref.onDispose(() {
+    disposed = true;
+    channel?.sink.close();
+  });
 
-  return channel.stream.map((data) {
+  Uint8List decodeFrame(dynamic data) {
     if (data is String) return base64Decode(data);
     if (data is Uint8List) return data;
     if (data is List<int>) return Uint8List.fromList(data);
     if (data is ByteBuffer) return Uint8List.view(data);
     return Uint8List(0);
-  }).where((b) => b.isNotEmpty);
+  }
+
+  Stream<Uint8List> connectLoop() async* {
+    final encoded = Uri.encodeQueryComponent(topic);
+    final uri = Uri.parse('ws://$ip:8000/ws/preview?topic=$encoded');
+    while (!disposed) {
+      try {
+        channel = WebSocketChannel.connect(uri);
+        await for (final data in channel!.stream) {
+          if (disposed) break;
+          final frame = decodeFrame(data);
+          if (frame.isNotEmpty) yield frame;
+        }
+      } catch (_) {
+        // The backend may restart its ROS node; reconnect instead of freezing.
+      } finally {
+        channel?.sink.close();
+        channel = null;
+      }
+      if (!disposed) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+      }
+    }
+  }
+
+  return connectLoop();
 });
 
 /// Streams PlanningState from WS /ws/planning at ~5 fps.

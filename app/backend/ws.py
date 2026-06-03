@@ -172,7 +172,14 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
         # Drop oldest frame if full — always keep the latest.
         loop.call_soon_threadsafe(lambda: _safe_put(queue, frame))
 
-    if not node.add_preview_callback(topic, _on_frame):
+    registered = False
+    try:
+        if not node.add_preview_callback(topic, _on_frame):
+            await ws.close(code=1013)
+            return
+        registered = True
+    except Exception as e:
+        print(f'Preview subscription failed for {topic}: {e}', flush=True)
         await ws.close(code=1013)
         return
     try:
@@ -187,7 +194,8 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
     except WebSocketDisconnect:
         pass
     finally:
-        node.remove_preview_callback(topic, _on_frame)
+        if registered:
+            node.remove_preview_callback(topic, _on_frame)
 
 
 # --------------------------------------------------------------------------- #
