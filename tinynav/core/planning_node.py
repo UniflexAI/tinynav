@@ -256,8 +256,15 @@ def generate_predefined_trajectory_vocabularies(
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
-                                front_len=0.35, rear_len=0.35, half_w=0.15):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
+                                front_len=0.35, rear_len=0.35, half_w=0.15,
+                                comfort_radius=0.6):
+    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners).
+
+    The returned score is a continuous clearance cost:
+      - inf for collision
+      - 1.0 when touching an obstacle
+      - 0.0 when clearance >= comfort_radius
+    """
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
@@ -311,13 +318,13 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
         elif min_dist_for_traj != float('inf'):
-            if min_dist_for_traj > safety_radius:
-                scores.append(0.0)
-            else:
-                max_steps = len(traj)
-                decay_factor = (max_steps - closest_step_for_traj) / max_steps
-                base_score = 1.0 / (min_dist_for_traj + 1e-3)
-                scores.append(decay_factor * base_score)
+            # Prefer trajectories with extra clearance, not just barely safe ones.
+            # min_dist_for_traj is the minimum ESDF distance from any sampled
+            # footprint point along this trajectory to the nearest obstacle.
+            clearance_cost = (comfort_radius - min_dist_for_traj) / comfort_radius
+            if clearance_cost < 0.0:
+                clearance_cost = 0.0
+            scores.append(clearance_cost)
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
@@ -608,6 +615,7 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
+            clearance_cost_weight = 100.0
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
@@ -624,7 +632,7 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return clearance_cost_weight * score + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
