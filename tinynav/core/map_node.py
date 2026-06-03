@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, estimate_best_pnp_pose
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -471,7 +471,7 @@ class MapNode(Node):
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = estimate_best_pnp_pose(pnp_candidates, self.map_K)
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight

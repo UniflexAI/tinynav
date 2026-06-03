@@ -215,7 +215,7 @@ def process_keypoints(kpts_prev, kpts_curr, idx_valid, depth, K):
     
     return points_3d[:valid_count], points_2d[:valid_count], valid_idx[:valid_count]
 
-def estimate_best_pnp_pose(
+def rerank_by_pnp_inliers(
     pnp_candidates: list[tuple[np.ndarray, np.ndarray]],
     K: np.ndarray,
     min_point_count: int = 80,
