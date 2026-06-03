@@ -207,9 +207,10 @@ RUN git clone --recursive https://github.com/dmlc/decord.git /tmp/decord \
     && cmake .. -DUSE_CUDA=0 -DCMAKE_BUILD_TYPE=Release \
     && make -j"$(nproc)" \
     && cd ../python \
-    && /opt/venv/bin/python setup.py install \
-    && DECORD_PKG_DIR=$(/opt/venv/bin/python -c "import site; print(site.getsitepackages()[0] + '/decord')") \
-    && ln -sf /opt/venv/decord/libdecord.so "${DECORD_PKG_DIR}/libdecord.so" \
+    && /usr/bin/python3 setup.py install \
+    && cp -f /tmp/decord/build/libdecord.so /usr/local/lib/libdecord.so \
+    && DECORD_PKG_DIR=$(/usr/bin/python3 -c "import site; print(site.getsitepackages()[0] + '/decord')") \
+    && ln -sf /usr/local/lib/libdecord.so "${DECORD_PKG_DIR}/libdecord.so" \
     && rm -rf /tmp/decord
 
 # Write entrypoint.sh (model build prompt only)
