@@ -1,5 +1,7 @@
 import math
 import logging
+import time
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -23,6 +25,8 @@ class CmdVelControlNode(Node):
         self._path_ref = None
         self._track_idx = 0
         self._last_traj_update_sec = None
+        self._last_traj_log_sec = None
+        self._last_zero_log_sec = {}
         self._time_lookahead_s = 0.1
 
         self.create_subscription(PoseStamped, "/insight/vio_100hz", self._odom_cb, 50)
@@ -68,9 +72,11 @@ class CmdVelControlNode(Node):
         if new_ref is None:
             self._path_ref = None
             self._track_idx = 0
+            self._log_traj_update(now, len(msg.poses), 0.0, accepted=False)
         elif self._path_ref is None or len(self._path_ref) == 0:
             self._path_ref = new_ref
             self._track_idx = 0
+            self._log_traj_update(now, len(msg.poses), float(new_ref[-1, 5] - new_ref[0, 5]), accepted=True)
         else:
             # Concatenate by timestamp: keep old segment strictly before new start,
             # then append the new trajectory (replaces overlapping future tail).
@@ -82,7 +88,18 @@ class CmdVelControlNode(Node):
             else:
                 self._path_ref = np.vstack((kept, new_ref))
             self._track_idx = int(np.clip(np.searchsorted(self._path_ref[:, 5], now, side='left'), 0, len(self._path_ref) - 1))
+            self._log_traj_update(now, len(msg.poses), float(new_ref[-1, 5] - new_ref[0, 5]), accepted=True)
         self._last_traj_update_sec = now
+
+    def _log_traj_update(self, now, pose_count, duration_s, accepted):
+        if self._last_traj_log_sec is not None and now - self._last_traj_log_sec < 1.0:
+            return
+        self._last_traj_log_sec = now
+        state = "accepted" if accepted else "ignored"
+        self.logger.info(
+            f"received /planning/trajectory_path {state}: "
+            f"poses={pose_count} duration={duration_s:.3f}s"
+        )
 
     def _rebuild_path(self, path_msg: Path):
         n = len(path_msg.poses)
@@ -215,7 +232,11 @@ class CmdVelControlNode(Node):
     def _publish_zero(self, reason):
         cmd = Twist()
         self.cmd_pub.publish(cmd)
-        self.logger.info(f"sent cmd_vel vx=0.000 vyaw=0.000 reason={reason}")
+        now = time.monotonic()
+        last_log_sec = self._last_zero_log_sec.get(reason)
+        if last_log_sec is None or now - last_log_sec >= 1.0:
+            self._last_zero_log_sec[reason] = now
+            self.logger.info(f"sent cmd_vel vx=0.000 vyaw=0.000 reason={reason}")
 
     def _now_sec(self):
         if self._odom_stamp_sec is not None:
