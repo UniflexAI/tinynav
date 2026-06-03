@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10.12, <3.11"
 resolution-markers = [
     "platform_machine == 'aarch64' and sys_platform == 'darwin'",
@@ -4016,7 +4016,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0" },
     { name = "fufpy" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "huggingface-hub" },
+    { name = "huggingface-hub", specifier = "==1.9.2" },
     { name = "lerobot", extras = ["lekiwi"], marker = "extra == 'lekiwi'", specifier = "==0.3.3" },
     { name = "lightglue", marker = "extra == '3dgs'", git = "https://github.com/cvg/LightGlue.git?rev=746fac2c042e05d1865315b1413419f1c1e7ba55" },
     { name = "matplotlib" },
