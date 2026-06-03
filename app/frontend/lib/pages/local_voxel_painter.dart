@@ -38,13 +38,15 @@ class LocalVoxelPainter extends CustomPainter {
 
     _drawGroundGrid(canvas, center, scale);
 
-    final zRange = _zRange(points);
+    final zBase = pose.z ?? 0.0;
+    final zRange = _zRange(points, zBase);
     final sorted = [...points]
       ..sort((a, b) => _depth(a, pose).compareTo(_depth(b, pose)));
     for (final p in sorted) {
-      final c = _project3d(center, scale, p.x - pose.x, p.y - pose.y, p.z);
+      final rz = p.z - zBase;
+      final c = _project3d(center, scale, p.x - pose.x, p.y - pose.y, rz);
       if (c.dx < -10 || c.dx > size.width + 10 || c.dy < -10 || c.dy > size.height + 10) continue;
-      final color = _heightColor(_zNorm(p.z, zRange.$1, zRange.$2));
+      final color = _heightColor(_zNorm(rz, zRange.$1, zRange.$2));
       canvas.drawCircle(c, 2.25, Paint()..color = color.withOpacity(0.92));
     }
 
@@ -77,9 +79,9 @@ class LocalVoxelPainter extends CustomPainter {
     return rx + ry + p.z;
   }
 
-  (double, double) _zRange(List<VoxelPoint> pts) {
+  (double, double) _zRange(List<VoxelPoint> pts, double zBase) {
     if (pts.isEmpty) return (-0.4, 0.8);
-    final zs = pts.map((p) => p.z).toList()..sort();
+    final zs = pts.map((p) => p.z - zBase).toList()..sort();
     final loIdx = (zs.length * 0.05).floor().clamp(0, zs.length - 1).toInt();
     final hiIdx = (zs.length * 0.95).floor().clamp(0, zs.length - 1).toInt();
     final lo = zs[loIdx];
