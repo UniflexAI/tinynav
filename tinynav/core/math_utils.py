@@ -215,6 +215,53 @@ def process_keypoints(kpts_prev, kpts_curr, idx_valid, depth, K):
     
     return points_3d[:valid_count], points_2d[:valid_count], valid_idx[:valid_count]
 
+def estimate_best_pnp_pose(
+    pnp_candidates: list[tuple[np.ndarray, np.ndarray]],
+    K: np.ndarray,
+    min_point_count: int = 80,
+    min_inlier_count: int = 50,
+) -> tuple[bool, np.ndarray, float, int, int, int]:
+    """
+    Estimate PnP for each candidate and return the pose with the most inliers.
+
+    Args:
+        pnp_candidates: list of (points_3d, points_2d) pairs.
+        K: camera intrinsic matrix.
+        min_point_count: minimum number of 3D/2D correspondences required.
+        min_inlier_count: minimum number of PnP inliers required.
+
+    Returns:
+        success, pose, inlier_ratio, best_candidate_index, best_inlier_count, best_point_count.
+    """
+    best_pose = None
+    best_candidate_index = -1
+    best_inlier_count = 0
+    best_point_count = 0
+
+    for candidate_index, (points_3d, points_2d) in enumerate(pnp_candidates):
+        point_count = len(points_2d)
+        if point_count <= min_point_count:
+            continue
+
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None)
+        inlier_count = 0 if inliers is None else len(inliers)
+        if not success or inliers is None or inlier_count < min_inlier_count:
+            continue
+
+        if inlier_count > best_inlier_count:
+            best_candidate_index = candidate_index
+            best_inlier_count = inlier_count
+            best_point_count = point_count
+            best_pose = np.eye(4)
+            R_mat, _ = cv2.Rodrigues(rvec)
+            best_pose[:3, :3] = R_mat
+            best_pose[:3, 3] = tvec.reshape(3)
+
+    if best_pose is None:
+        return False, np.eye(4), -np.inf, -1, 0, 0
+
+    return True, best_pose, best_inlier_count / best_point_count, best_candidate_index, best_inlier_count, best_point_count
+
 @lru_cache_numpy(maxsize=128)
 def estimate_pose(kpts_prev, kpts_curr, depth, K, idx_valid=None):
     """
