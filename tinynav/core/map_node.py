@@ -9,6 +9,7 @@ import sys
 import json
 
 import heapq
+from numba import njit
 from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, se3_inv
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
@@ -180,6 +181,241 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
+@njit(cache=True)
+def _nav_flat_index(x: int, y: int, z: int, ny: int, nz: int) -> int:
+    return (x * ny + y) * nz + z
+
+@njit(cache=True)
+def _nav_unflat_index(index: int, ny: int, nz: int):
+    x = index // (ny * nz)
+    remainder = index - x * ny * nz
+    y = remainder // nz
+    z = remainder - y * nz
+    return x, y, z
+
+@njit(cache=True)
+def _nav_heap_less(bucket_a: int, cost_a: float, node_a: int, bucket_b: int, cost_b: float, node_b: int) -> bool:
+    if bucket_a != bucket_b:
+        return bucket_a < bucket_b
+    if cost_a != cost_b:
+        return cost_a < cost_b
+    return node_a < node_b
+
+@njit(cache=True)
+def _nav_heap_push(heap_nodes: np.ndarray, heap_buckets: np.ndarray, heap_costs: np.ndarray, heap_size: int, node: int, bucket: int, cost: float) -> int:
+    i = heap_size
+    heap_nodes[i] = node
+    heap_buckets[i] = bucket
+    heap_costs[i] = cost
+    while i > 0:
+        parent = (i - 1) // 2
+        if not _nav_heap_less(heap_buckets[i], heap_costs[i], heap_nodes[i], heap_buckets[parent], heap_costs[parent], heap_nodes[parent]):
+            break
+        tmp_node = heap_nodes[parent]
+        tmp_bucket = heap_buckets[parent]
+        tmp_cost = heap_costs[parent]
+        heap_nodes[parent] = heap_nodes[i]
+        heap_buckets[parent] = heap_buckets[i]
+        heap_costs[parent] = heap_costs[i]
+        heap_nodes[i] = tmp_node
+        heap_buckets[i] = tmp_bucket
+        heap_costs[i] = tmp_cost
+        i = parent
+    return heap_size + 1
+
+@njit(cache=True)
+def _nav_heap_pop(heap_nodes: np.ndarray, heap_buckets: np.ndarray, heap_costs: np.ndarray, heap_size: int):
+    node = heap_nodes[0]
+    bucket = heap_buckets[0]
+    cost = heap_costs[0]
+    heap_size -= 1
+    if heap_size > 0:
+        heap_nodes[0] = heap_nodes[heap_size]
+        heap_buckets[0] = heap_buckets[heap_size]
+        heap_costs[0] = heap_costs[heap_size]
+        i = 0
+        while True:
+            left = 2 * i + 1
+            right = left + 1
+            smallest = i
+            if left < heap_size and _nav_heap_less(
+                heap_buckets[left], heap_costs[left], heap_nodes[left],
+                heap_buckets[smallest], heap_costs[smallest], heap_nodes[smallest],
+            ):
+                smallest = left
+            if right < heap_size and _nav_heap_less(
+                heap_buckets[right], heap_costs[right], heap_nodes[right],
+                heap_buckets[smallest], heap_costs[smallest], heap_nodes[smallest],
+            ):
+                smallest = right
+            if smallest == i:
+                break
+            tmp_node = heap_nodes[smallest]
+            tmp_bucket = heap_buckets[smallest]
+            tmp_cost = heap_costs[smallest]
+            heap_nodes[smallest] = heap_nodes[i]
+            heap_buckets[smallest] = heap_buckets[i]
+            heap_costs[smallest] = heap_costs[i]
+            heap_nodes[i] = tmp_node
+            heap_buckets[i] = tmp_bucket
+            heap_costs[i] = tmp_cost
+            i = smallest
+    return node, bucket, cost, heap_size
+
+@njit(cache=True)
+def _nav_reconstruct_path(parent: np.ndarray, current: int, ny: int, nz: int) -> np.ndarray:
+    count = 1
+    node = current
+    while parent[node] != node and parent[node] >= 0:
+        node = parent[node]
+        count += 1
+
+    path = np.empty((count, 3), dtype=np.int32)
+    node = current
+    for i in range(count - 1, -1, -1):
+        x, y, z = _nav_unflat_index(node, ny, nz)
+        path[i, 0] = x
+        path[i, 1] = y
+        path[i, 2] = z
+        if parent[node] == node or parent[node] < 0:
+            break
+        node = parent[node]
+    return path
+
+@njit(cache=True)
+def _nav_sdf_bucket(sdf_value: float) -> int:
+    if sdf_value < 0.2:
+        return 0
+    if sdf_value < 0.5:
+        return 1
+    if sdf_value < 1.0:
+        return 2
+    if sdf_value < 2.0:
+        return 3
+    if sdf_value < 5.0:
+        return 4
+    if sdf_value < 10.0:
+        return 5
+    return 6
+
+@njit(cache=True)
+def _nav_heuristic_idx(x: int, y: int, z: int, gx: int, gy: int, gz: int, resolution: float) -> float:
+    dx = (x - gx) * resolution
+    dy = (y - gy) * resolution
+    dz = (z - gz) * resolution
+    return np.sqrt(dx * dx + dy * dy + dz * dz) + 20.0 * np.abs(dz)
+
+@njit(cache=True)
+def search_close_to_sdf_map_numba(start_index: np.ndarray, sdf_map: np.ndarray, occupancy_map: np.ndarray, stop_distance: float) -> np.ndarray:
+    nx, ny, nz = sdf_map.shape
+    total = nx * ny * nz
+    sx = int(start_index[0])
+    sy = int(start_index[1])
+    sz = int(start_index[2])
+    start_node = _nav_flat_index(sx, sy, sz, ny, nz)
+
+    parent = np.full(total, -1, dtype=np.int64)
+    visited = np.zeros(total, dtype=np.bool_)
+    in_open = np.zeros(total, dtype=np.bool_)
+    heap_nodes = np.empty(total, dtype=np.int64)
+    heap_buckets = np.zeros(total, dtype=np.int32)
+    heap_costs = np.empty(total, dtype=np.float64)
+
+    parent[start_node] = start_node
+    in_open[start_node] = True
+    heap_size = _nav_heap_push(heap_nodes, heap_buckets, heap_costs, 0, start_node, 0, float(sdf_map[sx, sy, sz]))
+
+    while heap_size > 0:
+        current, _, _, heap_size = _nav_heap_pop(heap_nodes, heap_buckets, heap_costs, heap_size)
+        in_open[current] = False
+        if visited[current]:
+            continue
+        visited[current] = True
+        cx, cy, cz = _nav_unflat_index(current, ny, nz)
+        current_sdf = float(sdf_map[cx, cy, cz])
+        if current_sdf < stop_distance:
+            return _nav_reconstruct_path(parent, current, ny, nz)
+
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                for dz in range(-1, 2):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    nbx = cx + dx
+                    nby = cy + dy
+                    nbz = cz + dz
+                    if nbx < 0 or nbx >= nx or nby < 0 or nby >= ny or nbz < 0 or nbz >= nz:
+                        continue
+                    if occupancy_map[nbx, nby, nbz] == 2:
+                        continue
+                    neighbor = _nav_flat_index(nbx, nby, nbz, ny, nz)
+                    if visited[neighbor] or in_open[neighbor]:
+                        continue
+                    parent[neighbor] = current
+                    in_open[neighbor] = True
+                    heap_size = _nav_heap_push(heap_nodes, heap_buckets, heap_costs, heap_size, neighbor, 0, float(sdf_map[nbx, nby, nbz]))
+
+    return np.empty((0, 3), dtype=np.int32)
+
+@njit(cache=True)
+def search_within_sdf_map_numba(start: np.ndarray, goal: np.ndarray, sdf_map: np.ndarray, occupancy_map: np.ndarray, resolution: float) -> np.ndarray:
+    nx, ny, nz = sdf_map.shape
+    total = nx * ny * nz
+    sx = int(start[0])
+    sy = int(start[1])
+    sz = int(start[2])
+    gx = int(goal[0])
+    gy = int(goal[1])
+    gz = int(goal[2])
+    start_node = _nav_flat_index(sx, sy, sz, ny, nz)
+    goal_node = _nav_flat_index(gx, gy, gz, ny, nz)
+
+    parent = np.full(total, -1, dtype=np.int64)
+    visited = np.zeros(total, dtype=np.bool_)
+    in_open = np.zeros(total, dtype=np.bool_)
+    heap_nodes = np.empty(total, dtype=np.int64)
+    heap_buckets = np.empty(total, dtype=np.int32)
+    heap_costs = np.empty(total, dtype=np.float64)
+
+    parent[start_node] = start_node
+    in_open[start_node] = True
+    start_bucket = _nav_sdf_bucket(float(sdf_map[sx, sy, sz]))
+    start_cost = _nav_heuristic_idx(sx, sy, sz, gx, gy, gz, resolution)
+    heap_size = _nav_heap_push(heap_nodes, heap_buckets, heap_costs, 0, start_node, start_bucket, start_cost)
+
+    while heap_size > 0:
+        current, _, _, heap_size = _nav_heap_pop(heap_nodes, heap_buckets, heap_costs, heap_size)
+        in_open[current] = False
+        if visited[current]:
+            continue
+        visited[current] = True
+        if current == goal_node:
+            return _nav_reconstruct_path(parent, current, ny, nz)
+
+        cx, cy, cz = _nav_unflat_index(current, ny, nz)
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                for dz in range(-1, 2):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    nbx = cx + dx
+                    nby = cy + dy
+                    nbz = cz + dz
+                    if nbx < 0 or nbx >= nx or nby < 0 or nby >= ny or nbz < 0 or nbz >= nz:
+                        continue
+                    if occupancy_map[nbx, nby, nbz] == 2:
+                        continue
+                    neighbor = _nav_flat_index(nbx, nby, nbz, ny, nz)
+                    if visited[neighbor] or in_open[neighbor]:
+                        continue
+                    parent[neighbor] = current
+                    in_open[neighbor] = True
+                    bucket = _nav_sdf_bucket(float(sdf_map[nbx, nby, nbz]))
+                    cost = _nav_heuristic_idx(nbx, nby, nbz, gx, gy, gz, resolution)
+                    heap_size = _nav_heap_push(heap_nodes, heap_buckets, heap_costs, heap_size, neighbor, bucket, cost)
+
+    return np.empty((0, 3), dtype=np.int32)
+
 class DummyEmbeddingEngine:
     async def infer(self, _image: np.ndarray) -> np.ndarray:
         return np.zeros((1, 768), dtype=np.float32)
@@ -277,6 +513,7 @@ class MapNode(Node):
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
+        self._warmup_nav_path_search()
 
         print(f"sdf_map.shape: {self.sdf_map.shape}")
         print(f"occupancy_map.shape: {self.occupancy_map.shape}")
@@ -285,6 +522,7 @@ class MapNode(Node):
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
         self.last_relocalization_failure_reason = ""
+        self.last_relocalization_timing = {}
 
         self.T_from_map_to_odom = None
 
@@ -301,6 +539,19 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+
+    def _warmup_nav_path_search(self):
+        small_sdf = np.ones((3, 3, 3), dtype=self.sdf_map.dtype)
+        small_sdf[1, 1, 1] = 0.0
+        small_occupancy = np.zeros((3, 3, 3), dtype=self.occupancy_map.dtype)
+        search_close_to_sdf_map_numba(np.array([0, 0, 0], dtype=np.int32), small_sdf, small_occupancy, 0.2)
+        search_within_sdf_map_numba(
+            np.array([0, 0, 0], dtype=np.int32),
+            np.array([2, 2, 2], dtype=np.int32),
+            small_sdf,
+            small_occupancy,
+            float(self.occupancy_map_meta[3]),
+        )
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -361,19 +612,36 @@ class MapNode(Node):
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         t_start = time.perf_counter()
+        stage_timings = {}
+
+        def mark_stage(name: str, previous_t: float) -> float:
+            now = time.perf_counter()
+            stage_timings[name] = (now - previous_t) * 1000.0
+            return now
+
         self.get_logger().info("keyframe_mapping is temporarily disabled.")
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
-        t_decode = time.perf_counter()
+        t_stage = mark_stage("image_decode", t_start)
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
+        keyframe_odom_timestamp_ns = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
+        depth_timestamp_ns = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
+        sync_skew_ms = (max(keyframe_image_timestamp_ns, keyframe_odom_timestamp_ns, depth_timestamp_ns) - min(keyframe_image_timestamp_ns, keyframe_odom_timestamp_ns, depth_timestamp_ns)) / 1e6
+        t_stage = mark_stage("timestamp_parse", t_stage)
+
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+        t_stage = mark_stage("relocalization", t_stage)
+
         odom, _ = msg2np(keyframe_odom_msg)
+        t_stage = mark_stage("odom_msg_decode", t_stage)
+
         self.pose_graph_used_pose[keyframe_image_timestamp_ns] = odom
         self.odom[keyframe_image_timestamp_ns] = odom
-        t_reloc = time.perf_counter()
+        t_stage = mark_stage("pose_cache_update", t_stage)
+
         if success:
             self.compute_transform_from_map_to_odom()
-        t_tf = time.perf_counter()
+        t_stage = mark_stage("tf_update", t_stage)
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
@@ -381,17 +649,17 @@ class MapNode(Node):
             # and record the map pose
             # compute the coordinate transform from the map pose to the keyframe pose
             # publish the nav path from the map pose to the keyframe pose with the cost map
-        t_nav = time.perf_counter()
+        t_stage = mark_stage("nav_path", t_stage)
 
-        decode_ms = (t_decode - t_start) * 1000.0
-        relocal_ms = (t_reloc - t_decode) * 1000.0
-        tf_ms = (t_tf - t_reloc) * 1000.0
-        nav_ms = (t_nav - t_tf) * 1000.0
-        total_ms = (t_nav - t_start) * 1000.0
+        total_ms = (t_stage - t_start) * 1000.0
+        stage_parts = ", ".join(f"{name}={ms:.1f}" for name, ms in stage_timings.items())
+        relocal_parts = ", ".join(f"relocal_{name}={ms:.1f}" for name, ms in self.last_relocalization_timing.items())
         msg = (
-            f"Localization loop timing ms: total={total_ms:.1f}, decode={decode_ms:.1f}, "
-            f"relocal={relocal_ms:.1f}, tf_update={tf_ms:.1f}, nav_path={nav_ms:.1f}, success={success}"
+            f"Keyframe callback benchmark ms: timestamp={keyframe_image_timestamp_ns}, "
+            f"total={total_ms:.1f}, sync_skew={sync_skew_ms:.1f}, {stage_parts}, success={success}"
         )
+        if relocal_parts:
+            msg += f", {relocal_parts}"
         if total_ms > 500.0:
             self.get_logger().warning(msg)
         else:
@@ -520,36 +788,64 @@ class MapNode(Node):
         self.last_relocalization_failure_reason = reason
         return False, np.eye(4), -np.inf
 
-    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+    def _log_relocalization_timing(self, timestamp_ns: int, success: bool, timings: dict[str, float], extra: str = ""):
+        total_ms = sum(timings.values())
+        parts = ", ".join(f"{name}={ms:.1f}" for name, ms in timings.items())
+        msg = f"Relocalization stage timing ms: timestamp={timestamp_ns}, total={total_ms:.1f}, {parts}, success={success}"
+        if extra:
+            msg += f", {extra}"
+        if total_ms > 500.0:
+            self.get_logger().warning(msg)
+        else:
+            self.get_logger().info(msg)
+
+    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None, timings: dict[str, float] | None = None) -> tuple[bool, np.ndarray, float]:
+        if timings is None:
+            timings = {}
         self.last_relocalization_failure_reason = ""
         if K is None:
             return self._relocalization_failed("camera intrinsics unavailable")
+        t0 = time.perf_counter()
         query_embedding = self.get_embeddings(keyframe)
         query_embedding_norm = np.linalg.norm(query_embedding)
         if query_embedding_norm > 0:
             query_embedding = query_embedding / query_embedding_norm
+        timings["embedding"] = timings.get("embedding", 0.0) + (time.perf_counter() - t0) * 1000.0
 
         query_kp = keyframe_features["kpts"][0] if keyframe_features["kpts"].ndim == 3 else keyframe_features["kpts"]
         query_desc = keyframe_features["descps"][0] if keyframe_features["descps"].ndim == 3 else keyframe_features["descps"]
+        t0 = time.perf_counter()
         candidates = self.map_loop_closure.find_candidate_timestamps(
             query_kp,
             query_desc,
             query_embedding,
             top_k=self.relocalization_loop_top_k,
         )
+        timings["candidate_search"] = timings.get("candidate_search", 0.0) + (time.perf_counter() - t0) * 1000.0
         max_similarity = max([c["similarity"] for c in candidates]) if len(candidates) > 0 else 0
         if len(candidates) > 0:
             point_3d_in_world_arrays = []
             point_2d_in_keyframe_arrays = []
             candidate_summaries = []
+            candidate_timing_summaries = []
             for candidate in candidates:
                 timestamp_in_map = int(candidate["timestamp"])
                 similarity = float(candidate["similarity"])
                 reference_keyframe_pose = self.map_poses[timestamp_in_map]
+                t_db = time.perf_counter()
                 reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
+                db_ms = (time.perf_counter() - t_db) * 1000.0
+                timings["db_load"] = timings.get("db_load", 0.0) + db_ms
+                t_match = time.perf_counter()
                 reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
+                match_ms = (time.perf_counter() - t_match) * 1000.0
+                timings["match"] = timings.get("match", 0.0) + match_ms
+                depth_ms = 0.0
                 if len(matches) >= 20:
+                    t_depth = time.perf_counter()
                     point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
+                    depth_ms = (time.perf_counter() - t_depth) * 1000.0
+                    timings["depth3d"] = timings.get("depth3d", 0.0) + depth_ms
                     point_3d_in_world_arrays.append(point_3d_in_world[inliers])
                     point_2d_in_keyframe_arrays.append(keyframe_matched_keypoints[inliers])
                     candidate_summaries.append(
@@ -559,27 +855,35 @@ class MapNode(Node):
                     candidate_summaries.append(
                         f"{timestamp_in_map}:sim={similarity:.3f},matches={len(matches)}<20"
                     )
+                candidate_timing_summaries.append(
+                    f"{timestamp_in_map}:db={db_ms:.1f},match={match_ms:.1f},depth3d={depth_ms:.1f}"
+                )
 
             landmark_count = int(sum(points.shape[0] for points in point_3d_in_world_arrays))
             if landmark_count > 40:
                 point_3d_in_world_list = np.concatenate(point_3d_in_world_arrays, axis=0)
                 point_2d_in_keyframe_list = np.concatenate(point_2d_in_keyframe_arrays, axis=0)
 
+                t_pnp = time.perf_counter()
                 success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
+                timings["pnp"] = timings.get("pnp", 0.0) + (time.perf_counter() - t_pnp) * 1000.0
                 if success and len(inliers) >= 20:
                     R, _ = cv2.Rodrigues(rvec)
                     T = np.eye(4)
                     T[:3, :3] = R
                     T[:3, 3] = tvec.reshape(3)
                     print(f"relocalization pose : {T}")
+                    self.get_logger().info(f"Relocalization candidate timing ms: {'; '.join(candidate_timing_summaries)}")
                     return True, T, len(inliers) / len(point_2d_in_keyframe_list)
                 inlier_count = 0 if inliers is None else len(inliers)
+                self.get_logger().info(f"Relocalization candidate timing ms: {'; '.join(candidate_timing_summaries)}")
                 return self._relocalization_failed(
                     f"solvePnPRansac failed or insufficient inliers: success={success}, "
                     f"inliers={inlier_count}<20, landmarks={len(point_3d_in_world_list)}, "
                     f"candidates=[{'; '.join(candidate_summaries)}]"
                 )
             else:
+                self.get_logger().info(f"Relocalization candidate timing ms: {'; '.join(candidate_timing_summaries)}")
                 return self._relocalization_failed(
                     f"not enough valid depth landmarks: {landmark_count}<=40, "
                     f"candidates=[{'; '.join(candidate_summaries)}]"
@@ -621,20 +925,36 @@ class MapNode(Node):
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
+        timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
+        loop_t0 = time.perf_counter()
+        timings = {}
+        t0 = time.perf_counter()
         features = asyncio.run(self.extractor.infer(image))
-        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
+        timings["feature_extract"] = (time.perf_counter() - t0) * 1000.0
+        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K, timings)
         if res:
+            t0 = time.perf_counter()
             # publish the relocalization pose for debug
             pose_in_world = se3_inv(pose_in_camera)
-            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
+            timings["publish"] = (time.perf_counter() - t0) * 1000.0
+            timings["unaccounted"] = max(0.0, (time.perf_counter() - loop_t0) * 1000.0 - sum(timings.values()))
+            self.last_relocalization_timing = dict(timings)
+            self._log_relocalization_timing(
+                timestamp_ns,
+                True,
+                timings,
+                extra=f"pose_weight={pose_cov_weight:.3f}",
+            )
             return True, pose_in_world
         else:
             self.failed_relocalizations.append(timestamp)
-            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             reason = self.last_relocalization_failure_reason or "unknown relocalization failure"
+            timings["unaccounted"] = max(0.0, (time.perf_counter() - loop_t0) * 1000.0 - sum(timings.values()))
+            self.last_relocalization_timing = dict(timings)
+            self._log_relocalization_timing(timestamp_ns, False, timings, extra=f"reason={reason}")
             self.get_logger().warning(
                 f"Relocalization failed at timestamp={timestamp_ns}: {reason}"
             )
@@ -696,21 +1016,48 @@ class MapNode(Node):
         self.T_from_map_to_odom = optimized_parameters[0]
 
     def try_publish_nav_path(self, timestamp: int):
+        t_start = time.perf_counter()
+        stage_timings = {}
+
+        def mark_stage(name: str, previous_t: float) -> float:
+            now = time.perf_counter()
+            stage_timings[name] = (now - previous_t) * 1000.0
+            return now
+
+        def log_nav_timing(result: str, path_count: int | None = None):
+            total_ms = (time.perf_counter() - t_start) * 1000.0
+            parts = ", ".join(f"{name}={ms:.1f}" for name, ms in stage_timings.items())
+            msg = f"Nav path timing ms: timestamp={timestamp}, total={total_ms:.1f}, result={result}"
+            if path_count is not None:
+                msg += f", path_count={path_count}"
+            if parts:
+                msg += f", {parts}"
+            if total_ms > 500.0:
+                self.get_logger().warning(msg)
+            else:
+                self.get_logger().info(msg)
+
+        t_stage = t_start
         self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
+        t_stage = mark_stage("start_log", t_stage)
         if self.T_from_map_to_odom is None:
             self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
+            log_nav_timing("skip_no_relocalization")
             return
 
         pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
         pose_in_map_position = pose_in_map[:3, 3]
+        t_stage = mark_stage("pose_in_map_publish", t_stage)
 
         if self.poi_index == -1:
             self.get_logger().info("No POI found, skip publishing nav path")
+            log_nav_timing("skip_no_poi")
             return
 
         if self.poi_index >= len(self.pois):
             self.get_logger().info("All POIs have been visited, skip publishing nav path")
+            log_nav_timing("skip_all_pois_visited")
             return
 
         poi = self.pois[self.poi_index]
@@ -718,13 +1065,16 @@ class MapNode(Node):
         poi_pose = np.eye(4)
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
+        t_stage = mark_stage("poi_publish", t_stage)
 
+        advanced_poi_count = 0
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
             if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
                 self.poi_index += 1
+                advanced_poi_count += 1
                 dummy_pose = np.eye(4)
 
                 stamp_msg = self.get_clock().now().to_msg()
@@ -734,14 +1084,17 @@ class MapNode(Node):
                 continue
             else:
                 break
+        t_stage = mark_stage("poi_advance", t_stage)
 
         if self.poi_index >= len(self.pois):
             self.get_logger().info("All POIs have been visited, skip publishing nav path")
+            log_nav_timing(f"skip_all_pois_visited_after_advance:{advanced_poi_count}")
             return
 
         target_poi = self.pois[self.poi_index]
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
+        t_stage = mark_stage("generate_path", t_stage)
 
         if paths_in_map is not None:
             # use the max_speed to publish the position the robot should be after 5 seconds
@@ -767,31 +1120,73 @@ class MapNode(Node):
                 dummy_pose[:3, 3] = target_position_in_odom
                 #logging.info(f"target_position_in_odom: {target_position_in_odom}")
                 print(f"target_position_in_odom: {target_position_in_odom}")
+            t_stage = mark_stage("target_select", t_stage)
 
-                self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-                path_msg = Path()
-                path_msg.header.stamp = self.get_clock().now().to_msg()
-                path_msg.header.frame_id = "map"
-                for x, y, z in paths_in_map:
-                    pose = PoseStamped()
-                    pose.header = path_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = 0.0
-                    pose.pose.orientation.y = 0.0
-                    pose.pose.orientation.z = 0.0
-                    pose.pose.orientation.w = 1.0
-                    path_msg.poses.append(pose)
-                self.global_plan_pub.publish(path_msg)
-                self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+            self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+            t_stage = mark_stage("target_pose_publish", t_stage)
+
+            path_msg = Path()
+            path_msg.header.stamp = self.get_clock().now().to_msg()
+            path_msg.header.frame_id = "map"
+            for x, y, z in paths_in_map:
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = z
+                pose.pose.orientation.x = 0.0
+                pose.pose.orientation.y = 0.0
+                pose.pose.orientation.z = 0.0
+                pose.pose.orientation.w = 1.0
+                path_msg.poses.append(pose)
+            t_stage = mark_stage("global_path_msg_build", t_stage)
+
+            self.global_plan_pub.publish(path_msg)
+            t_stage = mark_stage("global_path_publish", t_stage)
+
+            self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+            mark_stage("tf_publish", t_stage)
+            log_nav_timing("published", path_count=len(paths_in_map))
         else:
             logging.info("No path found in map")
+            log_nav_timing("skip_no_path")
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
+        t_start = time.perf_counter()
+        stage_timings = {}
+
+        def mark_stage(name: str, previous_t: float) -> float:
+            now = time.perf_counter()
+            stage_timings[name] = (now - previous_t) * 1000.0
+            return now
+
+        def log_generate_timing(
+            result: str,
+            start_path_count: int = 0,
+            goal_path_count: int = 0,
+            path_sdf_count: int = 0,
+            path_count: int = 0,
+        ):
+            total_ms = (time.perf_counter() - t_start) * 1000.0
+            parts = ", ".join(f"{name}={ms:.1f}" for name, ms in stage_timings.items())
+            msg = (
+                f"Generate nav path timing ms: total={total_ms:.1f}, result={result}, "
+                f"start_path_count={start_path_count}, goal_path_count={goal_path_count}, "
+                f"path_sdf_count={path_sdf_count}, path_count={path_count}"
+            )
+            if parts:
+                msg += f", {parts}"
+            if total_ms > 500.0:
+                self.get_logger().warning(msg)
+            else:
+                self.get_logger().info(msg)
+
+        t_stage = t_start
         dummy_poi_pose = np.eye(4)
         dummy_poi_pose[:3, 3] = target_poi
         self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
+        t_stage = mark_stage("poi_publish", t_stage)
+
         occupancy_map_origin = self.occupancy_map_meta[:3]
         resolution = self.occupancy_map_meta[3]
         start_idx = np.array([
@@ -804,6 +1199,7 @@ class MapNode(Node):
             int((target_poi[1] - occupancy_map_origin[1]) / resolution),
             int((target_poi[2] - occupancy_map_origin[2]) / resolution)
         ], dtype=np.int32)
+        t_stage = mark_stage("index_convert", t_stage)
 
         if (
             start_idx[0] < 0
@@ -820,21 +1216,48 @@ class MapNode(Node):
             or poi_goal_idx[2] >= self.occupancy_map.shape[2]
         ):
             print("here")
+            log_generate_timing("out_of_bounds")
             return None 
-        sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
-        sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+
+        sdf_start_path = search_close_to_sdf_map_numba(start_idx, self.sdf_map, self.occupancy_map, 0.2)
+        t_stage = mark_stage("search_start_close", t_stage)
+        sdf_goal_path = search_close_to_sdf_map_numba(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+        t_stage = mark_stage("search_goal_close", t_stage)
+
+        if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
+            self.get_logger().warning(
+                f"search_close_to_sdf_map returned empty path: start_count={len(sdf_start_path)}, goal_count={len(sdf_goal_path)}"
+            )
+            log_generate_timing("empty_close_path", start_path_count=len(sdf_start_path), goal_path_count=len(sdf_goal_path))
+            return None
 
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
-        path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        path_sdf = search_within_sdf_map_numba(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        t_stage = mark_stage("search_within", t_stage)
         if len(path_sdf) == 0:
             self.get_logger().warning(
                 f"search_within_sdf_map returned empty path: start_idx={tuple(sdf_start_sdf)}, goal_idx={tuple(sdf_goal_sdf)}"
             )
-        path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
+        path = np.vstack((sdf_start_path, path_sdf, sdf_goal_path[::-1]))
+        t_stage = mark_stage("path_stack", t_stage)
         if len(path) > 0:
-            converted_path = np.array(path) * resolution + occupancy_map_origin
+            converted_path = path.astype(np.float64) * resolution + occupancy_map_origin
+            mark_stage("path_convert", t_stage)
+            log_generate_timing(
+                "ok",
+                start_path_count=len(sdf_start_path),
+                goal_path_count=len(sdf_goal_path),
+                path_sdf_count=len(path_sdf),
+                path_count=len(path),
+            )
             return converted_path
+        log_generate_timing(
+            "empty_path",
+            start_path_count=len(sdf_start_path),
+            goal_path_count=len(sdf_goal_path),
+            path_sdf_count=len(path_sdf),
+        )
         return None
 
 def main(args=None):
