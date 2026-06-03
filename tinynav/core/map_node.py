@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -451,38 +451,35 @@ class MapNode(Node):
 
         idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
         max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
-        if len(idx_and_similarity_array) > 0:
-            point_3d_in_world_list = []
-            point_2d_in_keyframe_list = []
-            for idx_in_map, similarity in idx_and_similarity_array:
-                timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
-                reference_keyframe_pose = self.map_poses[timestamp_in_map]
-                reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
-                reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-                if len(matches) >= 50:
-                    point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
-                    point_3d_in_world_list = point_3d_in_world[inliers]
-                    point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
-                else:
-                    print(f"not enough matched features to relocalize, {len(matches)} < 50")
-
-            if len(point_3d_in_world_list) > 80:
-                point_3d_in_world_list = np.array(point_3d_in_world_list)
-                point_2d_in_keyframe_list = np.array(point_2d_in_keyframe_list)
-
-                success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
-                if success and len(inliers) >= 50:
-                    R, _ = cv2.Rodrigues(rvec)
-                    T = np.eye(4)
-                    T[:3, :3] = R
-                    T[:3, 3] = tvec.reshape(3)
-                    print(f"relocalization pose : {T}")
-                    return True, T, len(inliers) / len(point_2d_in_keyframe_list)
-            else:
-                print(f"not enough landmarks to relocalize, {len(point_3d_in_world_list)}")
-                return False, np.eye(4), -np.inf
-        else:
+        if len(idx_and_similarity_array) == 0:
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
+            return False, np.eye(4), -np.inf
+
+        pnp_candidates = []
+        for idx_in_map, similarity in idx_and_similarity_array:
+            timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
+            reference_keyframe_pose = self.map_poses[timestamp_in_map]
+            reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
+            reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
+            if len(matches) < 50:
+                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+                continue
+
+            point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
+            point_3d_in_world_list = point_3d_in_world[inliers]
+            point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
+            point_count = len(point_2d_in_keyframe_list)
+            if point_count <= 80:
+                print(f"not enough landmarks to relocalize, {point_count}")
+                continue
+            pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        if success:
+            print(f"relocalization pose : {best_pose_in_camera}")
+            return True, best_pose_in_camera, pose_cov_weight
+
+        print("no valid PnP relocalization candidate found")
         return False, np.eye(4), -np.inf
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
