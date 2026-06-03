@@ -837,23 +837,43 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
     final planning = ref.watch(planningStreamProvider).valueOrNull;
 
-    // Auto-select color topic on first load
+    final selectedTopicIsValid = selectedTopic != null && topics.contains(selectedTopic);
+    if (topics.isNotEmpty && !selectedTopicIsValid) {
+      final nextTopic = topics.firstWhere(
+        (t) => t.contains('color'),
+        orElse: () => topics.first,
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        final latestTopics = ref.read(imageTopicsProvider).valueOrNull ?? const <String>[];
+        final currentTopic = ref.read(selectedPreviewTopicProvider);
+        final currentIsValid = currentTopic != null && latestTopics.contains(currentTopic);
+        if (latestTopics.contains(nextTopic) && !currentIsValid) {
+          ref.read(selectedPreviewTopicProvider.notifier).state = nextTopic;
+          setState(() => _latestFrame = null);
+        }
+      });
+    }
+
+    // Keep the current preview topic valid after backend/sensor restarts.
     ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
       final topics = next.valueOrNull;
-      if (topics != null && ref.read(selectedPreviewTopicProvider) == null) {
+      final currentTopic = ref.read(selectedPreviewTopicProvider);
+      final currentIsValid = currentTopic != null && (topics?.contains(currentTopic) ?? false);
+      if (topics != null && topics.isNotEmpty && !currentIsValid) {
         final colorTopic = topics.firstWhere(
           (t) => t.contains('color'),
-          orElse: () => '',
+          orElse: () => topics.first,
         );
-        if (colorTopic.isNotEmpty) {
-          ref.read(selectedPreviewTopicProvider.notifier).state = colorTopic;
-        }
+        ref.read(selectedPreviewTopicProvider.notifier).state = colorTopic;
+        if (mounted) setState(() => _latestFrame = null);
       }
     });
 
-    final previewFrame = selectedTopic == null
+    final activeTopic = selectedTopicIsValid ? selectedTopic : null;
+    final previewFrame = activeTopic == null
         ? null
-        : ref.watch(previewStreamProvider(selectedTopic)).valueOrNull;
+        : ref.watch(previewStreamProvider(activeTopic)).valueOrNull;
     final frameToShow = previewFrame ?? _latestFrame;
     if (previewFrame != null && !identical(previewFrame, _latestFrame)) {
       _latestFrame = previewFrame;
@@ -864,7 +884,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (selectedTopic != null && frameToShow != null)
+          if (activeTopic != null && frameToShow != null)
             GestureDetector(
               onTap: () => _showFullscreen(context),
               child: Image.memory(frameToShow, fit: BoxFit.contain, gaplessPlayback: true),
@@ -877,7 +897,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                   const Icon(Icons.videocam_off_outlined, color: Colors.white24, size: 32),
                   const SizedBox(height: 6),
                   Text(
-                    selectedTopic == null ? 'Select a camera topic' : 'Waiting for stream…',
+                    activeTopic == null ? 'Select a camera topic' : 'Waiting for stream…',
                     style: const TextStyle(color: Colors.white38, fontSize: 12),
                   ),
                 ],
@@ -905,7 +925,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                   const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
                   const SizedBox(width: 6),
                   DropdownButton<String?>(
-                    value: selectedTopic,
+                    value: activeTopic,
                     hint: const Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
                     style: const TextStyle(color: Colors.white, fontSize: 12),
                     dropdownColor: Colors.black87,
@@ -918,6 +938,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                       ),
                       ...topics.map((t) {
                         const labels = {
+                          '/camera/camera/color/image_rect_raw/compressed': 'color',
                           '/camera/camera/color/image_raw': 'color',
                           '/camera/camera/infra1/image_rect_raw': 'left',
                           '/camera/camera/infra2/image_rect_raw': 'right',
@@ -939,7 +960,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
               ),
             ),
           ),
-          if (selectedTopic != null && frameToShow != null)
+          if (activeTopic != null && frameToShow != null)
             Positioned(
               bottom: 8, right: 8,
               child: GestureDetector(

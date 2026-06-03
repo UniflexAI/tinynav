@@ -284,6 +284,7 @@ class MapNode(Node):
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
+        self.last_relocalization_failure_reason = ""
 
         self.T_from_map_to_odom = None
 
@@ -515,9 +516,14 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
+    def _relocalization_failed(self, reason: str) -> tuple[bool, np.ndarray, float]:
+        self.last_relocalization_failure_reason = reason
+        return False, np.eye(4), -np.inf
+
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+        self.last_relocalization_failure_reason = ""
         if K is None:
-            return False, np.eye(4), -np.inf
+            return self._relocalization_failed("camera intrinsics unavailable")
         query_embedding = self.get_embeddings(keyframe)
         query_embedding_norm = np.linalg.norm(query_embedding)
         if query_embedding_norm > 0:
@@ -533,38 +539,56 @@ class MapNode(Node):
         )
         max_similarity = max([c["similarity"] for c in candidates]) if len(candidates) > 0 else 0
         if len(candidates) > 0:
-            point_3d_in_world_list = []
-            point_2d_in_keyframe_list = []
+            point_3d_in_world_arrays = []
+            point_2d_in_keyframe_arrays = []
+            candidate_summaries = []
             for candidate in candidates:
                 timestamp_in_map = int(candidate["timestamp"])
+                similarity = float(candidate["similarity"])
                 reference_keyframe_pose = self.map_poses[timestamp_in_map]
                 reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
                 reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-                if len(matches) >= 50:
+                if len(matches) >= 20:
                     point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
-                    point_3d_in_world_list = point_3d_in_world[inliers]
-                    point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
+                    point_3d_in_world_arrays.append(point_3d_in_world[inliers])
+                    point_2d_in_keyframe_arrays.append(keyframe_matched_keypoints[inliers])
+                    candidate_summaries.append(
+                        f"{timestamp_in_map}:sim={similarity:.3f},matches={len(matches)},valid_depth={int(np.count_nonzero(inliers))}"
+                    )
                 else:
-                    print(f"not enough matched features to relocalize, {len(matches)} < 50")
+                    candidate_summaries.append(
+                        f"{timestamp_in_map}:sim={similarity:.3f},matches={len(matches)}<20"
+                    )
 
-            if len(point_3d_in_world_list) > 80:
-                point_3d_in_world_list = np.array(point_3d_in_world_list)
-                point_2d_in_keyframe_list = np.array(point_2d_in_keyframe_list)
+            landmark_count = int(sum(points.shape[0] for points in point_3d_in_world_arrays))
+            if landmark_count > 40:
+                point_3d_in_world_list = np.concatenate(point_3d_in_world_arrays, axis=0)
+                point_2d_in_keyframe_list = np.concatenate(point_2d_in_keyframe_arrays, axis=0)
 
                 success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
-                if success and len(inliers) >= 50:
+                if success and len(inliers) >= 20:
                     R, _ = cv2.Rodrigues(rvec)
                     T = np.eye(4)
                     T[:3, :3] = R
                     T[:3, 3] = tvec.reshape(3)
                     print(f"relocalization pose : {T}")
                     return True, T, len(inliers) / len(point_2d_in_keyframe_list)
+                inlier_count = 0 if inliers is None else len(inliers)
+                return self._relocalization_failed(
+                    f"solvePnPRansac failed or insufficient inliers: success={success}, "
+                    f"inliers={inlier_count}<20, landmarks={len(point_3d_in_world_list)}, "
+                    f"candidates=[{'; '.join(candidate_summaries)}]"
+                )
             else:
-                print(f"not enough landmarks to relocalize, {len(point_3d_in_world_list)}")
-                return False, np.eye(4), -np.inf
+                return self._relocalization_failed(
+                    f"not enough valid depth landmarks: {landmark_count}<=40, "
+                    f"candidates=[{'; '.join(candidate_summaries)}]"
+                )
         else:
-            print(f"not enough similar embeddings to relocalize, {len(candidates)}, max_similarity : {max_similarity}")
-        return False, np.eye(4), -np.inf
+            return self._relocalization_failed(
+                f"no loop candidates above threshold: candidates={len(candidates)}, max_similarity={max_similarity:.3f}"
+            )
+        return self._relocalization_failed("unknown relocalization failure")
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
         point_in_camera = []
@@ -609,6 +633,11 @@ class MapNode(Node):
             return True, pose_in_world
         else:
             self.failed_relocalizations.append(timestamp)
+            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
+            reason = self.last_relocalization_failure_reason or "unknown relocalization failure"
+            self.get_logger().warning(
+                f"Relocalization failed at timestamp={timestamp_ns}: {reason}"
+            )
             return False, np.eye(4)
 
     def save_relocalization_poses(self):

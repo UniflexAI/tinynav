@@ -241,15 +241,24 @@ class ORBFeatureTRTCompatible:
 
 class ORBMatcher:
     """
-    ORB descriptor matcher with BFMatcher(crossCheck=True) and geometric RANSAC filtering.
+    ORB descriptor matcher using FLANN LSH for binary descriptors.
 
     Output is LightGlue-compatible:
       - match_indices: (1, N0) int32, each value is matched index in keypoints1 or -1.
     """
 
-    def __init__(self, ransac_reproj_threshold: float = 1.0):
-        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    def __init__(self, ransac_reproj_threshold: float = 1.0, flann_ratio: float = 0.75):
+        flann_index_lsh = 6
+        index_params = dict(
+            algorithm=flann_index_lsh,
+            table_number=6,
+            key_size=12,
+            multi_probe_level=1,
+        )
+        search_params = dict(checks=50)
+        self.flann = cv2.FlannBasedMatcher(index_params, search_params)
         self.ransac_reproj_threshold = float(ransac_reproj_threshold)
+        self.flann_ratio = float(flann_ratio)
 
     async def infer(
         self,
@@ -304,40 +313,36 @@ class ORBMatcher:
             return out
 
         # ORB descriptor is binary; convert normalized float [0,1] back to uint8 [0,255].
-        d0_u8 = np.clip(np.rint(d0[idx0] * 255.0), 0, 255).astype(np.uint8)
-        d1_u8 = np.clip(np.rint(d1[idx1] * 255.0), 0, 255).astype(np.uint8)
+        d0_u8 = np.ascontiguousarray(np.clip(np.rint(d0[idx0] * 255.0), 0, 255).astype(np.uint8))
+        d1_u8 = np.ascontiguousarray(np.clip(np.rint(d1[idx1] * 255.0), 0, 255).astype(np.uint8))
         if d0_u8.size == 0 or d1_u8.size == 0:
             return out
 
-        raw_matches = self.bf.match(d0_u8, d1_u8)
-        if len(raw_matches) == 0:
+        k = 2 if d1_u8.shape[0] >= 2 else 1
+        raw_matches = self.flann.knnMatch(d0_u8, d1_u8, k=k)
+        good_matches = []
+        for pair in raw_matches:
+            if len(pair) == 0:
+                continue
+            if len(pair) == 1:
+                good_matches.append(pair[0])
+                continue
+            m, n = pair[:2]
+            if m.distance < self.flann_ratio * n.distance:
+                good_matches.append(m)
+
+        if len(good_matches) == 0:
             return out
 
-        raw_matches = sorted(raw_matches, key=lambda m: m.distance)
-        pts0 = np.array([k0[idx0[m.queryIdx]] for m in raw_matches], dtype=np.float32).reshape(-1, 2)
-        pts1 = np.array([k1[idx1[m.trainIdx]] for m in raw_matches], dtype=np.float32).reshape(-1, 2)
+        logger.info(
+            "ORBMatcher FLANN LSH: queries=%d train=%d raw_knn=%d ratio_matches=%d ransac=disabled",
+            d0_u8.shape[0],
+            d1_u8.shape[0],
+            len(raw_matches),
+            len(good_matches),
+        )
 
-        inlier_mask = np.ones((len(raw_matches),), dtype=bool)
-        if len(raw_matches) >= 8 and np.isfinite(pts0).all() and np.isfinite(pts1).all():
-            logger.info(
-                "ORBMatcher RANSAC input: pts0.shape=%s pts1.shape=%s raw_matches=%d",
-                pts0.shape,
-                pts1.shape,
-                len(raw_matches),
-            )
-            _, ransac_inliers = cv2.findFundamentalMat(
-                pts0,
-                pts1,
-                cv2.FM_RANSAC,
-                self.ransac_reproj_threshold,
-                0.99,
-            )
-            if ransac_inliers is not None and ransac_inliers.size == len(raw_matches):
-                inlier_mask = ransac_inliers.reshape(-1).astype(bool)
-
-        for i, m in enumerate(raw_matches):
-            if not inlier_mask[i]:
-                continue
+        for m in good_matches:
             gi = int(idx0[m.queryIdx])
             gj = int(idx1[m.trainIdx])
             out["match_indices"][0, gi] = gj
