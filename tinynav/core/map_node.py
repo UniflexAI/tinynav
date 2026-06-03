@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -674,47 +674,7 @@ class MapNode(Node):
 
         idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
         max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
-        if len(idx_and_similarity_array) > 0:
-            best_pose_in_camera = None
-            best_inlier_count = 0
-            best_point_count = 0
-            for idx_in_map, similarity in idx_and_similarity_array:
-                timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
-                reference_keyframe_pose = self.map_poses[timestamp_in_map]
-                reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
-                reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-                if len(matches) >= 50:
-                    point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
-                    point_3d_in_world_list = point_3d_in_world[inliers]
-                    point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
-                else:
-                    print(f"not enough matched features to relocalize, {len(matches)} < 50")
-                    continue
-
-                if len(point_3d_in_world_list) <= 80:
-                    print(f"not enough landmarks to relocalize, {len(point_3d_in_world_list)}")
-                    continue
-                success, rvec, tvec, inliers = cv2.solvePnPRansac(point_3d_in_world_list, point_2d_in_keyframe_list, self.map_K, None)
-                if success and inliers is not None and len(inliers) >= 50:
-                    inlier_count = len(inliers)
-                    if inlier_count > best_inlier_count:
-                        best_inlier_count = inlier_count
-                        best_point_count = len(point_2d_in_keyframe_list)
-                        best_pose_in_camera = np.eye(4)
-                        R, _ = cv2.Rodrigues(rvec)
-                        best_pose_in_camera[:3, :3] = R
-                        best_pose_in_camera[:3, 3] = tvec.reshape(3)
-                else:
-                    inlier_count = 0 if inliers is None else len(inliers)
-                    print(f"not enough PnP inliers to relocalize, {inlier_count} < 50")
-
-            if best_pose_in_camera is not None:
-                print(f"relocalization pose : {best_pose_in_camera}")
-                return True, best_pose_in_camera, best_inlier_count / best_point_count
-            else:
-                print("no valid PnP relocalization candidate found")
-                return False, np.eye(4), -np.inf
-        else:
+        if len(idx_and_similarity_array) == 0:
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
             return False, np.eye(4), -np.inf
 
