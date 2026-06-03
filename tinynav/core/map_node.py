@@ -701,6 +701,10 @@ class MapNode(Node):
             self.get_logger().info("Relocalization not successful yet, skip publishing nav path")
             return
 
+        pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
+        pose_in_map_position = pose_in_map[:3, 3]
+
         if self.poi_index == -1:
             self.get_logger().info("No POI found, skip publishing nav path")
             return
@@ -714,11 +718,6 @@ class MapNode(Node):
         poi_pose = np.eye(4)
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
-        # get the pose from the map to the odom
-        pose_in_map = se3_inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
-        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
-
-        pose_in_map_position = pose_in_map[:3, 3]
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
