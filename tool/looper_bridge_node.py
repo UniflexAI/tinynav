@@ -108,7 +108,7 @@ class LooperBridgeNode(Node):
         return (
             translation >= self.args.keyframe_translation
             or rotation_angle >= np.deg2rad(self.args.keyframe_rotation_deg)
-            or current_time - self.last_keyframe_time > 3.0
+            or current_time - self.last_keyframe_time >= self.args.keyframe_static_interval
         )
 
     def build_odom(self, T_world_camera: np.ndarray, stamp) -> Odometry:
@@ -216,6 +216,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyframe-translation", type=float, default=0.03)
     parser.add_argument("--keyframe-rotation-deg", type=float, default=1.0)
+    parser.add_argument("--keyframe-static-interval", type=float, default=1.0)
     return parser.parse_args()
 
 
