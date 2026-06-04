@@ -29,6 +29,7 @@ class MapBuildRequest(BaseModel):
 @router.post('/build')
 def map_build(req: MapBuildRequest = MapBuildRequest()):
     node = _require_node()
+    node.recover_stale_error_state()
     if req.bag_name:
         node.set_active_bag(req.bag_name)
     active_bag = node.active_bag_path

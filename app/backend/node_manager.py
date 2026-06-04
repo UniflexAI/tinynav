@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -150,7 +151,7 @@ class BackendNode(Ros2NodeManager):
         self._battery: float | None = None
 
         # Path to the last successfully verified bag (after stop + ros2 bag info check)
-        self._last_verified_bag: str | None = None
+        self._last_verified_bag: str | None = self._find_latest_bag()
 
         # Nav nodes (map_node + cmd_vel_control) managed independently of _stop_all
         self._nav_nodes_running: bool = False
@@ -515,6 +516,23 @@ class BackendNode(Ros2NodeManager):
             with self._lock:
                 self._last_verified_bag = path
 
+    def _find_latest_bag(self) -> str | None:
+        rosbags_dir = os.path.join(self.tinynav_db_path, 'rosbags')
+        if not os.path.isdir(rosbags_dir):
+            return None
+        candidates = []
+        for name in os.listdir(rosbags_dir):
+            path = os.path.join(rosbags_dir, name)
+            if os.path.isdir(path) and os.path.exists(os.path.join(path, 'bag_0.db3')):
+                candidates.append(path)
+        if not candidates:
+            return None
+        now = time.time() + 24 * 60 * 60.0
+        candidates_not_future = [p for p in candidates if os.path.getmtime(p) <= now]
+        if candidates_not_future:
+            candidates = candidates_not_future
+        return max(candidates, key=os.path.getmtime)
+
     @property
     def active_bag_path(self) -> str | None:
         """Most recently verified bag folder, ready for map building."""
@@ -523,18 +541,53 @@ class BackendNode(Ros2NodeManager):
             return lvb
         return None
 
+    def is_bag_recording(self) -> bool:
+        """Return true if the backend or OS process table shows an active recorder."""
+        return self._proc_alive(self.processes.get('bag_record')) or bool(self._find_bag_record_processes())
+
+    def recover_stale_error_state(self):
+        """Clear terminal error states once no managed process is still active."""
+        if not self.state.startswith('error:'):
+            return
+        if self.is_bag_recording():
+            return
+        live = [
+            name for name, proc in self.processes.items()
+            if proc is not None and proc.poll() is None
+        ]
+        if live:
+            return
+        old_state = self.state
+        self.processes.clear()
+        self.state = 'idle'
+        self._pub_state()
+        self.get_logger().warn(f'Recovered stale backend state {old_state} to idle')
+
+    def get_bag_status(self) -> dict:
+        self.recover_stale_error_state()
+        bag_file = os.path.join(self.bag_path, 'bag_0.db3')
+        active_bag = self.active_bag_path
+        return {
+            'status': 'recording' if self.is_bag_recording() else 'idle',
+            'bagFileReady': os.path.exists(bag_file) or active_bag is not None,
+            'bagPath': self.bag_path,
+            'activeBagPath': active_bag,
+        }
+
     def get_status(self) -> dict:
+        self.recover_stale_error_state()
         with self._lock:
             raw = self.state
             pct = self.mapping_percent
             battery = self._battery
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
+        bag_recording = self.is_bag_recording()
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
             'battery': battery,
-            'bagStatus': 'recording' if raw == 'realsense_bag_record' else 'idle',
+            'bagStatus': 'recording' if bag_recording else 'idle',
             'bagFileReady': bag_files_exist,
             'mapStatus': self._derive_map_status(raw, pct, map_files_exist),
             'mappingPercent': pct,
@@ -640,6 +693,104 @@ class BackendNode(Ros2NodeManager):
     @staticmethod
     def _proc_alive(proc: subprocess.Popen | None) -> bool:
         return proc is not None and proc.poll() is None
+
+    def _find_bag_record_processes(self) -> list[tuple[int, int, str]]:
+        """Find live rosbag recorder or wrapper processes for self.bag_path.
+
+        This is a safety net for cases where the backend state was reset but the
+        OS-level recorder kept running.
+        """
+        try:
+            result = subprocess.run(
+                ['ps', '-ww', '-eo', 'pid=,pgid=,command='],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except Exception:
+            return []
+        if result.returncode != 0:
+            return []
+
+        matches: list[tuple[int, int, str]] = []
+        for raw in result.stdout.splitlines():
+            parts = raw.strip().split(None, 2)
+            if len(parts) != 3:
+                continue
+            try:
+                pid = int(parts[0])
+                pgid = int(parts[1])
+            except ValueError:
+                continue
+            cmdline = parts[2]
+            if pid == os.getpid() or self.bag_path not in cmdline:
+                continue
+            is_recorder = 'ros2 bag record' in cmdline
+            is_wrapper = 'run_rosbag_record.sh' in cmdline
+            if is_recorder or is_wrapper:
+                matches.append((pid, pgid, cmdline))
+        return matches
+
+    def _signal_bag_recorders(self, sig: signal.Signals):
+        current_pgid = os.getpgrp()
+        targets: set[tuple[str, int]] = set()
+
+        proc = self.processes.get('bag_record')
+        if self._proc_alive(proc):
+            try:
+                pgid = os.getpgid(proc.pid)
+                if pgid != current_pgid:
+                    targets.add(('pgid', pgid))
+                else:
+                    targets.add(('pid', proc.pid))
+            except Exception:
+                targets.add(('pid', proc.pid))
+
+        for pid, pgid, _ in self._find_bag_record_processes():
+            if pgid > 0 and pgid != current_pgid:
+                targets.add(('pgid', pgid))
+            else:
+                targets.add(('pid', pid))
+
+        for kind, value in targets:
+            try:
+                if kind == 'pgid':
+                    os.killpg(value, sig)
+                else:
+                    os.kill(value, sig)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                self.get_logger().warn(f'Failed to signal bag recorder {kind}={value}: {exc}')
+
+    def _wait_for_bag_recorders_exit(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self.is_bag_recording():
+                return True
+            time.sleep(0.1)
+        return not self.is_bag_recording()
+
+    def _terminate_bag_recorders(self) -> bool:
+        if not self.is_bag_recording():
+            self.processes.pop('bag_record', None)
+            return True
+        self._signal_bag_recorders(signal.SIGINT)
+        if not self._wait_for_bag_recorders_exit(4.0):
+            self._signal_bag_recorders(signal.SIGTERM)
+            self._wait_for_bag_recorders_exit(2.0)
+        if self.is_bag_recording():
+            self._signal_bag_recorders(signal.SIGKILL)
+            self._wait_for_bag_recorders_exit(1.0)
+        self.processes.pop('bag_record', None)
+        stopped = not self.is_bag_recording()
+        if not stopped:
+            self.get_logger().error('Failed to stop live bag recorder process')
+        return stopped
+
+    def _stop_all(self):
+        super()._stop_all()
+        self._terminate_bag_recorders()
 
     def _launch_sensor_procs(self, env: dict):
         """Start sensor procs based on current _sensor_mode."""
@@ -768,23 +919,48 @@ class BackendNode(Ros2NodeManager):
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
 
+    def _start_realsense_bag_record(self):
+        import shutil
+
+        if not self._terminate_bag_recorders():
+            raise RuntimeError('Cannot start bag recording while previous recorder is still running')
+
+        if os.path.exists(self.bag_path):
+            shutil.rmtree(self.bag_path)
+
+        script = os.path.join(_TINYNAV_ROOT, 'scripts', 'run_rosbag_record.sh')
+        self.processes['bag_record'] = self._launch_proc(
+            'bag_record',
+            ['bash', script, '--output', self.bag_path],
+        )
+
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
             self._stop_sensor_procs()
         self._stop_all()
         self._start('realsense_bag_record')
 
-    def cmd_bag_stop(self):
-        if self.state == 'realsense_bag_record':
-            bag_path = self.bag_path
-            self._stop_all()
-            if self._sensor_mode == 'looper':
-                threading.Thread(
-                    target=lambda bp: (self._finalize_bag(bp), self._restart_sensor_procs()),
-                    args=(bag_path,), daemon=True,
-                ).start()
-            else:
-                threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
+    def cmd_bag_stop(self) -> bool:
+        if self.state != 'realsense_bag_record' and not self.is_bag_recording():
+            return False
+
+        bag_path = self.bag_path
+        stopped = self._terminate_bag_recorders()
+        self.processes.pop('bag_record', None)
+        if self.state != 'idle':
+            self.state = 'idle'
+            self._pub_state()
+        if not stopped:
+            return False
+
+        if self._sensor_mode == 'looper':
+            threading.Thread(
+                target=lambda bp: (self._finalize_bag(bp), self._restart_sensor_procs()),
+                args=(bag_path,), daemon=True,
+            ).start()
+        else:
+            threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
+        return True
 
 
     def _finalize_bag(self, bag_path: str):

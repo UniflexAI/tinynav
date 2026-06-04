@@ -10,6 +10,7 @@ This document provides an overview of the key scripts in the `scripts/` director
 | `run_navigation.sh`           | Runs the full navigation pipeline using a pre-built map for localization and planning.        |
 | `run_rosbag_examples.sh`      | Runs a demo pipeline: launches core nodes, plays a sample rosbag, and opens RViz for visualization. |
 | `run_rosbag_build_map.sh`     | Builds a map from a specified rosbag file, launching all required nodes and RViz.            |
+| `run_jetson_rosbag_build_map.sh` | Builds a map on Jetson from a copied looper rosbag using the backend-equivalent isolated ROS domain flow. |
 | `run_realsense_sensor.sh`     | Starts the RealSense camera ROS 2 driver on your host system.                                |
 | `run_sensors_preview.sh`      | Starts the RealSense sensor driver and opens `rqt` after a short delay for live preview.     |
 | `run_rosbag_record.sh`        | Records the mapping rosbag topics into the XDG data directory.                               |
@@ -43,6 +44,11 @@ TinyNav supports several key modes to fit different robotics workflows:
    - You can also build a map using the included example data:
       ```bash
       bash scripts/run_rosbag_build_map.sh
+      ```
+   - On Jetson, build from a copied looper bag inside the devcontainer:
+      ```bash
+      bash scripts/run_jetson_rosbag_build_map.sh --dry-run bag_2025_08_27_00_57_16
+      bash scripts/run_jetson_rosbag_build_map.sh bag_2025_08_27_00_57_16
       ```
     <picture>
       <img alt="prebuild-map" src="/docs/map.png" width="50%" height="50%">
