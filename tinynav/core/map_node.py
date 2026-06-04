@@ -851,7 +851,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.75 and diff_position_norm_z < 2.0:
+            if diff_position_norm_xy < 0.3 and diff_position_norm_z < 2.0:
                 if self._leg_initial_length is not None:
                     arrived_msg = String()
                     arrived_msg.data = json.dumps({
