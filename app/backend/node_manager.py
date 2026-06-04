@@ -99,7 +99,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_target_pose: dict | None = None
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
-        self.create_subscription(Odometry, '/slam/odometry', self._on_slam_odom, 10)
+        self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
