@@ -424,6 +424,7 @@ class MapNode(Node):
 
         self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
+        self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -665,7 +666,7 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
-    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None, current_odom_pose: np.ndarray | None = None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
         query_embedding = self.get_embeddings(keyframe)
@@ -715,6 +716,42 @@ class MapNode(Node):
                 return False, np.eye(4), -np.inf
         else:
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
+            return False, np.eye(4), -np.inf
+
+        pnp_candidates = []
+        for idx_in_map, similarity in idx_and_similarity_array:
+            timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
+            reference_keyframe_pose = self.map_poses[timestamp_in_map]
+
+            # Odom position prior filter: skip candidates too far from predicted position
+            if self.T_from_map_to_odom is not None and current_odom_pose is not None:
+                current_pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ current_odom_pose
+                xy_dist = np.linalg.norm(reference_keyframe_pose[:3, 3][:2] - current_pose_in_map[:2, 3])
+                if xy_dist > self.relocalization_odom_prior_threshold:
+                    print(f"candidate too far from odom prediction: {xy_dist:.2f}m > {self.relocalization_odom_prior_threshold}m, skipping")
+                    continue
+
+            reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
+            reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
+            if len(matches) < 50:
+                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+                continue
+
+            point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
+            point_3d_in_world_list = point_3d_in_world[inliers]
+            point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
+            point_count = len(point_2d_in_keyframe_list)
+            if point_count <= 80:
+                print(f"not enough landmarks to relocalize, {point_count}")
+                continue
+            pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        if success:
+            print(f"relocalization pose : {best_pose_in_camera}")
+            return True, best_pose_in_camera, pose_cov_weight
+
+        print("no valid PnP relocalization candidate found")
         return False, np.eye(4), -np.inf
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
@@ -749,7 +786,9 @@ class MapNode(Node):
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
-        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
+        timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
+        current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
+        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K, current_odom_pose=current_odom_pose)
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
