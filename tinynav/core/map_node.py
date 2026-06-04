@@ -190,6 +190,7 @@ class MapNode(Node):
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path
+        self.tinynav_map_path = tinynav_map_path
 
         self.bridge = CvBridge()
 
@@ -251,6 +252,7 @@ class MapNode(Node):
         self.pois = {}
         self.poi_index = -1
         self._nav_completed = False
+        self._map_pois_loaded = False
         self._leg_initial_length: float | None = None
         self._leg_start_time: float | None = None
         self._speed_estimate: float | None = None
@@ -337,6 +339,7 @@ class MapNode(Node):
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
+            self._try_load_map_pois()
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
@@ -560,6 +563,27 @@ class MapNode(Node):
             pass
 
 
+    def _try_load_map_pois(self):
+        if self._map_pois_loaded or self.pois:
+            return
+        self._map_pois_loaded = True
+        pois_path = os.path.join(self.tinynav_map_path, "pois.json")
+        if not os.path.exists(pois_path):
+            return
+        try:
+            with open(pois_path) as f:
+                data = json.load(f)
+            pois_dict = {}
+            keys = sorted([int(key) for key in data.keys()])
+            for index, key in enumerate(keys):
+                pois_dict[index] = np.array(data[str(key)]["position"])
+            self.pois = pois_dict
+            self.poi_index = min(0, len(self.pois) - 1)
+            self._nav_completed = False
+            self.get_logger().info(f"Loaded {len(self.pois)} POIs from map: {pois_path}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to load POIs from {pois_path}: {e}")
+
     def compute_transform_from_map_to_odom(self):
         """
         Solve the optmization problem.
@@ -684,7 +708,7 @@ class MapNode(Node):
                     start_point = pose_in_map_position[:3]
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
-                        accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
+                        accumulated_distance += np.linalg.norm((paths_in_map[i] - start_point)[:2])
                         if accumulated_distance > max_speed * 5:
                             target_position = paths_in_map[i]
                             break
