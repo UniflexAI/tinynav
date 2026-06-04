@@ -681,7 +681,7 @@ class MapNode(Node):
                     start_point = pose_in_map_position[:3]
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
-                        accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
+                        accumulated_distance += np.linalg.norm(paths_in_map[i][:2] - start_point[:2])
                         if accumulated_distance > max_speed * 5:
                             target_position = paths_in_map[i]
                             break
