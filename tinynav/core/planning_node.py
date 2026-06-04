@@ -386,7 +386,7 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 30)
+        self.grid_shape = (100, 100, 40)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
@@ -668,7 +668,7 @@ class PlanningNode(Node):
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.99
+            self.occupancy_grid *= 0.993
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
@@ -691,7 +691,7 @@ class PlanningNode(Node):
         with Timer(name='target refine', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.safe_target_pose = self.choose_safe_target_pose(self.target_pose, ESDF_map)
             if self.target_pose is not None and self.safe_target_pose is None:
-                self.get_logger().warn("target_pose is inside/adjacent obstacle and no safe nearby target found; stop")
+                self.safe_target_pose = np.asarray(self.target_pose) 
             elif self.target_pose is not None and self.safe_target_pose is not None:
                 if np.linalg.norm(self.safe_target_pose - self.target_pose) > 0.07:
                     self.get_logger().warn("target_pose adjusted to nearby safe point: ({:.3f}, {:.3f}, {:.3f})".format(*self.safe_target_pose))
@@ -712,7 +712,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, 0.2)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
@@ -747,10 +747,6 @@ class PlanningNode(Node):
             path = Path()
             path.header = depth_msg.header
             path.header.frame_id = "world"
-
-            if self.target_pose is not None and self.safe_target_pose is None:
-                self.get_logger().warn('target_pose unsafe and no safe alternative; stopping path.')
-                return
 
             if self.target_pose is None:
                 return

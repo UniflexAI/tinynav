@@ -323,11 +323,17 @@ def main(
             poi_id = poi_id_counter
             poi_id_counter += 1
             poi_name = f"POI_{poi_id}"
+            if len(poi_points) > 0:
+                previous_poi_id = max(poi_points.keys())
+                previous_position = np.asarray(poi_points[previous_poi_id]["position"], dtype=float)
+                poi_position = previous_position + np.array([0.3, 0.0, 0.0])
+            else:
+                poi_position = np.random.randn(3)
             # Add POI to list
             poi_points[poi_id] = {
                 'id': poi_id,
                 'name': poi_name,
-                'position': np.random.randn(3),
+                'position': poi_position,
             }
             sphere_handle = server.scene.add_icosphere(
                 f"/{poi_name}",

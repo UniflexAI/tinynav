@@ -73,6 +73,110 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
     transformed_points = homogeneous_points @ T.T
     return transformed_points[:, :3]
 
+
+
+def _interpolate_polyline(nodes: np.ndarray, cumulative: np.ndarray, distance: float) -> np.ndarray:
+    distance = float(np.clip(distance, 0.0, cumulative[-1]))
+    idx = int(np.searchsorted(cumulative, distance, side="right") - 1)
+    idx = min(max(idx, 0), len(nodes) - 2)
+    seg_len = cumulative[idx + 1] - cumulative[idx]
+    if seg_len < 1e-6:
+        return nodes[idx].copy()
+    ratio = (distance - cumulative[idx]) / seg_len
+    return nodes[idx] + ratio * (nodes[idx + 1] - nodes[idx])
+
+
+def _drop_reversal_cusps(nodes: np.ndarray, reversal_angle_threshold_rad: float) -> np.ndarray:
+    """Remove obvious backtrack-then-forward cusps from the target-selection path.
+
+    These cusps can appear in the global SDF path as a short reverse step followed by
+    a hard turn. They are bad local targets: stopping before them makes the robot aim
+    at the backtrack, while following them can induce a sharp correction. For target
+    pose selection we skip over them; the published global plan is left unchanged for
+    debugging.
+    """
+    pruned = np.asarray(nodes, dtype=np.float64).copy()
+    changed = True
+    while changed and len(pruned) > 2:
+        changed = False
+        keep = np.ones(len(pruned), dtype=bool)
+        for i in range(1, len(pruned) - 1):
+            v_prev = pruned[i] - pruned[i - 1]
+            v_next = pruned[i + 1] - pruned[i]
+            prev_norm = float(np.linalg.norm(v_prev))
+            next_norm = float(np.linalg.norm(v_next))
+            if prev_norm < 1e-6 or next_norm < 1e-6:
+                keep[i] = False
+                changed = True
+                continue
+            cos_angle = float(np.clip(np.dot(v_prev, v_next) / (prev_norm * next_norm), -1.0, 1.0))
+            if float(np.arccos(cos_angle)) >= reversal_angle_threshold_rad:
+                keep[i] = False
+                changed = True
+        pruned = pruned[keep]
+    return pruned
+
+
+def select_target_position_on_path(
+    path_points: np.ndarray,
+    current_position: np.ndarray,
+    lookahead_distance: float,
+    turn_angle_threshold_rad: float = np.deg2rad(70.0),
+    reversal_angle_threshold_rad: float = np.deg2rad(120.0),
+    turn_stop_margin: float = 0.15,
+    min_turn_distance: float = 0.3,
+    turn_window_distance: float = 0.4,
+) -> np.ndarray:
+    """Pick a local-planner target on the global path without looking past sharp turns.
+
+    The local planner only receives a point target, not the whole global plan. If the
+    target is placed beyond a stair landing / corridor corner, it can cut the corner
+    toward unseen rails or walls. This helper caps the target before the first strong
+    direction change, while keeping the old distance-based lookahead on straight
+    segments. Turn detection uses a short polyline window so voxel-level zigzags do
+    not look like real corners.
+    """
+    pts = np.asarray(path_points, dtype=np.float64)
+    curr = np.asarray(current_position, dtype=np.float64)
+    if len(pts) == 0:
+        return curr
+    if len(pts) == 1:
+        return pts[0]
+
+    nodes = _drop_reversal_cusps(
+        np.vstack([curr, pts]),
+        reversal_angle_threshold_rad=reversal_angle_threshold_rad,
+    )
+    seg_lengths = np.linalg.norm(np.diff(nodes[:, :2], axis=0), axis=1)
+    keep = np.concatenate([[True], seg_lengths > 1e-6])
+    nodes = nodes[keep]
+    if len(nodes) == 1:
+        return nodes[0]
+    seg_lengths = np.linalg.norm(np.diff(nodes[:, :2], axis=0), axis=1)
+    cumulative = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+    total_length = float(cumulative[-1])
+    target_distance = min(float(lookahead_distance), total_length)
+
+    for i in range(1, len(nodes) - 1):
+        d = float(cumulative[i])
+        if d < min_turn_distance or d >= target_distance:
+            continue
+        prev_point = _interpolate_polyline(nodes, cumulative, max(0.0, d - turn_window_distance))
+        next_point = _interpolate_polyline(nodes, cumulative, min(total_length, d + turn_window_distance))
+        v_prev = nodes[i] - prev_point
+        v_next = next_point - nodes[i]
+        prev_norm = float(np.linalg.norm(v_prev))
+        next_norm = float(np.linalg.norm(v_next))
+        if prev_norm < turn_window_distance * 0.5 or next_norm < turn_window_distance * 0.5:
+            continue
+        cos_angle = float(np.clip(np.dot(v_prev, v_next) / (prev_norm * next_norm), -1.0, 1.0))
+        angle = float(np.arccos(cos_angle))
+        if angle >= turn_angle_threshold_rad:
+            stop_distance = max(0.0, d - turn_stop_margin)
+            return _interpolate_polyline(nodes, cumulative, stop_distance)
+
+    return _interpolate_polyline(nodes, cumulative, target_distance)
+
 def heuristic(start, goal, resolution):
     vec_start = np.array(start)
     vec_goal = np.array(goal)
@@ -199,7 +303,7 @@ def shortcut_prune_path(
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    sdf_bins = [0.3, 0.5, 1.0, 2.0, 5.0, 10.0]
 
     def get_queue_index(sdf_value: float) -> int:
         for idx, threshold in enumerate(sdf_bins):
@@ -309,6 +413,7 @@ class MapNode(Node):
 
         self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
+        self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -523,7 +628,7 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
-    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None, timestamp_ns: int | None = None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
         query_embedding = self.get_embeddings(keyframe)
@@ -538,6 +643,17 @@ class MapNode(Node):
             for idx_in_map, similarity in idx_and_similarity_array:
                 timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
                 reference_keyframe_pose = self.map_poses[timestamp_in_map]
+
+                # Odom position prior filter: skip candidates too far from predicted position
+                if self.T_from_map_to_odom is not None and timestamp_ns is not None:
+                    current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
+                    if current_odom_pose is not None:
+                        current_pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ current_odom_pose
+                        xy_dist = np.linalg.norm(reference_keyframe_pose[:3, 3][:2] - current_pose_in_map[:2, 3])
+                        if xy_dist > self.relocalization_odom_prior_threshold:
+                            print(f"candidate too far from odom prediction: {xy_dist:.2f}m > {self.relocalization_odom_prior_threshold}m, skipping")
+                            continue
+
                 reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
                 reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
                 if len(matches) >= 50:
@@ -706,7 +822,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+            if diff_position_norm_xy < 0.75 and diff_position_norm_z < 2.0:
                 if self._leg_initial_length is not None:
                     arrived_msg = String()
                     arrived_msg.data = json.dumps({
@@ -774,18 +890,17 @@ class MapNode(Node):
             # use the max_speed to publish the position the robot should be after 5 seconds
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
-                if len(paths_in_map) > 1:
-                    accumulated_distance = 0.0
-                    start_point = pose_in_map_position[:3]
-                    target_position = paths_in_map[-1]
-                    for i in range(len(paths_in_map) - 1):
-                        accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                        if accumulated_distance > max_speed * 5:
-                            target_position = paths_in_map[i]
-                            break
-                        start_point = paths_in_map[i]
-                else:
-                    target_position = paths_in_map[0]
+                lookahead_distance = max_speed * 5
+                target_position = select_target_position_on_path(
+                    paths_in_map,
+                    pose_in_map_position[:3],
+                    lookahead_distance=lookahead_distance,
+                    turn_angle_threshold_rad=np.deg2rad(70.0),
+                    reversal_angle_threshold_rad=np.deg2rad(100.0),
+                    turn_stop_margin=0.15,
+                    min_turn_distance=0.3,
+                    turn_window_distance=0.4,
+                )
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 pose_in_origin_odom = self.odom[timestamp]
                 T = pose_in_origin_odom @ se3_inv(pose_in_map)
