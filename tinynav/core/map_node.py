@@ -930,20 +930,6 @@ class MapNode(Node):
                     min_turn_distance=0.3,
                     turn_window_distance=0.4,
                 )
-
-                # if len(paths_in_map) > 1:
-                #     accumulated_distance = 0.0
-                #     start_point = pose_in_map_position[:3]
-                #     target_position = paths_in_map[-1]
-                #     for i in range(len(paths_in_map) - 1):
-                #         accumulated_distance += np.linalg.norm((paths_in_map[i] - start_point)[:2])
-                #         if accumulated_distance > max_speed * 5:
-                #             target_position = paths_in_map[i]
-                #             break
-                #         start_point = paths_in_map[i]
-                # else:
-                #     target_position = paths_in_map[0]
-
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
                 target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
