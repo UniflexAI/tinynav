@@ -162,7 +162,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.4
-    dilation_cells: int = 1
+    dilation_cells: int = 0
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -712,7 +712,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, 0.1)
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, 0.3)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 

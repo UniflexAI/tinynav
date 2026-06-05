@@ -655,7 +655,7 @@ class MapNode(Node):
                 if self.T_from_map_to_odom is not None and timestamp_ns is not None:
                     current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
                     if current_odom_pose is not None:
-                        current_pose_in_map = se3_inv(self.T_from_map_to_odom) @ current_odom_pose
+                        current_pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ current_odom_pose
                         xy_dist = np.linalg.norm(reference_keyframe_pose[:3, 3][:2] - current_pose_in_map[:2, 3])
                         if xy_dist > self.relocalization_odom_prior_threshold:
                             print(f"candidate too far from odom prediction: {xy_dist:.2f}m > {self.relocalization_odom_prior_threshold}m, skipping")
@@ -815,7 +815,7 @@ class MapNode(Node):
                 self.nav_done_pub.publish(Bool(data=True))
             return
 
-        pose_in_map = se3_inv(self.T_from_map_to_odom) @ self._latest_continuous_odom
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self._latest_continuous_odom
         pose_in_map_position = pose_in_map[:3, 3]
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
@@ -954,7 +954,7 @@ class MapNode(Node):
 
         # Transform target from map frame to odom frame
         target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
-        T = self._latest_continuous_odom @ se3_inv(pose_in_map)
+        T = self._latest_continuous_odom @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
         dummy_pose = np.eye(4)
         dummy_pose[:3, 3] = target_position_in_odom
