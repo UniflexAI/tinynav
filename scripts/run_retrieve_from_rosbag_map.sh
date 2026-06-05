@@ -16,7 +16,7 @@ DEBUG_DIR="/tinynav/tinynav_temp/retrieval_from_bag_debug"
 mkdir -p "$(dirname "$OUT_JSONL")" "$DEBUG_DIR"
 
 cd /tinynav
-python3 scripts/retrieve_from_rosbag_map.py \
+python3 tool/retrieve_from_rosbag_map.py \
   --bag_path "$BAG_PATH" \
   --map_path "$MAP_PATH" \
   --topic /camera/camera/infra1/image_rect_raw \

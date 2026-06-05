@@ -18,13 +18,18 @@ from tinynav.core.build_map_node import TinyNavDB, find_loop
 from tinynav.core.models_trt import Dinov2TRT, LightGlueTRT, SuperPointTRT
 
 
-def build_map_embeddings(map_path: str) -> tuple[list[int], np.ndarray, TinyNavDB]:
+def load_map_timestamps_and_db(map_path: str) -> tuple[list[int], TinyNavDB]:
     db = TinyNavDB(map_path, is_scratch=False)
     poses_path = os.path.join(map_path, "poses.npy")
     if not os.path.exists(poses_path):
         raise FileNotFoundError(f"Missing map poses file: {poses_path}")
     poses = np.load(poses_path, allow_pickle=True).item()
     timestamps = sorted(int(t) for t in poses.keys())
+    return timestamps, db
+
+
+def build_map_embeddings(map_path: str) -> tuple[list[int], np.ndarray, TinyNavDB]:
+    timestamps, db = load_map_timestamps_and_db(map_path)
     embs = []
     for ts in timestamps:
         e = db.get_embedding(ts).astype(np.float32)
@@ -35,6 +40,46 @@ def build_map_embeddings(map_path: str) -> tuple[list[int], np.ndarray, TinyNavD
     if not embs:
         raise RuntimeError("No map embeddings found.")
     return timestamps, np.stack(embs, axis=0), db
+
+
+def build_reembedded_map_embeddings(
+    map_path: str,
+    embed_model: Dinov2TRT,
+    cache_path: str = "",
+) -> tuple[list[int], np.ndarray, TinyNavDB]:
+    timestamps, db = load_map_timestamps_and_db(map_path)
+    if cache_path and os.path.exists(cache_path):
+        cached = np.load(cache_path)
+        cached_ts = [int(x) for x in cached["timestamps_ns"].tolist()]
+        if cached_ts == timestamps:
+            embs = cached["embeddings"].astype(np.float32)
+            print(f"loaded reembedded map cache: {cache_path} rows={len(cached_ts)}")
+            return cached_ts, embs, db
+        print(f"ignoring stale map embedding cache: {cache_path}")
+
+    valid_ts = []
+    embs = []
+    for i, ts in enumerate(timestamps):
+        _, _, _, _, infra1_loader = db.get_depth_embedding_features_images(ts)
+        image = infra1_loader() if infra1_loader is not None else None
+        if image is None:
+            continue
+        e = asyncio.run(embed_model.infer(image)).astype(np.float32)
+        n = np.linalg.norm(e)
+        if n <= 1e-8:
+            continue
+        valid_ts.append(int(ts))
+        embs.append(e / n)
+        if (i + 1) % 100 == 0:
+            print(f"reembedded_map={i + 1}/{len(timestamps)} valid={len(valid_ts)}")
+    if not embs:
+        raise RuntimeError("No map images could be embedded.")
+    embs = np.stack(embs, axis=0)
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+        np.savez_compressed(cache_path, timestamps_ns=np.asarray(valid_ts, dtype=np.int64), embeddings=embs)
+        print(f"saved reembedded map cache: {cache_path} rows={len(valid_ts)}")
+    return valid_ts, embs, db
 
 
 def match_keypoints(lightglue: LightGlueTRT, feats0: dict, feats1: dict, image_shape: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -139,14 +184,26 @@ def main():
     parser.add_argument("--out_jsonl", default="tinynav_temp/retrieval_from_bag.jsonl")
     parser.add_argument("--save_debug_dir", default="", help="optional debug image dir")
     parser.add_argument("--review_root", default="tinynav_temp/retrieval_from_bag_review", help="output root for review session_*")
+    parser.add_argument("--dino_engine_path", default="", help="optional DINO TensorRT engine path")
+    parser.add_argument("--reembed_map", action="store_true", default=False, help="recompute map embeddings with the selected DINO engine")
+    parser.add_argument("--map_embedding_cache", default="", help="optional .npz cache for reembedded map embeddings")
     parser.add_argument("--pnp_min_matches", type=int, default=50)
     parser.add_argument("--pnp_min_inliers", type=int, default=50)
     args = parser.parse_args()
 
-    map_ts, map_embs, map_db = build_map_embeddings(args.map_path)
+    embed_model = Dinov2TRT(engine_path=args.dino_engine_path) if args.dino_engine_path else Dinov2TRT()
+    if args.reembed_map:
+        map_ts, map_embs, map_db = build_reembedded_map_embeddings(
+            args.map_path,
+            embed_model=embed_model,
+            cache_path=args.map_embedding_cache,
+        )
+    else:
+        if args.dino_engine_path:
+            print("[warn] --dino_engine_path is set without --reembed_map; query/map embeddings may be inconsistent.")
+        map_ts, map_embs, map_db = build_map_embeddings(args.map_path)
     map_poses = np.load(os.path.join(args.map_path, "poses.npy"), allow_pickle=True).item()
     map_K = np.load(os.path.join(args.map_path, "intrinsics.npy"))
-    embed_model = Dinov2TRT()
     superpoint = SuperPointTRT()
     lightglue = LightGlueTRT()
 
@@ -173,7 +230,6 @@ def main():
             if qn <= 1e-8:
                 continue
             q = q / qn
-            query_features = asyncio.run(superpoint.infer(infra1))
             image_shape = np.array([infra1.shape[1], infra1.shape[0]], dtype=np.int64)
 
             hits = find_loop(q, map_embs, args.threshold, args.topk)
@@ -183,6 +239,7 @@ def main():
             inlier_count = 0
             inlier_ratio = 0.0
             pnp_match_path = ""
+            query_features = None
             for idx, sim in hits:
                 map_timestamp = int(map_ts[idx])
                 retrieved.append(
@@ -202,6 +259,8 @@ def main():
                 ref_img = infra1_loader() if infra1_loader is not None else None
                 if ref_features is None:
                     continue
+                if query_features is None:
+                    query_features = asyncio.run(superpoint.infer(infra1))
                 ref_matched_kpts, query_matched_kpts, matches = match_keypoints(lightglue, ref_features, query_features, image_shape)
                 if len(matches) < args.pnp_min_matches:
                     continue

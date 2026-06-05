@@ -21,22 +21,40 @@ HTML = """
     img { max-width: 320px; border: 1px solid #ccc; }
     .meta { font-family: monospace; font-size: 12px; white-space: pre-wrap; }
     .btns button { margin-right: 8px; }
+    .playbar { margin-bottom: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .playbar label { font-size: 14px; }
+    .playbar input[type=\"number\"] { width: 80px; }
+    .playbar select { min-width: 160px; }
+    .navlink { margin-left: 8px; }
+    .status { font-family: monospace; color: #334155; }
     .retrieval-item { margin-bottom: 14px; padding: 10px; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; }
   </style>
 </head>
 <body>
   <h2>Retrieval Label Review</h2>
   <p>Sample {{ idx + 1 }} / {{ total }} | {{ sample_id }}</p>
-  <form method=\"post\" action=\"{{ url_for('review', idx=idx) }}\" class=\"card\">
-    <div class=\"btns\">
-      <button type=\"submit\" name=\"review_label\" value=\"true_match\">true_match</button>
-      <button type=\"submit\" name=\"review_label\" value=\"false_match\">false_match</button>
-      <button type=\"submit\" name=\"review_label\" value=\"uncertain\">uncertain</button>
-      {% if idx > 0 %}<a style=\"margin-left: 12px;\" href=\"{{ url_for('index', idx=idx-1) }}\">Prev</a>{% endif %}
-      {% if idx + 1 < total %}<a style=\"margin-left: 12px;\" href=\"{{ url_for('index', idx=idx+1) }}\">Next</a>{% endif %}
-    </div>
-    <p><input style=\"width: 80%;\" type=\"text\" name=\"review_note\" placeholder=\"optional note\" /></p>
-  </form>
+  <div class=\"card playbar\">
+    <button id=\"playToggle\" type=\"button\">Play</button>
+    <label>
+      mode
+      <select id=\"playMode\">
+        <option value=\"all\">all samples ({{ summary_counts.all }})</option>
+        <option value=\"retrieved\">with retrieved candidates ({{ summary_counts.retrieved }})</option>
+        <option value=\"pnp\">PnP success ({{ summary_counts.pnp }})</option>
+      </select>
+    </label>
+    <label>
+      interval ms
+      <input id=\"playInterval\" type=\"number\" min=\"100\" step=\"100\" value=\"900\" />
+    </label>
+    <label>
+      <input id=\"playLoop\" type=\"checkbox\" />
+      loop
+    </label>
+    <span class=\"status\" id=\"playStatus\">paused</span>
+    {% if idx > 0 %}<a class=\"navlink\" href=\"{{ url_for('index', idx=idx-1) }}\">Prev</a>{% endif %}
+    {% if idx + 1 < total %}<a class=\"navlink\" href=\"{{ url_for('index', idx=idx+1) }}\">Next</a>{% endif %}
+  </div>
   <div class=\"row\">
     <div class=\"card\">
       <h3>Query</h3>
@@ -69,6 +87,115 @@ HTML = """
     <h3>Metadata</h3>
     <div class=\"meta\">{{ meta }}</div>
   </div>
+  <script>
+    const currentIdx = {{ idx }};
+    const totalSamples = {{ total }};
+    const nextByMode = {{ next_by_mode|tojson }};
+    const nextLoopByMode = {{ next_loop_by_mode|tojson }};
+    const playKey = \"retrievalReviewPlaying\";
+    const modeKey = \"retrievalReviewPlayMode\";
+    const intervalKey = \"retrievalReviewPlayIntervalMs\";
+    const loopKey = \"retrievalReviewPlayLoop\";
+    const playToggle = document.getElementById(\"playToggle\");
+    const playMode = document.getElementById(\"playMode\");
+    const playInterval = document.getElementById(\"playInterval\");
+    const playLoop = document.getElementById(\"playLoop\");
+    const playStatus = document.getElementById(\"playStatus\");
+    let playTimer = null;
+
+    function sampleUrl(idx) {
+      return \"/sample/\" + idx;
+    }
+
+    function isPlaying() {
+      return localStorage.getItem(playKey) === \"1\";
+    }
+
+    function selectedMode() {
+      return playMode.value || \"all\";
+    }
+
+    function selectedIntervalMs() {
+      const parsed = Number.parseInt(playInterval.value, 10);
+      return Number.isFinite(parsed) ? Math.max(parsed, 100) : 900;
+    }
+
+    function selectedLoop() {
+      return playLoop.checked;
+    }
+
+    function nextIdx() {
+      const mode = selectedMode();
+      return selectedLoop() ? nextLoopByMode[mode] : nextByMode[mode];
+    }
+
+    function updateControls() {
+      playToggle.textContent = isPlaying() ? \"Pause\" : \"Play\";
+      const target = nextIdx();
+      if (isPlaying()) {
+        playStatus.textContent = target === null
+          ? \"playing: end of \" + selectedMode()
+          : \"playing: next sample \" + (target + 1) + \" / \" + totalSamples;
+      } else {
+        playStatus.textContent = \"paused\";
+      }
+    }
+
+    function stopPlayback() {
+      localStorage.setItem(playKey, \"0\");
+      if (playTimer !== null) {
+        window.clearTimeout(playTimer);
+        playTimer = null;
+      }
+      updateControls();
+    }
+
+    function schedulePlayback() {
+      if (playTimer !== null) {
+        window.clearTimeout(playTimer);
+        playTimer = null;
+      }
+      if (!isPlaying()) {
+        updateControls();
+        return;
+      }
+      const target = nextIdx();
+      updateControls();
+      if (target === null || target === currentIdx) {
+        stopPlayback();
+        return;
+      }
+      playTimer = window.setTimeout(() => {
+        window.location.href = sampleUrl(target);
+      }, selectedIntervalMs());
+    }
+
+    playToggle.addEventListener(\"click\", () => {
+      localStorage.setItem(playKey, isPlaying() ? \"0\" : \"1\");
+      schedulePlayback();
+    });
+    playMode.addEventListener(\"change\", () => {
+      localStorage.setItem(modeKey, selectedMode());
+      schedulePlayback();
+    });
+    playInterval.addEventListener(\"change\", () => {
+      localStorage.setItem(intervalKey, String(selectedIntervalMs()));
+      playInterval.value = String(selectedIntervalMs());
+      schedulePlayback();
+    });
+    playLoop.addEventListener(\"change\", () => {
+      localStorage.setItem(loopKey, selectedLoop() ? \"1\" : \"0\");
+      schedulePlayback();
+    });
+    document.querySelectorAll(\"form\").forEach((form) => {
+      form.addEventListener(\"submit\", stopPlayback);
+    });
+
+    playMode.value = localStorage.getItem(modeKey) || \"retrieved\";
+    playInterval.value = localStorage.getItem(intervalKey) || \"900\";
+    playLoop.checked = localStorage.getItem(loopKey) === \"1\";
+    schedulePlayback();
+  </script>
 </body>
 </html>
 """
@@ -107,6 +234,46 @@ def load_index(session_dir: str):
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def load_sample_summaries(rows):
+    summaries = []
+    for row in rows:
+        sample_json = row["sample_json"]
+        with open(sample_json, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        sample_dir = os.path.dirname(sample_json)
+        retrieved_count = max(
+            len(meta.get("retrieved_timestamps_ns", [])),
+            len(glob(os.path.join(sample_dir, "retrieved_*.png"))),
+        )
+        summaries.append({
+            "has_retrieval": retrieved_count > 0,
+            "pnp_success": bool(meta.get("pnp_success", False)),
+            "inlier_count": int(meta.get("inlier_count", 0)),
+        })
+    return summaries
+
+
+def find_next_sample_idx(summaries, idx: int, mode: str, loop: bool):
+    def matches(candidate: int) -> bool:
+        if mode == "retrieved":
+            return summaries[candidate]["has_retrieval"]
+        if mode == "pnp":
+            return summaries[candidate]["pnp_success"]
+        return True
+
+    count = len(summaries)
+    if count <= 1:
+        return None
+    steps = range(1, count) if loop else range(1, count - idx)
+    for step in steps:
+        candidate = idx + step
+        if candidate >= count:
+            candidate %= count
+        if matches(candidate):
+            return candidate
+    return None
 
 
 def resolve_session_dir(path: str) -> str:
@@ -148,6 +315,12 @@ def make_app(session_dir: str):
     rows = load_index(session_dir)
     if not rows:
         raise RuntimeError(f"No samples found in {session_dir}")
+    sample_summaries = load_sample_summaries(rows)
+    summary_counts = {
+        "all": len(sample_summaries),
+        "retrieved": sum(1 for item in sample_summaries if item["has_retrieval"]),
+        "pnp": sum(1 for item in sample_summaries if item["pnp_success"]),
+    }
     app = Flask(__name__)
 
     @app.route("/media/<path:relpath>")
@@ -213,6 +386,17 @@ def make_app(session_dir: str):
             inlier_ratio=float(meta.get("inlier_ratio", 0.0)),
             retrieved_paths=retrieved_paths,
             retrieved_items=retrieved_items,
+            summary_counts=summary_counts,
+            next_by_mode={
+                "all": find_next_sample_idx(sample_summaries, idx, "all", loop=False),
+                "retrieved": find_next_sample_idx(sample_summaries, idx, "retrieved", loop=False),
+                "pnp": find_next_sample_idx(sample_summaries, idx, "pnp", loop=False),
+            },
+            next_loop_by_mode={
+                "all": find_next_sample_idx(sample_summaries, idx, "all", loop=True),
+                "retrieved": find_next_sample_idx(sample_summaries, idx, "retrieved", loop=True),
+                "pnp": find_next_sample_idx(sample_summaries, idx, "pnp", loop=True),
+            },
             meta=json.dumps(meta, ensure_ascii=True, indent=2),
         )
 

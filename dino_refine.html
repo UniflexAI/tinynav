@@ -171,7 +171,7 @@
         <article class="panel">
           <h3>Training and Evaluation Tooling</h3>
           <ul>
-            <li><code>scripts/train_dinov2_lora.py</code></li>
+            <li><code>tool/train_dinov2_lora.py</code></li>
             <li><code>scripts/eval_dinov2_retrieval.py</code></li>
             <li><code>scripts/merge_dinov2_lora.py</code></li>
             <li><code>scripts/export_dinov2_lora_onnx.py</code></li>
@@ -182,7 +182,7 @@
           <ul>
             <li>Debug switches in <code>tinynav/core/map_node.py</code></li>
             <li>Retrieval sample capture (query + retrieved + metadata)</li>
-            <li>Manual review UI: <code>scripts/review_retrieval_labels.py</code></li>
+            <li>Manual review UI: <code>tool/review_retrieval_labels.py</code></li>
           </ul>
         </article>
       </div>
@@ -241,7 +241,7 @@ retrieval_debug/
       </ol>
       <p><b>Commands:</b></p>
       <ul>
-        <li><code>python3 scripts/train_dinov2_lora.py --config &lt;config.yaml&gt;</code></li>
+        <li><code>python3 tool/train_dinov2_lora.py --config &lt;config.yaml&gt;</code></li>
         <li><code>python3 scripts/merge_dinov2_lora.py --base_model facebook/dinov2-base --lora_path &lt;lora_ckpt&gt; --out_dir &lt;merged_model&gt;</code></li>
         <li><code>python3 scripts/export_dinov2_lora_onnx.py --model_path &lt;merged_model&gt; --out_onnx /tinynav/tinynav/models/dinov2_base_224x224_fp16.onnx</code></li>
         <li><code>cd /tinynav/tinynav/models &amp;&amp; make dinov2</code></li>

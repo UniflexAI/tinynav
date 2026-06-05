@@ -25,11 +25,17 @@ def set_seed(seed: int):
 
 def load_pairs(path: str):
     rows = []
+    base_dir = os.path.dirname(os.path.abspath(path))
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                rows.append(json.loads(line))
+                row = json.loads(line)
+                for key in ("query_image", "retrieved_image"):
+                    value = row.get(key, "")
+                    if value and not os.path.isabs(value):
+                        row[key] = os.path.join(base_dir, value)
+                rows.append(row)
     return rows
 
 
@@ -65,6 +71,9 @@ def preprocess(path: str, h: int, w: int):
     img = Image.open(path).convert("RGB").resize((w, h))
     arr = np.array(img).astype(np.float32) / 255.0
     arr = np.transpose(arr, (2, 0, 1))
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+    std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+    arr = (arr - mean) / std
     return torch.from_numpy(arr)
 
 
@@ -185,8 +194,8 @@ def main():
             r = torch.stack(r_batch).to(device)
             y = torch.tensor(y_batch, dtype=torch.float32, device=device)
 
-            q_out = model(pixel_values=q).last_hidden_state[:, 0]
-            r_out = model(pixel_values=r).last_hidden_state[:, 0]
+            pair_out = model(pixel_values=torch.cat([q, r], dim=0)).last_hidden_state[:, 0]
+            q_out, r_out = torch.chunk(pair_out, 2, dim=0)
             q_out = F.normalize(q_out, dim=1)
             r_out = F.normalize(r_out, dim=1)
             sim = torch.sum(q_out * r_out, dim=1)
