@@ -61,7 +61,7 @@ B2_CONFIG = RobotConfig(
     name='b2', shape='square',
     length=0.6, width=0.3,
     camera_x=0.3, camera_y=0.0,
-    control_x=-0.3, control_y=0.0,
+    control_x=-0.0, control_y=0.0,
     safety_radius=0.3,
 )
 
@@ -161,8 +161,8 @@ class ObstacleConfig:
     robot_z_bottom: float = -0.7
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.5
-    dilation_cells: int = 0
+    min_wall_span_m: float = 0.4
+    dilation_cells: int = 1
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -386,7 +386,7 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 40)
+        self.grid_shape = (80, 80, 40)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
@@ -668,7 +668,7 @@ class PlanningNode(Node):
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.993
+            self.occupancy_grid *= 0.995
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
@@ -712,7 +712,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, 0.2)
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, 0.1)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
