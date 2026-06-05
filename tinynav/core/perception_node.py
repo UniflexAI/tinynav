@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 import cv2
@@ -144,12 +145,41 @@ class PerceptionNode(Node):
 
         self.camera_info_msg = None
 
-        # Noise model (continuous-time)
-        # for Realsense D435i
-        accel_noise_density = 0.50     # [m/s^2/√Hz]
-        gyro_noise_density = 0.50 # [rad/s/√Hz]
-        bias_acc_rw_sigma = 0.001
-        bias_gyro_rw_sigma = 0.0001
+        # Noise model (continuous-time). Defaults preserve the previous D435i tuning.
+        accel_noise_density = self.declare_parameter("imu.accel_noise_density", 0.50).value
+        gyro_noise_density = self.declare_parameter("imu.gyro_noise_density", 0.50).value
+        bias_acc_rw_sigma = self.declare_parameter("imu.bias_acc_random_walk", 0.001).value
+        bias_gyro_rw_sigma = self.declare_parameter("imu.bias_gyro_random_walk", 0.0001).value
+        self.min_imu_measurements_between_keyframes = int(
+            self.declare_parameter("imu.min_measurements_between_keyframes", 26).value
+        )
+        self.bias_prior_sigma_accel = float(self.declare_parameter("imu.bias_prior_sigma_accel", 1e-2).value)
+        self.bias_prior_sigma_gyro = float(self.declare_parameter("imu.bias_prior_sigma_gyro", 1e-2).value)
+        self.landmark_overlay_enabled = bool(
+            self.declare_parameter("debug.landmark_overlay.enabled", False).value
+        )
+        self.landmark_overlay_dir = str(
+            self.declare_parameter(
+                "debug.landmark_overlay.dir",
+                "tinynav_temp/sliding_window_landmarks",
+            ).value
+        )
+        if self.landmark_overlay_enabled:
+            os.makedirs(self.landmark_overlay_dir, exist_ok=True)
+        self.stereo_feature_debug_enabled = bool(
+            self.declare_parameter("debug.stereo_feature.enabled", False).value
+        )
+        self.stereo_feature_debug_dir = str(
+            self.declare_parameter(
+                "debug.stereo_feature.dir",
+                "tinynav_temp/stereo_feature_debug",
+            ).value
+        )
+        self.stereo_feature_debug_max_matches = int(
+            self.declare_parameter("debug.stereo_feature.max_matches", 200).value
+        )
+        if self.stereo_feature_debug_enabled:
+            os.makedirs(self.stereo_feature_debug_dir, exist_ok=True)
         self.pre_integration_params = gtsam.PreintegrationCombinedParams.MakeSharedU()
         self.pre_integration_params.setAccelerometerCovariance((accel_noise_density**2) * np.eye(3))
         self.pre_integration_params.setGyroscopeCovariance((gyro_noise_density**2) * np.eye(3))
@@ -171,6 +201,198 @@ class PerceptionNode(Node):
         self._async_loop = asyncio.new_event_loop()
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
+
+    def _track_color(self, track_idx):
+        rng = np.random.default_rng(track_idx + 17)
+        return tuple(int(c) for c in rng.integers(64, 256, size=3))
+
+    def _save_sliding_window_landmarks(self, tracks, extract_info, stamp):
+        if not self.landmark_overlay_enabled:
+            return
+
+        window = self.keyframe_queue[-_N:]
+        if not window:
+            return
+
+        tiles = []
+        for pose_idx, keyframe in enumerate(window):
+            image = keyframe.image
+            if image.ndim == 2:
+                tile = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            else:
+                tile = image.copy()
+            label = f"{pose_idx} t={keyframe.timestamp:.3f}"
+            cv2.putText(tile, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+            tiles.append(tile)
+
+        tile_widths = [tile.shape[1] for tile in tiles]
+        x_offsets = np.cumsum([0] + tile_widths[:-1])
+        points_by_track = []
+
+        for track_idx, landmark in enumerate(tracks):
+            color = self._track_color(track_idx)
+            points = []
+            for projection in landmark:
+                pose_idx = projection // _M
+                feature_idx = projection % _M
+                if pose_idx >= len(window) or pose_idx >= len(extract_info):
+                    continue
+
+                keypoints = extract_info[pose_idx]["kpts"][0]
+                if feature_idx >= len(keypoints):
+                    continue
+
+                x, y = keypoints[feature_idx]
+                x_i = int(round(float(x)))
+                y_i = int(round(float(y)))
+                if not (0 <= y_i < tiles[pose_idx].shape[0] and 0 <= x_i < tiles[pose_idx].shape[1]):
+                    continue
+
+                cv2.circle(tiles[pose_idx], (x_i, y_i), 3, color, -1)
+                points.append((pose_idx, int(x_offsets[pose_idx]) + x_i, y_i))
+            if len(points) >= 2:
+                ordered_points = [(x, y) for _, x, y in sorted(points)]
+                points_by_track.append((color, ordered_points))
+
+        mosaic = cv2.hconcat(tiles)
+        for color, points in points_by_track:
+            for p0, p1 in zip(points[:-1], points[1:]):
+                cv2.line(mosaic, p0, p1, color, 1, cv2.LINE_AA)
+
+        timestamp_ns = np.int64(stamp.sec) * 1_000_000_000 + np.int64(stamp.nanosec)
+        filename = f"window_{self.process_cnt:06d}_{timestamp_ns}.png"
+        output_path = os.path.join(self.landmark_overlay_dir, filename)
+        if not cv2.imwrite(output_path, mosaic):
+            self.logger.warning(f"Failed to write landmark overlay image: {output_path}")
+
+    def _draw_keypoints(self, image, keypoints, color):
+        if image.ndim == 2:
+            output = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        else:
+            output = image.copy()
+        for x, y in keypoints:
+            x_i = int(round(float(x)))
+            y_i = int(round(float(y)))
+            if 0 <= y_i < output.shape[0] and 0 <= x_i < output.shape[1]:
+                cv2.circle(output, (x_i, y_i), 2, color, -1, cv2.LINE_AA)
+        return output
+
+    def _disparity_color(self, disparity):
+        valid = np.isfinite(disparity) & (disparity > 0)
+        if valid.any():
+            disp_min = float(np.nanpercentile(disparity[valid], 2))
+            disp_max = float(np.nanpercentile(disparity[valid], 98))
+            if disp_max > disp_min:
+                disp_norm = (np.clip(disparity, disp_min, disp_max) - disp_min) / (disp_max - disp_min)
+            else:
+                disp_norm = np.zeros_like(disparity, dtype=np.float32)
+        else:
+            disp_min = 0.0
+            disp_max = 0.0
+            disp_norm = np.zeros_like(disparity, dtype=np.float32)
+
+        disp_u8 = np.clip(disp_norm * 255.0, 0, 255).astype(np.uint8)
+        disp_color = cv2.applyColorMap(disp_u8, cv2.COLORMAP_PLASMA)
+        cv2.putText(
+            disp_color,
+            f"Retinify disparity p02={disp_min:.2f} p98={disp_max:.2f}",
+            (8, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        return disp_color
+
+    def _save_stereo_feature_debug(self, left_img, right_img, disparity, left_extract, right_extract, match_result, stamp):
+        if not self.stereo_feature_debug_enabled:
+            return
+
+        left_keypoints = left_extract["kpts"][0]
+        right_keypoints = right_extract["kpts"][0]
+        match_indices = match_result["match_indices"][0]
+        valid_left_idx = np.flatnonzero(match_indices != -1)
+        if len(valid_left_idx) > self.stereo_feature_debug_max_matches:
+            step = max(1, len(valid_left_idx) // self.stereo_feature_debug_max_matches)
+            valid_left_idx = valid_left_idx[::step][: self.stereo_feature_debug_max_matches]
+
+        rows = []
+        for left_idx in valid_left_idx:
+            right_idx = int(match_indices[left_idx])
+            if right_idx < 0 or right_idx >= len(right_keypoints):
+                continue
+            xl, yl = left_keypoints[left_idx]
+            xr, yr = right_keypoints[right_idx]
+            x_i = int(round(float(xl)))
+            y_i = int(round(float(yl)))
+            disp_value = np.nan
+            if 0 <= y_i < disparity.shape[0] and 0 <= x_i < disparity.shape[1]:
+                disp_value = float(disparity[y_i, x_i])
+            lg_disp = float(xl - xr)
+            rows.append(
+                {
+                    "left_idx": int(left_idx),
+                    "right_idx": right_idx,
+                    "xl": float(xl),
+                    "yl": float(yl),
+                    "xr": float(xr),
+                    "yr": float(yr),
+                    "lightglue_disparity": lg_disp,
+                    "retinify_disparity": disp_value,
+                    "difference": lg_disp - disp_value,
+                }
+            )
+
+        left_sp = self._draw_keypoints(left_img, left_keypoints, (0, 255, 0))
+        right_sp = self._draw_keypoints(right_img, right_keypoints, (0, 255, 255))
+        cv2.putText(left_sp, f"left SuperPoint: {len(left_keypoints)}", (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+        cv2.putText(right_sp, f"right SuperPoint: {len(right_keypoints)}", (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
+        match_vis = np.hstack([cv2.cvtColor(left_img, cv2.COLOR_GRAY2BGR), cv2.cvtColor(right_img, cv2.COLOR_GRAY2BGR)])
+        right_offset = left_img.shape[1]
+        finite_diffs = []
+        for row in rows:
+            color = self._track_color(row["left_idx"])
+            pt_left = (int(round(row["xl"])), int(round(row["yl"])))
+            pt_right = (right_offset + int(round(row["xr"])), int(round(row["yr"])))
+            cv2.circle(match_vis, pt_left, 3, color, -1, cv2.LINE_AA)
+            cv2.circle(match_vis, pt_right, 3, color, -1, cv2.LINE_AA)
+            cv2.line(match_vis, pt_left, pt_right, color, 1, cv2.LINE_AA)
+            if np.isfinite(row["difference"]):
+                finite_diffs.append(row["difference"])
+
+        if finite_diffs:
+            diff_arr = np.asarray(finite_diffs, dtype=np.float32)
+            diff_text = (
+                f"matches={len(rows)} dx-disp mean={float(np.mean(diff_arr)):.2f} "
+                f"median={float(np.median(diff_arr)):.2f} abs95={float(np.percentile(np.abs(diff_arr), 95)):.2f}"
+            )
+        else:
+            diff_text = f"matches={len(rows)} no finite disparity samples"
+        cv2.putText(match_vis, diff_text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
+        disp_color = self._disparity_color(disparity)
+        blank = np.zeros_like(disp_color)
+        top = np.hstack([left_sp, right_sp])
+        middle = match_vis
+        bottom = np.hstack([disp_color, blank])
+        mosaic = np.vstack([top, middle, bottom])
+
+        timestamp_ns = np.int64(stamp.sec) * 1_000_000_000 + np.int64(stamp.nanosec)
+        basename = f"stereo_{self.process_cnt:06d}_{timestamp_ns}"
+        image_path = os.path.join(self.stereo_feature_debug_dir, f"{basename}.png")
+        csv_path = os.path.join(self.stereo_feature_debug_dir, f"{basename}.csv")
+        if not cv2.imwrite(image_path, mosaic):
+            self.logger.warning(f"Failed to write stereo feature debug image: {image_path}")
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write("left_idx,right_idx,xl,yl,xr,yr,lightglue_disparity,retinify_disparity,difference\n")
+            for row in rows:
+                f.write(
+                    f"{row['left_idx']},{row['right_idx']},{row['xl']:.3f},{row['yl']:.3f},"
+                    f"{row['xr']:.3f},{row['yr']:.3f},{row['lightglue_disparity']:.3f},"
+                    f"{row['retinify_disparity']:.3f},{row['difference']:.3f}\n"
+                )
 
     def info_callback(self, msg):
         if self.K is None:
@@ -255,6 +477,29 @@ class PerceptionNode(Node):
         current_timestamp = stamp2second(left_msg.header.stamp)
         if len(self.keyframe_queue) == 0: # first frame
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
+            if self.stereo_feature_debug_enabled:
+                left_extract_result = await self.superpoint.infer(left_img)
+                right_extract_result = await self.superpoint.infer(right_img)
+                stereo_match_result = await self.light_glue.infer(
+                    left_extract_result["kpts"],
+                    right_extract_result["kpts"],
+                    left_extract_result["descps"],
+                    right_extract_result["descps"],
+                    left_extract_result["mask"],
+                    right_extract_result["mask"],
+                    left_img.shape,
+                    right_img.shape,
+                )
+                self._save_stereo_feature_debug(
+                    left_img,
+                    right_img,
+                    disparity,
+                    left_extract_result,
+                    right_extract_result,
+                    stereo_match_result,
+                    left_msg.header.stamp,
+                )
+            initial_bias = gtsam.imuBias.ConstantBias()
             self.keyframe_queue.append(
                 Keyframe(
                     timestamp=current_timestamp,
@@ -263,8 +508,8 @@ class PerceptionNode(Node):
                     depth=depth,
                     pose=self.T_body_last,
                     velocity=np.zeros(3),
-                    bias=gtsam.imuBias.ConstantBias(),
-                    preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
+                    bias=initial_bias,
+                    preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, initial_bias),
                     latest_imu_timestamp=current_timestamp
                 )
             )
@@ -288,6 +533,28 @@ class PerceptionNode(Node):
                 current_left_extract_result["mask"],
                 kf_prev.image.shape,
                 left_img.shape)
+
+        if self.stereo_feature_debug_enabled:
+            right_extract_result = await self.superpoint.infer(right_img)
+            stereo_match_result = await self.light_glue.infer(
+                current_left_extract_result["kpts"],
+                right_extract_result["kpts"],
+                current_left_extract_result["descps"],
+                right_extract_result["descps"],
+                current_left_extract_result["mask"],
+                right_extract_result["mask"],
+                left_img.shape,
+                right_img.shape,
+            )
+            self._save_stereo_feature_debug(
+                left_img,
+                right_img,
+                disparity,
+                current_left_extract_result,
+                right_extract_result,
+                stereo_match_result,
+                left_msg.header.stamp,
+            )
 
         # propagate IMU measurements
         while len(self.imu_measurements) > 0 and self.imu_measurements[0][0] <= current_timestamp:
@@ -331,6 +598,7 @@ class PerceptionNode(Node):
             )
             self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
         # for new frame, we first add it as keyframe, if not, we pop it later
+        previous_bias = self.keyframe_queue[-1].bias
         self.keyframe_queue.append(
             Keyframe(
                 timestamp=current_timestamp,
@@ -339,8 +607,8 @@ class PerceptionNode(Node):
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
                 velocity=self.keyframe_queue[-1].velocity,
-                bias=gtsam.imuBias.ConstantBias(),
-                preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
+                bias=previous_bias,
+                preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, previous_bias),
                 latest_imu_timestamp=current_timestamp
             )
         )
@@ -354,12 +622,28 @@ class PerceptionNode(Node):
                 # process previous keyframes' factors
                 for i, keyframe in enumerate(self.keyframe_queue[-_N:]):
                     # per pose -- bias
-                    initial_estimate.insert(B(i), gtsam.imuBias.ConstantBias())
-                    graph.add(gtsam.PriorFactorConstantBias(B(i), gtsam.imuBias.ConstantBias(), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2, 1e-2, 1e-2, 1e-2]))))
+                    initial_estimate.insert(B(i), keyframe.bias)
 
                     initial_estimate.insert(V(i), keyframe.velocity)
                     initial_estimate.insert(X(i), Matrix4x4ToGtsamPose3(keyframe.pose))
                     if i == 0:
+                        bias_sigmas = np.array(
+                            [
+                                self.bias_prior_sigma_accel,
+                                self.bias_prior_sigma_accel,
+                                self.bias_prior_sigma_accel,
+                                self.bias_prior_sigma_gyro,
+                                self.bias_prior_sigma_gyro,
+                                self.bias_prior_sigma_gyro,
+                            ]
+                        )
+                        graph.add(
+                            gtsam.PriorFactorConstantBias(
+                                B(i),
+                                keyframe.bias,
+                                gtsam.noiseModel.Diagonal.Sigmas(bias_sigmas),
+                            )
+                        )
                         ## per pose -- velocity
                         #graph.add(gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([1e-2, 1e-2, 1e-2]))))
 
@@ -368,10 +652,11 @@ class PerceptionNode(Node):
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
-                        if keyframe.imu_measurement_count < 26:
+                        if keyframe.imu_measurement_count < self.min_imu_measurements_between_keyframes:
                             self.logger.warning(
                                 f"keyframe {i} at {keyframe.timestamp} only used "
-                                f"{keyframe.imu_measurement_count} imu measurements; expected at least 26"
+                                f"{keyframe.imu_measurement_count} imu measurements; expected at least "
+                                f"{self.min_imu_measurements_between_keyframes}"
                             )
                         imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
                         graph.add(imu_factor)
@@ -478,6 +763,7 @@ class PerceptionNode(Node):
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 tracks = uf_all_sets_list(uf, min_component_size=2)
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
+                self._save_sliding_window_landmarks(tracks, extract_info, left_msg.header.stamp)
 
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 for landmark in tracks[::1]:
@@ -529,8 +815,9 @@ class PerceptionNode(Node):
                 T_i = result.atPose3(X(i)).matrix()
                 keyframe.pose = T_i
                 keyframe.velocity = result.atVector(V(i))
+                keyframe.bias = result.atConstantBias(B(i))
                 self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
-                self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
+                self.logger.debug(f"Bias {i} updated:\n{keyframe.bias}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
 
         with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -556,6 +843,7 @@ class PerceptionNode(Node):
         with Timer(name="[Publish Odometry]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             self.T_body_last = result.atPose3(X(len(self.keyframe_queue) - 1)).matrix()
             self.V_last = result.atVector(V(len(self.keyframe_queue) - 1))
+            self.B_last = result.atConstantBias(B(len(self.keyframe_queue) - 1))
             # publish odometry
             self.odom_pub.publish(np2msg(self.T_body_last, left_msg.header.stamp, "world", "camera", self.V_last))
             # publish TF
@@ -589,7 +877,7 @@ def main(args=None):
     rclpy.init(args=args)
     parser = argparse.ArgumentParser(description='Run TinyNav perception node.')
     parser.add_argument('--verbose_timer', action='store_true', help='Print timing for key pipeline stages.')
-    parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
+    parsed_args, _ = parser.parse_known_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
     #imu_propagator_node = ImuPropagatorNode()

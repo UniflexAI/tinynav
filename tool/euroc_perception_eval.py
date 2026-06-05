@@ -32,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tail-seconds", type=float, default=3.0, help="Extra spin time after final publish.")
     parser.add_argument("--eval-topic", type=str, default="/slam/odometry_visual", help="Estimated odometry topic.")
     parser.add_argument("--output-dir", type=Path, default=Path("output/euroc_eval"), help="Report output directory.")
+    parser.add_argument(
+        "--alignment-method",
+        choices=("se3", "first_origin"),
+        default="se3",
+        help="Trajectory alignment for ATE metrics. se3 removes global yaw/frame offset; first_origin only removes translation.",
+    )
     return parser.parse_args()
 
 
@@ -109,9 +115,9 @@ def build_euroc_rectifier(cam0_yaml: dict, cam1_yaml: dict):
 
     T_BS0 = np.asarray(cam0_yaml["T_BS"]["data"], dtype=np.float64).reshape(4, 4)
     T_BS1 = np.asarray(cam1_yaml["T_BS"]["data"], dtype=np.float64).reshape(4, 4)
-    T_C0_C1 = np.linalg.inv(T_BS0) @ T_BS1
-    R = T_C0_C1[:3, :3]
-    t = T_C0_C1[:3, 3]
+    T_C1_C0 = np.linalg.inv(T_BS1) @ T_BS0
+    R = T_C1_C0[:3, :3]
+    t = T_C1_C0[:3, 3]
 
     R0, R1, P0, P1, _, _, _ = cv2.stereoRectify(
         K0,
@@ -397,13 +403,23 @@ def evaluate_and_report(args: argparse.Namespace, est_poses: dict[int, np.ndarra
     gt_points = np.array([g[:3, 3] for g in gt_pose_pairs], dtype=np.float64)
     est_points = np.array(est_points, dtype=np.float64)
 
-    # No global world-transform estimation: compare trajectories in relative coordinates
-    # anchored at each trajectory's first matched point.
     gt_origin = gt_points[0]
     est_origin = est_points[0]
     gt_points_rel = gt_points - gt_origin
-    est_points_rel = est_points - est_origin
-    est_points_aligned = est_points_rel
+
+    if args.alignment_method == "first_origin":
+        est_points_aligned = est_points - est_origin
+        alignment_transform = np.eye(4, dtype=np.float64)
+    else:
+        R_init, t_init = umeyama_rigid(est_points, gt_points)
+        T_init = make_T(R_init, t_init)
+        alignment_transform = se3_pose_pair_align(est_pose_pairs, gt_pose_pairs, T_init)
+        est_points_abs_aligned = np.array(
+            [(alignment_transform @ pose)[:3, 3] for pose in est_pose_pairs],
+            dtype=np.float64,
+        )
+        est_points_aligned = est_points_abs_aligned - gt_origin
+
     errors = np.linalg.norm(est_points_aligned - gt_points_rel, axis=1)
 
     rmse = float(np.sqrt(np.mean(errors**2)))
@@ -421,7 +437,8 @@ def evaluate_and_report(args: argparse.Namespace, est_poses: dict[int, np.ndarra
         "ate_mean_m": mean_err,
         "ate_median_m": median_err,
         "ate_max_m": max_err,
-        "alignment_method": "first_matched_origin_only",
+        "alignment_method": args.alignment_method,
+        "alignment_transform_est_to_gt": alignment_transform.tolist(),
         "gt_origin": gt_origin.tolist(),
         "est_origin": est_origin.tolist(),
     }
@@ -515,6 +532,7 @@ def evaluate_and_report(args: argparse.Namespace, est_poses: dict[int, np.ndarra
       <tr><th>Dataset</th><td><code>{args.dataset_root}</code></td></tr>
       <tr><th>Estimated Pose Count</th><td>{len(est_poses)}</td></tr>
       <tr><th>Matched Pose Count</th><td>{int(len(errors))}</td></tr>
+      <tr><th>Alignment Method</th><td>{args.alignment_method}</td></tr>
       <tr><th>ATE RMSE (m)</th><td>{rmse:.6f}</td></tr>
       <tr><th>ATE Mean (m)</th><td>{mean_err:.6f}</td></tr>
       <tr><th>ATE Median (m)</th><td>{median_err:.6f}</td></tr>
