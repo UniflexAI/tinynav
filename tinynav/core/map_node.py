@@ -902,10 +902,19 @@ class MapNode(Node):
         paths_in_map = self._current_path_in_map
         pose_in_map_position = pose_in_map[:3, 3]
 
-        # Compute remaining length and progress
+        # Find closest point on path to current position
+        closest_idx = 0
+        closest_dist = float('inf')
+        for i in range(len(paths_in_map)):
+            dist = np.linalg.norm(paths_in_map[i][:2] - pose_in_map_position[:2])
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_idx = i
+
+        # Compute remaining length from closest point to end
         remaining_length = sum(
             np.linalg.norm(paths_in_map[i + 1] - paths_in_map[i])
-            for i in range(len(paths_in_map) - 1)
+            for i in range(closest_idx, len(paths_in_map) - 1)
         ) if len(paths_in_map) > 1 else 0.0
 
         now = time.time()
@@ -929,20 +938,19 @@ class MapNode(Node):
             })
             self.nav_progress_pub.publish(progress_msg)
 
-        # Find look-ahead target position
+        # Find look-ahead target: start from closest point, look ahead by max_speed * 5
         max_speed = 0.5
-        if len(paths_in_map) > 1:
+        lookahead_distance = max_speed * 5
+        if len(paths_in_map) > 1 and closest_idx < len(paths_in_map) - 1:
             accumulated_distance = 0.0
-            start_point = pose_in_map_position[:3]
-            target_position = paths_in_map[-1]
-            for i in range(len(paths_in_map) - 1):
-                accumulated_distance += np.linalg.norm(paths_in_map[i][:2] - start_point[:2])
-                if accumulated_distance > max_speed * 5:
-                    target_position = paths_in_map[i]
+            target_position = paths_in_map[-1]  # default to end
+            for i in range(closest_idx, len(paths_in_map) - 1):
+                accumulated_distance += np.linalg.norm(paths_in_map[i + 1][:2] - paths_in_map[i][:2])
+                if accumulated_distance > lookahead_distance:
+                    target_position = paths_in_map[i + 1]
                     break
-                start_point = paths_in_map[i]
         else:
-            target_position = paths_in_map[0]
+            target_position = paths_in_map[closest_idx]
 
         # Transform target from map frame to odom frame
         target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
@@ -954,11 +962,12 @@ class MapNode(Node):
 
         self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
 
-        # Publish global plan path
+        # Publish remaining global plan path (from closest point onwards)
         path_msg = Path()
         path_msg.header.stamp = self.get_clock().now().to_msg()
         path_msg.header.frame_id = "map"
-        for x, y, z in paths_in_map:
+        for i in range(closest_idx, len(paths_in_map)):
+            x, y, z = paths_in_map[i]
             pose = PoseStamped()
             pose.header = path_msg.header
             pose.pose.position.x = x
