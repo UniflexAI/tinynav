@@ -347,7 +347,10 @@ class MapNode(Node):
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
-            self._path_needs_replan = True
+            # Only replan if we don't have a path yet (first reloc or POI change)
+            # Don't replan on every reloc success - that causes path oscillation
+            if self._current_path_in_map is None and self.poi_index != -1 and self.poi_index < len(self.pois):
+                self._path_needs_replan = True
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -642,9 +645,17 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
 
-        # Replan path if needed (heavy, only on relocalization success or POI change)
+        # Replan path if needed (heavy, only when no path exists or POI changed)
+        # Also replan if robot drifted too far from current path start
         if self._path_needs_replan:
             self.replan_nav_path(pose_in_map)
+        elif self._current_path_in_map is not None:
+            # Check if robot drifted too far from path start - trigger replan
+            path_start = self._current_path_in_map[0]
+            drift = np.linalg.norm(pose_in_map_position[:2] - path_start[:2])
+            if drift > 2.0:  # More than 2m from path start
+                self.get_logger().info(f"Robot drifted {drift:.1f}m from path start, triggering replan")
+                self.replan_nav_path(pose_in_map)
 
         # Publish target_pose from cached path (lightweight)
         if self._current_path_in_map is not None:
