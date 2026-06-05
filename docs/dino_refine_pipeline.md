@@ -4,6 +4,16 @@ This workflow improves TinyNav image retrieval by collecting reviewed retrieval 
 
 Run commands inside the devcontainer unless a step explicitly says otherwise.
 
+## Current NAS Paths
+
+These paths are the latest verified Beijing DINO refinement run. Example commands below still use `<run_id>` placeholders for future runs.
+
+- Dataset root: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset`
+- Reviewed dataset: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/tinynav-retrieval-reviewed-20_54_21-map-thr085`
+- Refine run: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628`
+- TensorRT engine: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628/tensorrt/dinov2_refined_20_54_21_map_thr085_x86_64.plan`
+- Refined map embedding cache: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628/retrieval_eval/map_embeddings_refined_20_54_21_map_thr085.npz`
+
 ## 1. Generate Retrieval Pairs
 
 Use a query rosbag and an existing TinyNav map. For refined-model evaluation, pass the refined DINO engine and re-embed the map so query and map embeddings come from the same model.
