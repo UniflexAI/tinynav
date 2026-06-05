@@ -4,19 +4,57 @@ This workflow improves TinyNav image retrieval by collecting reviewed retrieval 
 
 Run commands inside the devcontainer unless a step explicitly says otherwise.
 
+## Pipeline Overview
+
+The full loop is:
+
+```text
+query rosbag + TinyNav map
+  -> retrieval pairs
+  -> manual true/false/uncertain labels
+  -> Hugging Face-format dataset
+  -> DINOv2 LoRA training
+  -> merged DINO model
+  -> ONNX export
+  -> TensorRT engine
+  -> refined retrieval evaluation
+```
+
+Use this workflow when the current DINO retrieval engine returns plausible but incorrect map matches and you need to add reviewed positives/negatives back into the retrieval model.
+
+## Prerequisites
+
+- Run inside the TinyNav devcontainer.
+- Mount NAS at `/mnt/nas` when using the verified Beijing dataset and refine outputs.
+- Use a GPU container for DINO training, ONNX export checks, TensorRT engine build, and retrieval eval.
+- Authenticate with Hugging Face only if you need `merge_upload`. The local export and NAS copy steps work offline.
+- Keep the query rosbag image topic consistent with the map camera stream. The Beijing runs use `/camera/camera/infra1/image_rect_raw`.
+
 ## Current NAS Paths
 
 These paths are the latest verified Beijing DINO refinement run. Example commands below still use `<run_id>` placeholders for future runs.
 
 - Dataset root: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset`
+- Local container dataset copy: `/tinynav/datasets/tinynav-retrieval-reviewed-20_54_21-map-thr085`
 - Reviewed dataset: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/tinynav-retrieval-reviewed-20_54_21-map-thr085`
 - Refine run: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628`
 - TensorRT engine: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628/tensorrt/dinov2_refined_20_54_21_map_thr085_x86_64.plan`
 - Refined map embedding cache: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628/retrieval_eval/map_embeddings_refined_20_54_21_map_thr085.npz`
 
+## Common Run Parameters
+
+- Query topic: `/camera/camera/infra1/image_rect_raw`
+- Retrieval threshold: `0.85` for the Beijing runs in this workflow.
+- Candidate count: `--topk 3`
+- Frame sampling: `--every_n 1`
+- Query bag used for the verified run: `/mnt/nas/share-all/junlinp/rosbag/beijing/tinynav_debug_bags/debug_2026_06_04_20_54_21`
+- Map used for the verified run: `/mnt/nas/share-all/junlinp/rosbag/beijing/map`
+
 ## 1. Generate Retrieval Pairs
 
-Use a query rosbag and an existing TinyNav map. For refined-model evaluation, pass the refined DINO engine and re-embed the map so query and map embeddings come from the same model.
+Use a query rosbag and an existing TinyNav map.
+
+For the first bootstrap run, use the default DINO engine and the map's stored embeddings. Do not pass `--dino_engine_path`, `--reembed_map`, or `--map_embedding_cache`.
 
 ```bash
 python3 tool/retrieve_from_rosbag_map.py \
@@ -26,15 +64,12 @@ python3 tool/retrieve_from_rosbag_map.py \
   --topk 3 \
   --threshold 0.85 \
   --every_n 1 \
-  --out_jsonl /tinynav/tinynav_temp/retrieval_debug_2026_06_04_20_54_21_refined_thr085.jsonl \
-  --save_debug_dir /tinynav/tinynav_temp/retrieval_debug_2026_06_04_20_54_21_refined_thr085_images \
-  --review_root /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085_refined \
-  --dino_engine_path /mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/<run_id>/tensorrt/dinov2_refined_20_54_21_map_thr085_x86_64.plan \
-  --reembed_map \
-  --map_embedding_cache /mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/<run_id>/retrieval_eval/map_embeddings_refined.npz
+  --out_jsonl /tinynav/tinynav_temp/retrieval_debug_2026_06_04_20_54_21_thr085.jsonl \
+  --save_debug_dir /tinynav/tinynav_temp/retrieval_debug_2026_06_04_20_54_21_thr085_images \
+  --review_root /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085
 ```
 
-For the first bootstrap run, omit `--dino_engine_path`, `--reembed_map`, and `--map_embedding_cache` to use the default DINO engine and the map's stored embeddings.
+For refined-model evaluation, use the command in [8. Evaluate The Refined Engine](#8-evaluate-the-refined-engine). A refined query embedding must be compared against map embeddings produced by the same refined engine.
 
 Outputs:
 
@@ -42,13 +77,19 @@ Outputs:
 - `--save_debug_dir`: flat debug image export.
 - `--review_root/session_YYYYmmdd_HHMMSS`: Web UI review session with `sample_*/sample.json`, `query.png`, `retrieved_*.png`, and optional `pnp_match.png`.
 
+Verify before continuing:
+
+- The JSONL file exists and has one line per processed query frame.
+- The review session directory contains `sample_*` folders.
+- Each useful sample has `query.png`, at least one `retrieved_*.png`, and `sample.json`.
+
 ## 2. Review Pair Labels
 
 Start the review UI on a free port:
 
 ```bash
 python3 tool/review_retrieval_labels.py \
-  --session_dir /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085_refined/session_YYYYmmdd_HHMMSS \
+  --session_dir /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085/session_YYYYmmdd_HHMMSS \
   --host 0.0.0.0 \
   --port 8053
 ```
@@ -73,14 +114,20 @@ The UI includes play mode for fast manual inspection:
 - `with retrieved candidates`
 - `PnP success`
 
+Verify before continuing:
+
+- Label useful pairs from the retrieved-image cards, not from the whole-sample card.
+- Open a labeled `sample.json` and confirm labels are written under `review_matches`.
+- Use `uncertain` for ambiguous pairs so they can be filtered or reviewed later.
+
 ## 3. Merge Labels Into Dataset
 
 Merge reviewed pair labels into a Hugging Face-format local dataset:
 
 ```bash
 python3 scripts/sync_retrieval_hf_dataset.py export \
-  --session_root /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085_refined \
-  --out_dir /tinynav/datasets/tinynav-retrieval-reviewed \
+  --session_root /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085 \
+  --out_dir /tinynav/datasets/tinynav-retrieval-reviewed-20_54_21-map-thr085 \
   --split train
 ```
 
@@ -88,7 +135,7 @@ To merge with and upload to a Hugging Face dataset repo:
 
 ```bash
 python3 scripts/sync_retrieval_hf_dataset.py merge_upload \
-  --session_root /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085_refined \
+  --session_root /tinynav/tinynav_temp/retrieval_from_bag_review_20_54_21_map_thr085 \
   --repo_id Junlinp/tinynav-retrieval-reviewed-public \
   --split train \
   --work_dir /tinynav/tinynav_temp/hf_merge_work
@@ -97,7 +144,7 @@ python3 scripts/sync_retrieval_hf_dataset.py merge_upload \
 If Hugging Face is rate-limited, keep the local dataset and copy it to NAS:
 
 ```bash
-cp -r /tinynav/datasets/tinynav-retrieval-reviewed \
+cp -r /tinynav/datasets/tinynav-retrieval-reviewed-20_54_21-map-thr085 \
   /mnt/nas/share-all/junlinp/tinynav_dino_dataset/
 ```
 
@@ -120,6 +167,13 @@ Each JSONL row contains:
 - `reviewed_at`
 - `review_note`
 
+Verify before continuing:
+
+- The local dataset has `train.jsonl` and `images/*.png`.
+- `train.jsonl` contains the expected reviewed labels.
+- The NAS copy exists if training will run from NAS.
+- The Hugging Face dataset upload is optional. Do not block training on upload failures if the local or NAS dataset is available.
+
 ## 4. Train DINOv2 LoRA
 
 Train from a local HF-format dataset:
@@ -127,7 +181,7 @@ Train from a local HF-format dataset:
 ```bash
 python3 tool/train_dinov2_lora.py \
   --base_model facebook/dinov2-base \
-  --train_pairs /mnt/nas/share-all/junlinp/tinynav_dino_dataset/tinynav-retrieval-reviewed/train.jsonl \
+  --train_pairs /mnt/nas/share-all/junlinp/tinynav_dino_dataset/tinynav-retrieval-reviewed-20_54_21-map-thr085/train.jsonl \
   --output_dir /mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/<run_id>/lora_ckpt \
   --batch_size 2 \
   --num_epochs 1 \
@@ -146,6 +200,12 @@ If Hugging Face model download is unavailable, use an existing local merged mode
 
 The training script resolves relative dataset image paths against the JSONL directory and uses ImageNet normalization to match `Dinov2TRT` runtime preprocessing.
 
+Verify before continuing:
+
+- The training log reports both positive and negative pairs.
+- The LoRA checkpoint directory exists under `refine_runs/<run_id>/lora_ckpt`.
+- If the dataset is small, start with `--num_epochs 1` and inspect retrieval eval before increasing epochs.
+
 ## 5. Merge LoRA
 
 ```bash
@@ -156,6 +216,11 @@ python3 scripts/merge_dinov2_lora.py \
 ```
 
 Use the same `--base_model` used during training.
+
+Verify before continuing:
+
+- The merged model directory exists.
+- The merged model can be loaded by the ONNX export script.
 
 ## 6. Export ONNX
 
@@ -179,6 +244,12 @@ onnx.checker.check_model(model)
 print('onnx ok:', path)
 PY
 ```
+
+Verify before continuing:
+
+- `onnx.checker.check_model` succeeds.
+- The ONNX input shape is compatible with `pixel_values:1x3x224x224`.
+- The output embedding width is `768` for `facebook/dinov2-base`.
 
 ## 7. Build TensorRT Engine
 
@@ -209,6 +280,12 @@ PY
 
 Expected embedding shape is `(768,)` for DINOv2-base.
 
+Verify before continuing:
+
+- `trtexec` writes the `.plan` file.
+- `Dinov2TRT` loads the engine without TensorRT binding errors.
+- Runtime inference returns a `(768,)` embedding with a finite norm.
+
 ## 8. Evaluate The Refined Engine
 
 Run retrieval again with the refined TensorRT engine and re-embed/cache map embeddings:
@@ -237,6 +314,13 @@ python3 tool/review_retrieval_labels.py \
   --host 0.0.0.0 \
   --port 8053
 ```
+
+Verify the refined eval:
+
+- The map embedding cache is written by the same TensorRT engine passed with `--dino_engine_path`.
+- The retrieval JSONL contains rows with refined similarity scores.
+- The review session can be opened in the Web UI for manual comparison.
+- If similarity scores look inconsistent, delete the map embedding cache and rerun with `--reembed_map`.
 
 ## Notes
 
