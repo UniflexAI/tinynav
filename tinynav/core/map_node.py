@@ -272,6 +272,8 @@ class MapNode(Node):
         self._latest_continuous_odom = None
         self._current_path_in_map = None
         self._path_needs_replan = True
+        self._last_replan_attempt_time = 0.0
+        self._replan_retry_interval_s = 2.0
         self._nav_timer = self.create_timer(0.2, self.nav_timer_callback)  # 5Hz
 
     def pois_callback(self, msg: String):
@@ -287,6 +289,7 @@ class MapNode(Node):
 
             if not self.pois:
                 self.poi_index = -1
+                self._reset_nav_state()
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -294,16 +297,22 @@ class MapNode(Node):
                 return
 
             self.poi_index = min(0, len(self.pois) - 1)
-            self._nav_completed = False
-            self._leg_initial_length = None
-            self._leg_start_time = None
-            self._speed_estimate = None
-            self._path_needs_replan = True
-            self._current_path_in_map = None
+            self._reset_nav_state()
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
+            self.poi_index = -1
+            self._reset_nav_state()
+
+    def _reset_nav_state(self):
+        self._nav_completed = False
+        self._leg_initial_length = None
+        self._leg_start_time = None
+        self._speed_estimate = None
+        self._path_needs_replan = True
+        self._current_path_in_map = None
+        self._last_replan_attempt_time = 0.0
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -645,16 +654,20 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
 
-        # Replan path if needed (heavy, only when no path exists or POI changed)
-        # Also replan if robot drifted too far from current path start
+        # Replan path if needed (heavy, only when no path exists or POI changed).
+        # Replan failures are throttled so the 5Hz timer does not run A* continuously.
+        now = time.time()
         if self._path_needs_replan:
-            self.replan_nav_path(pose_in_map)
+            if now - self._last_replan_attempt_time >= self._replan_retry_interval_s:
+                self.replan_nav_path(pose_in_map)
         elif self._current_path_in_map is not None:
-            # Check if robot drifted too far from path start - trigger replan
-            path_start = self._current_path_in_map[0]
-            drift = np.linalg.norm(pose_in_map_position[:2] - path_start[:2])
-            if drift > 2.0:  # More than 2m from path start
-                self.get_logger().info(f"Robot drifted {drift:.1f}m from path start, triggering replan")
+            # Check if robot drifted too far from the cached path - trigger replan.
+            closest_path_dist = min(
+                np.linalg.norm(path_point[:2] - pose_in_map_position[:2])
+                for path_point in self._current_path_in_map
+            )
+            if closest_path_dist > 2.0:  # More than 2m from current path
+                self.get_logger().info(f"Robot drifted {closest_path_dist:.1f}m from cached path, triggering replan")
                 self.replan_nav_path(pose_in_map)
 
         # Publish target_pose from cached path (lightweight)
@@ -663,6 +676,7 @@ class MapNode(Node):
 
     def replan_nav_path(self, pose_in_map: np.ndarray):
         """Heavy: generate nav path via A* on SDF map. Called only when replan is needed."""
+        self._last_replan_attempt_time = time.time()
         target_poi = self.pois[self.poi_index]
         with Timer(name="generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             paths_in_map = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
@@ -681,6 +695,7 @@ class MapNode(Node):
                 self._leg_initial_length = remaining_length
                 self._leg_start_time = now
         else:
+            self._path_needs_replan = True
             self.get_logger().warning("Replan failed: no path found in map")
 
     def update_target_pose(self, pose_in_map: np.ndarray):
