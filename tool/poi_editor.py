@@ -1,6 +1,7 @@
 from __future__ import annotations
 import sys
 sys.path.append("/tinynav/tinynav/core")
+import math
 import time
 from pathlib import Path
 from typing import TypedDict
@@ -574,8 +575,12 @@ def main(
 
     fx, _, cx, cy = camera_K[0, 0], camera_K[1, 1], camera_K[0, 2], camera_K[1, 2]
     infra1_db = _open_infra1_video_db(tinynav_map_path)
+    max_camera_poses = 500
+    sample_interval = max(1, math.ceil(len(poses) / max_camera_poses))
     with server.gui.add_folder("cameras") as _:
-        for timestamp, camera_pose in poses.items():
+        for pose_idx, (timestamp, camera_pose) in enumerate(poses.items()):
+            if pose_idx % sample_interval != 0:
+                continue
             R = vtf.SO3.from_matrix(camera_pose[:3, :3])
             t = camera_pose[:3, 3]
             timestamp_str = str(timestamp)
