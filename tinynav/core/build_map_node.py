@@ -18,6 +18,8 @@ from codetiming import Timer
 import os
 import argparse
 import sys
+import time
+from contextlib import contextmanager
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.planning_node import run_raycasting_loopy
@@ -28,7 +30,7 @@ import dbm.dumb
 import pickle
 from tqdm import tqdm
 from tf2_msgs.msg import TFMessage
-from typing import Dict
+from typing import Callable, Dict, Optional
 try:
     from tool.video_db import VideoDB
 except ImportError:
@@ -48,6 +50,55 @@ from rclpy.serialization import deserialize_message
 
 
 logger = logging.getLogger(__name__)
+
+def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
+    """COLMAP-style gate for expensive global refinement steps."""
+    return num_frames >= frames_ratio * prev_num_frames
+
+
+class StageTimer:
+    def __init__(self, verbose_logger: Optional[Callable[[str], None]] = None):
+        self._stats = {}
+        self.verbose_logger = verbose_logger
+
+    def record(self, name: str, duration_s: float) -> None:
+        stats = self._stats.setdefault(
+            name,
+            {"count": 0, "total_s": 0.0, "min_s": float("inf"), "max_s": 0.0},
+        )
+        stats["count"] += 1
+        stats["total_s"] += duration_s
+        stats["min_s"] = min(stats["min_s"], duration_s)
+        stats["max_s"] = max(stats["max_s"], duration_s)
+        if self.verbose_logger is not None:
+            self.verbose_logger(f"[{name}] Elapsed time: {duration_s * 1000:.0f} ms")
+
+    @contextmanager
+    def timed(self, name: str):
+        start_s = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record(name, time.perf_counter() - start_s)
+
+    def log_summary(self, log_fn: Callable[[str], None]) -> None:
+        if not self._stats:
+            log_fn("No build-map stage timing data collected.")
+            return
+        total_s = sum(stats["total_s"] for stats in self._stats.values())
+        lines = ["=== Build map stage timing ==="]
+        lines.append("stage count total_s mean_ms min_ms max_ms pct")
+        for name, stats in sorted(self._stats.items(), key=lambda item: -item[1]["total_s"]):
+            count = stats["count"]
+            mean_ms = (stats["total_s"] / count) * 1000.0 if count else 0.0
+            pct = (100.0 * stats["total_s"] / total_s) if total_s > 0.0 else 0.0
+            lines.append(
+                f"{name} {count} {stats['total_s']:.3f} {mean_ms:.1f} "
+                f"{stats['min_s'] * 1000.0:.1f} {stats['max_s'] * 1000.0:.1f} {pct:.1f}"
+            )
+        lines.append(f"Grand total: {total_s:.3f} s")
+        log_fn("\n".join(lines))
+
 
 def z_value_to_color(z, z_min, z_max):
     color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)
@@ -231,7 +282,7 @@ class DummyEmbeddingEngine:
     async def infer(self, _image: np.ndarray) -> np.ndarray:
         return np.zeros((1, 768), dtype=np.float32)
 
-def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100):
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100, stage_timer: Optional[StageTimer] = None):
     """
         Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -257,14 +308,23 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100)
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
 
     odom_positions = []
-    for timestamp, odom_pose in tqdm(poses.items()):
-        depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
-        odom_translation = odom_pose[:3, 3]
-        local_origin = np.floor(odom_translation / resolution) * resolution - 0.5 * np.array(raycast_shape) * resolution
-        local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
-        global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
-        odom_position = odom_pose[:3, 3]
-        odom_positions.append(odom_position)
+
+    def _raycast_all_poses():
+        nonlocal global_grid, global_origin
+        for timestamp, odom_pose in tqdm(poses.items()):
+            depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
+            odom_translation = odom_pose[:3, 3]
+            local_origin = np.floor(odom_translation / resolution) * resolution - 0.5 * np.array(raycast_shape) * resolution
+            local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
+            global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
+            odom_position = odom_pose[:3, 3]
+            odom_positions.append(odom_position)
+
+    if stage_timer is not None:
+        with stage_timer.timed("occupancy_raycast"):
+            _raycast_all_poses()
+    else:
+        _raycast_all_poses()
 
     voxels = int(np.prod(global_grid_shape))
     print(
@@ -274,17 +334,23 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100)
         f"global_origin={global_origin.tolist()}, voxels={voxels}"
     )
 
-    # Compute SDF as voxel distance to nearest odom seed using SciPy EDT.
-    with Timer(name="sdf_distance_transform_edt", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+    def _compute_sdf():
         if len(odom_positions) == 0:
-            sdf_map = np.full(global_grid_shape, np.inf, dtype=np.float32)
-        else:
-            seed_mask = np.ones(global_grid_shape, dtype=np.uint8)
-            odom_positions_np = np.asarray(odom_positions, dtype=np.float32)
-            seed_indices = np.rint((odom_positions_np - global_origin) / resolution).astype(np.int32)
-            seed_indices = np.clip(seed_indices, 0, global_grid_shape - 1)
-            seed_mask[seed_indices[:, 0], seed_indices[:, 1], seed_indices[:, 2]] = 0
-            sdf_map = distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
+            return np.full(global_grid_shape, np.inf, dtype=np.float32)
+        seed_mask = np.ones(global_grid_shape, dtype=np.uint8)
+        odom_positions_np = np.asarray(odom_positions, dtype=np.float32)
+        seed_indices = np.rint((odom_positions_np - global_origin) / resolution).astype(np.int32)
+        seed_indices = np.clip(seed_indices, 0, global_grid_shape - 1)
+        seed_mask[seed_indices[:, 0], seed_indices[:, 1], seed_indices[:, 2]] = 0
+        return distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
+
+    # Compute SDF as voxel distance to nearest odom seed using SciPy EDT.
+    if stage_timer is not None:
+        with stage_timer.timed("occupancy_sdf"):
+            sdf_map = _compute_sdf()
+    else:
+        with Timer(name="sdf_distance_transform_edt", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            sdf_map = _compute_sdf()
 
     # 0 is the unknown.
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
@@ -586,11 +652,19 @@ class BuildMapNode(Node):
         loop_closure_use_bow: bool = False,
         dbow3_vocabulary_path: str | None = None,
         verbose_timer: bool = True,
+        global_frames_ratio: float = 1.1,
     ):
         super().__init__('build_map_node')
+        if global_frames_ratio < 1.0:
+            raise ValueError(f"global_frames_ratio must be >= 1.0, got {global_frames_ratio}")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
+        self.stage_timer = StageTimer(
+            verbose_logger=self.logger.info if verbose_timer else None,
+        )
+        self.global_frames_ratio = global_frames_ratio
+        self._global_prev_num_frames = 0
         self.extractor = extractor
         self.matcher = matcher
         self.embedding_extractor = embedding_extractor
@@ -735,13 +809,13 @@ class BuildMapNode(Node):
                 self.mapping_save_finished_pub.publish(save_finished_msg)
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
-        with Timer(name="Mapping Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.timer_logger):
+        with self.stage_timer.timed("mapping_loop"):
             if self.K is None:
                 return
             self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
 
     def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
-        with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("msg_decode"):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
             keyframe_depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
@@ -753,20 +827,20 @@ class BuildMapNode(Node):
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
-        with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("save_image_and_depth"):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
-        with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("get_embeddings"):
             embedding = self.get_embeddings(infra1_image)
             embedding_norm = np.linalg.norm(embedding)
             if embedding_norm > 0:
                 embedding = embedding / embedding_norm
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
-        with Timer(name = "feature extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("feature_extractor"):
             features = asyncio.run(self.extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
 
-        with Timer(name = "loop and pose graph solve", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("loop_and_pose_graph_update"):
             if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
                 self.odom[keyframe_image_timestamp] = odom
                 self.pose_graph_used_pose[keyframe_image_timestamp] = odom
@@ -787,7 +861,7 @@ class BuildMapNode(Node):
                     _, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(timestamp)
                     curr_kp = curr_features["kpts"][0] if curr_features["kpts"].ndim == 3 else curr_features["kpts"]
                     curr_desc = curr_features["descps"][0] if curr_features["descps"].ndim == 3 else curr_features["descps"]
-                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                    with self.stage_timer.timed("find_loop"):
                         loop_list = self.loop_closure.find_candidate_timestamps(
                             curr_kp,
                             curr_desc,
@@ -795,7 +869,7 @@ class BuildMapNode(Node):
                             top_k=self.loop_top_k,
                             allowed_timestamps=set(valid_timestamp),
                         )
-                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                    with self.stage_timer.timed("relative_pose_estimation"):
                         for candidate in loop_list:
                             prev_timestamp = candidate["timestamp"]
                             curr_timestamp = timestamp
@@ -806,19 +880,18 @@ class BuildMapNode(Node):
                             if success and len(inliers) >= 100:
                                 self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                                 print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                    with self.stage_timer.timed("solve_pose_graph_loop"):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
                 # find_loop_and_pose_graph(keyframe_image_timestamp)  # temp disabled
                 # self.loop_closure.add_timestamp(keyframe_image_timestamp)  # temp disabled
 
-        with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        self.maybe_run_global_refinement()
+
+        with self.stage_timer.timed("publish_local_pointcloud"):
             cloud = depth_to_cloud(depth, self.K, 30, 3)
             self.publish_local_map(cloud, 'camera_'+str(keyframe_image_timestamp))
 
-        with Timer(name = "tf publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.publish_all_transforms()
-
-        with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("pose_graph_trajectory_publish"):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.processed_keyframes += 1
         if self.processed_keyframes % self.db_sync_every == 0:
@@ -831,6 +904,22 @@ class BuildMapNode(Node):
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
         return asyncio.run(self.embedding_extractor.infer(image))
+
+    def maybe_run_global_refinement(self) -> None:
+        """Batch expensive online pose-graph solve and TF publishing."""
+        num_frames = len(self.pose_graph_used_pose)
+        if not check_global_frames_ratio(num_frames, self._global_prev_num_frames, self.global_frames_ratio):
+            return
+
+        with self.stage_timer.timed("solve_pose_graph_online"):
+            self.pose_graph_used_pose = solve_pose_graph(
+                self.pose_graph_used_pose,
+                self.relative_pose_constraint,
+                max_iteration_num=5,
+            )
+        with self.stage_timer.timed("tf_publish"):
+            self.publish_all_transforms()
+        self._global_prev_num_frames = num_frames
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
@@ -878,8 +967,12 @@ class BuildMapNode(Node):
         # Save continuous poses
         self.continuous_odom_recorder.save_to_disk()
 
-        with Timer(name = "final pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("final_pose_graph"):
             self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint)
+
+        with self.stage_timer.timed("tf_publish"):
+            self.publish_all_transforms()
+        self._global_prev_num_frames = len(self.pose_graph_used_pose)
 
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
@@ -896,17 +989,25 @@ class BuildMapNode(Node):
         occupancy_resolution = 0.1
         occupancy_step = 10
         occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
-            self.pose_graph_used_pose, occupancy_db, self.K, self.baseline, occupancy_resolution, occupancy_step
+            self.pose_graph_used_pose,
+            occupancy_db,
+            self.K,
+            self.baseline,
+            occupancy_resolution,
+            occupancy_step,
+            stage_timer=self.stage_timer,
         )
         occupancy_db.close()
-        occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
-        np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
-        np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
-        np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
-        cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
+        with self.stage_timer.timed("occupancy_save_files"):
+            occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
+            np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
+            np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
+            np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
+            cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
+        self.stage_timer.log_summary(self.get_logger().info)
 
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
@@ -1039,6 +1140,12 @@ def main(args=None):
     parser.add_argument("--map_save_path", type=str, default="tinynav_db")
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument(
+        "--global-frames-ratio",
+        type=float,
+        default=1.1,
+        help="Minimum keyframe growth ratio before online pose graph solve and TF republish.",
+    )
     parser.add_argument("--loop-closure-mode", type=str, default="embedding", choices=["embedding", "bow"])
     parser.add_argument("--loop-closure-use-bow", action="store_true", help="Use ORB+BF and DBoW3 for loop closure")
     parser.add_argument(
@@ -1077,6 +1184,7 @@ def main(args=None):
         loop_closure_use_bow=use_bow,
         dbow3_vocabulary_path=parsed_args.dbow3_vocabulary_path,
         verbose_timer=parsed_args.verbose_timer,
+        global_frames_ratio=parsed_args.global_frames_ratio,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)
