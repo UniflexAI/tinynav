@@ -30,7 +30,6 @@ class RobotConfig:
     camera_y: float = 0.0
     control_x: float = 0.0
     control_y: float = 0.0
-    safety_radius: float = 0.1
 
     @property
     def cam_offset_3d(self):
@@ -54,7 +53,6 @@ GO2_CONFIG = RobotConfig(
     length=0.4, width=0.3,
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
 )
 
 B2_CONFIG = RobotConfig(
@@ -62,7 +60,6 @@ B2_CONFIG = RobotConfig(
     length=1.0, width=0.5,
     camera_x=0.5, camera_y=0.0,
     control_x=-0.5, control_y=0.0,
-    safety_radius=0.1,
 )
 
 # === Helper functions ===
@@ -255,7 +252,7 @@ def generate_predefined_trajectory_vocabularies(
     return np.asarray(trajectories), np.asarray(params)
 
 @njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
+def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution,
                                 front_len=0.35, rear_len=0.35, half_w=0.15,
                                 comfort_radius=0.6):
     """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners).
@@ -361,8 +358,7 @@ class PlanningNode(Node):
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
-            f"ctrl=({self.robot.control_x},{self.robot.control_y}), "
-            f"safety_r={self.robot.safety_radius}m)"
+            f"ctrl=({self.robot.control_x},{self.robot.control_y}))"
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
@@ -608,7 +604,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, front_len, rear_len, half_w)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
