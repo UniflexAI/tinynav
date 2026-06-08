@@ -18,6 +18,7 @@ import time
 from starlette.websockets import WebSocketState
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
+from .manager_client import get_manager_json, is_display_role
 from .state import runner
 
 router = APIRouter(tags=['ws'])
@@ -49,11 +50,15 @@ async def ws_status(ws: WebSocket):
     await ws.accept()
     try:
         while True:
-            node = runner.node
-            if node is not None:
-                payload = json.dumps({'online': True, **node.get_status()})
+            if is_display_role():
+                status = get_manager_json('/device/status')
+                payload = json.dumps(status if status is not None else {'online': False})
             else:
-                payload = json.dumps({'online': False})
+                node = runner.node
+                if node is not None:
+                    payload = json.dumps({'online': True, **node.get_status()})
+                else:
+                    payload = json.dumps({'online': False})
             await ws.send_text(payload)
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:

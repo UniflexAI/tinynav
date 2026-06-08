@@ -5,6 +5,8 @@ import cv2
 import message_filters
 import numpy as np
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
@@ -33,22 +35,51 @@ class LooperBridgeNode(Node):
         self.last_pose = None
         self.last_pose_time = None
         self._missing_input_counter = 0
+        self._last_sync_log_stamp = None
 
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
+        self.fast_pose_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
+        self.fast_depth_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self.tf_static_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
+        self.fast_pose_group = MutuallyExclusiveCallbackGroup()
+        self.fast_depth_group = MutuallyExclusiveCallbackGroup()
+        self.sync_group = MutuallyExclusiveCallbackGroup()
+        self.misc_group = MutuallyExclusiveCallbackGroup()
 
-        self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
-        self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
+        self.camera_info_sub = self.create_subscription(
+            CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback,
+            self.sensor_qos, callback_group=self.misc_group
+        )
+        self.tf_static_sub = self.create_subscription(
+            TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos,
+            callback_group=self.misc_group
+        )
+        self.pose_visual_sub = self.create_subscription(
+            PoseStamped, "/insight/vio_20hz", self.pose_visual_callback,
+            self.fast_pose_qos, callback_group=self.fast_pose_group
+        )
+        self.depth_direct_sub = self.create_subscription(
+            Image, "/camera/camera/depth/image_rect_raw", self.depth_callback,
+            self.fast_depth_qos, callback_group=self.fast_depth_group
+        )
 
         # Keep /insight/vio_100hz unbridged; cmd_vel_control consumes it directly.
-        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
-        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/insight/vio_20hz")
-        self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
+        self.depth_sub = message_filters.Subscriber(
+            self, Image, "/camera/camera/depth/image_rect_raw",
+            qos_profile=self.sensor_qos, callback_group=self.sync_group
+        )
+        self.pose_sub = message_filters.Subscriber(
+            self, PoseStamped, "/insight/vio_20hz", callback_group=self.sync_group
+        )
+        self.image_sub = message_filters.Subscriber(
+            self, Image, "/camera/camera/infra1/image_rect_raw",
+            qos_profile=self.sensor_qos, callback_group=self.sync_group
+        )
         self.sync = message_filters.TimeSynchronizer(
             [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20
         )
@@ -111,6 +142,15 @@ class LooperBridgeNode(Node):
             or current_time - self.last_keyframe_time >= self.args.keyframe_static_interval
         )
 
+    def make_odom_msg(self, T_world_camera: np.ndarray, stamp, velocity=None) -> Odometry:
+        return np2msg(
+            T_world_camera,
+            stamp,
+            "world",
+            "camera",
+            velocity=velocity,
+        )
+
     def build_odom(self, T_world_camera: np.ndarray, stamp) -> Odometry:
         velocity = None
         current_time = stamp.sec + stamp.nanosec * 1e-9
@@ -119,16 +159,18 @@ class LooperBridgeNode(Node):
             if dt > 1e-3:
                 velocity = (T_world_camera[:3, 3] - self.last_pose[:3, 3]) / dt
 
-        odom_msg = np2msg(
-            T_world_camera,
-            stamp,
-            "world",
-            "camera",
-            velocity=velocity,
-        )
+        odom_msg = self.make_odom_msg(T_world_camera, stamp, velocity=velocity)
         self.last_pose = T_world_camera.copy()
         self.last_pose_time = current_time
         return odom_msg
+
+    def pose_visual_callback(self, pose_msg: PoseStamped):
+        T_world_camera = pose_msg2np(pose_msg)
+        self.odom_visual_pub.publish(self.build_odom(T_world_camera, pose_msg.header.stamp))
+
+    def depth_callback(self, depth_msg: Image):
+        depth_m = self.decode_depth_meters(depth_msg)
+        self.depth_pub.publish(self.build_depth_msg(depth_m, depth_msg.header.stamp))
 
     def decode_depth_meters(self, depth_msg: Image) -> np.ndarray:
         depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
@@ -179,17 +221,19 @@ class LooperBridgeNode(Node):
         T_world_camera = pose_msg2np(pose_msg)
         stamp = pose_msg.header.stamp
 
-        odom_msg = self.build_odom(T_world_camera, stamp)
-        self.odom_visual_pub.publish(odom_msg)
+        odom_msg = self.make_odom_msg(T_world_camera, stamp)
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
         disparity_vis_msg = self.build_disparity_vis(depth_m, stamp)
 
-        self.get_logger().info(
-            "sync_callback: "
-            f"t={self.stamp_to_sec(stamp):.3f}, "
-            f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}"
-        )
+        stamp_s = self.stamp_to_sec(stamp)
+        if self._last_sync_log_stamp is None or stamp_s - self._last_sync_log_stamp >= 1.0:
+            self._last_sync_log_stamp = stamp_s
+            self.get_logger().info(
+                "sync_callback: "
+                f"t={stamp_s:.3f}, "
+                f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}"
+            )
 
         image_out = copy.deepcopy(image_msg)
         image_out.header.stamp = stamp
@@ -199,7 +243,6 @@ class LooperBridgeNode(Node):
         camera_info_out.header.stamp = stamp
         camera_info_out.header.frame_id = "camera"
 
-        self.depth_pub.publish(depth_out)
         self.disparity_pub_vis.publish(disparity_vis_msg)
         self.slam_camera_info_pub.publish(camera_info_out)
         self.camera_info_alias_pub.publish(camera_info_out)
@@ -223,11 +266,14 @@ def parse_args():
 def main(args=None):
     rclpy.init(args=args)
     node = LooperBridgeNode(parse_args())
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

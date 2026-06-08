@@ -28,7 +28,7 @@ import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import CompressedImage, Image
+from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
@@ -71,13 +71,25 @@ _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
 class BackendNode(Ros2NodeManager):
     """Ros2NodeManager + subscriptions needed by the HTTP/WS layer."""
 
-    def __init__(self, tinynav_db_path: str | None = None):
+    def __init__(
+        self,
+        tinynav_db_path: str | None = None,
+        *,
+        manage_processes: bool = True,
+        telemetry_enabled: bool = True,
+    ):
         if tinynav_db_path is None:
             tinynav_db_path = os.path.join(_TINYNAV_ROOT, 'tinynav_db')
-        super().__init__(tinynav_db_path=tinynav_db_path)
+        super().__init__(
+            tinynav_db_path=tinynav_db_path,
+            node_name='ros2_node_manager' if manage_processes else 'tinynav_display_backend',
+            enable_service_control=manage_processes,
+        )
 
         self._lock = threading.Lock()
         self._destroyed = False
+        self._manage_processes = manage_processes
+        self.telemetry_enabled = telemetry_enabled
         self.mapping_percent: float = 0.0
         self.current_pose: dict | None = None   # latest pose from SLAM or map
 
@@ -95,32 +107,40 @@ class BackendNode(Ros2NodeManager):
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
+        self._trajectory_ref: np.ndarray | None = None  # columns: x, y, t_abs
         self._global_path: list = []
+        self._footprint: list = []
+        self._voxel_points: list = []
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
-        self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
-        self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
-        self.create_subscription(
-            Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
-        )
-        # Mark localized as soon as any relocalization succeeds (published unconditionally
-        # by map_node, unlike current_pose_in_map which requires POIs to be set).
-        self.create_subscription(
-            Odometry, '/map/relocalization', self._on_relocalization, 10
-        )
-        self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
-        self.create_subscription(
-            OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
-        )
-        self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
-        self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
-        self.create_subscription(
-            Odometry, '/control/target_pose', self._on_nav_target_pose, 1
-        )
+        self._tf_buffer = None
+        self._tf_listener = None
+        if self.telemetry_enabled:
+            self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
+            self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
+            self.create_subscription(
+                Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
+            )
+            # Mark localized as soon as any relocalization succeeds (published unconditionally
+            # by map_node, unlike current_pose_in_map which requires POIs to be set).
+            self.create_subscription(
+                Odometry, '/map/relocalization', self._on_relocalization, 10
+            )
+            self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
+            self.create_subscription(
+                OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
+            )
+            self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
+            self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
+            self.create_subscription(
+                Odometry, '/control/target_pose', self._on_nav_target_pose, 1
+            )
+            self.create_subscription(PointCloud, '/planning/footprint', self._on_footprint, 1)
+            self.create_subscription(PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1)
 
-        self._tf_buffer = tf2_ros.Buffer()
-        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+            self._tf_buffer = tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         # Publisher for POI nav target consumed by map_node via /mapping/cmd_pois
         self._cmd_pois_pub = self.create_publisher(String, '/mapping/cmd_pois', 10)
@@ -158,9 +178,15 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
 
-        self.create_subscription(Float32, '/battery', self._on_battery, 10)
+        if self._manage_processes:
+            self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self._detect_and_init_sensor()
-        self._start_unitree_if_configured()
+        if self._manage_processes:
+            self._start_unitree_if_configured()
+
+    def _cmd_cb(self, msg):
+        if self._manage_processes:
+            super()._cmd_cb(msg)
 
     # ------------------------------------------------------------------ #
     # ROS callbacks                                                        #
@@ -248,12 +274,40 @@ class BackendNode(Ros2NodeManager):
             pass
 
     def _on_trajectory_path(self, msg: Path):
-        pts = [
-            {'x': p.pose.position.x, 'y': p.pose.position.y}
-            for p in msg.poses
-        ]
+        new_ref = self._rebuild_trajectory_ref(msg)
         with self._lock:
-            self._trajectory = pts
+            if new_ref is None:
+                self._trajectory_ref = None
+                self._trajectory = []
+                return
+            if self._trajectory_ref is None or len(self._trajectory_ref) == 0:
+                self._trajectory_ref = new_ref
+            else:
+                new_start_t = float(new_ref[0, 2])
+                kept = self._trajectory_ref[self._trajectory_ref[:, 2] < new_start_t]
+                self._trajectory_ref = new_ref if len(kept) == 0 else np.vstack((kept, new_ref))
+            self._trajectory = self._trajectory_ref_to_points(self._trajectory_ref)
+
+    def _rebuild_trajectory_ref(self, path_msg: Path):
+        n = len(path_msg.poses)
+        if n == 0:
+            return None
+        ref = np.zeros((n, 3), dtype=np.float64)
+        for i, pose in enumerate(path_msg.poses):
+            ref[i, 0] = pose.pose.position.x
+            ref[i, 1] = pose.pose.position.y
+            ref[i, 2] = pose.header.stamp.sec + pose.header.stamp.nanosec * 1e-9
+
+        if n > 1 and np.min(np.diff(ref[:, 2])) <= 0.0:
+            start_t = ref[0, 2]
+            if start_t <= 0.0:
+                start_t = path_msg.header.stamp.sec + path_msg.header.stamp.nanosec * 1e-9
+            ref[:, 2] = start_t + np.arange(n, dtype=np.float64) * 0.2
+        return ref
+
+    @staticmethod
+    def _trajectory_ref_to_points(ref: np.ndarray):
+        return [{'x': float(x), 'y': float(y)} for x, y in ref[:, :2]]
 
     def _on_global_plan(self, msg: Path):
         pts = [
@@ -262,6 +316,35 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._global_path = pts
+
+    def _on_footprint(self, msg: PointCloud):
+        n = len(msg.points)
+        if n == 0:
+            return
+        if n >= 84 and n % 21 == 0:
+            corners = [{'x': msg.points[i * 21].x, 'y': msg.points[i * 21].y} for i in range(n // 21)]
+        else:
+            corners = [{'x': p.x, 'y': p.y} for p in msg.points]
+        with self._lock:
+            self._footprint = corners
+
+    def _on_occupied_voxels(self, msg: PointCloud2):
+        try:
+            import sensor_msgs_py.point_cloud2 as pc2
+
+            point_count = len(msg.data) // max(1, msg.point_step)
+            step = max(1, point_count // 2500)
+            points = []
+            for i, p in enumerate(pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)):
+                if i % step != 0:
+                    continue
+                points.append({'x': float(p[0]), 'y': float(p[1]), 'z': float(p[2])})
+                if len(points) >= 2500:
+                    break
+            with self._lock:
+                self._voxel_points = points
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
@@ -296,7 +379,7 @@ class BackendNode(Ros2NodeManager):
 
     def _transform_path_via_tf(self, path: list) -> list:
         """Transform map-frame path points to odom (world) frame via TF lookup."""
-        if not path:
+        if not path or self._tf_buffer is None:
             return path
         try:
             t = self._tf_buffer.lookup_transform('world', 'map', rclpy.time.Time())
@@ -339,12 +422,14 @@ class BackendNode(Ros2NodeManager):
 
             if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
-                self.get_logger().info('Sensor mode: looper — launching looper bridge + planning')
+                action = 'launching looper bridge + planning' if self._manage_processes else 'using existing looper topics'
+                self.get_logger().info(f'Sensor mode: looper — {action}')
             else:
                 self._sensor_mode = 'realsense'
-                self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
+                action = 'launching driver + perception + planning' if self._manage_processes else 'using existing realsense topics'
+                self.get_logger().info(f'Sensor mode: realsense — {action}')
 
-            if self._sensor_mode in ('looper', 'realsense'):
+            if self._manage_processes and self._sensor_mode in ('looper', 'realsense'):
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
                 self._launch_sensor_procs(_env)
@@ -479,6 +564,8 @@ class BackendNode(Ros2NodeManager):
                 'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
+                'footprint': list(self._footprint),
+                'voxel_points': list(self._voxel_points),
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot
@@ -666,11 +753,15 @@ class BackendNode(Ros2NodeManager):
         return run_env
 
     def _stop_sensor_procs(self):
+        if not self._manage_processes:
+            return
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
 
     def _stop_backend_procs(self):
+        if not self._manage_processes:
+            return
         for attr in (
             '_looper_bridge_proc', '_realsense_proc', '_perception_proc',
             '_planning_proc', '_unitree_proc', '_map_node_proc', '_cmd_vel_proc',
@@ -789,11 +880,15 @@ class BackendNode(Ros2NodeManager):
         return stopped
 
     def _stop_all(self):
+        if not self._manage_processes:
+            return
         super()._stop_all()
         self._terminate_bag_recorders()
 
     def _launch_sensor_procs(self, env: dict):
         """Start sensor procs based on current _sensor_mode."""
+        if not self._manage_processes:
+            return
         if self._sensor_mode == 'looper':
             if not self._proc_alive(self._looper_bridge_proc):
                 self._looper_bridge_proc = self._launch_proc(
@@ -827,6 +922,8 @@ class BackendNode(Ros2NodeManager):
                 )
 
     def _restart_sensor_procs(self):
+        if not self._manage_processes:
+            return
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._launch_sensor_procs(_env)
@@ -837,6 +934,8 @@ class BackendNode(Ros2NodeManager):
     # ------------------------------------------------------------------ #
 
     def cmd_start_nav_nodes(self):
+        if not self._manage_processes:
+            raise RuntimeError('Nav node lifecycle is disabled in display backend role')
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._map_node_proc = self._launch_proc(
@@ -863,6 +962,8 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().info('Nav nodes started')
 
     def cmd_stop_nav_nodes(self):
+        if not self._manage_processes:
+            raise RuntimeError('Nav node lifecycle is disabled in display backend role')
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
@@ -871,12 +972,18 @@ class BackendNode(Ros2NodeManager):
             self._nav_nodes_running = False
             self._localized = False
             self._map_pose = None
+            self._trajectory = []
+            self._trajectory_ref = None
             self._global_path = []
+            self._footprint = []
+            self._voxel_points = []
             self._nav_target_pose = None
             self._nav_paused = False
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
+        if not self._manage_processes:
+            raise RuntimeError('Nav node lifecycle is disabled in display backend role')
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
         self._kill_proc(self._cmd_vel_proc)
@@ -913,7 +1020,11 @@ class BackendNode(Ros2NodeManager):
             self._nav_nodes_running = True
             self._localized = False
             self._map_pose = None
+            self._trajectory = []
+            self._trajectory_ref = None
             self._global_path = []
+            self._footprint = []
+            self._voxel_points = []
             self._nav_target_pose = None
         self.state = 'idle'
         self._pub_state()
@@ -935,6 +1046,8 @@ class BackendNode(Ros2NodeManager):
         )
 
     def cmd_bag_start(self):
+        if not self._manage_processes:
+            raise RuntimeError('Bag recording is disabled in display backend role')
         if self._sensor_mode == 'looper':
             self._stop_sensor_procs()
         self._stop_all()
@@ -1123,6 +1236,8 @@ class BackendNode(Ros2NodeManager):
 
 
     def cmd_map_build(self):
+        if not self._manage_processes:
+            raise RuntimeError('Map building is disabled in display backend role')
         self._stop_sensor_procs()
         self._stop_all()
         self._start('rosbag_build_map')
@@ -1219,8 +1334,16 @@ class BackendNode(Ros2NodeManager):
 class NodeRunner:
     """Manages the rclpy lifecycle; spins BackendNode in a daemon thread."""
 
-    def __init__(self, tinynav_db_path: str | None = None):
+    def __init__(
+        self,
+        tinynav_db_path: str | None = None,
+        *,
+        manage_processes: bool = True,
+        telemetry_enabled: bool = True,
+    ):
         self._db_path = tinynav_db_path or os.path.join(_TINYNAV_ROOT, 'tinynav_db')
+        self._manage_processes = manage_processes
+        self._telemetry_enabled = telemetry_enabled
         self.node: BackendNode | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -1244,8 +1367,12 @@ class NodeRunner:
             node: BackendNode | None = None
             try:
                 rclpy.init()
-                node = BackendNode(tinynav_db_path=self._db_path)
-                if restart_nav_nodes:
+                node = BackendNode(
+                    tinynav_db_path=self._db_path,
+                    manage_processes=self._manage_processes,
+                    telemetry_enabled=self._telemetry_enabled,
+                )
+                if self._manage_processes and restart_nav_nodes:
                     try:
                         node.cmd_start_nav_nodes()
                     except Exception:
@@ -1271,7 +1398,9 @@ class NodeRunner:
                     if not self._stopping.is_set():
                         try:
                             with node._lock:
-                                restart_nav_nodes = bool(node._nav_nodes_running)
+                                restart_nav_nodes = bool(
+                                    self._manage_processes and node._nav_nodes_running
+                                )
                         except Exception:
                             restart_nav_nodes = False
                     try:

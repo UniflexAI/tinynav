@@ -172,7 +172,7 @@ class CmdVelControlNode(Node):
             np.linalg.norm(robot_pos[:2] - self._path_ref[-1, :2]) < 0.1
             and abs(heading_to_goal) < 0.1
         ):
-            self._publish_zero("target reached")
+            self._publish_zero("local trajectory endpoint reached")
             return
 
         cmd = Twist()

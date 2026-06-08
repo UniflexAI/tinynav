@@ -26,6 +26,7 @@ fi
 
 export PYTHONPATH="$APP_ROOT:${PYTHONPATH:-}"
 export TINYNAV_DB_PATH="${TINYNAV_DB_PATH:-$DB_PATH_DEFAULT}"
+export TINYNAV_BACKEND_ROLE="${TINYNAV_BACKEND_ROLE:-manager}"
 export LD_LIBRARY_PATH="/userdata/opencv-release/lib:/userdata/hobot/opt/hobot/deps:${LD_LIBRARY_PATH:-}"
 
 exec python3 -m uvicorn app.backend.main:app --host 0.0.0.0 --port 8000

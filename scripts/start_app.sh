@@ -1,7 +1,10 @@
 #!/bin/bash
 
 FRONTEND_PORT="${FRONTEND_PORT:-80}"
-DEVICE_PROXY_ENABLE="${DEVICE_PROXY_ENABLE:-1}"
+BACKEND_MODE="${BACKEND_MODE:-display}"  # display | proxy | none
+DISPLAY_BACKEND_PORT="${DISPLAY_BACKEND_PORT:-8000}"
+TINYNAV_MANAGER_BASE_URL="${TINYNAV_MANAGER_BASE_URL:-http://169.254.10.1:8000}"
+TINYNAV_DB_PATH="${TINYNAV_DB_PATH:-/tinynav/tinynav_db}"
 DEVICE_PROXY_LISTEN_HOST="${DEVICE_PROXY_LISTEN_HOST:-0.0.0.0}"
 DEVICE_PROXY_LISTEN_PORT="${DEVICE_PROXY_LISTEN_PORT:-8000}"
 DEVICE_PROXY_TARGET_HOST="${DEVICE_PROXY_TARGET_HOST:-169.254.10.1}"
@@ -69,12 +72,21 @@ pkill -f "$DEVICE_PROXY_SCRIPT" >/dev/null 2>&1 || true
 
 tmux kill-session -t app >/dev/null 2>&1 || true
 
-if [ "$DEVICE_PROXY_ENABLE" = "1" ]; then
+FRONTEND_CMD="python -m http.server $FRONTEND_PORT --directory /tinynav/app/frontend/build/web"
+DISPLAY_BACKEND_CMD="source /opt/ros/humble/setup.bash 2>/dev/null || true; cd /tinynav && TINYNAV_BACKEND_ROLE=display TINYNAV_MANAGER_BASE_URL=$TINYNAV_MANAGER_BASE_URL TINYNAV_DB_PATH=$TINYNAV_DB_PATH python3 -m uvicorn app.backend.main:app --host 0.0.0.0 --port $DISPLAY_BACKEND_PORT"
+PROXY_CMD="python3 $DEVICE_PROXY_SCRIPT"
+
+if [ "$BACKEND_MODE" = "display" ]; then
   tmux new-session -s app \; \
     split-window -h \; \
-    select-pane -t 0 \; send-keys "python -m http.server $FRONTEND_PORT --directory /tinynav/app/frontend/build/web" C-m \; \
-    select-pane -t 1 \; send-keys "python3 $DEVICE_PROXY_SCRIPT" C-m
+    select-pane -t 0 \; send-keys "$FRONTEND_CMD" C-m \; \
+    select-pane -t 1 \; send-keys "$DISPLAY_BACKEND_CMD" C-m
+elif [ "$BACKEND_MODE" = "proxy" ]; then
+  tmux new-session -s app \; \
+    split-window -h \; \
+    select-pane -t 0 \; send-keys "$FRONTEND_CMD" C-m \; \
+    select-pane -t 1 \; send-keys "$PROXY_CMD" C-m
 else
   tmux new-session -s app \; \
-    send-keys "python -m http.server $FRONTEND_PORT --directory /tinynav/app/frontend/build/web" C-m
+    send-keys "$FRONTEND_CMD" C-m
 fi

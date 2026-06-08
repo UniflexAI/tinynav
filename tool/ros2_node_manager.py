@@ -7,19 +7,25 @@ import os
 import shutil
 import threading
 class Ros2NodeManager(Node):
-    def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
-        super().__init__('ros2_node_manager')
+    def __init__(
+        self,
+        tinynav_db_path: str = '/tinynav/tinynav_db',
+        node_name: str = 'ros2_node_manager',
+        enable_service_control: bool = True,
+    ):
+        super().__init__(node_name)
         self.state = 'idle'
         self.processes = {}
         self.tinynav_db_path = tinynav_db_path
         self.bag_path = os.path.join(tinynav_db_path, 'bag')
         self.map_path = os.path.join(tinynav_db_path, 'map')
         self.nav_out_path = os.path.join(tinynav_db_path, 'nav_out')
-        self.state_pub = self.create_publisher(String, '/service/state', 10)
-        self.create_subscription(String, '/service/command', self._cmd_cb, 10)
-        
-        self.state_timer = self.create_timer(1.0, self._pub_state)
-        self.process_monitor_timer = self.create_timer(2.0, self._check_processes)
+        self.state_pub = None
+        if enable_service_control:
+            self.state_pub = self.create_publisher(String, '/service/state', 10)
+            self.create_subscription(String, '/service/command', self._cmd_cb, 10)
+            self.state_timer = self.create_timer(1.0, self._pub_state)
+            self.process_monitor_timer = self.create_timer(2.0, self._check_processes)
         self._pub_state()
     
     def _cmd_cb(self, msg):
@@ -178,7 +184,8 @@ class Ros2NodeManager(Node):
             self._pub_state()
     
     def _pub_state(self):
-        self.state_pub.publish(String(data=self.state))
+        if self.state_pub is not None:
+            self.state_pub.publish(String(data=self.state))
     
     def destroy_node(self):
         self._stop_all()

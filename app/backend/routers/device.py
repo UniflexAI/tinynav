@@ -3,6 +3,7 @@ import socket
 import psutil
 from fastapi import APIRouter
 
+from ..manager_client import get_manager_json, is_display_role
 from ..state import runner
 
 router = APIRouter(tags=['device'])
@@ -19,6 +20,11 @@ def device_info():
 
 @router.get('/status')
 def device_status():
+    if is_display_role():
+        manager_status = get_manager_json('/device/status')
+        if manager_status is not None:
+            return manager_status
+
     node = runner.node
     if node is None:
         return {'online': False, 'battery': None, **_empty_status()}

@@ -24,11 +24,15 @@ cd build/web && uv run python -m http.server 8080
 ## Device Startup: Jetson + insight9
 
 In the deployed robot setup, the backend runs on insight9 and the frontend runs in
-the Jetson devcontainer:
+the Jetson devcontainer. The backend is split into two roles:
 
-- insight9 backend: `169.254.10.1:8000`
+- insight9 manager backend: `169.254.10.1:8000`
+- Jetson display backend: `192.168.123.220:8000`
 - Jetson frontend: `http://192.168.123.220`
-- Jetson backend proxy: `192.168.123.220:8000 -> 169.254.10.1:8000`
+
+The manager backend starts/stops ROS nodes and handles commands. The display
+backend subscribes ROS topics, converts them to JSON/JPEG/WebSocket payloads for
+the frontend, and proxies manager-owned HTTP routes to insight9.
 
 Start the backend from Jetson:
 
@@ -48,6 +52,7 @@ Verify the backend from Jetson:
 curl http://169.254.10.1:8000/device/status
 curl http://169.254.10.1:8000/sensor/mode
 curl http://169.254.10.1:8000/sensor/image-topics
+curl http://169.254.10.1:8000/openapi.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["title"])'
 ```
 
 For insight9, the expected sensor mode is `looper`, and the color stream should be
@@ -68,8 +73,17 @@ cd /tinynav
 bash scripts/start_app.sh
 ```
 
-`scripts/start_app.sh` serves the frontend on port `80` and starts the proxy from
-Jetson port `8000` to insight9 port `8000`.
+`scripts/start_app.sh` serves the frontend on port `80` and starts the Jetson
+display backend on port `8000`. Use `BACKEND_MODE=proxy` only to fall back to
+the old raw TCP proxy.
+
+Verify the Jetson display backend:
+
+```bash
+curl http://127.0.0.1:8000/device/status
+curl http://127.0.0.1:8000/sensor/mode
+curl http://127.0.0.1:8000/openapi.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["title"])'
+```
 
 Enable navigation nodes after the backend and frontend are running:
 
@@ -91,6 +105,9 @@ ssh root@169.254.10.1 'tail -f /userdata/junlinp/logs/backend_debug.log'
 | Variable | Default | Description |
 |---|---|---|
 | `TINYNAV_DB_PATH` | `<repo>/tinynav_db` | Root path for bag, map, and nav data |
+| `TINYNAV_BACKEND_ROLE` | `combined` | `manager`, `display`, or `combined` backend mode |
+| `TINYNAV_MANAGER_BASE_URL` | `http://169.254.10.1:8000` | Manager URL used by the Jetson display backend |
+| `BACKEND_MODE` | `display` | `scripts/start_app.sh` mode: `display`, `proxy`, or `none` |
 | `BACKEND_PORT`   | `8000` | Override the backend port |
 | `FRONTEND_PORT`  | `8080` | Override the frontend port |
 

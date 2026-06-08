@@ -1097,16 +1097,17 @@ class MapNode(Node):
         t_stage = mark_stage("generate_path", t_stage)
 
         if paths_in_map is not None:
-            # use the max_speed to publish the position the robot should be after 5 seconds
+            # use the max_speed to publish the position the robot should be after 10 seconds
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
+                lookahead_seconds = 10.0
                 if len(paths_in_map) > 1:
                     accumulated_distance = 0.0
                     start_point = pose_in_map_position[:3]
                     target_position = paths_in_map[-1]
                     for i in range(len(paths_in_map) - 1):
                         accumulated_distance += np.linalg.norm(paths_in_map[i] - start_point)
-                        if accumulated_distance > max_speed * 5:
+                        if accumulated_distance > max_speed * lookahead_seconds:
                             target_position = paths_in_map[i]
                             break
                         start_point = paths_in_map[i]

@@ -23,7 +23,7 @@ class SendPoisRequest(BaseModel):
 @router.post('/send-pois')
 def nav_send_pois(req: SendPoisRequest):
     node = _require_node()
-    if not node._localized:
+    if getattr(node, 'telemetry_enabled', True) and not node._localized:
         raise HTTPException(409, 'Not localized')
     node.cmd_send_pois(req.poi_ids)
     return {'ok': True}
