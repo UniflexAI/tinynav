@@ -115,6 +115,77 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
                             parent[neighbor] = current
     return []
 
+def _segment_is_shortcut_safe(
+    start: tuple,
+    goal: tuple,
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    sdf_margin_m: float = 0.2,
+) -> bool:
+    """Return whether a straight shortcut stays in known-safe map cells."""
+    start_np = np.asarray(start, dtype=np.float32)
+    goal_np = np.asarray(goal, dtype=np.float32)
+    delta = goal_np - start_np
+    distance_m = float(np.linalg.norm(delta) * resolution)
+    if distance_m <= 1e-6:
+        return True
+    if distance_m > max_segment_m:
+        return False
+
+    steps = max(1, int(np.ceil(float(np.max(np.abs(delta))))))
+    max_allowed_sdf = max(float(sdf_map[start]), float(sdf_map[goal]), 0.5) + sdf_margin_m
+    for t in np.linspace(0.0, 1.0, steps + 1):
+        idx = tuple(np.rint(start_np + delta * t).astype(np.int32).tolist())
+        if (
+            idx[0] < 0
+            or idx[0] >= occupancy_map.shape[0]
+            or idx[1] < 0
+            or idx[1] >= occupancy_map.shape[1]
+            or idx[2] < 0
+            or idx[2] >= occupancy_map.shape[2]
+        ):
+            return False
+        if occupancy_map[idx] == 2:
+            return False
+        if not np.isfinite(sdf_map[idx]) or float(sdf_map[idx]) > max_allowed_sdf:
+            return False
+    return True
+
+
+def shortcut_prune_path(
+    path: list,
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    max_skip_nodes: int = 30,
+) -> list:
+    """Greedily remove small zig-zags from a voxel path using local line-of-sight."""
+    if len(path) <= 2:
+        return path
+
+    pruned = [path[0]]
+    i = 0
+    while i < len(path) - 1:
+        farthest = i + 1
+        upper = min(len(path) - 1, i + max_skip_nodes)
+        for j in range(upper, i, -1):
+            if _segment_is_shortcut_safe(
+                path[i],
+                path[j],
+                sdf_map,
+                occupancy_map,
+                resolution,
+                max_segment_m=max_segment_m,
+            ):
+                farthest = j
+                break
+        pruned.append(path[farthest])
+        i = farthest
+    return pruned
+
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
@@ -272,8 +343,11 @@ class MapNode(Node):
         self._latest_continuous_odom = None
         self._current_path_in_map = None
         self._path_needs_replan = True
+        self._pending_forced_replans = 0
         self._last_replan_attempt_time = 0.0
         self._replan_retry_interval_s = 2.0
+        self._last_shortcut_prune_time = 0.0
+        self._shortcut_prune_interval_s = 2.0
         self._nav_timer = self.create_timer(0.2, self.nav_timer_callback)  # 5Hz
 
     def pois_callback(self, msg: String):
@@ -311,8 +385,10 @@ class MapNode(Node):
         self._leg_start_time = None
         self._speed_estimate = None
         self._path_needs_replan = True
+        self._pending_forced_replans = 0
         self._current_path_in_map = None
         self._last_replan_attempt_time = 0.0
+        self._last_shortcut_prune_time = 0.0
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -355,10 +431,12 @@ class MapNode(Node):
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
-            # Only replan if we don't have a path yet (first reloc or POI change)
-            # Don't replan on every reloc success - that causes path oscillation
-            if self._current_path_in_map is None and self.poi_index != -1 and self.poi_index < len(self.pois):
+            # Every successful relocalization must trigger one path generation.
+            # This forced attempt bypasses retry throttling; follow-up retries for
+            # failures remain throttled in nav_timer_callback.
+            if self.poi_index != -1 and self.poi_index < len(self.pois):
                 self._path_needs_replan = True
+                self._pending_forced_replans += 1
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -653,12 +731,12 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
 
-        # Replan path if needed (heavy, only when no path exists or POI changed).
-        # Replan failures are throttled so the 5Hz timer does not run A* continuously.
+        # Replan path if needed. Every relocalization success queues exactly one
+        # generation attempt; only failure retries are throttled.
         now = time.time()
         if self._path_needs_replan:
-            if now - self._last_replan_attempt_time >= self._replan_retry_interval_s:
-                self.replan_nav_path(pose_in_map)
+            if self._pending_forced_replans > 0 or now - self._last_replan_attempt_time >= self._replan_retry_interval_s:
+                self.replan_nav_path(pose_in_map, forced=self._pending_forced_replans > 0)
         elif self._current_path_in_map is not None:
             # Check if robot drifted too far from the cached path - trigger replan.
             closest_path_dist = min(
@@ -673,16 +751,33 @@ class MapNode(Node):
         if self._current_path_in_map is not None:
             self.update_target_pose(pose_in_map)
 
-    def replan_nav_path(self, pose_in_map: np.ndarray):
+    def replan_nav_path(self, pose_in_map: np.ndarray, forced: bool = False):
         """Heavy: generate nav path via A* on SDF map. Called only when replan is needed."""
-        self._last_replan_attempt_time = time.time()
+        now = time.time()
+        self._last_replan_attempt_time = now
+        if forced:
+            self._pending_forced_replans = max(0, self._pending_forced_replans - 1)
+
+        # Shortcut pruning is useful but extra work; run it periodically, plus
+        # force it for the first path of a leg so the initial plan is compact.
+        apply_shortcut = (
+            self._current_path_in_map is None
+            or now - self._last_shortcut_prune_time >= self._shortcut_prune_interval_s
+        )
+        if apply_shortcut:
+            self._last_shortcut_prune_time = now
+
         target_poi = self.pois[self.poi_index]
         with Timer(name="generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            paths_in_map = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+            paths_in_map = self.generate_nav_path_in_map(
+                pose_in_map=pose_in_map,
+                target_poi=target_poi,
+                apply_shortcut=apply_shortcut,
+            )
 
         if paths_in_map is not None:
             self._current_path_in_map = paths_in_map
-            self._path_needs_replan = False
+            self._path_needs_replan = self._pending_forced_replans > 0
 
             remaining_length = sum(
                 np.linalg.norm(paths_in_map[i + 1] - paths_in_map[i])
@@ -781,7 +876,7 @@ class MapNode(Node):
         self.global_plan_pub.publish(path_msg)
         self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
 
-    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
+    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray, apply_shortcut: bool = True) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
         dummy_poi_pose[:3, 3] = target_poi
         self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -816,6 +911,12 @@ class MapNode(Node):
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
 
+        if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
+            self.get_logger().warning(
+                f"search_close_to_sdf_map returned empty path: start_idx={tuple(start_idx)}, goal_idx={tuple(poi_goal_idx)}"
+            )
+            return None
+
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
@@ -825,6 +926,11 @@ class MapNode(Node):
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
+            if apply_shortcut:
+                pruned_path = shortcut_prune_path(path, self.sdf_map, self.occupancy_map, resolution)
+                if len(pruned_path) < len(path):
+                    self.get_logger().info(f"shortcut pruned nav path: {len(path)} -> {len(pruned_path)} points")
+                path = pruned_path
             converted_path = np.array(path) * resolution + occupancy_map_origin
             return converted_path
         return None
