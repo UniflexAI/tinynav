@@ -151,11 +151,11 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.8
+    robot_z_bottom: float = -0.7
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.5
-    dilation_cells: int = 2
+    dilation_cells: int = 0
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -387,7 +387,7 @@ class PlanningNode(Node):
 
         self.smoothed_velocity = 0.0
 
-        self.create_subscription(Odometry, '/mapping/lookahead_target', self.target_pose_callback, 10)
+        self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
@@ -585,7 +585,7 @@ class PlanningNode(Node):
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2] * self.resolution / 2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
             self.publish_footprint(T, depth_msg.header.stamp)
 
@@ -609,7 +609,7 @@ class PlanningNode(Node):
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
-        with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name='cc', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
 

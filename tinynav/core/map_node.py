@@ -469,7 +469,7 @@ class MapNode(Node):
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
-        self.target_pose_pub = self.create_publisher(Odometry, "/mapping/lookahead_target", 10)
+        self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -960,29 +960,29 @@ class MapNode(Node):
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
                 lookahead_distance = max_speed * 4
-                target_position = select_target_position_on_path(
-                    paths_in_map,
-                    pose_in_map_position[:3],
-                    lookahead_distance=lookahead_distance,
-                    turn_angle_threshold_rad=np.deg2rad(70.0),
-                    reversal_angle_threshold_rad=np.deg2rad(120.0),
-                    turn_stop_margin=0.15,
-                    min_turn_distance=0.3,
-                    turn_window_distance=0.4,
-                )
+                # target_position = select_target_position_on_path(
+                #     paths_in_map,
+                #     pose_in_map_position[:3],
+                #     lookahead_distance=lookahead_distance,
+                #     turn_angle_threshold_rad=np.deg2rad(70.0),
+                #     reversal_angle_threshold_rad=np.deg2rad(120.0),
+                #     turn_stop_margin=0.15,
+                #     min_turn_distance=0.3,
+                #     turn_window_distance=0.4,
+                # )
 
-                # if len(paths_in_map) > 1:
-                #     accumulated_distance = 0.0
-                #     start_point = pose_in_map_position[:3]
-                #     target_position = paths_in_map[-1]
-                #     for i in range(len(paths_in_map) - 1):
-                #         accumulated_distance += np.linalg.norm((paths_in_map[i] - start_point)[:2])
-                #         if accumulated_distance > max_speed * 5:
-                #             target_position = paths_in_map[i]
-                #             break
-                #         start_point = paths_in_map[i]
-                # else:
-                #     target_position = paths_in_map[0]
+                if len(paths_in_map) > 1:
+                    accumulated_distance = 0.0
+                    start_point = pose_in_map_position[:3]
+                    target_position = paths_in_map[-1]
+                    for i in range(len(paths_in_map) - 1):
+                        accumulated_distance += np.linalg.norm((paths_in_map[i] - start_point)[:2])
+                        if accumulated_distance > max_speed * 5:
+                            target_position = paths_in_map[i]
+                            break
+                        start_point = paths_in_map[i]
+                else:
+                    target_position = paths_in_map[0]
 
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
                 T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
