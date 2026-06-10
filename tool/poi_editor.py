@@ -16,6 +16,7 @@ import  viser.transforms as vtf
 import viser
 from viser import transforms as tf
 import json
+import heapq
 import cv2
 from rclpy.node import Node
 import rclpy
@@ -168,8 +169,267 @@ def _load_infra1_camera_image(infra1_db: VideoDB | None, timestamp: str) -> np.n
         return cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    
-def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphere_handle:viser.SceneHandle):
+
+def _world_to_grid_index(point: np.ndarray, origin: np.ndarray, resolution: float) -> tuple[int, int, int]:
+    # Match map_node.generate_nav_path_in_map: Python int() truncation after
+    # world-to-grid conversion, not floor(), so editor tests use identical indices.
+    p = np.asarray(point, dtype=np.float32)
+    return (
+        int((p[0] - origin[0]) / float(resolution)),
+        int((p[1] - origin[1]) / float(resolution)),
+        int((p[2] - origin[2]) / float(resolution)),
+    )
+
+
+def _grid_index_in_bounds(idx: tuple[int, int, int], shape: tuple[int, int, int]) -> bool:
+    return (
+        0 <= idx[0] < shape[0]
+        and 0 <= idx[1] < shape[1]
+        and 0 <= idx[2] < shape[2]
+    )
+
+
+def _grid_indices_to_world(path: list[tuple[int, int, int]], origin: np.ndarray, resolution: float) -> np.ndarray:
+    if len(path) == 0:
+        return np.empty((0, 3), dtype=np.float32)
+    return np.asarray(path, dtype=np.float32) * float(resolution) + origin[None, :]
+
+
+def _heuristic_sdf(start, goal, resolution: float) -> float:
+    vec_start = np.array(start)
+    vec_goal = np.array(goal)
+    return np.linalg.norm((vec_start - vec_goal) * resolution) + 20 * np.abs(vec_start[2] - vec_goal[2]) * resolution
+
+
+def _reconstruct_path_sdf(parent: dict, current: tuple) -> list[tuple[int, int, int]]:
+    path = []
+    while current in parent:
+        path.append(current)
+        if current == parent[current]:
+            break
+        current = parent[current]
+    return path[::-1]
+
+
+def _search_close_to_sdf_map(
+    start_index: tuple[int, int, int],
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    stop_distance: float,
+) -> list[tuple[int, int, int]]:
+    # Same semantics as map_node.search_close_to_sdf_map: walk from an arbitrary
+    # POI voxel to the nearest low-SDF corridor voxel, avoiding occupied cells.
+    start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else tuple(start_index)
+    open_heap = [(float(sdf_map[start_index]), start_index)]
+    open_heap_set = {start_index}
+    parent = {start_index: start_index}
+    visited = set()
+    while len(open_heap) > 0:
+        current_sdf, current = heapq.heappop(open_heap)
+        open_heap_set.remove(current)
+        visited.add(current)
+        if current_sdf < stop_distance:
+            return _reconstruct_path_sdf(parent, current)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if not _grid_index_in_bounds(neighbor, sdf_map.shape):
+                        continue
+                    if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
+                        open_heap_set.add(neighbor)
+                        heapq.heappush(open_heap, (float(sdf_map[neighbor]), neighbor))
+                        parent[neighbor] = current
+    return []
+
+
+def _search_within_sdf_map(
+    start: tuple[int, int, int],
+    goal: tuple[int, int, int],
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+) -> list[tuple[int, int, int]]:
+    # Same bucketed SDF search policy as map_node.search_within_sdf_map.
+    start = tuple(start.flatten()) if isinstance(start, np.ndarray) else tuple(start)
+    goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else tuple(goal)
+    sdf_bins = [0.15, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+    def get_queue_index(sdf_value: float) -> int:
+        for idx, threshold in enumerate(sdf_bins):
+            if sdf_value < threshold:
+                return idx
+        return len(sdf_bins)
+
+    open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
+    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
+    start_queue_idx = get_queue_index(float(sdf_map[start]))
+    heapq.heappush(open_heaps[start_queue_idx], (_heuristic_sdf(start, goal, resolution), start))
+    open_sets[start_queue_idx].add(start)
+    parent = {start: start}
+    visited = set()
+
+    while True:
+        queue_idx = -1
+        for i, q in enumerate(open_heaps):
+            if len(q) > 0:
+                queue_idx = i
+                break
+        if queue_idx == -1:
+            break
+
+        _, current = heapq.heappop(open_heaps[queue_idx])
+        open_sets[queue_idx].remove(current)
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == goal:
+            return _reconstruct_path_sdf(parent, current)
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if not _grid_index_in_bounds(neighbor, sdf_map.shape):
+                        continue
+                    if neighbor in visited or occupancy_map[neighbor] == 2:
+                        continue
+                    neighbor_queue_idx = get_queue_index(float(sdf_map[neighbor]))
+                    if neighbor in open_sets[neighbor_queue_idx]:
+                        continue
+                    open_sets[neighbor_queue_idx].add(neighbor)
+                    heapq.heappush(
+                        open_heaps[neighbor_queue_idx],
+                        (_heuristic_sdf(neighbor, goal, resolution), neighbor),
+                    )
+                    if neighbor not in parent:
+                        parent[neighbor] = current
+    return []
+
+
+def _segment_is_shortcut_safe(
+    start: tuple[int, int, int],
+    goal: tuple[int, int, int],
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    sdf_margin_m: float = 0.2,
+) -> bool:
+    start_np = np.asarray(start, dtype=np.float32)
+    goal_np = np.asarray(goal, dtype=np.float32)
+    delta = goal_np - start_np
+    distance_m = float(np.linalg.norm(delta) * resolution)
+    if distance_m <= 1e-6:
+        return True
+    if distance_m > max_segment_m:
+        return False
+
+    steps = max(1, int(np.ceil(float(np.max(np.abs(delta))))))
+    max_allowed_sdf = max(float(sdf_map[start]), float(sdf_map[goal]), 0.5) + sdf_margin_m
+    for t in np.linspace(0.0, 1.0, steps + 1):
+        idx = tuple(np.rint(start_np + delta * t).astype(np.int32).tolist())
+        if not _grid_index_in_bounds(idx, occupancy_map.shape):
+            return False
+        if occupancy_map[idx] == 2:
+            return False
+        if not np.isfinite(sdf_map[idx]) or float(sdf_map[idx]) > max_allowed_sdf:
+            return False
+    return True
+
+
+def _shortcut_prune_path(
+    path: list[tuple[int, int, int]],
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    max_skip_nodes: int = 30,
+    max_prune_nodes: int = 100,
+) -> list[tuple[int, int, int]]:
+    # Same bounded local shortcut pruning as map_node.shortcut_prune_path.
+    if len(path) <= 2:
+        return path
+
+    prune_end = min(len(path), max_prune_nodes)
+    prune_path = path[:prune_end]
+    tail = path[prune_end:]
+
+    pruned = [prune_path[0]]
+    i = 0
+    while i < len(prune_path) - 1:
+        farthest = i + 1
+        upper = min(len(prune_path) - 1, i + max_skip_nodes)
+        for j in range(upper, i, -1):
+            if _segment_is_shortcut_safe(
+                prune_path[i],
+                prune_path[j],
+                sdf_map,
+                occupancy_map,
+                resolution,
+                max_segment_m=max_segment_m,
+            ):
+                farthest = j
+                break
+        pruned.append(prune_path[farthest])
+        i = farthest
+
+    return pruned + tail
+
+
+def _plan_sdf_path_between_points(
+    start_position: np.ndarray,
+    goal_position: np.ndarray,
+    occupancy_map: np.ndarray,
+    occupancy_meta: np.ndarray,
+    sdf_map: np.ndarray,
+    stop_distance: float = 0.2,
+) -> tuple[np.ndarray | None, str]:
+    origin = occupancy_meta[:3].astype(np.float32)
+    resolution = float(occupancy_meta[3])
+    start_idx = _world_to_grid_index(start_position, origin, resolution)
+    goal_idx = _world_to_grid_index(goal_position, origin, resolution)
+
+    if not _grid_index_in_bounds(start_idx, occupancy_map.shape):
+        return None, f"Start out of map bounds: {start_idx}"
+    if not _grid_index_in_bounds(goal_idx, occupancy_map.shape):
+        return None, f"Goal out of map bounds: {goal_idx}"
+    if occupancy_map[start_idx] == 2:
+        return None, f"Start is occupied: {start_idx}"
+    if occupancy_map[goal_idx] == 2:
+        return None, f"Goal is occupied: {goal_idx}"
+
+    sdf_start_path = _search_close_to_sdf_map(start_idx, sdf_map, occupancy_map, stop_distance)
+    sdf_goal_path = _search_close_to_sdf_map(goal_idx, sdf_map, occupancy_map, stop_distance)
+    if len(sdf_start_path) == 0:
+        return None, f"No low-SDF corridor reachable from start: {start_idx}"
+    if len(sdf_goal_path) == 0:
+        return None, f"No low-SDF corridor reachable from goal: {goal_idx}"
+
+    sdf_start = sdf_start_path[-1]
+    sdf_goal = sdf_goal_path[-1]
+    path_sdf = _search_within_sdf_map(sdf_start, sdf_goal, sdf_map, occupancy_map, resolution)
+    if len(path_sdf) == 0:
+        return None, f"No SDF path between corridor voxels: {sdf_start} -> {sdf_goal}"
+
+    raw_path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
+    pruned_path = _shortcut_prune_path(raw_path, sdf_map, occupancy_map, resolution)
+    world_path = _grid_indices_to_world(pruned_path, origin, resolution)
+    return world_path, f"SDF path OK: raw={len(raw_path)}, pruned={len(pruned_path)}, start_idx={start_idx}, goal_idx={goal_idx}"
+
+
+def create_poi_ui(
+    server,
+    poi_list_container,
+    poi_index: int,
+    poi_points: dict,
+    sphere_handle: viser.SceneHandle,
+    nav_state: dict | None = None,
+    refresh_nav_markers=None,
+):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
             gui_vector3 = server.gui.add_vector3(
@@ -183,7 +443,26 @@ def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphe
             color_r_slider = server.gui.add_slider("Color R", min=0, max=255, step=1, initial_value=int(sphere_handle.color[0]))
             color_g_slider = server.gui.add_slider("Color G", min=0, max=255, step=1, initial_value=int(sphere_handle.color[1]))
             color_b_slider = server.gui.add_slider("Color B", min=0, max=255, step=1, initial_value=int(sphere_handle.color[2]))
+            set_start_button = None
+            set_goal_button = None
+            if nav_state is not None:
+                set_start_button = server.gui.add_button("Set as Start", color=(40, 220, 80))
+                set_goal_button = server.gui.add_button("Set as Goal", color=(255, 80, 80))
             delete_button = server.gui.add_button("Delete POI", color=(255, 0, 0))
+
+    if set_start_button is not None:
+        @set_start_button.on_click
+        def _(_) -> None:
+            nav_state["start_poi_id"] = poi_index
+            if refresh_nav_markers is not None:
+                refresh_nav_markers()
+
+    if set_goal_button is not None:
+        @set_goal_button.on_click
+        def _(_) -> None:
+            nav_state["goal_poi_id"] = poi_index
+            if refresh_nav_markers is not None:
+                refresh_nav_markers()
 
     def update_scale(event):
         sphere_handle.radius = scale.value
@@ -201,16 +480,38 @@ def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphe
         # Update sphere position when gizmo is dragged
         sphere_handle.position = event.target.position
         gui_vector3.value = event.target.position
-        poi_points[poi_index]['position'] = event.target.position
+        poi_points[poi_index]['position'] = np.asarray(event.target.position, dtype=np.float32)
+        if refresh_nav_markers is not None and nav_state is not None and (
+            nav_state.get("start_poi_id") == poi_index or nav_state.get("goal_poi_id") == poi_index
+        ):
+            refresh_nav_markers()
         #print("Sphere moved to:", event.position)
     gizmo.on_update(on_gizmo_update)
+
+    def on_vector3_update(event):
+        new_pos = np.asarray(gui_vector3.value, dtype=np.float32)
+        sphere_handle.position = new_pos
+        gizmo.position = new_pos
+        poi_points[poi_index]['position'] = new_pos
+        if refresh_nav_markers is not None and nav_state is not None and (
+            nav_state.get("start_poi_id") == poi_index or nav_state.get("goal_poi_id") == poi_index
+        ):
+            refresh_nav_markers()
+    gui_vector3.on_update(on_vector3_update)
 
     @delete_button.on_click
     def _(_) -> None:
         del poi_points[poi_index]
+        if nav_state is not None:
+            if nav_state.get("start_poi_id") == poi_index:
+                nav_state["start_poi_id"] = None
+            if nav_state.get("goal_poi_id") == poi_index:
+                nav_state["goal_poi_id"] = None
         poi_container.remove()
         sphere_handle.remove()
         gizmo.remove()
+        if refresh_nav_markers is not None:
+            refresh_nav_markers()
 
 class RelocalizationPose(Node):
     def __init__(self, viser_server: viser.ViserServer):
@@ -313,6 +614,32 @@ def main(
     # POI management
     poi_points = {}
     poi_id_counter = 0
+    nav_state = {
+        "start_poi_id": None,
+        "goal_poi_id": None,
+        "start_marker": None,
+        "goal_marker": None,
+        "path_handle": None,
+    }
+
+    def refresh_nav_markers() -> None:
+        for marker_key, poi_key, color, radius in [
+            ("start_marker", "start_poi_id", (0, 255, 0), 0.25),
+            ("goal_marker", "goal_poi_id", (255, 0, 0), 0.25),
+        ]:
+            handle = nav_state.get(marker_key)
+            if handle is not None:
+                handle.remove()
+                nav_state[marker_key] = None
+            poi_id = nav_state.get(poi_key)
+            if poi_id is None or poi_id not in poi_points:
+                continue
+            nav_state[marker_key] = server.scene.add_icosphere(
+                f"/sdf_path_test/{poi_key}",
+                radius=radius,
+                color=color,
+                position=np.asarray(poi_points[poi_id]["position"], dtype=np.float32),
+            )
 
     if os.path.exists(f"{tinynav_map_path}/pois.json"):
         with open(f"{tinynav_map_path}/pois.json", "r") as f:
@@ -342,7 +669,7 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_point['position']
             )
-            create_poi_ui(server, poi_list_container,int(poi_id), poi_points, sphere_handle)
+            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, nav_state, refresh_nav_markers)
 
         @add_poi_button.on_click
         def _(_) -> None:
@@ -370,12 +697,15 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_points[poi_id]['position']
             )
-            create_poi_ui(server, poi_list_container,poi_id, poi_points, sphere_handle)
+            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, nav_state, refresh_nav_markers)
     
     # Load and visualize occupancy grid as 2D XY projection (same as build_map_node).
     occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
     occupancy_meta_path = tinynav_map_path / "occupancy_meta.npy"
     sdf_map_path = tinynav_map_path / "sdf_map.npy"
+    occupancy_grid = None
+    occupancy_meta = None
+    sdf_map = None
     
     if occupancy_grid_path.exists() and occupancy_meta_path.exists():
         print(f"Loading occupancy grid from {tinynav_map_path}")
@@ -565,6 +895,80 @@ def main(
         if not occupancy_meta_path.exists():
             print(f"  Missing: {occupancy_meta_path}")
     
+    if occupancy_grid is not None and occupancy_meta is not None and sdf_map_path.exists():
+        if sdf_map is None:
+            loaded_sdf_map = np.load(sdf_map_path).astype(np.float32)
+            if loaded_sdf_map.shape == occupancy_grid.shape:
+                sdf_map = loaded_sdf_map
+        with server.gui.add_folder("SDF POI Path Test") as _:
+            path_status = server.gui.add_text("Status", initial_value="Pick POI start/goal, then Plan SDF Path")
+            stop_distance_slider = server.gui.add_slider(
+                "SDF Stop Distance", min=0.05, max=1.0, step=0.05, initial_value=0.2
+            )
+            line_width_slider = server.gui.add_slider(
+                "Path Line Width", min=1.0, max=20.0, step=1.0, initial_value=8.0
+            )
+            plan_button = server.gui.add_button("Plan SDF Path", color=(80, 200, 80))
+            clear_button = server.gui.add_button("Clear Planned Path")
+
+            @plan_button.on_click
+            def _(_) -> None:
+                start_id = nav_state.get("start_poi_id")
+                goal_id = nav_state.get("goal_poi_id")
+                if start_id is None or goal_id is None:
+                    path_status.value = "Need both start and goal POIs"
+                    print(path_status.value)
+                    return
+                if start_id not in poi_points or goal_id not in poi_points:
+                    path_status.value = "Start/goal POI was deleted"
+                    print(path_status.value)
+                    refresh_nav_markers()
+                    return
+                if sdf_map is None:
+                    path_status.value = f"Missing/invalid sdf_map.npy: {sdf_map_path}"
+                    print(path_status.value)
+                    return
+                if nav_state.get("path_handle") is not None:
+                    nav_state["path_handle"].remove()
+                    nav_state["path_handle"] = None
+                start_position = np.asarray(poi_points[start_id]["position"], dtype=np.float32)
+                goal_position = np.asarray(poi_points[goal_id]["position"], dtype=np.float32)
+                t0 = time.time()
+                world_path, message = _plan_sdf_path_between_points(
+                    start_position,
+                    goal_position,
+                    occupancy_grid,
+                    occupancy_meta,
+                    sdf_map,
+                    stop_distance=float(stop_distance_slider.value),
+                )
+                elapsed_ms = (time.time() - t0) * 1000.0
+                if world_path is None or len(world_path) < 2:
+                    path_status.value = f"Plan failed ({elapsed_ms:.0f} ms): {message}"
+                    print(path_status.value)
+                    return
+                segments = np.stack([world_path[:-1], world_path[1:]], axis=1)
+                colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
+                colors[:, :, :] = np.array([1.0, 1.0, 0.0], dtype=np.float32)
+                nav_state["path_handle"] = server.scene.add_line_segments(
+                    "/sdf_path_test/planned_path",
+                    points=segments,
+                    colors=colors,
+                    line_width=float(line_width_slider.value),
+                )
+                refresh_nav_markers()
+                path_len = float(np.sum(np.linalg.norm(np.diff(world_path, axis=0), axis=1)))
+                path_status.value = f"{message}; len={path_len:.2f}m; time={elapsed_ms:.0f}ms"
+                print(path_status.value)
+
+            @clear_button.on_click
+            def _(_) -> None:
+                if nav_state.get("path_handle") is not None:
+                    nav_state["path_handle"].remove()
+                    nav_state["path_handle"] = None
+                path_status.value = "Cleared planned path"
+                print(path_status.value)
+
     poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
     if (tinynav_map_path / "intrinsics.npy").exists():
         camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
@@ -679,9 +1083,15 @@ def main(
         rclpy.spin(relocalization_pose_node)
         relocalization_pose_node.destroy_node()
         rclpy.shutdown()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    except Exception:
         pass
     finally:
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
         if infra1_db is not None:
             infra1_db.close()
 
