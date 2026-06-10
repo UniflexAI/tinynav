@@ -422,7 +422,7 @@ class BackendNode(Ros2NodeManager):
             else:
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
-
+            self._sensor_mode = 'looper'
             if self._sensor_mode in ('looper', 'realsense'):
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')

@@ -30,7 +30,7 @@ class RobotConfig:
     camera_y: float = 0.0
     control_x: float = 0.0
     control_y: float = 0.0
-    safety_radius: float = 0.1
+    safety_radius: float = 0.5
 
     @property
     def cam_offset_3d(self):
@@ -59,10 +59,10 @@ GO2_CONFIG = RobotConfig(
 
 B2_CONFIG = RobotConfig(
     name='b2', shape='square',
-    length=0.8, width=0.4,
-    camera_x=0.5, camera_y=0.0,
+    length=0.6, width=0.4,
+    camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.1,
+    safety_radius=0.2,
 )
 
 # === Helper functions ===
@@ -154,7 +154,7 @@ class ObstacleConfig:
     robot_z_bottom: float = -0.7
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.5
+    min_wall_span_m: float = 0.4
     dilation_cells: int = 0
 
 
