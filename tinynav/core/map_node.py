@@ -126,13 +126,16 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                 return idx
         return len(sdf_bins)
 
+    def dist_cost(a: tuple, b: tuple) -> float:
+        return float(np.linalg.norm((np.array(a) - np.array(b)) * resolution))
+
     open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
-    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
     start_queue_idx = get_queue_index(float(sdf_map[start]))
-    heapq.heappush(open_heaps[start_queue_idx], (heuristic(start, goal, resolution), start))
-    open_sets[start_queue_idx].add(start)
+    heapq.heappush(open_heaps[start_queue_idx], (dist_cost(start, goal), 0.0, start))
     parent = {start: start}
-    visited = set()
+    g_cost = {start: 0.0}
+    best_goal_cost = float('inf')
+    best_goal = None
 
     while True:
         queue_idx = -1
@@ -143,35 +146,52 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
         if queue_idx == -1:
             break
 
-        current_cost, current = heapq.heappop(open_heaps[queue_idx])
-        open_sets[queue_idx].remove(current)
-        if current in visited:
+        f_cost, current_g, current = heapq.heappop(open_heaps[queue_idx])
+        if current_g > g_cost.get(current, float('inf')):
             continue
-        visited.add(current)
+        # Since dist_cost is admissible, no remaining node in this bin can lead
+        # to a shorter path once its f_cost is already worse than the best goal.
+        # Keep checking later bins only if they can still beat best_goal_cost.
+        if f_cost >= best_goal_cost:
+            continue
         if current == goal:
-            return reconstruct_path_sdf(parent, current)
+            best_goal_cost = current_g
+            best_goal = current
+            continue
+
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
                 for dz in [-1, 0, 1]:
                     if dx == 0 and dy == 0 and dz == 0:
                         continue
                     neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
-                    if (0 <= neighbor[0] < sdf_map.shape[0] and
+                    if not (0 <= neighbor[0] < sdf_map.shape[0] and
                             0 <= neighbor[1] < sdf_map.shape[1] and
                             0 <= neighbor[2] < sdf_map.shape[2]):
-                        if neighbor in visited or occupancy_map[neighbor] == 2:
-                            continue
-                        neighbor_sdf = float(sdf_map[neighbor])
-                        neighbor_queue_idx = get_queue_index(neighbor_sdf)
-                        if neighbor in open_sets[neighbor_queue_idx]:
-                            continue
-                        open_sets[neighbor_queue_idx].add(neighbor)
-                        heapq.heappush(
-                            open_heaps[neighbor_queue_idx],
-                            (heuristic(neighbor, goal, resolution), neighbor),
-                        )
-                        if neighbor not in parent:
-                            parent[neighbor] = current
+                        continue
+                    if occupancy_map[neighbor] == 2:
+                        continue
+
+                    step_cost = float(np.sqrt(dx * dx + dy * dy + dz * dz) * resolution)
+                    tentative_g = current_g + step_cost
+                    if tentative_g >= best_goal_cost:
+                        continue
+                    if tentative_g >= g_cost.get(neighbor, float('inf')):
+                        continue
+
+                    parent[neighbor] = current
+                    g_cost[neighbor] = tentative_g
+                    neighbor_f_cost = tentative_g + dist_cost(neighbor, goal)
+                    if neighbor_f_cost >= best_goal_cost:
+                        continue
+                    neighbor_queue_idx = get_queue_index(float(sdf_map[neighbor]))
+                    heapq.heappush(
+                        open_heaps[neighbor_queue_idx],
+                        (neighbor_f_cost, tentative_g, neighbor),
+                    )
+
+    if best_goal is not None:
+        return reconstruct_path_sdf(parent, best_goal)
     return []
 
 class MapNode(Node):
@@ -751,6 +771,12 @@ class MapNode(Node):
             return None 
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+        if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
+            self.get_logger().warning(
+                f"search_close_to_sdf_map returned empty path: start_idx={tuple(start_idx)}, "
+                f"goal_idx={tuple(poi_goal_idx)}"
+            )
+            return None
 
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
