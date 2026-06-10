@@ -246,6 +246,17 @@ TinyNav supports [Dev Containers](https://containers.dev/) for a consistent and 
 
 If you prefer the command line:
 
+#### Recommended: install a newer Node.js/npm with nvm first
+
+Some systems ship with an older npm. We recommend installing a newer Node.js/npm via `nvm` before installing the Dev Containers CLI:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+nvm install --lts
+```
+
+Then install and use the Dev Containers CLI:
+
 ```bash
 # Install the Dev Containers CLI
 npm install -g @devcontainers/cli
@@ -269,6 +280,27 @@ uv sync
 ```
 
 This will create a virtual environment and install all required dependencies.
+
+### Optional Dependencies
+
+Depending on your robot platform or map representation, install the corresponding extras:
+
+```bash
+# Unitree GO2 robot support
+uv sync --extra unitree
+
+# LeKiwi robot support
+uv sync --extra lekiwi
+
+# 3D Gaussian Splatting (3DGS) map support
+uv sync --extra 3dgs
+```
+
+You can combine multiple extras in one command:
+
+```bash
+uv sync --extra unitree --extra 3dgs
+```
 
 # Next Steps
 - [ ] **High Optimization NN models**:
@@ -335,4 +367,6 @@ This project follows the [all-contributors](https://github.com/all-contributors/
 Thanks to our sponsor(s) for supporting the development of this project:
 
 **DeepMirror** - https://www.deepmirror.com/
+
+**Looper Robotics** - https://looper-robotics.com/
 

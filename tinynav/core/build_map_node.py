@@ -1,50 +1,136 @@
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool
-import numpy as np
-from numba import njit, prange
-import sys
-
-from sensor_msgs.msg import PointCloud2
-from std_msgs.msg import Header
-from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
-from math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from sensor_msgs.msg import Image, CameraInfo
-from message_filters import TimeSynchronizer, Subscriber
-from cv_bridge import CvBridge
-import cv2
-from codetiming import Timer
-import os
-import argparse
-
-from tinynav.tinynav_cpp_bind import pose_graph_solve
-from models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
-from planning_node import run_raycasting_loopy
-import logging
 import asyncio
+import logging
+import os
 import shelve
-from tqdm import tqdm
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from math import inf
+from typing import Callable, Dict, Optional
+
+import cv2
 import einops
-from tf2_msgs.msg import TFMessage
-from typing import Tuple, Dict
-import json
-
-from tf2_ros import TransformBroadcaster
-from geometry_msgs.msg import TransformStamped,Point
-from scipy.spatial.transform import Rotation as R
-
+import numpy as np
+import rclpy
+import tyro
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PoseStamped, TransformStamped, Point
+from message_filters import Subscriber, ApproximateTimeSynchronizer
+from nav_msgs.msg import Path, Odometry
 from rclpy.executors import SingleThreadedExecutor
-from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
-from rosidl_runtime_py.utilities import get_message
-from rosgraph_msgs.msg import Clock
+from rclpy.node import Node
 from rclpy.serialization import deserialize_message
+from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
+from rosgraph_msgs.msg import Clock
+from rosidl_runtime_py.utilities import get_message
+from scipy.ndimage import distance_transform_edt
+from scipy.spatial.transform import Rotation as R
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage, PointCloud2
+from std_msgs.msg import Bool, Float32, Header, ColorRGBA
+from tabulate import tabulate
+from tf2_msgs.msg import TFMessage
+from tf2_ros import TransformBroadcaster
+from tqdm import tqdm
+from visualization_msgs.msg import Marker, MarkerArray
 
-
+from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.planning_node import run_raycasting_loopy
+from tinynav.tinynav_cpp_bind import pose_graph_solve
+from tool.video_db import VideoDB
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BuildMapArgs:
+    bag_file: str = "tinynav_db"
+    map_save_path: str = "tinynav_db"
+    play_rate: float = 1.0
+    verbose_timer: bool = True
+    # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
+    # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
+    global_frames_ratio: float = 1.1
+
+
+def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
+    """Return whether to run global refinement (pose graph + TF), using COLMAP's frames-ratio rule.
+
+    Adapted from COLMAP ``IncrementalPipeline::CheckRunGlobalRefinement`` (frames branch only):
+    ``NumRegFrames() >= ba_global_frames_ratio * ba_prev_num_reg_frames``.
+
+    Here ``num_frames`` is the current keyframe count and ``prev_num_frames`` is the count at the
+    last global refinement. Set ``frames_ratio`` to 1.0 to refine on every keyframe.
+    """
+    return num_frames >= frames_ratio * prev_num_frames
+
+
+@dataclass
+class StageStats:
+    count: int = 0
+    total_s: float = 0.0
+    min_s: float = inf
+    max_s: float = 0.0
+
+    def record(self, duration_s: float) -> None:
+        self.count += 1
+        self.total_s += duration_s
+        self.min_s = min(self.min_s, duration_s)
+        self.max_s = max(self.max_s, duration_s)
+
+
+class StageTimer:
+    def __init__(self, verbose_logger: Optional[Callable[[str], None]] = None):
+        self._stats: Dict[str, StageStats] = {}
+        self.verbose_logger = verbose_logger
+
+    def record(self, name: str, duration_s: float) -> None:
+        if name not in self._stats:
+            self._stats[name] = StageStats()
+        self._stats[name].record(duration_s)
+        if self.verbose_logger is not None:
+            self.verbose_logger(f"[{name}] Elapsed time: {duration_s * 1000:.0f} ms")
+
+    @contextmanager
+    def timed(self, name: str):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.record(name, time.perf_counter() - t0)
+
+    def log_summary(self, log_fn: Callable[[str], None]) -> None:
+        if not self._stats:
+            log_fn("No stage timing data collected.")
+            return
+
+        grand_total = sum(s.total_s for s in self._stats.values())
+        rows = []
+        for name, stats in sorted(self._stats.items(), key=lambda item: -item[1].total_s):
+            mean_s = stats.total_s / stats.count if stats.count else 0.0
+            min_ms = stats.min_s * 1000 if stats.count else 0.0
+            pct = (100.0 * stats.total_s / grand_total) if grand_total > 0 else 0.0
+            rows.append([
+                name,
+                stats.count,
+                round(stats.total_s, 3),
+                round(mean_s * 1000, 1),
+                round(min_ms, 1),
+                round(stats.max_s * 1000, 1),
+                round(pct, 1),
+            ])
+
+        table = tabulate(
+            rows,
+            headers=["stage", "count", "total_s", "mean_ms", "min_ms", "max_ms", "pct"],
+            tablefmt="simple",
+        )
+        note = "pct is each stage total_s / sum of all stage totals (non-overlapping leaf stages)"
+        log_fn(
+            f"=== Build map stage timing ===\n{table}\n"
+            f"Grand total: {round(grand_total, 3)} s ({note})"
+        )
+
 
 def z_value_to_color(z, z_min, z_max):
     color = ColorRGBA(r=0.0, g=0.0, b=0.0, a=1.0)
@@ -62,38 +148,6 @@ def z_value_to_color(z, z_min, z_max):
         color.r = 1.0
         color.g = 1.0 - (normalized_z - 0.75) * 4.0
     return color
-
-def convert_nerf_format(output_dir: str, infra1_poses: dict, rgb_intrinscis:np.ndarray, image_size: Tuple[int, int], T_rgb_to_infra1:np.ndarray):
-    camera_model = "PINHOLE"
-    fl_x = rgb_intrinscis[0, 0]
-    fl_y = rgb_intrinscis[1, 1]
-    cx = rgb_intrinscis[0, 2]
-    cy = rgb_intrinscis[1, 2]
-    w = image_size[1]
-    h = image_size[0]
-    frames = []
-    opencv_to_opengl_convention = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-    for timestmap, camera_to_world_pose in infra1_poses.items():
-        camera_to_world_opengl = camera_to_world_pose @ T_rgb_to_infra1 @ opencv_to_opengl_convention
-        frame = {
-            "file_path": f"images/image_{timestmap}.png",
-            "transform_matrix": camera_to_world_opengl.tolist(),
-        }
-        frames.append(frame)
-
-    data = {
-        "camera_model": camera_model,
-        "fl_x": fl_x,
-        "fl_y": fl_y,
-        "cx": cx,
-        "cy": cy,
-        "w": w,
-        "h": h,
-        "frames": frames
-    }
-
-    with open(f"{output_dir}/transforms.json", "w") as f:
-        json.dump(data, f, indent=4)
 
 def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, local_grid:np.ndarray, local_origin:np.ndarray, resolution:float) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -133,28 +187,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-@njit(cache=True, parallel=True)
-def sdf_min_dist_parallel(position_grid, positions, sdf_map):
-    """Parallel over grid points: each voxel gets min distance to all positions."""
-    ni, nj, nk = position_grid.shape[0], position_grid.shape[1], position_grid.shape[2]
-    n_pos = positions.shape[0]
-    for i in prange(ni):
-        for j in range(nj):
-            for k in range(nk):
-                gx = position_grid[i, j, k, 0]
-                gy = position_grid[i, j, k, 1]
-                gz = position_grid[i, j, k, 2]
-                min_d = np.inf
-                for p in range(n_pos):
-                    dx = gx - positions[p, 0]
-                    dy = gy - positions[p, 1]
-                    dz = gz - positions[p, 2]
-                    d = np.sqrt(dx * dx + dy * dy + dz * dz)
-                    if d < min_d:
-                        min_d = d
-                sdf_map[i, j, k] = min_d
-
-def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100):
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100, stage_timer: Optional[StageTimer] = None):
     """
         Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -164,37 +197,63 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.05, step = 100
     """
     raycast_shape = (100, 100, 20)
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
-    odom_pose_min_position = np.array([np.inf, np.inf, np.inf])
-    odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf])
+    odom_pose_min_position = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
+    odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
     for timestamp, odom_pose in poses.items():
         odom_translation = odom_pose[:3, 3]
         odom_pose_min_position = np.minimum(odom_pose_min_position, odom_translation)
         odom_pose_max_position = np.maximum(odom_pose_max_position, odom_translation)
     odom_pose_min_position = np.floor(odom_pose_min_position / resolution) * resolution
     odom_pose_max_position = np.ceil(odom_pose_max_position / resolution) * resolution
-    global_grid_shape = (np.ceil((odom_pose_max_position - odom_pose_min_position) / resolution) + raycast_shape).astype(np.int32)
+    global_grid_shape = np.ceil(
+        (odom_pose_max_position - odom_pose_min_position) / resolution + np.array(raycast_shape)
+    ).astype(np.int32)
+    print(f"global_grid_shape : {global_grid_shape}")
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
 
     odom_positions = []
-    for timestamp, odom_pose in tqdm(poses.items()):
-        depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
-        odom_translation = odom_pose[:3, 3]
-        local_origin = np.floor(odom_translation / resolution) * resolution - 0.5 * np.array(raycast_shape) * resolution
-        local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
-        global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
-        odom_position = odom_pose[:3, 3]
-        odom_positions.append(odom_position)
 
-    sdf_map = np.full_like(global_grid, np.inf, dtype=np.float32)
-    # compute the sdf w.r.t odom_position: odom_sdf_map[i,j,k] = || (i,j,k)*resolution + origin - odom_position ||
-    ix = np.arange(global_grid_shape[0], dtype=np.float32)
-    iy = np.arange(global_grid_shape[1], dtype=np.float32)
-    iz = np.arange(global_grid_shape[2], dtype=np.float32)
-    xx, yy, zz = np.meshgrid(ix, iy, iz, indexing="ij")
-    grid_positions = global_origin + resolution * np.stack([xx, yy, zz], axis=-1)
-    with Timer(name="sdf_min_dist_baseline", text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-        sdf_min_dist_parallel(grid_positions, np.array(odom_positions), sdf_map)
+    def _raycast_all_poses():
+        nonlocal global_grid, global_origin
+        for timestamp, odom_pose in tqdm(poses.items()):
+            depth, _, _, _, _ = db.get_depth_embedding_features_images(timestamp)
+            odom_translation = odom_pose[:3, 3]
+            local_origin = np.floor(odom_translation / resolution) * resolution - 0.5 * np.array(raycast_shape) * resolution
+            local_grid = run_raycasting_loopy(depth, odom_pose, raycast_shape, fx, fy, cx, cy, local_origin, step, resolution, filter_ground = True)
+            global_grid, global_origin = merge_local_into_global(global_grid, global_origin, local_grid, local_origin, resolution)
+            odom_positions.append(odom_pose[:3, 3])
+
+    if stage_timer is not None:
+        with stage_timer.timed("occupancy_raycast"):
+            _raycast_all_poses()
+    else:
+        _raycast_all_poses()
+
+    voxels = int(np.prod(global_grid_shape))
+    print(
+        "[generate_occupancy_map] SDF stage params: "
+        f"resolution={resolution}, step={step}, "
+        f"num_poses={len(odom_positions)}, global_grid_shape={tuple(global_grid_shape.tolist())}, "
+        f"global_origin={global_origin.tolist()}, voxels={voxels}"
+    )
+
+    # Compute SDF as voxel distance to nearest odom seed using SciPy EDT.
+    def _compute_sdf():
+        if len(odom_positions) == 0:
+            return np.full(global_grid_shape, np.inf, dtype=np.float32)
+        seed_mask = np.ones(global_grid_shape, dtype=np.uint8)
+        odom_positions_np = np.asarray(odom_positions, dtype=np.float32)
+        seed_indices = np.rint((odom_positions_np - global_origin) / resolution).astype(np.int32)
+        seed_indices = np.clip(seed_indices, 0, global_grid_shape - 1)
+        seed_mask[seed_indices[:, 0], seed_indices[:, 1], seed_indices[:, 2]] = 0
+        return distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
+
+    if stage_timer is not None:
+        with stage_timer.timed("occupancy_sdf"):
+            sdf_map = _compute_sdf()
+    else:
+        sdf_map = _compute_sdf()
 
     # 0 is the unknown.
     grid_type = np.zeros_like(global_grid, dtype=np.uint8)
@@ -287,28 +346,34 @@ class OdomPoseRecorder:
 class TinyNavDB():
     def __init__(self, map_save_path:str, is_scratch:bool = True):
         self.map_save_path = map_save_path
+        self.is_scratch = is_scratch
+        mode = "write" if is_scratch else "read"
+        self.infra1_video_db = VideoDB(
+            dir_path=f"{map_save_path}/infra1_images_db",
+            mode=mode,
+            fps=30,
+        )
+        self.rgb_video_db = VideoDB(
+            dir_path=f"{map_save_path}/rgb_images_db",
+            mode=mode,
+            fps=30,
+        )
         if is_scratch:
             if os.path.exists(f"{map_save_path}/features.db"):
                 os.remove(f"{map_save_path}/features.db")
-            if os.path.exists(f"{map_save_path}/infra1_images.db"):
-                os.remove(f"{map_save_path}/infra1_images.db")
             if os.path.exists(f"{map_save_path}/depths.db"):
                 os.remove(f"{map_save_path}/depths.db")
-            if os.path.exists(f"{map_save_path}/rgb_images.db"):
-                os.remove(f"{map_save_path}/rgb_images.db")
             if os.path.exists(f"{map_save_path}/embeddings.db"):
                 os.remove(f"{map_save_path}/embeddings.db")
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
-        self.infra1_images = IntKeyShelf(f"{map_save_path}/infra1_images")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
-        self.rgb_images = IntKeyShelf(f"{map_save_path}/rgb_images")
 
     def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
-            self.infra1_images[key] = infra1_image
+            self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
-            self.rgb_images[key] = rgb_image
+            self.rgb_video_db.write(key, rgb_image)
         if depth is not None:
             self.depths[key] = depth
         if embedding is not None:
@@ -317,7 +382,18 @@ class TinyNavDB():
             self.features[key] = features
 
     def get_depth_embedding_features_images(self, key:int):
-        return self.depths[key], self.embeddings[key], self.features[key], self.rgb_images[key], self.infra1_images[key]
+        key_int = int(key)
+        def rgb_loader():
+            if self.is_scratch:
+                return None
+            return self.rgb_video_db.read(key_int)
+
+        def infra1_loader():
+            if self.is_scratch:
+                return None
+            return self.infra1_video_db.read(key_int)
+
+        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
         return self.embeddings[key]
@@ -325,14 +401,21 @@ class TinyNavDB():
     def close(self):
         self.features.close()
         self.embeddings.close()
-        self.infra1_images.close()
         self.depths.close()
-        self.rgb_images.close()
+        self.infra1_video_db.close()
+        self.rgb_video_db.close()
 
 class BagPlayer(Node):
-    def __init__(self, bag_uri: str, storage_id: str = "sqlite3", serialization_format: str = "cdr",
+    def __init__(
+        self,
+        bag_uri: str,
+        storage_id: str = "sqlite3",
+        serialization_format: str = "cdr",
+        play_rate: float = 1.0,
     ):
         super().__init__("rosbag_player")
+        if play_rate <= 0.0:
+            raise ValueError(f"play_rate must be > 0, got {play_rate}")
 
         self._storage_options = StorageOptions(uri=bag_uri, storage_id="sqlite3",)
         self._converter_options = ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr",)
@@ -340,19 +423,98 @@ class BagPlayer(Node):
         self._reader = SequentialReader()
         self._reader.open(self._storage_options, self._converter_options)
 
+        self.start_timestamp_ns = None
+        self.end_timestamp_ns = None
+        self.play_rate = play_rate
+        self._playback_start_timestamp_ns = None
+        self._playback_start_wall_time_s = None
+
+        topic_infos = self._reader.get_all_topics_and_types()
+        if len(topic_infos) == 0:
+            raise ValueError(f"Bag {bag_uri} has no topics")
+
+        self.start_timestamp_ns, self.end_timestamp_ns = self._scan_bag_time_range(
+            bag_uri,
+            storage_id,
+            serialization_format,
+        )
+
         # topic -> (publisher, msg_type)
         self._topic_publishers = {}
 
         # Build publishers for all topics in the bag
-        for topic_info in self._reader.get_all_topics_and_types():
+        for topic_info in topic_infos:
             msg_type = get_message(topic_info.type)
             pub = self.create_publisher(msg_type, topic_info.name, 10)
             self._topic_publishers[topic_info.name] = (pub, msg_type)
 
+        self.get_logger().info("Bag topics and message types:")
+        for topic_info in sorted(topic_infos, key=lambda t: t.name):
+            self.get_logger().info(f"  {topic_info.name} -> {topic_info.type}")
+
         # /clock publisher (for use_sim_time)
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
+        self._mapping_percent_pub = self.create_publisher(Float32, "/mapping/percent", 10)
 
-        self.get_logger().info(f"BagPlayer opened bag: {bag_uri}")
+        self.get_logger().info(f"BagPlayer opened bag: {bag_uri}, play_rate={play_rate}")
+
+    def _scan_bag_time_range(self, bag_uri: str, storage_id: str, serialization_format: str) -> tuple[int, int]:
+        # We have not found a rosbag2_py API that exposes the bag time range directly,
+        # so for now we scan the bag once to get the first and last message timestamps.
+        scan_reader = SequentialReader()
+        scan_reader.open(
+            StorageOptions(uri=bag_uri, storage_id=storage_id),
+            ConverterOptions(
+                input_serialization_format=serialization_format,
+                output_serialization_format=serialization_format,
+            ),
+        )
+
+        first_timestamp_ns = None
+        last_timestamp_ns = None
+        while scan_reader.has_next():
+            _, _, timestamp_ns = scan_reader.read_next()
+            timestamp_ns = int(timestamp_ns)
+            if first_timestamp_ns is None:
+                first_timestamp_ns = timestamp_ns
+            last_timestamp_ns = timestamp_ns
+
+        if first_timestamp_ns is None or last_timestamp_ns is None:
+            raise ValueError(f"Bag {bag_uri} has no messages")
+
+        return first_timestamp_ns, last_timestamp_ns
+
+    _PERCENT_LOG_INTERVAL_S = 2.0  # throttle progress logging
+
+    def _publish_percent(self, percent: float) -> None:
+        msg = Float32()
+        msg.data = float(percent)
+        self._mapping_percent_pub.publish(msg)
+        # Emit a throttled log line so the parent process can read progress
+        # from stdout without needing a separate bridge node.
+        # Always emit 100% (completion signal) regardless of throttle.
+        now = self.get_clock().now()
+        elapsed = ((now - self._last_percent_log_time).nanoseconds / 1e9
+                   if hasattr(self, '_last_percent_log_time') else float('inf'))
+        if percent >= 100.0 or elapsed >= self._PERCENT_LOG_INTERVAL_S:
+            self.get_logger().info(f"MAPPING_PERCENT:{percent:.1f}")
+            self._last_percent_log_time = now
+
+    def _publish_percent_from_timestamp(self, timestamp_ns: int) -> None:
+        percent = 100.0 * (timestamp_ns - self.start_timestamp_ns) / (self.end_timestamp_ns - self.start_timestamp_ns)
+        self._publish_percent(percent)
+
+    def _pace_to_timestamp(self, timestamp_ns: int) -> None:
+        if self._playback_start_timestamp_ns is None:
+            self._playback_start_timestamp_ns = timestamp_ns
+            self._playback_start_wall_time_s = time.monotonic()
+            return
+
+        elapsed_bag_s = (timestamp_ns - self._playback_start_timestamp_ns) * 1e-9
+        target_wall_time_s = self._playback_start_wall_time_s + elapsed_bag_s / self.play_rate
+        sleep_s = target_wall_time_s - time.monotonic()
+        if sleep_s > 0:
+            time.sleep(sleep_s)
 
     def play_next(self) -> bool:
         """
@@ -363,6 +525,9 @@ class BagPlayer(Node):
             return False
 
         topic, serialized_msg, timestamp_ns = self._reader.read_next()
+        timestamp_ns = int(timestamp_ns)
+        self._pace_to_timestamp(timestamp_ns)
+        self._publish_percent_from_timestamp(timestamp_ns)
 
         # Find publisher + msg type for this topic
         pub_and_type = self._topic_publishers.get(topic)
@@ -387,39 +552,36 @@ class BagPlayer(Node):
         return True
 
 class BuildMapNode(Node):
-    def __init__(self, map_save_path:str, verbose_timer: bool = True):
-        super().__init__('map_node')
+    def __init__(
+        self,
+        map_save_path: str,
+        verbose_timer: bool = True,
+        global_frames_ratio: float = 1.1,
+    ):
+        super().__init__('build_map_node')
+        if global_frames_ratio < 1.0:
+            raise ValueError(f"global_frames_ratio must be >= 1.0, got {global_frames_ratio}")
         self.verbose_timer = verbose_timer
+        self.global_frames_ratio = global_frames_ratio
+        # Keyframe count at the last global refinement (COLMAP: ba_prev_num_reg_frames).
+        self._global_prev_num_frames = 0
         self.logger = logging.getLogger(__name__)
-        self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
-        # Lazy initialization after the image shape is known
-        self.super_point_extractor = None
+        self.stage_timer = StageTimer(
+            verbose_logger=self.logger.info if verbose_timer else None,
+        )
+        self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
 
         self.bridge = CvBridge()
 
         self.tf_broadcaster = TransformBroadcaster(self)
-        active_topics = [t[0] for t in self.get_topic_names_and_types()]
-        while True:
-            if '/camera/camera/infra2/camera_info' in active_topics:
-                self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
-                self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
-                self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
-                break
-            elif '/insight/camera_right_info' in active_topics:
-                self.camera_info_sub = self.create_subscription(CameraInfo, '/insight/camera_right_info', self.info_callback, 10)
-                # use the keyframe image as the rgb image.
-                self.rgb_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
-                self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/insight/camera_right_info")
-                break
-            else:
-                self.logger.error(f"Invalid active topics: {active_topics}")
-                active_topics = [t[0] for t in self.get_topic_names_and_types()]
 
+        self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
+        self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
 
         self.marker_pub = self.create_publisher(MarkerArray, '/mapping/pointcloud_markers', 10)
@@ -433,7 +595,8 @@ class BuildMapNode(Node):
         # Add stop signal subscription and save finished publisher
         self.mapping_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.mapping_stop_callback, 10)
         self.mapping_save_finished_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 1000)
+        # Keep sync queue bounded to reduce memory spikes/OOM risk on Jetson during map building.
+        self.ts = ApproximateTimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 200, 0.02)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
@@ -456,19 +619,25 @@ class BuildMapNode(Node):
         self._save_completed = False
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
+        self.tf_static_sub = Subscriber(self, TFMessage, "/tf_static")
+        self.tf_static_sub.registerCallback(self.tf_callback)
         self.T_rgb_to_infra1 = None
+        self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
-
-        self.edges = set()
 
     def tf_callback(self, msg:TFMessage):
         T_infra1_to_link = None
         T_infra1_optical_to_infra1 = None
         T_rgb_to_link = None
         T_rgb_optical_to_rgb = None
+        tf_messages: Dict[int, Dict[str, np.ndarray]] = {}
         for t in msg.transforms:
             frame_id, child_frame_id, T = tf2np(t)
+            timestamp_ns = int(t.header.stamp.sec * 1e9) + int(t.header.stamp.nanosec)
+            if timestamp_ns not in tf_messages:
+                tf_messages[timestamp_ns] = {}
+            tf_messages[timestamp_ns][f"{frame_id}->{child_frame_id}"] = T
             if frame_id == "camera_link" and child_frame_id == "camera_infra1_frame":
                 T_infra1_to_link = T
             if frame_id == "camera_infra1_frame" and child_frame_id == "camera_infra1_optical_frame":
@@ -477,10 +646,22 @@ class BuildMapNode(Node):
                 T_rgb_optical_to_rgb = T
             if frame_id == "camera_link" and child_frame_id == "camera_color_frame":
                 T_rgb_to_link = T
-        if T_infra1_optical_to_infra1 is None or T_rgb_optical_to_rgb is None or T_infra1_to_link is None or T_rgb_to_link is None:
-            self.T_rgb_to_infra1 = np.eye(4)
-            return
-        self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
+            # Looper bags use cam_left/cam_rgb directly as camera frames.
+            # In this code path, TF matrix is interpreted as child -> frame.
+            if frame_id == "cam_left" and child_frame_id == "cam_rgb":
+                self.T_rgb_to_infra1 = T
+
+        if T_infra1_optical_to_infra1 is not None and T_rgb_optical_to_rgb is not None and T_infra1_to_link is not None and T_rgb_to_link is not None:
+            self.T_rgb_to_infra1 = np.linalg.inv(T_infra1_optical_to_infra1) @ np.linalg.inv(T_infra1_to_link) @ T_rgb_to_link @ T_rgb_optical_to_rgb
+        if tf_messages and self.T_rgb_to_infra1 is not None:
+            np.save(f"{self.map_save_path}/tf_messages.npy", tf_messages, allow_pickle=True)
+            if self.tf_sub is not None:
+                self.destroy_subscription(self.tf_sub.sub)
+                self.tf_sub = None
+            if self.tf_static_sub is not None:
+                self.destroy_subscription(self.tf_static_sub.sub)
+                self.tf_static_sub = None
+            self.get_logger().info("Saved tf_messages.npy and unsubscribed from /tf and /tf_static")
 
     def rgb_camera_info_callback(self, msg:CameraInfo):
         if self.rgb_camera_K is None:
@@ -492,10 +673,7 @@ class BuildMapNode(Node):
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]
-            self.image_height = msg.height
-            self.image_width = msg.width
             self.baseline = -Tx / fx
-            self.super_point_extractor = SuperPointTRT(f"{self.image_height // 2}x{self.image_width // 2}")
             self.destroy_subscription(self.camera_info_sub)
 
     def continuous_odom_callback(self, odom_msg: Odometry):
@@ -522,75 +700,53 @@ class BuildMapNode(Node):
                 self.mapping_save_finished_pub.publish(save_finished_msg)
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
-        with Timer(name="Mapping Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.timer_logger):
+        with self.stage_timer.timed("mapping_loop"):
             if self.K is None:
                 return
             self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
 
     def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
-        with Timer(name = "Msg decode", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("msg_decode"):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
+            keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
+            keyframe_depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
+            if keyframe_image_timestamp != keyframe_odom_timestamp or keyframe_image_timestamp != keyframe_depth_timestamp:
+                self.get_logger().error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
+
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
-        with Timer(name = "save image and depth", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("save_image_and_depth"):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
-        with Timer(name = "get embeddings", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("get_embeddings"):
             embedding = self.get_embeddings(infra1_image)
             embedding = embedding / np.linalg.norm(embedding)
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
-        with Timer(name = "super point extractor", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("super_point_extractor"):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
 
-        with Timer(name = "loop and pose graph solve", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
-                self.odom[keyframe_image_timestamp] = odom
-                self.pose_graph_used_pose[keyframe_image_timestamp] = odom
-            else:
-                last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
-                T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
-                self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
-                self.edges.add((self.last_keyframe_timestamp, keyframe_image_timestamp))
-                self.pose_graph_used_pose[keyframe_image_timestamp] = odom
-                self.odom[keyframe_image_timestamp] = odom
+        if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
+            self.odom[keyframe_image_timestamp] = odom
+            self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+        else:
+            last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
+            T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
+            self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+            self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+            self.odom[keyframe_image_timestamp] = odom
+            self.detect_loop_closure(keyframe_image_timestamp)
 
+        self.maybe_run_global_refinement()
 
-                def find_loop_and_pose_graph(timestamp):
-                    target_embedding = self.db.get_embedding(timestamp)
-                    valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
-                    valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
-
-                    idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
-                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
-                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        for idx, similarity in loop_list:
-                            prev_timestamp = idx_to_timestamp[idx]
-                            curr_timestamp = timestamp
-                            prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
-                            curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
-                            prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
-                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
-                            if success and len(inliers) >= 100:
-                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                                print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                                self.edges.add((prev_timestamp, curr_timestamp))
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-                find_loop_and_pose_graph(keyframe_image_timestamp)
-
-        with Timer(name = "publish local pointcloud", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("publish_local_pointcloud"):
             cloud = depth_to_cloud(depth, self.K, 30, 3)
             self.publish_local_map(cloud, 'camera_'+str(keyframe_image_timestamp))
 
-        with Timer(name = "tf publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.publish_all_transforms()
-
-        with Timer(name = "pose graph trajectory publish", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("pose_graph_trajectory_publish"):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_image_timestamp
 
@@ -598,8 +754,46 @@ class BuildMapNode(Node):
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
 
-    def match_keypoints(self, feats0:dict, feats1:dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        image_shape = np.array([self.image_height, self.image_width], dtype = np.int64)
+    def detect_loop_closure(self, timestamp: int) -> None:
+        target_embedding = self.db.get_embedding(timestamp)
+        valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
+        valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
+        idx_to_timestamp = {i: t for i, t in enumerate(valid_timestamp)}
+
+        with self.stage_timer.timed("find_loop"):
+            loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
+        with self.stage_timer.timed("relative_pose_estimation"):
+            for idx, _similarity in loop_list:
+                prev_timestamp = idx_to_timestamp[idx]
+                curr_timestamp = timestamp
+                prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
+                curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
+                prev_matched_keypoints, curr_matched_keypoints, _matches = self.match_keypoints(prev_features, curr_features)
+                success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
+                if success and len(inliers) >= 100:
+                    self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                    print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+
+    def maybe_run_global_refinement(self) -> None:
+        """Run pose-graph optimization and full TF publish when the map has grown enough.
+
+        Loop detection still runs every keyframe; this batches the expensive global steps using
+        COLMAP's ``ba_global_frames_ratio`` policy (see ``check_global_frames_ratio``).
+        A final full solve runs in ``save_mapping`` regardless of this gate.
+        """
+        num_frames = len(self.pose_graph_used_pose)
+        if not check_global_frames_ratio(num_frames, self._global_prev_num_frames, self.global_frames_ratio):
+            return
+
+        with self.stage_timer.timed("solve_pose_graph_online"):
+            self.pose_graph_used_pose = solve_pose_graph(
+                self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num=5
+            )
+        with self.stage_timer.timed("tf_publish"):
+            self.publish_all_transforms()
+        self._global_prev_num_frames = num_frames
+
+    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
@@ -645,8 +839,12 @@ class BuildMapNode(Node):
         # Save continuous poses
         self.continuous_odom_recorder.save_to_disk()
 
-        with Timer(name = "final pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+        with self.stage_timer.timed("final_pose_graph"):
             self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint)
+
+        with self.stage_timer.timed("tf_publish"):
+            self.publish_all_transforms()
+        self._global_prev_num_frames = len(self.pose_graph_used_pose)
 
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
@@ -654,31 +852,34 @@ class BuildMapNode(Node):
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
-        np.save(f"{self.map_save_path}/edges.npy", list(self.edges), allow_pickle = True)
+
+        # Flush and close writable DB first, then reopen DB for occupancy generation.
+        self.db.close()
+        occupancy_db = TinyNavDB(self.map_save_path, is_scratch=False)
 
         # Generate occupancy map
-        occupancy_resolution = 0.05
+        occupancy_resolution = 0.1
         occupancy_step = 10
-        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(self.pose_graph_used_pose, self.db, self.K, self.baseline, occupancy_resolution, occupancy_step)
-        occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
-        np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
-        np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
-        np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
-        cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
-
-        image_size = None
-        os.makedirs(f"{self.map_save_path}/images", exist_ok=True)
-        for timestamp, infra1_pose in self.pose_graph_used_pose.items():
-            _, _, _, rgb_image, _ = self.db.get_depth_embedding_features_images(timestamp)
-            if image_size is None:
-                image_size = rgb_image.shape[:2]
-            cv2.imwrite(f"{self.map_save_path}/images/image_{timestamp}.png", rgb_image)
-        convert_nerf_format(self.map_save_path, self.pose_graph_used_pose, self.rgb_camera_K, image_size, self.T_rgb_to_infra1)
-        self.db.close()
+        occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
+            self.pose_graph_used_pose,
+            occupancy_db,
+            self.K,
+            self.baseline,
+            occupancy_resolution,
+            occupancy_step,
+            stage_timer=self.stage_timer,
+        )
+        occupancy_db.close()
+        with self.stage_timer.timed("occupancy_save_files"):
+            occupancy_meta = np.array([occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], occupancy_resolution], dtype=np.float32)
+            np.save(f"{self.map_save_path}/occupancy_grid.npy", occupancy_grid)
+            np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
+            np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
+            cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
-
+        self.stage_timer.log_summary(self.get_logger().info)
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
         marker_array = MarkerArray()
@@ -743,13 +944,13 @@ class BuildMapNode(Node):
             return
             
         transforms = []        
-        for time, pose_in_world in self.pose_graph_used_pose.items():
+        for timestamp, pose_in_world in self.pose_graph_used_pose.items():
             transform = TransformStamped()
             
             # Set header
             transform.header.stamp = self.get_clock().now().to_msg()
             transform.header.frame_id = 'world'
-            transform.child_frame_id = 'camera_' + str(time)
+            transform.child_frame_id = 'camera_' + str(timestamp)
             
             # Set position
             t = pose_in_world[:3, 3]
@@ -776,31 +977,48 @@ class BuildMapNode(Node):
             # Ignore errors during destruction as resources may already be freed
             pass
 
+class ImageTransportsNode(Node):
+    def __init__(self):
+        super().__init__('image_transports_node')
+        # Simple compressed → raw image transport for color images.
+        self.image_sub = self.create_subscription(
+            CompressedImage,
+            '/camera/camera/color/image_rect_raw/compressed',
+            self.image_callback,
+            10,
+        )
+        self.image_pub = self.create_publisher(Image, '/camera/camera/color/image_raw', 10)
+        self.bridge = CvBridge()
 
-def main(args=None):
+    def image_callback(self, msg: CompressedImage):
+        image = self.bridge.compressed_imgmsg_to_cv2(msg)
+        image_msg = self.bridge.cv2_to_imgmsg(image, encoding="bgr8")
+        image_msg.header.stamp = msg.header.stamp
+        image_msg.header.frame_id = msg.header.frame_id
+        self.image_pub.publish(image_msg)
+
+if __name__ == '__main__':
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    rclpy.init(args=args)
+    rclpy.init()
 
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bag_file", type=str, default="tinynav_db")
-    parser.add_argument("--map_save_path", type=str, default="tinynav_db")
-    parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
-    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
-    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+    parsed_args = tyro.cli(BuildMapArgs, use_underscores=True)
 
     exec_ = SingleThreadedExecutor()
-    player_node = BagPlayer(parsed_args.bag_file)
-    map_node = BuildMapNode(parsed_args.map_save_path, verbose_timer=parsed_args.verbose_timer)
+    player_node = BagPlayer(parsed_args.bag_file, play_rate=parsed_args.play_rate)
+    map_node = BuildMapNode(
+        parsed_args.map_save_path,
+        verbose_timer=parsed_args.verbose_timer,
+        global_frames_ratio=parsed_args.global_frames_ratio,
+    )
+    image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)
     exec_.add_node(map_node)
+    exec_.add_node(image_transports_node)
     while rclpy.ok() and player_node.play_next():
         exec_.spin_once(timeout_sec=0.001)
+    player_node._publish_percent(100.0)
     map_node.save_mapping()
-
-if __name__ == '__main__':
-    main()

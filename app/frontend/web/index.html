@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="tinynav_app">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>tinynav_app</title>
+  <link rel="manifest" href="manifest.json">
+
+  <script>
+  // Intercept Google Fonts requests so Roboto loads from local files (offline-safe).
+  (function () {
+    var _fetch = window.fetch;
+    window.fetch = function (url, opts) {
+      if (typeof url === 'string' && url.indexOf('fonts.googleapis.com') !== -1) {
+        var css = [
+          "@font-face{font-family:'Roboto';font-style:normal;font-weight:300;src:url('/fonts/Roboto-Light.ttf') format('truetype')}",
+          "@font-face{font-family:'Roboto';font-style:normal;font-weight:400;src:url('/fonts/Roboto-Regular.ttf') format('truetype')}",
+          "@font-face{font-family:'Roboto';font-style:normal;font-weight:500;src:url('/fonts/Roboto-Medium.ttf') format('truetype')}",
+          "@font-face{font-family:'Roboto';font-style:normal;font-weight:700;src:url('/fonts/Roboto-Bold.ttf') format('truetype')}",
+        ].join('\n');
+        return Promise.resolve(new Response(css, {status: 200, headers: {'Content-Type': 'text/css'}}));
+      }
+      return _fetch(url, opts);
+    };
+  })();
+  </script>
+</head>
+<body>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

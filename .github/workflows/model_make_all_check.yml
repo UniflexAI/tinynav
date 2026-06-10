@@ -1,0 +1,37 @@
+name: Model Make All Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CI_IMAGE: uniflexai/tinynav:342ca22d
+
+jobs:
+  build:
+    runs-on: X64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Perform Git LFS checkout
+        run: git lfs checkout
+
+      - name: Pull CI image
+        run: docker pull "$CI_IMAGE"
+
+      - name: Build all model plans
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -i --gpus all \
+            --entrypoint "" \
+            -v "$GITHUB_WORKSPACE:/tinynav" \
+            -w /tinynav/tinynav/models \
+            "$CI_IMAGE" \
+            bash -lc 'set -euo pipefail && make all'

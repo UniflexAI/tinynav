@@ -1,0 +1,34 @@
+{
+  "name": "tinynav-dev",
+  "image": "docker.1ms.run/uniflexai/tinynav:latest",
+  "context": "..",
+
+  "containerEnv": {
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "GDK_SCALE": "2",
+    "HF_ENDPOINT": "https://hf-mirror.com",
+    "PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple/",
+    "PIP_TRUSTED_HOST": "mirrors.aliyun.com"
+  },
+
+  "runArgs": [
+    "--gpus", "all",
+    "--privileged",
+    "--network", "host",
+    "-v", "/tmp/.X11-unix:/tmp/.X11-unix",
+    "-v", "/dev:/dev",
+    "-v", "/etc/localtime:/etc/localtime",
+    "--device-cgroup-rule=c 81:* rwm",
+    "--device-cgroup-rule=c 234:* rwm",
+    "--shm-size=16gb",
+    "-v", "${localWorkspaceFolder}:/tinynav"
+  ],
+
+  "workspaceFolder": "/tinynav",
+  "remoteUser": "root",
+  "features": {},
+  "mounts": [],
+  "postCreateCommand": "echo 'Devcontainer ready.'",
+  "postStartCommand": "/usr/local/bin/entrypoint.sh"
+}
+

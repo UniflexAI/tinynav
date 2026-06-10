@@ -1,9 +1,10 @@
 import numpy as np
 from numba import njit
 from scipy.spatial.transform import Rotation as R
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
 import cv2
+import fufpy
 from tinynav.core.func import lru_cache_numpy
 
 @njit(cache=True)
@@ -161,6 +162,15 @@ def msg2np(msg):
         velocity = np.array([0.0, 0.0, 0.0])
     return T, velocity
 
+def pose_msg2np(msg: PoseStamped):
+    T = np.eye(4)
+    position = msg.pose.position
+    rot = msg.pose.orientation
+    quat = [rot.x, rot.y, rot.z, rot.w]
+    T[:3, :3] = R.from_quat(quat).as_matrix()
+    T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
+    return T
+
 @njit(cache=True)
 def depth_to_cloud(depth, K, step=10, max_dist=1e9):
     h, w = depth.shape
@@ -179,10 +189,9 @@ def depth_to_cloud(depth, K, step=10, max_dist=1e9):
                 x = (u - cx) * z / fx
                 y = (v - cy) * z / fy
                 pts.append((x, y, z))   # tuples are allowed
-
-    # convert typed list → ndarray
     if len(pts) == 0:
         return np.empty((0, 3), dtype=np.float64)
+    # convert typed list → ndarray
     return np.array(pts)
 
 @njit(cache=True)
@@ -205,6 +214,53 @@ def process_keypoints(kpts_prev, kpts_curr, idx_valid, depth, K):
                 valid_count += 1
     
     return points_3d[:valid_count], points_2d[:valid_count], valid_idx[:valid_count]
+
+def rerank_by_pnp_inliers(
+    pnp_candidates: list[tuple[np.ndarray, np.ndarray]],
+    K: np.ndarray,
+    min_point_count: int = 80,
+    min_inlier_count: int = 50,
+) -> tuple[bool, np.ndarray, float, int, int, int]:
+    """
+    Estimate PnP for each candidate and return the pose with the most inliers.
+
+    Args:
+        pnp_candidates: list of (points_3d, points_2d) pairs.
+        K: camera intrinsic matrix.
+        min_point_count: minimum number of 3D/2D correspondences required.
+        min_inlier_count: minimum number of PnP inliers required.
+
+    Returns:
+        success, pose, inlier_ratio, best_candidate_index, best_inlier_count, best_point_count.
+    """
+    best_pose = None
+    best_candidate_index = -1
+    best_inlier_count = 0
+    best_point_count = 0
+
+    for candidate_index, (points_3d, points_2d) in enumerate(pnp_candidates):
+        point_count = len(points_2d)
+        if point_count <= min_point_count:
+            continue
+
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(points_3d, points_2d, K, None)
+        inlier_count = 0 if inliers is None else len(inliers)
+        if not success or inliers is None or inlier_count < min_inlier_count:
+            continue
+
+        if inlier_count > best_inlier_count:
+            best_candidate_index = candidate_index
+            best_inlier_count = inlier_count
+            best_point_count = point_count
+            best_pose = np.eye(4)
+            R_mat, _ = cv2.Rodrigues(rvec)
+            best_pose[:3, :3] = R_mat
+            best_pose[:3, 3] = tvec.reshape(3)
+
+    if best_pose is None:
+        return False, np.eye(4), -np.inf, -1, 0, 0
+
+    return True, best_pose, best_inlier_count / best_point_count, best_candidate_index, best_inlier_count, best_point_count
 
 @lru_cache_numpy(maxsize=128)
 def estimate_pose(kpts_prev, kpts_curr, depth, K, idx_valid=None):
@@ -239,56 +295,18 @@ def estimate_pose(kpts_prev, kpts_curr, depth, K, idx_valid=None):
     inlier_idx_original = idx_valid[inliers]
     return True, T, inliers_2d, inliers_3d, inlier_idx_original
 
-# Disjoint Set (Union-Find) implementation with path compression and union by rank
-@njit(cache=True)
+# Union–find via fufpy (https://github.com/LuisScoccola/fufpy)
 def uf_init(n):
-    parent = np.empty(n, np.int64)
-    rank = np.zeros(n, np.int64)
-    for i in range(n):
-        parent[i] = i
-    return parent, rank
-
-@njit(cache=True)
-def uf_find(i, parent):
-    root = i
-    while parent[root] != root:
-        root = parent[root]
-    while parent[i] != i:
-        p = parent[i]
-        parent[i] = root
-        i = p
-    return root
-
-@njit(cache=True)
-def uf_union(a, b, parent, rank):
-    ra = uf_find(a, parent)
-    rb = uf_find(b, parent)
-    if ra == rb:
-        return ra
-    if rank[ra] < rank[rb]:
-        parent[ra] = rb
-        return rb
-    elif rank[ra] > rank[rb]:
-        parent[rb] = ra
-        return ra
-    else:
-        parent[rb] = ra
-        rank[ra] += 1
-        return ra
-
-def uf_all_sets_list(parent):
-    root_to_members = {}
-    for i in range(len(parent)):
-        r = parent[i]
-        root_to_members.setdefault(r, []).append(i)
-    return list(root_to_members.values())
+    return fufpy.dynamic_partition_create(int(n))
 
 
+def uf_union(a, b, uf, _rank=None):
+    return fufpy.dynamic_partition_union(uf, int(a), int(b))
 
-def se3_inv(matrix_4x4:np.ndarray):
-    rotation = matrix_4x4[:3, :3]
-    translation = matrix_4x4[:3, 3]
-    T = np.eye(4)
-    T[:3, :3] = rotation.T
-    T[:3, 3] = -rotation.T @ translation
-    return T
+
+def uf_all_sets_list(uf, min_component_size=1):
+    out = []
+    for part in fufpy.dynamic_partition_parts(uf):
+        if part.size >= int(min_component_size):
+            out.append(np.sort(part).tolist())
+    return out

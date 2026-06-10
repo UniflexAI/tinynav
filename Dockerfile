@@ -69,11 +69,16 @@ RUN add-apt-repository universe
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
 RUN apt-get update && apt-get install -y ros-humble-desktop \
+    ros-humble-image-transport-plugins \
+    ros-humble-compressed-image-transport \
     python3-colcon-common-extensions \
     && rm -rf /var/lib/apt/lists/*
 
 # env
 ENV RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
+# Limit OpenBLAS worker threads globally to avoid high CPU on small NumPy/SciPy
+# workloads on Jetson. See OpenBLAS fix context: https://github.com/OpenMathLib/OpenBLAS/pull/4388
+ENV OPENBLAS_NUM_THREADS=1
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 ENV CYCLONEDDS_URI=/tinynav/scripts/cyclone_dds_localhost.xml
 ENV PATH=$PATH:/usr/src/tensorrt/bin/
@@ -104,7 +109,7 @@ RUN git clone https://github.com/IntelRealSense/librealsense.git -b r/256 \
     && cp config/99-realsense-libusb.rules /etc/udev/rules.d/. \
     && mkdir build \
     && cd build \
-    && cmake ../ -DFORCE_LIBUVC=true -DCMAKE_BUILD_TYPE=release -DBUILD_EXAMPLES=true \
+    && cmake ../ -DFORCE_LIBUVC=true -DCMAKE_BUILD_TYPE=release -DBUILD_EXAMPLES=true -DCHECK_FOR_UPDATES=OFF \
     && make -j$(nproc) \
     && make install
     
@@ -131,7 +136,7 @@ RUN apt-get update && \
     apt-get install -y clang-tidy ros-humble-ament-clang-tidy ros-humble-ament-lint \
     && rm -rf /var/lib/apt/lists/*
 
-# gtsam
+# gtsam from source
 RUN apt-get update && apt-get install -y python3-pip \
     && rm -rf /var/lib/apt/lists/*
 RUN pip3 install pyparsing==3.1.1
@@ -139,9 +144,21 @@ RUN git clone https://github.com/dvorak0/gtsam.git -b yzf/add_smart_factor_pytho
     && cd gtsam \
     && mkdir build && cd build \
     && cmake -DCMAKE_BUILD_TYPE=Release -DGTSAM_BUILD_PYTHON=ON -DGTSAM_THROW_CHEIRALITY_EXCEPTION=OFF .. \
-    && make -j1
+    && make -j2
 ENV PYTHONPATH="/3rdparty/gtsam/build/python:${PYTHONPATH}"
 
+# plotjuggler ROS2 String JSON parser patch
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nlohmann-json3-dev \
+    ros-humble-plotjuggler \
+    ros-humble-plotjuggler-ros \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /3rdparty/plotjuggler_ws/src \
+    && git clone https://github.com/dvorak0/plotjuggler-ros-plugins.git /3rdparty/plotjuggler_ws/src/plotjuggler_ros \
+    && cd /3rdparty/plotjuggler_ws \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build --packages-select plotjuggler_ros --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo
+RUN echo "source /3rdparty/plotjuggler_ws/install/local_setup.bash" >> ~/.bashrc
 
 # foxglove streaming
 RUN apt-get update && apt-get install -y \
@@ -149,6 +166,14 @@ RUN apt-get update && apt-get install -y \
     ros-humble-foxglove-msgs \
     ros-humble-foxglove-compressed-video-transport \
     && rm -rf /var/lib/apt/lists/*
+
+# Override apt-installed message_filters with UniflexAI/message_filters humble branch
+RUN mkdir -p /3rdparty/message_filters_ws/src \
+    && git clone --branch humble https://github.com/UniflexAI/message_filters.git /3rdparty/message_filters_ws/src/message_filters \
+    && cd /3rdparty/message_filters_ws \
+    && . /opt/ros/humble/setup.sh \
+    && colcon build --packages-select message_filters --allow-overriding message_filters
+RUN echo "source /3rdparty/message_filters_ws/install/local_setup.bash" >> ~/.bashrc
 
 # clean
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -158,72 +183,85 @@ WORKDIR /tinynav
 USER root
 
 # Install uv
-RUN curl -LsSf https://astral.sh/uv/0.7.3/install.sh | sh
+RUN curl -LsSf https://astral.sh/uv/0.7.3/install.sh | sh && test -f /root/.local/bin/uv
 ENV PATH=$PATH:/root/.local/bin/
 
-# Write auto_uv_venv.sh
-RUN cat > /usr/local/bin/auto_uv_venv.sh <<'EOF'
-#!/usr/bin/env bash
-auto_uv_venv() {
-  if [[ $PWD == "/tinynav" ]]; then
-    if [[ ! -d ".venv" ]]; then
-      echo "[auto_uv_venv] Creating virtual environment..."
-      uv venv --system-site-packages
-    else
-         if [[ $(cat ".venv/pyvenv.cfg") == *"include-system-site-packages = true"* ]]; then
-            echo "[auto_uv_venv] .venv/pyvenv.cfg already exists, skipping."
-         else
-            echo "[auto_uv_venv] .venv/pyvenv.cfg already exists, but include-system-site-packages is false, creating virtual environment..."
-            uv venv --system-site-packages
-         fi
-    fi
-  fi
-}
-maybe_build_models() {
-  MODEL_DIR="/tinynav/tinynav/models"
-  PLAN_COUNT=$(ls "$MODEL_DIR"/*.plan 2>/dev/null | wc -l || true)
+# Pre-create venv and sync dependencies at build time
+WORKDIR /tinynav
+COPY . /tinynav
+RUN rm -rf .venv
+RUN /root/.local/bin/uv venv /opt/venv --system-site-packages --seed
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONPATH="/tinynav:/3rdparty/gtsam/build/python:/opt/venv/lib/python3.10/site-packages"
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+# lekiwi conflicts with unitree (lerobot vs unitree-sdk2py dependency clash), so only unitree is included by default.
+# To use lekiwi instead, replace --extra unitree with --extra lekiwi.
+RUN /root/.local/bin/uv sync --python /opt/venv/bin/python --extra unitree
 
-  if [[ "$PLAN_COUNT" -eq 0 ]]; then
-    echo
-    echo "======================================================"
-    echo " Model Optimization for Your Platform"
-    echo "======================================================"
-    echo "No TensorRT engine (*.plan) files found in:"
-    echo "  $MODEL_DIR"
-    echo
-    echo "This step will run 'make all' to generate them."
-    echo "It may take 5–10 minutes."
-    echo "This only needs to happen once per platform — we'll reuse '*_${ARCH}.plan' next time."
-    echo
-    read -p "Do you want to generate models now? [y/N]: " reply
-    case "$reply" in
-      [yY]|[yY][eE][sS])
-        echo "[entrypoint] Starting model build..."
-        make -C "$MODEL_DIR" all
-        echo "[entrypoint] Model build finished."
-        ;;
-      *)
-        echo "[entrypoint] Skipping model build."
-        ;;
-    esac
-  else
-    echo "[entrypoint] Found $PLAN_COUNT plan file(s), skipping model build prompt."
-  fi
-}
-EOF
+# build decord from source
+RUN git clone --recursive https://github.com/dmlc/decord.git /tmp/decord \
+    && cd /tmp/decord \
+    && mkdir -p build \
+    && cd build \
+    && cmake .. -DUSE_CUDA=0 -DCMAKE_BUILD_TYPE=Release \
+    && make -j"$(nproc)" \
+    && cd ../python \
+    && /usr/bin/python3 setup.py install \
+    && cp -f /tmp/decord/build/libdecord.so /usr/local/lib/libdecord.so \
+    && DECORD_PKG_DIR=$(/usr/bin/python3 -c "import site; print(site.getsitepackages()[0] + '/decord')") \
+    && ln -sf /usr/local/lib/libdecord.so "${DECORD_PKG_DIR}/libdecord.so" \
+    && rm -rf /tmp/decord
 
-# Write entrypoint.sh
+# Write entrypoint.sh (model build prompt only)
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF'
 #!/usr/bin/env bash
 set -e
-source /usr/local/bin/auto_uv_venv.sh
-auto_uv_venv
-maybe_build_models
+
+MODEL_DIR="/tinynav/tinynav/models"
+PLAN_COUNT=$(ls "$MODEL_DIR"/*.plan 2>/dev/null | wc -l || true)
+
+if [[ "$PLAN_COUNT" -eq 0 ]]; then
+  echo
+  echo "======================================================"
+  echo " Model Optimization for Your Platform"
+  echo "======================================================"
+  echo "No TensorRT engine (*.plan) files found in:"
+  echo "  $MODEL_DIR"
+  echo
+  echo "This step will run 'make all' to generate them."
+  echo "It may take 5–10 minutes."
+  echo "This only needs to happen once per platform — we'll reuse '*_${ARCH}.plan' next time."
+  echo
+  read -p "Do you want to generate models now? [y/N]: " reply
+  case "$reply" in
+    [yY]|[yY][eE][sS])
+      echo "[entrypoint] Starting model build..."
+      make -C "$MODEL_DIR" all
+      echo "[entrypoint] Model build finished."
+      ;;
+    *)
+      echo "[entrypoint] Skipping model build."
+      ;;
+  esac
+else
+  echo "[entrypoint] Found $PLAN_COUNT plan file(s), skipping model build prompt."
+fi
+
 exec "$@"
 EOF
 
-RUN chmod +x /usr/local/bin/auto_uv_venv.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Flutter — install stable via git (arch-agnostic: works on x86_64 and aarch64)
+RUN git clone https://github.com/flutter/flutter.git -b stable --depth 1 /opt/flutter \
+    && git config --global --add safe.directory /opt/flutter
+ENV PATH="/opt/flutter/bin:$PATH"
+RUN flutter config --enable-web \
+    && flutter precache --web \
+    && cd /tinynav/app/frontend \
+    && flutter pub get \
+    && flutter build web --release --suppress-analytics
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bash"]
-

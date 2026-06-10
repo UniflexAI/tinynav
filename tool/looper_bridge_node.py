@@ -1,0 +1,254 @@
+import argparse
+import copy
+
+import cv2
+import message_filters
+import numpy as np
+import rclpy
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
+from sensor_msgs.msg import CameraInfo, Image
+from tf2_msgs.msg import TFMessage
+
+from tinynav.core.math_utils import np2msg, pose_msg2np
+
+
+class LooperBridgeNode(Node):
+    def __init__(self, args):
+        super().__init__("looper_bridge_node")
+        self.args = args
+        self.bridge = CvBridge()
+
+        self.cached_camera_info = None
+        self.last_keyframe_pose = None
+        self.last_keyframe_time = None
+        self.last_pose = None
+        self.last_pose_time = None
+        self._missing_input_counter = 0
+
+        self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
+        self.tf_static_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
+        self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
+
+        self.vio_100hz_sub = self.create_subscription(
+            PoseStamped, "/insight/vio_100hz", self.vio_100hz_callback, 50
+        )
+
+        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
+        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/insight/vio_20hz")
+        self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
+        self.sync = message_filters.TimeSynchronizer(
+            [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20
+        )
+        self.sync.registerCallback(self.sync_callback)
+
+        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
+        self.odom_visual_pub = self.create_publisher(
+            Odometry, "/slam/odometry_visual", 10
+        )
+        self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
+        self.disparity_pub_vis = self.create_publisher(Image, "/slam/disparity_vis", 10)
+        self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
+        self.camera_info_alias_pub = self.create_publisher(
+            CameraInfo, "/camera/camera/infra2/camera_info", 10
+        )
+        self.keyframe_pose_visual_pub = self.create_publisher(
+            Odometry, "/slam/keyframe_odom", 10
+        )
+        self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
+        self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
+
+        self.get_logger().info(
+            "Bridging /insight/vio_20hz + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
+        )
+        self.get_logger().info(
+            "Bridging /insight/vio_100hz into /slam/odometry."
+        )
+
+    def vio_100hz_callback(self, pose_msg: PoseStamped):
+        # /insight/vio_100hz already reports T_world_camera.
+        T_world_camera = pose_msg2np(pose_msg)
+        odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
+        self.odom_pub.publish(odom_msg)
+        self.get_logger().info(
+            f"Bridged first /insight/vio_100hz message at "
+            f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry.",
+            once=True,
+        )
+
+    def camera_info_callback(self, msg: CameraInfo):
+        self.cached_camera_info = msg
+        self.get_logger().info(
+            f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.",
+            once=True,
+        )
+
+    def tf_callback(self, msg: TFMessage):
+        self.get_logger().info("Received TF_STATIC for Looper bridge.", once=True)
+
+    def log_missing_inputs(self):
+        self._missing_input_counter += 1
+        if self._missing_input_counter % 30 != 1:
+            return
+        if self.cached_camera_info is None:
+            self.get_logger().info("Waiting for Looper bridge inputs: /camera/camera/infra1/camera_info")
+
+    @staticmethod
+    def stamp_to_sec(stamp) -> float:
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+    def should_add_keyframe(self, T_world_camera: np.ndarray, stamp) -> bool:
+        if self.last_keyframe_pose is None or self.last_keyframe_time is None:
+            return True
+        current_time = self.stamp_to_sec(stamp)
+        translation = np.linalg.norm(
+            T_world_camera[:3, 3] - self.last_keyframe_pose[:3, 3]
+        )
+        relative_rotation = self.last_keyframe_pose[:3, :3].T @ T_world_camera[:3, :3]
+        rotation_angle = np.arccos(
+            np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0)
+        )
+        return (
+            translation >= self.args.keyframe_translation
+            or rotation_angle >= np.deg2rad(self.args.keyframe_rotation_deg)
+            or current_time - self.last_keyframe_time > 3.0
+        )
+
+    def build_odom(self, T_world_camera: np.ndarray, stamp) -> Odometry:
+        velocity = None
+        current_time = stamp.sec + stamp.nanosec * 1e-9
+        if self.last_pose is not None and self.last_pose_time is not None:
+            dt = current_time - self.last_pose_time
+            if dt > 1e-3:
+                velocity = (T_world_camera[:3, 3] - self.last_pose[:3, 3]) / dt
+
+        odom_msg = np2msg(
+            T_world_camera,
+            stamp,
+            "world",
+            "camera",
+            velocity=velocity,
+        )
+        self.last_pose = T_world_camera.copy()
+        self.last_pose_time = current_time
+        return odom_msg
+
+    def decode_depth_meters(self, depth_msg: Image) -> np.ndarray:
+        depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
+        depth = np.asarray(depth)
+        if depth_msg.encoding in ("mono16", "16UC1"):
+            depth = depth.astype(np.float32) / 1000.0
+        else:
+            depth = depth.astype(np.float32)
+        return depth
+
+    def build_depth_msg(self, depth_m: np.ndarray, stamp) -> Image:
+        depth_out = self.bridge.cv2_to_imgmsg(depth_m, encoding="32FC1")
+        depth_out.header.stamp = stamp
+        depth_out.header.frame_id = "camera"
+        return depth_out
+
+    def build_disparity_vis(self, depth_m: np.ndarray, stamp) -> Image:
+        depth = np.asarray(depth_m, dtype=np.float32)
+
+        valid = np.isfinite(depth) & (depth > 1e-3)
+        disparity_u8 = np.zeros(depth.shape, dtype=np.uint8)
+        if np.any(valid):
+            inv_depth = np.zeros(depth.shape, dtype=np.float32)
+            inv_depth[valid] = 1.0 / depth[valid]
+            disp_min = float(np.min(inv_depth[valid]))
+            disp_max = float(np.max(inv_depth[valid]))
+            if disp_max > disp_min:
+                disparity_u8[valid] = np.clip(
+                    255.0 * (inv_depth[valid] - disp_min) / (disp_max - disp_min),
+                    0.0,
+                    255.0,
+                ).astype(np.uint8)
+            else:
+                disparity_u8[valid] = 255
+
+        disp_color = cv2.applyColorMap(disparity_u8, cv2.COLORMAP_PLASMA)
+        disp_color[~valid] = 0
+        disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding="bgr8")
+        disp_color_msg.header.stamp = stamp
+        disp_color_msg.header.frame_id = "camera"
+        return disp_color_msg
+
+    def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
+        if self.cached_camera_info is None:
+            self.log_missing_inputs()
+            return
+
+        T_world_camera = pose_msg2np(pose_msg)
+        stamp = pose_msg.header.stamp
+
+        odom_msg = self.build_odom(T_world_camera, stamp)
+        self.odom_visual_pub.publish(odom_msg)
+        depth_m = self.decode_depth_meters(depth_msg)
+        depth_out = self.build_depth_msg(depth_m, stamp)
+        disparity_vis_msg = self.build_disparity_vis(depth_m, stamp)
+
+        self.get_logger().info(
+            "sync_callback: "
+            f"t={self.stamp_to_sec(stamp):.3f}, "
+            f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}"
+        )
+
+        image_out = copy.deepcopy(image_msg)
+        image_out.header.stamp = stamp
+        image_out.header.frame_id = "camera"
+
+        camera_info_out = copy.deepcopy(self.cached_camera_info)
+        camera_info_out.header.stamp = stamp
+        camera_info_out.header.frame_id = "camera"
+
+        self.depth_pub.publish(depth_out)
+        self.disparity_pub_vis.publish(disparity_vis_msg)
+        self.slam_camera_info_pub.publish(camera_info_out)
+        self.camera_info_alias_pub.publish(camera_info_out)
+
+        if self.should_add_keyframe(T_world_camera, stamp):
+            self.keyframe_pose_visual_pub.publish(odom_msg)
+            self.keyframe_image_pub.publish(image_out)
+            self.keyframe_depth_pub.publish(depth_out)
+            self.last_keyframe_pose = T_world_camera.copy()
+            self.last_keyframe_time = self.stamp_to_sec(stamp)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--keyframe-translation", type=float, default=0.03)
+    parser.add_argument("--keyframe-rotation-deg", type=float, default=1.0)
+    return parser.parse_args()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LooperBridgeNode(parse_args())
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -2,7 +2,8 @@
 uv pip install .[3dgs]
 data_path=/tinynav/output/map_color_benchmark01
 output_path=/tinynav/output/map_color_benchmark01
-MAX_JOBS=1 ns-train splatfacto \
+uv run python tool/convert_to_nerf_format.py --map-dir "$data_path"
+MAX_JOBS=1 uv run ns-train splatfacto \
       --output-dir $output_path \
       --experiment-name experiment \
       --method-name splatfacto \
@@ -15,4 +16,4 @@ MAX_JOBS=1 ns-train splatfacto \
       --center-method none \
       --auto-scale-poses False \
       --orientation_method none
-ns-export gaussian-splat --load-config "$output_path/experiment/splatfacto/0/config.yml"  --output-dir "$output_path"
+uv run ns-export gaussian-splat --load-config "$output_path/experiment/splatfacto/0/config.yml"  --output-dir "$output_path"

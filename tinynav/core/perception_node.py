@@ -1,19 +1,23 @@
 import argparse
+import json
 import logging
 import sys
+import time
 import cv2
-from message_filters import Subscriber, ApproximateTimeSynchronizer
+from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
 import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
-from models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
+from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
+from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose, se3_inv
-from math_utils import uf_init, uf_union, uf_all_sets_list
+from rclpy.duration import Duration
+from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
+from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
 from tf2_ros import TransformBroadcaster
 import asyncio
 import gtsam
@@ -22,6 +26,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from gtsam.symbol_shorthand import X, B, V
+from tinynav.core.imu_propagator_node import ImuPropagatorNode
 
 _N = 5
 _M = 1000
@@ -35,7 +40,7 @@ logger.setLevel(logging.INFO)
 
 
 def keyframe_check(T_i, T_j):
-    T_ij = se3_inv(T_i) @ T_j
+    T_ij = np.linalg.inv(T_i) @ T_j
     t_diff = np.linalg.norm(T_ij[:3, 3])
     cos_theta = (np.trace(T_ij[:3, :3]) - 1) / 2
     r_diff = np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
@@ -57,6 +62,13 @@ def stamp2second(stamp):
     return nano_s * 1e-9
 
 
+@dataclass
+class StereoPairMsg:
+    header: object
+    left_msg: Image
+    right_msg: Image
+
+
 # keyframe dataclass
 @dataclass
 class Keyframe:
@@ -69,48 +81,22 @@ class Keyframe:
     bias: gtsam.imuBias.ConstantBias
     preintegrated_imu: gtsam.PreintegratedCombinedMeasurements
     latest_imu_timestamp: float
-
-realsense_signature = [
-    "/camera/camera/imu",
-    "/camera/camera/infra1/image_rect_raw",
-    "/camera/camera/infra2/image_rect_raw",
-    "/camera/camera/infra2/camera_info",
-]
-
-looper_signature = [
-    "/insight/imu",
-    "/insight/camera_left_rectified",
-    "/insight/camera_right_rectified",
-    "/insight/camera_right_info"
-]
+    imu_measurement_count: int = 0
 
 class PerceptionNode(Node):
     def __init__(self, verbose_timer: bool = True):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
         self.logger = logging.getLogger(__name__)
-        active_topics = [t[0] for t in self.get_topic_names_and_types()]
-        
-        while True:
-            if all(topic in active_topics for topic in realsense_signature):
-                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = realsense_signature
-                self.superpoint = SuperPointTRT("240x424")
-                self.stereo_engine = StereoEngineTRT("480x848")
-                break
-            elif all(topic in active_topics for topic in looper_signature):
-                imu_topic_name ,left_image_topic_name ,right_image_topic_name, camera_info_topic_name = looper_signature
-                self.superpoint = SuperPointTRT("320x272")
-                self.stereo_engine = StereoEngineTRT("640x544")
-                break
-            else:
-                self.logger.error(f"Invalid active topics: {active_topics}")
-                active_topics = [t[0] for t in self.get_topic_names_and_types()]
-
+        # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
+        # model
+        self.superpoint = SuperPointTRT()
         self.light_glue = LightGlueTRT()
 
         self.last_keyframe_img = None
         self.last_keyframe_features = None
 
+        self.stereo_engine = StereoEngineTRT()
         # intrinsic
         self.baseline = None
         self.K = None
@@ -125,21 +111,33 @@ class PerceptionNode(Node):
         qos_profile = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=500)
 
         # use a single topic to handle the imu data.
-        self.imu_sub = self.create_subscription(Imu, imu_topic_name, self.sync_imu_callback, qos_profile)
+        self.imu_sub = self.create_subscription(Imu, "/camera/camera/imu", self.imu_callback, qos_profile)
         self.imu_last_received_timestamp = None
-        self.camerainfo_sub = self.create_subscription(CameraInfo, camera_info_topic_name, self.info_callback, 10)
-        self.left_sub = Subscriber(self, Image, left_image_topic_name)
-        self.right_sub = Subscriber(self, Image, right_image_topic_name)
 
+
+        self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
+        self.left_sub = Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw")
+        self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=10, slop=0.02)
         self.ts.registerCallback(self.images_callback)
-        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
+
+        self.input_aligner_imu_filter = SimpleFilter()
+        self.input_aligner_stereo_filter = SimpleFilter()
+        self.input_aligner = InputAligner(Duration(seconds=1.000), self.input_aligner_imu_filter, self.input_aligner_stereo_filter)
+        self.input_aligner.setInputPeriod(0, Duration(seconds=0.005))
+        self.input_aligner.setInputPeriod(1, Duration(seconds=0.01))
+        self.input_aligner.registerCallback(0, self._aligned_imu_callback)
+        self.input_aligner.registerCallback(1, self._aligned_stereo_callback)
+        self.input_aligner_seen_imu = False
+        self.input_aligner_seen_stereo = False
+        self.odom_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
+        self.stats_pub = self.create_publisher(String, "/slam/data", 10)
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
@@ -148,8 +146,8 @@ class PerceptionNode(Node):
 
         # Noise model (continuous-time)
         # for Realsense D435i
-        accel_noise_density = 0.25     # [m/s^2/√Hz]
-        gyro_noise_density = 0.00005 # [rad/s/√Hz]
+        accel_noise_density = 0.50     # [m/s^2/√Hz]
+        gyro_noise_density = 0.50 # [rad/s/√Hz]
         bias_acc_rw_sigma = 0.001
         bias_gyro_rw_sigma = 0.0001
         self.pre_integration_params = gtsam.PreintegrationCombinedParams.MakeSharedU()
@@ -170,14 +168,12 @@ class PerceptionNode(Node):
         self.imu_measurements = deque(maxlen=1000)
 
         self.keyframe_queue = []
+        self._async_loop = asyncio.new_event_loop()
         self.logger.info("PerceptionNode initialized.")
         self.process_cnt = 0
 
     def info_callback(self, msg):
         if self.K is None:
-            self.image_height = msg.height
-            self.image_width = msg.width
-
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]  # From the right camera's projection matrix
@@ -186,7 +182,7 @@ class PerceptionNode(Node):
             self.camera_info_msg = msg
             self.destroy_subscription(self.camerainfo_sub)
 
-    def sync_imu_callback(self, imu_msg):
+    def _process_imu_msg(self, imu_msg):
         current_timestamp = stamp2second(imu_msg.header.stamp)
         if len(self.accel_readings) >= 10 and self.T_body_last is None:
             accel_data = np.array([(a.x, a.y, a.z) for a in self.accel_readings])
@@ -210,17 +206,49 @@ class PerceptionNode(Node):
         gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
         self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
-    def images_callback(self, left_msg, right_msg):
-        current_timestamp = stamp2second(left_msg.header.stamp)
-        if current_timestamp - self.last_processed_timestamp < 0.1333:
+    def _aligned_imu_callback(self, imu_msg):
+        self._process_imu_msg(imu_msg)
+
+    def _aligned_stereo_callback(self, stereo_pair_msg):
+        left_msg = stereo_pair_msg.left_msg
+        right_msg = stereo_pair_msg.right_msg
+        image_timestamp = stamp2second(left_msg.header.stamp)
+        if image_timestamp - self.last_processed_timestamp < 0.1333:
             return
-        self.last_processed_timestamp = current_timestamp
+
+        self.last_processed_timestamp = image_timestamp
+        loop_start = time.perf_counter()
         with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            asyncio.run(self.process(left_msg, right_msg))
+            processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
+        if processed:
+            processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
+            self.stats_pub.publish(String(data=json.dumps(processed)))
+
+    def destroy_node(self):
+        if self._async_loop is not None:
+            self._async_loop.close()
+            self._async_loop = None
+        return super().destroy_node()
+
+    def imu_callback(self, imu_msg):
+        self.input_aligner_imu_filter.signalMessage(imu_msg)
+        self.input_aligner_seen_imu = True
+        if self.input_aligner_seen_stereo:
+            self.input_aligner.dispatchMessages()
+
+    def images_callback(self, left_msg, right_msg):
+        stereo_pair_msg = StereoPairMsg(header=left_msg.header, left_msg=left_msg, right_msg=right_msg)
+        self.input_aligner_stereo_filter.signalMessage(stereo_pair_msg)
+        self.input_aligner_seen_stereo = True
+        if self.input_aligner_seen_imu:
+            self.input_aligner.dispatchMessages()
 
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
-            return
+            return {
+            "stats": {"process_cnt": 0},
+            "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+        }
         self.process_cnt += 1
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
@@ -240,7 +268,10 @@ class PerceptionNode(Node):
                     latest_imu_timestamp=current_timestamp
                 )
             )
-            return
+            return {
+            "stats": {"process_cnt": 0},
+            "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
+        }
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
@@ -270,14 +301,15 @@ class PerceptionNode(Node):
 
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt) #todo
             self.keyframe_queue[-1].latest_imu_timestamp = timestamp
+            self.keyframe_queue[-1].imu_measurement_count += 1
 
             self.imu_measurements.popleft()
-
         # specially process the last imu
         if len(self.imu_measurements) > 0 and current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.001:
             timestamp, accel, gyro = self.imu_measurements[0]
             dt = current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt)
+            self.keyframe_queue[-1].imu_measurement_count += 1
 
         with Timer(name="[PnP]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
         # do simple pose estimation between last keyframe and current frame
@@ -336,9 +368,17 @@ class PerceptionNode(Node):
 
                     # per pose -- preintegrated IMU factor, only between two keyframes
                     if i != len(self.keyframe_queue[-_N:]) - 1:
+                        if keyframe.imu_measurement_count < 26:
+                            self.logger.warning(
+                                f"keyframe {i} at {keyframe.timestamp} only used "
+                                f"{keyframe.imu_measurement_count} imu measurements; expected at least 26"
+                            )
                         imu_factor = gtsam.CombinedImuFactor(X(i), V(i), X(i+1), V(i+1), B(i), B(i+1), keyframe.preintegrated_imu)
                         graph.add(imu_factor)
-                    self.logger.debug(f"for frame {i} at {keyframe.timestamp}, added imufactor up to {keyframe.latest_imu_timestamp}")
+                    self.logger.debug(
+                        f"for frame {i} at {keyframe.timestamp}, added imufactor up to "
+                        f"{keyframe.latest_imu_timestamp} using {keyframe.imu_measurement_count} imu measurements"
+                    )
 
             #with Timer(name="[stats]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             #    self.frame_diff_t = []
@@ -361,10 +401,9 @@ class PerceptionNode(Node):
 
             with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
                 extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
-            parent, rank = uf_init(len(self.keyframe_queue[-_N:]) * _M)
+                uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
-            
             # Process pairs of keyframes from last _N keyframes: extract features (SuperPoint),
             # match by LightGlue, filter by geometric consistency (pose estimation), 
             # and build tracks via Union-Find
@@ -391,7 +430,8 @@ class PerceptionNode(Node):
                             prev_left_extract_result["mask"],
                             current_left_extract_result["mask"],
                             kf_prev.image.shape,
-                            kf_curr.image.shape)
+                            kf_curr.image.shape,
+                        )
                     with Timer(name="[cached result[2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_keypoints = prev_left_extract_result["kpts"][0]  # (n, 2)
                         current_keypoints = current_left_extract_result["kpts"][0]  # (n, 2)
@@ -425,19 +465,18 @@ class PerceptionNode(Node):
                             velocity_constraint = gtsam.PriorFactorVector(V(i), np.zeros(3), gtsam.noiseModel.Diagonal.Sigmas(np.array([0.25, 0.25, 0.25])))
                             graph.add(velocity_constraint)
 
-
                     with Timer(name="[cached result[3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         count = 0
                         for k, match_idx in enumerate(match_indices):
                             if match_idx != -1:
                                 idx_prev = i * _M + k
                                 idx_curr = j * _M + match_idx
-                                uf_union(idx_prev, idx_curr, parent, rank)
+                                uf_union(idx_prev, idx_curr, uf)
                                 count += 1
                         self.logger.debug(f"{i} match {j} after Pnp filter count: {count}")
 
             with Timer(name="[found track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                tracks = [track for track in uf_all_sets_list(parent) if len(track) >= 2]
+                tracks = uf_all_sets_list(uf, min_component_size=2)
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
@@ -474,7 +513,7 @@ class PerceptionNode(Node):
                         )
                         smart_factor.add(stereo_meas, X(pose_idx), calib)
                     graph.add(smart_factor)
-            
+
         with Timer(name="[Solver]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             params = gtsam.LevenbergMarquardtParams()
             # set iteration limit
@@ -531,34 +570,38 @@ class PerceptionNode(Node):
             else:
                 self.keyframe_queue.pop()
 
+        return {
+            "stats": {
+                "process_cnt": self.process_cnt,
+            },
+            "metrics": {
+                "num_keyframes": len(self.keyframe_queue),
+                "num_tracks": len(tracks),
+                "num_factors": graph.size(),
+                "num_variables": initial_estimate.size(),
+                "initial_error": graph.error(initial_estimate),
+                "final_error": graph.error(result),
+            },
+        }
 
 
 def main(args=None):
-
     rclpy.init(args=args)
-    parser = argparse.ArgumentParser()
-    parser.set_defaults(verbose_timer=True)
-    parser.add_argument("--verbose_timer", action="store_true", help="Enable verbose timer output")
-    parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
-    parser.add_argument("--log_file", type=str, default="odom.log", help="Path to the log file")
-    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
-    print(f"Verbose timer: {parsed_args.verbose_timer}")
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(parsed_args.log_file)],
-    )
+    parser = argparse.ArgumentParser(description='Run TinyNav perception node.')
+    parser.add_argument('--verbose_timer', action='store_true', help='Print timing for key pipeline stages.')
+    parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
+    imu_propagator_node = ImuPropagatorNode()
 
-    executor = rclpy.executors.SingleThreadedExecutor()
+    executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(perception_node)
+    executor.add_node(imu_propagator_node)
     executor.spin()
     perception_node.destroy_node()
-    executor.shutdown()
+    imu_propagator_node.destroy_node()
+    rclpy.shutdown()
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
     main()
