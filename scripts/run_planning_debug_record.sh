@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Usage: run_planning_debug_record.sh [--output DIR]
-#   Records the minimum planning_node.py input topics for offline replay/debug.
+#   Records planning_node.py inputs plus outputs needed for offline replay/debug.
 
 output_dir=""
 while [[ $# -gt 0 ]]; do
@@ -25,9 +25,9 @@ fi
 ros2 bag record \
     --output "${output_dir}" \
     --max-cache-size 2147483648 \
-    /slam/depth \
+    /camera/camera/depth/image_rect_raw \
     /insight/vio_100hz \
-    /slam/odometry_visual \
+    /insight/vio_20hz \
     /planning/trajectory_path \
     /cmd_vel \
     /camera/camera/infra2/camera_info \

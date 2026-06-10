@@ -25,18 +25,27 @@ from tinynav.core.planning_node import (
 )
 
 
+PLANNING_ODOM_TOPIC = "/insight/vio_20hz"
+LEGACY_PLANNING_ODOM_TOPIC = "/slam/odometry_visual"
+PLANNING_DEPTH_TOPIC = "/camera/camera/depth/image_rect_raw"
+LEGACY_PLANNING_DEPTH_TOPIC = "/slam/depth"
+PLANNING_PATH_TOPIC = "/planning/trajectory_path"
+
 PLANNING_INPUT_TOPICS = {
-    "/slam/depth",
-    "/slam/odometry_visual",
+    PLANNING_DEPTH_TOPIC,
+    PLANNING_ODOM_TOPIC,
+    PLANNING_PATH_TOPIC,
     "/camera/camera/infra2/camera_info",
     "/control/target_pose",
     "/mapping/poi_change",
 }
+READABLE_PLANNING_TOPICS = PLANNING_INPUT_TOPICS | {LEGACY_PLANNING_ODOM_TOPIC, LEGACY_PLANNING_DEPTH_TOPIC}
 
 
 @dataclass
 class PoseFrame:
     timestamp_ns: int
+    header_timestamp_ns: int | None
     position: np.ndarray
     wxyz: np.ndarray
     matrix: np.ndarray
@@ -93,6 +102,14 @@ class TrajectoryFrame:
 
 
 @dataclass
+class RecordedPathFrame:
+    timestamp_ns: int
+    header_timestamp_ns: int | None
+    points: np.ndarray
+    first_stamp_ns: int | None
+
+
+@dataclass
 class BagData:
     poses: list[PoseFrame]
     targets: list[TargetFrame]
@@ -101,6 +118,7 @@ class BagData:
     raycast_inputs: list[RaycastInputFrame]
     occupancy_frames: list[OccupancyFrame]
     trajectory_frames: list[TrajectoryFrame]
+    recorded_path_frames: list[RecordedPathFrame]
     topics: dict[str, str]
     start_ns: int | None
     end_ns: int | None
@@ -117,6 +135,23 @@ def _quat_xyzw_to_matrix(x: float, y: float, z: float, w: float) -> np.ndarray:
     )
 
 
+def _stamp_to_ns(stamp) -> int:
+    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+
+
+def _header_stamp_ns(msg) -> int | None:
+    if not hasattr(msg, "header"):
+        return None
+    stamp_ns = _stamp_to_ns(msg.header.stamp)
+    return stamp_ns if stamp_ns > 0 else None
+
+
+def _format_stamp(stamp_ns: int | None) -> str:
+    if stamp_ns is None:
+        return "none"
+    return f"{stamp_ns / 1e9:.6f}"
+
+
 def _odom_to_pose_frame(timestamp_ns: int, msg) -> PoseFrame:
     p = msg.pose.pose.position
     q = msg.pose.pose.orientation
@@ -126,9 +161,46 @@ def _odom_to_pose_frame(timestamp_ns: int, msg) -> PoseFrame:
     T[:3, 3] = np.array([p.x, p.y, p.z], dtype=np.float64)
     return PoseFrame(
         timestamp_ns=timestamp_ns,
+        header_timestamp_ns=_header_stamp_ns(msg),
         position=T[:3, 3].copy(),
         wxyz=np.array([q.w, q.x, q.y, q.z], dtype=np.float64),
         matrix=T,
+    )
+
+
+def _pose_stamped_to_pose_frame(timestamp_ns: int, msg) -> PoseFrame:
+    p = msg.pose.position
+    q = msg.pose.orientation
+    R = _quat_xyzw_to_matrix(q.x, q.y, q.z, q.w)
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R
+    T[:3, 3] = np.array([p.x, p.y, p.z], dtype=np.float64)
+    return PoseFrame(
+        timestamp_ns=timestamp_ns,
+        header_timestamp_ns=_header_stamp_ns(msg),
+        position=T[:3, 3].copy(),
+        wxyz=np.array([q.w, q.x, q.y, q.z], dtype=np.float64),
+        matrix=T,
+    )
+
+
+def _path_to_frame(timestamp_ns: int, msg) -> RecordedPathFrame:
+    points = []
+    first_stamp_ns = None
+    for idx, pose_stamped in enumerate(msg.poses):
+        p = pose_stamped.pose.position
+        points.append([p.x, p.y, p.z])
+        if idx == 0:
+            first_stamp_ns = _stamp_to_ns(pose_stamped.header.stamp)
+    if points:
+        points_arr = np.asarray(points, dtype=np.float32)
+    else:
+        points_arr = np.zeros((0, 3), dtype=np.float32)
+    return RecordedPathFrame(
+        timestamp_ns=timestamp_ns,
+        header_timestamp_ns=_header_stamp_ns(msg),
+        points=points_arr,
+        first_stamp_ns=first_stamp_ns,
     )
 
 
@@ -194,6 +266,9 @@ def _seed_from_last_trajectory(
         return None
     rel_t = query_stamp - last_base_stamp
     if rel_t < 0.0:
+        return None
+    traj_end_stamp = last_base_stamp + float(len(last_traj) - 1) * dt
+    if query_stamp > traj_end_stamp:
         return None
     idx = int(round(rel_t / dt))
     idx = max(0, min(idx, len(last_traj) - 1))
@@ -394,7 +469,7 @@ def _build_trajectory_frame(
     last_traj_base_stamp: float | None,
     max_candidates: int,
     dt: float = 0.1,
-    planning_latency_s: float = 0.1,
+    planning_latency_s: float = 0.2,
     seed_fallback_distance_m: float = 2.0,
     seed_fallback_rotation_rad: float = np.deg2rad(15.0),
     resolution: float = 0.1,
@@ -477,7 +552,7 @@ def _build_trajectory_frame(
             costs.append(
                 score * 100000
                 + 100 * dist
-                + 10 * abs(last_param[0] - param[0])
+                + 40 * abs(last_param[0] - param[0])
                 + 10 * abs(last_param[1] - param[1])
                 + reverse_gate_penalty
             )
@@ -572,6 +647,7 @@ def read_bag(
     target_events: list[TargetEvent] = []
     depth_frames: list[DepthFrame] = []
     raycast_inputs: list[RaycastInputFrame] = []
+    recorded_path_frames: list[RecordedPathFrame] = []
     camera_info = None
     start_ns = None
     end_ns = None
@@ -582,12 +658,16 @@ def read_bag(
         start_ns = timestamp_ns if start_ns is None else min(start_ns, timestamp_ns)
         end_ns = timestamp_ns if end_ns is None else max(end_ns, timestamp_ns)
 
-        if topic not in PLANNING_INPUT_TOPICS:
+        if topic not in READABLE_PLANNING_TOPICS:
             continue
 
         msg = deserialize_message(serialized_msg, msg_types[topic])
-        if topic == "/slam/odometry_visual":
+        if topic == PLANNING_ODOM_TOPIC:
+            poses.append(_pose_stamped_to_pose_frame(timestamp_ns, msg))
+        elif topic == LEGACY_PLANNING_ODOM_TOPIC:
             poses.append(_odom_to_pose_frame(timestamp_ns, msg))
+        elif topic == PLANNING_PATH_TOPIC:
+            recorded_path_frames.append(_path_to_frame(timestamp_ns, msg))
         elif topic == "/control/target_pose":
             target = _target_to_frame(timestamp_ns, msg)
             targets.append(target)
@@ -596,7 +676,7 @@ def read_bag(
             target_events.append(TargetEvent(timestamp_ns=timestamp_ns, target=None))
         elif topic == "/camera/camera/infra2/camera_info":
             camera_info = msg
-        elif topic == "/slam/depth":
+        elif topic in (PLANNING_DEPTH_TOPIC, LEGACY_PLANNING_DEPTH_TOPIC):
             pose = _latest_before(poses, timestamp_ns)
             depth = _decode_depth(msg)
             if depth is None or camera_info is None or pose is None:
@@ -620,6 +700,7 @@ def read_bag(
     target_events.sort(key=lambda f: f.timestamp_ns)
     depth_frames.sort(key=lambda f: f.timestamp_ns)
     raycast_inputs.sort(key=lambda f: f.timestamp_ns)
+    recorded_path_frames.sort(key=lambda f: f.timestamp_ns)
     occupancy_frames = build_occupancy_frames(raycast_inputs, max_occupancy_frames, occupancy_every)
     trajectory_frames = build_trajectory_frames(
         occupancy_frames,
@@ -635,6 +716,7 @@ def read_bag(
         raycast_inputs=raycast_inputs,
         occupancy_frames=occupancy_frames,
         trajectory_frames=trajectory_frames,
+        recorded_path_frames=recorded_path_frames,
         topics=topics,
         start_ns=start_ns,
         end_ns=end_ns,
@@ -718,6 +800,9 @@ def run_viewer(
     max_idx = max(0, len(data.poses) - 1)
     with server.gui.add_folder("Replay") as _:
         frame_slider = server.gui.add_slider("Frame", min=0, max=max_idx, step=1, initial_value=0)
+        prev_button = server.gui.add_button("Prev Frame")
+        next_button = server.gui.add_button("Next Frame")
+        frame_text = server.gui.add_markdown("**Frame**\n\nNo frame loaded.")
         play_toggle = server.gui.add_checkbox("Play", initial_value=False)
         initial_rate = max(0.1, float(rate))
         rate_slider = server.gui.add_slider("Rate", min=0.1, max=max(5.0, initial_rate), step=0.1, initial_value=initial_rate)
@@ -726,6 +811,7 @@ def run_viewer(
         show_obstacles = server.gui.add_checkbox("Show Planner Obstacles", initial_value=True)
         show_candidates = server.gui.add_checkbox("Show Candidate Trajectories", initial_value=True)
         show_selected = server.gui.add_checkbox("Show Selected Trajectory", initial_value=True)
+        show_recorded_path = server.gui.add_checkbox("Show Recorded Path", initial_value=True)
         show_target = server.gui.add_checkbox("Show Target", initial_value=True)
         show_footprint = server.gui.add_checkbox("Show Footprint", initial_value=True)
         obstacle_text = server.gui.add_markdown(
@@ -741,7 +827,19 @@ def run_viewer(
         if not data.poses:
             return
         handles = state["handles"]
-        for name in ("current", "trail", "target", "depth", "occupancy", "obstacles", "front_clearance", "candidates", "selected", "footprint"):
+        for name in (
+            "current",
+            "trail",
+            "target",
+            "depth",
+            "occupancy",
+            "obstacles",
+            "front_clearance",
+            "candidates",
+            "selected",
+            "recorded_path",
+            "footprint",
+        ):
             handle = handles.pop(name, None)
             if handle is not None:
                 try:
@@ -752,6 +850,42 @@ def run_viewer(
         idx = int(np.clip(idx, 0, len(data.poses) - 1))
         pose = data.poses[idx]
         state["idx"] = idx
+        rel_s = 0.0
+        if data.start_ns is not None:
+            rel_s = (pose.timestamp_ns - data.start_ns) / 1e9
+        traj_frame = _latest_before(data.trajectory_frames, pose.timestamp_ns)
+        recorded_path = _latest_before(data.recorded_path_frames, pose.timestamp_ns)
+        odom_header_ns = pose.header_timestamp_ns
+        if recorded_path is not None and recorded_path.first_stamp_ns is not None:
+            path_msg_stamp_s = recorded_path.timestamp_ns / 1e9
+            path_first_stamp_s = recorded_path.first_stamp_ns / 1e9
+            path_header_s = _format_stamp(recorded_path.header_timestamp_ns)
+            if odom_header_ns is not None:
+                path_lag_text = f"`odom header - path first`: `{(odom_header_ns - recorded_path.first_stamp_ns) / 1e9:.3f}` s"
+            else:
+                path_lag_text = "`odom header - path first`: `none`"
+            path_timestamp_text = (
+                f"`path record stamp`: `{path_msg_stamp_s:.6f}` s  \n"
+                f"`path header stamp`: `{path_header_s}` s  \n"
+                f"`path first stamp`: `{path_first_stamp_s:.6f}` s  \n"
+                f"{path_lag_text}"
+            )
+        elif recorded_path is not None:
+            path_timestamp_text = (
+                f"`path record stamp`: `{recorded_path.timestamp_ns / 1e9:.6f}` s  \n"
+                f"`path header stamp`: `{_format_stamp(recorded_path.header_timestamp_ns)}` s  \n"
+                "`path first stamp`: `none`"
+            )
+        else:
+            path_timestamp_text = "`path first stamp`: `none`"
+        frame_text.content = (
+            "**Frame**\n\n"
+            f"`id`: `{idx}` / `{max_idx}`  \n"
+            f"`odom record stamp`: `{pose.timestamp_ns / 1e9:.6f}` s  \n"
+            f"`odom header stamp`: `{_format_stamp(pose.header_timestamp_ns)}` s  \n"
+            f"`relative`: `{rel_s:.3f}` s  \n"
+            f"{path_timestamp_text}"
+        )
         handles["current"] = server.scene.add_transform_controls("/odom/current", position=pose.position, wxyz=pose.wxyz)
         if show_footprint.value:
             footprint = _footprint_segments(pose.matrix)
@@ -837,7 +971,6 @@ def run_viewer(
                 line_width=5,
             )
 
-        traj_frame = _latest_before(data.trajectory_frames, pose.timestamp_ns)
         if traj_frame is not None and traj_frame.selected_param is not None:
             selected_param_text.content = (
                 "**Selected Trajectory**\n\n"
@@ -880,10 +1013,28 @@ def run_viewer(
                     colors=np.tile(selected_color, (len(selected_segments), 1, 1)),
                     line_width=selected_line_width,
                 )
+        if recorded_path is not None and show_recorded_path.value and len(recorded_path.points) > 1:
+            recorded_segments = _line_segments(recorded_path.points)
+            if len(recorded_segments) > 0:
+                recorded_color = np.array([[[1.0, 0.82, 0.0], [1.0, 0.82, 0.0]]], dtype=np.float32)
+                handles["recorded_path"] = server.scene.add_line_segments(
+                    "/planning/recorded_trajectory_path",
+                    points=recorded_segments,
+                    colors=np.tile(recorded_color, (len(recorded_segments), 1, 1)),
+                    line_width=max(2.0, selected_line_width * 0.75),
+                )
 
     @frame_slider.on_update
     def _(_) -> None:
         render(int(frame_slider.value))
+
+    @prev_button.on_click
+    def _(_) -> None:
+        frame_slider.value = max(0, state["idx"] - 1)
+
+    @next_button.on_click
+    def _(_) -> None:
+        frame_slider.value = min(max_idx, state["idx"] + 1)
 
     @play_toggle.on_update
     def _(_) -> None:
@@ -910,6 +1061,10 @@ def run_viewer(
     def _(_) -> None:
         render(state["idx"])
 
+    @show_recorded_path.on_update
+    def _(_) -> None:
+        render(state["idx"])
+
     @show_target.on_update
     def _(_) -> None:
         render(state["idx"])
@@ -922,11 +1077,17 @@ def run_viewer(
     print(
         f"Loaded poses={len(data.poses)} targets={len(data.targets)} "
         f"depth_frames={len(data.depth_frames)} occupancy_frames={len(data.occupancy_frames)} "
-        f"trajectory_frames={len(data.trajectory_frames)}"
+        f"trajectory_frames={len(data.trajectory_frames)} "
+        f"recorded_paths={len(data.recorded_path_frames)}"
     )
     if data.start_ns is not None and data.end_ns is not None:
         print(f"Bag duration: {(data.end_ns - data.start_ns) / 1e9:.2f}s")
-    missing = sorted(PLANNING_INPUT_TOPICS - set(data.topics.keys()))
+    expected_topics = set(PLANNING_INPUT_TOPICS)
+    if PLANNING_ODOM_TOPIC not in data.topics and LEGACY_PLANNING_ODOM_TOPIC in data.topics:
+        expected_topics.remove(PLANNING_ODOM_TOPIC)
+    if PLANNING_DEPTH_TOPIC not in data.topics and LEGACY_PLANNING_DEPTH_TOPIC in data.topics:
+        expected_topics.remove(PLANNING_DEPTH_TOPIC)
+    missing = sorted(expected_topics - set(data.topics.keys()))
     if missing:
         print("Missing expected topics:")
         for topic in missing:
@@ -941,7 +1102,6 @@ def run_viewer(
                 if now - state["last_update"] >= step_dt:
                     next_idx = (state["idx"] + 1) % len(data.poses)
                     frame_slider.value = next_idx
-                    render(next_idx)
                     state["last_update"] = now
             time.sleep(0.02)
     except KeyboardInterrupt:

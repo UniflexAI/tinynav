@@ -403,7 +403,7 @@ class PlanningNode(Node):
 
         self.smoothed_velocity = 0.0
         self.dt = 0.1
-        self.planning_latency_s = 0.1
+        self.planning_latency_s = 0.2
         self.seed_fallback_distance_m = 2.0
         self.target_reached_distance_m = 0.15
         self.last_planned_traj = None
@@ -573,6 +573,9 @@ class PlanningNode(Node):
             return None
         rel_t = query_stamp - self.last_planned_traj_base_stamp
         if rel_t < 0.0:
+            return None
+        traj_end_stamp = self.last_planned_traj_base_stamp + float(len(traj) - 1) * self.dt
+        if query_stamp > traj_end_stamp:
             return None
         idx = int(round(rel_t / self.dt))
         idx = max(0, min(idx, len(traj) - 1))
@@ -755,7 +758,7 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return score * 100000 + 100 * dist + 40 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             # path
             path = Path()

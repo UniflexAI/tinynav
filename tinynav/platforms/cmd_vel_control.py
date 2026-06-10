@@ -27,7 +27,9 @@ class CmdVelControlNode(Node):
         self._last_traj_update_sec = None
         self._last_traj_log_sec = None
         self._last_zero_log_sec = {}
-        self._time_lookahead_s = 0.1
+        self._time_lookahead_s = 0.15
+        self._trajectory_expire_grace_s = 0.05
+        self._vx_gain_comp = 1.2
 
         self.create_subscription(PoseStamped, "/insight/vio_100hz", self._odom_cb, 50)
         self.create_subscription(Path, "/planning/trajectory_path", self._traj_cb, 10)
@@ -144,13 +146,23 @@ class CmdVelControlNode(Node):
             self._publish_zero("no /planning/trajectory_path arrived yet")
             return
 
+        now_sec = self._now_sec()
+        expired, query_t, path_end_t = self._trajectory_expired(now_sec)
+        if expired:
+            self._track_idx = len(self._path_ref) - 1
+            self._publish_zero(
+                "trajectory expired",
+                f"query={query_t:.3f} end={path_end_t:.3f} over={query_t - path_end_t:.3f}s",
+            )
+            return
+
         # Keep this consistent with planning_node.camera_to_robot_center().
         camera_offset = np.array([0.0, 0.0, 0.35], dtype=np.float64)  # GO2 control center to camera.
         robot_pos = self.position - self.rotation @ camera_offset
         forward = self.rotation @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
         robot_yaw = math.atan2(forward[1], forward[0])
 
-        target = self._find_tracking_target(robot_pos, robot_yaw, self._now_sec())
+        target = self._find_tracking_target(robot_pos, robot_yaw, now_sec)
         if target is None:
             self._publish_zero("no valid tracking target")
             return
@@ -159,11 +171,12 @@ class CmdVelControlNode(Node):
         v_ref = float(target[3])
         w_ref = float(target[4])
 
-        b = 2.0
+        b = 1.2
         zeta = 0.7
         k = 2.0 * zeta * math.sqrt(w_ref * w_ref + b * v_ref * v_ref)
         v = v_ref * math.cos(heading_err) + k * tx
         wz = w_ref + k * heading_err + b * v_ref * self._sinc(heading_err) * ty
+        v *= self._vx_gain_comp
         v = float(np.clip(v, -0.2, 0.6))
         wz = float(np.clip(wz, -0.8, 0.8))
 
@@ -206,6 +219,13 @@ class CmdVelControlNode(Node):
         self._track_idx = nearest_idx
         return self._path_ref[target_idx]
 
+    def _trajectory_expired(self, now_sec):
+        if self._path_ref is None or len(self._path_ref) == 0:
+            return True, now_sec, now_sec
+        query_t = now_sec + self._time_lookahead_s
+        path_end_t = float(self._path_ref[-1, 5])
+        return query_t > path_end_t + self._trajectory_expire_grace_s, query_t, path_end_t
+
     def _target_error(self, robot_pos, robot_yaw, target):
         dx = target[0] - robot_pos[0]
         dy = target[1] - robot_pos[1]
@@ -229,14 +249,17 @@ class CmdVelControlNode(Node):
             return 1.0
         return math.sin(a) / a
 
-    def _publish_zero(self, reason):
+    def _publish_zero(self, reason, detail=None):
         cmd = Twist()
         self.cmd_pub.publish(cmd)
         now = time.monotonic()
         last_log_sec = self._last_zero_log_sec.get(reason)
         if last_log_sec is None or now - last_log_sec >= 1.0:
             self._last_zero_log_sec[reason] = now
-            self.logger.info(f"sent cmd_vel vx=0.000 vyaw=0.000 reason={reason}")
+            msg = f"sent cmd_vel vx=0.000 vyaw=0.000 reason={reason}"
+            if detail:
+                msg = f"{msg} {detail}"
+            self.logger.info(msg)
 
     def _now_sec(self):
         if self._odom_stamp_sec is not None:

@@ -144,6 +144,7 @@ class BackendNode(Ros2NodeManager):
 
         # Publisher for POI nav target consumed by map_node via /mapping/cmd_pois
         self._cmd_pois_pub = self.create_publisher(String, '/mapping/cmd_pois', 10)
+        self._poi_change_pub = self.create_publisher(Odometry, '/mapping/poi_change', 10)
 
         # Latched publisher — new subscribers (cmd_vel_control) get current state immediately on connect
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -570,6 +571,27 @@ class BackendNode(Ros2NodeManager):
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot
 
+    def _clear_nav_snapshot_locked(self):
+        self._localized = False
+        self._odom_pose_at_kf = None
+        self._map_pose = None
+        self._trajectory = []
+        self._trajectory_ref = None
+        self._global_path = []
+        self._footprint = []
+        self._voxel_points = []
+        self._nav_target_pose = None
+
+    def _publish_nav_target_clear(self):
+        """Clear map_node POIs and directly notify planning_node to drop its target."""
+        self._cmd_pois_pub.publish(String(data='{}'))
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'world'
+        msg.child_frame_id = 'map'
+        self._poi_change_pub.publish(msg)
+        self.get_logger().info('Published nav target clear on /mapping/cmd_pois and /mapping/poi_change')
+
     def _start_unitree_if_configured(self):
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -964,20 +986,15 @@ class BackendNode(Ros2NodeManager):
     def cmd_stop_nav_nodes(self):
         if not self._manage_processes:
             raise RuntimeError('Nav node lifecycle is disabled in display backend role')
+        self._publish_nav_target_clear()
+        self.publish_cmd_vel(0.0, 0.0, 0.0)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
         self._cmd_vel_proc = None
         with self._lock:
             self._nav_nodes_running = False
-            self._localized = False
-            self._map_pose = None
-            self._trajectory = []
-            self._trajectory_ref = None
-            self._global_path = []
-            self._footprint = []
-            self._voxel_points = []
-            self._nav_target_pose = None
+            self._clear_nav_snapshot_locked()
             self._nav_paused = False
         self.get_logger().info('Nav nodes stopped')
 
@@ -1300,15 +1317,18 @@ class BackendNode(Ros2NodeManager):
     def cmd_nav_cancel(self):
         if self.state != 'navigation':
             return
+        self._publish_nav_target_clear()
+        self.publish_cmd_vel(0.0, 0.0, 0.0)
         with self._lock:
             nav_running = self._nav_nodes_running
         if nav_running:
-            # Clear the active nav target so map_node stops pathing.
-            self._publish_cmd_pois(None)
             self.state = 'idle'
             self._pub_state()
         else:
             self._stop_all()
+        with self._lock:
+            self._clear_nav_snapshot_locked()
+            self._nav_paused = False
 
     def cmd_nav_pause(self):
         with self._lock:

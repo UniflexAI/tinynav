@@ -23,6 +23,10 @@ from .state import runner
 
 router = APIRouter(tags=['ws'])
 
+_MANAGER_STATUS_CACHE_TTL_S = 0.5
+_manager_status_cache: dict | None = None
+_manager_status_cache_time = 0.0
+
 
 def _safe_put(queue: asyncio.Queue, item):
     """Put item onto queue, dropping the oldest entry if full."""
@@ -39,6 +43,47 @@ def _connected(ws: WebSocket) -> bool:
         ws.client_state == WebSocketState.CONNECTED
         and ws.application_state == WebSocketState.CONNECTED
     )
+
+
+def _get_cached_manager_status() -> dict | None:
+    global _manager_status_cache
+    global _manager_status_cache_time
+
+    now = time.monotonic()
+    if now - _manager_status_cache_time <= _MANAGER_STATUS_CACHE_TTL_S:
+        return _manager_status_cache
+
+    _manager_status_cache = get_manager_json('/device/status')
+    _manager_status_cache_time = now
+    return _manager_status_cache
+
+
+def _clear_stopped_nav_snapshot(snapshot: dict) -> dict:
+    if not is_display_role():
+        return snapshot
+
+    status = _get_cached_manager_status()
+    if status is None or status.get('navNodesRunning', False):
+        return snapshot
+
+    # The display backend owns ROS telemetry subscriptions and may still hold
+    # the last localization/path frame after the manager stops nav nodes.
+    snapshot = dict(snapshot)
+    snapshot.update({
+        'localized': False,
+        'odom_pose_at_kf': None,
+        'map_pose': None,
+        'esdf_image': None,
+        'obstacle_image': None,
+        'trajectory': [],
+        'global_path': [],
+        'map_global_path': [],
+        'grid_info': None,
+        'nav_target_pose': None,
+        'footprint': [],
+        'voxel_points': [],
+    })
+    return snapshot
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +195,8 @@ async def ws_planning(ws: WebSocket):
         return
     try:
         while True:
-            payload = json.dumps(node.get_planning_snapshot())
+            snapshot = _clear_stopped_nav_snapshot(node.get_planning_snapshot())
+            payload = json.dumps(snapshot)
             await ws.send_text(payload)
             await asyncio.sleep(0.2)
     except WebSocketDisconnect:
