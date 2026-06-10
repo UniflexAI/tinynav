@@ -118,16 +118,30 @@ def _sample_polyline_voxels(
 
 
 def build_sdf_from_paths(
-    paths: dict[int, dict[str, Any]], origin: np.ndarray, resolution: float, shape: tuple[int, int, int]
+    paths: dict[int, dict[str, Any]], origin: np.ndarray, resolution: float, shape: tuple[int, int, int],
+    seed_radius_m: float = 0.1,
 ) -> np.ndarray:
     seed_mask = np.ones(shape, dtype=np.uint8)
     seed_count = 0
+    # Dilate seeds by seed_radius_m (in voxels).
+    radius_vox = max(1, int(round(seed_radius_m / resolution)))
+    offsets = []
+    for dx in range(-radius_vox, radius_vox + 1):
+        for dy in range(-radius_vox, radius_vox + 1):
+            for dz in range(-radius_vox, radius_vox + 1):
+                if dx * dx + dy * dy + dz * dz <= radius_vox * radius_vox:
+                    offsets.append((dx, dy, dz))
     for item in paths.values():
         indices = _sample_polyline_voxels(item["points"], origin, resolution, shape)
         if len(indices) == 0:
             continue
-        seed_mask[indices[:, 0], indices[:, 1], indices[:, 2]] = 0
-        seed_count += len(indices)
+        for idx in indices:
+            for dx, dy, dz in offsets:
+                nb = (idx[0] + dx, idx[1] + dy, idx[2] + dz)
+                if 0 <= nb[0] < shape[0] and 0 <= nb[1] < shape[1] and 0 <= nb[2] < shape[2]:
+                    if seed_mask[nb[0], nb[1], nb[2]] != 0:
+                        seed_mask[nb[0], nb[1], nb[2]] = 0
+                        seed_count += 1
     if seed_count == 0:
         return np.full(shape, np.inf, dtype=np.float32)
     return distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
