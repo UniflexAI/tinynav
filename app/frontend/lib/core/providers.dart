@@ -196,6 +196,19 @@ final mapFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async
   }
 });
 
+final debugBagFilesProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
+  final dio = ref.watch(dioProvider);
+  if (ref.watch(baseUrlProvider) == null) return [];
+  try {
+    final resp = await dio.get('/files/debug-bags');
+    return (resp.data['files'] as List)
+        .map((j) => FileEntry.fromJson(j as Map<String, dynamic>))
+        .toList();
+  } catch (_) {
+    return [];
+  }
+});
+
 /// Metadata + POIs for a named map folder (from GET /map/files/{name}).
 final mapFileInfoProvider =
     FutureProvider.autoDispose.family<MapFileInfo, String>((ref, mapName) async {
