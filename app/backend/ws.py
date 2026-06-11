@@ -204,6 +204,26 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
 
 
 # --------------------------------------------------------------------------- #
+# /ws/vio-status  — pushes VIO status string every 1 s                      #
+# --------------------------------------------------------------------------- #
+
+@router.websocket('/ws/vio-status')
+async def ws_vio_status(ws: WebSocket):
+    await ws.accept()
+    node = runner.node
+    if node is None:
+        await ws.close(code=1013)
+        return
+    try:
+        while True:
+            payload = json.dumps({'vio_status': node.get_vio_status()})
+            await ws.send_text(payload)
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # /ws/teleop  — receives velocity commands and publishes to /cmd_vel          #
 # --------------------------------------------------------------------------- #
 

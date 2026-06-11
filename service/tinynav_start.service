@@ -1,0 +1,18 @@
+[Unit]
+Description=TinyNav boot: restart tinynav-dev container and start app when /insight_full is ready
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 20
+ExecStartPre=/usr/bin/docker restart tinynav-dev
+ExecStartPre=/bin/bash -c 'until [ "$(docker inspect -f "{{.State.Running}}" tinynav-dev 2>/dev/null)" = "true" ]; do sleep 1; done'
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/docker exec -itd tinynav-dev /tinynav/service/start_app_if_insight_full.sh
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

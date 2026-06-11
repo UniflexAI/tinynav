@@ -1550,6 +1550,12 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                 baseUrl: baseUrl,
               ),
             ),
+          // ── VIO Status ─────────────────────────────────────────────
+          if (ref.watch(vioStatusProvider).valueOrNull?.data.isNotEmpty ?? false)
+            Positioned(
+              bottom: 8, left: 8,
+              child: _VioStatusChip(status: ref.watch(vioStatusProvider).valueOrNull!),
+            ),
           // ── Topic selector ───────────────────────────────────────────
           Positioned(
             top: 8, right: 8,
@@ -1725,6 +1731,44 @@ class _MapPip extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── VIO status chip ──────────────────────────────────────────────────────────
+
+class _VioStatusChip extends StatelessWidget {
+  final VioStatus status;
+
+  const _VioStatusChip({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.65),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      constraints: const BoxConstraints(maxWidth: 280),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 7, height: 7,
+            decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.cyanAccent),
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              status.data,
+              style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w500),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+        ],
       ),
     );
   }
