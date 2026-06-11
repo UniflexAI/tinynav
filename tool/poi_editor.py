@@ -142,6 +142,32 @@ def load_pointcloud_ply(ply_file_path: Path, center: bool = False) -> dict:
     }
 
 
+def _center_and_span_from_positions(positions: np.ndarray) -> tuple[np.ndarray, float]:
+    if len(positions) == 0:
+        return np.zeros(3, dtype=np.float32), 5.0
+    positions = np.asarray(positions, dtype=np.float32)
+    mins = positions.min(axis=0)
+    maxs = positions.max(axis=0)
+    center = (mins + maxs) * 0.5
+    span_xy = max(float(maxs[0] - mins[0]), float(maxs[1] - mins[1]), 1.0)
+    return center.astype(np.float32), span_xy
+
+
+def _center_and_span_from_map(origin: np.ndarray, resolution: float, shape: tuple[int, int, int]) -> tuple[np.ndarray, float]:
+    extent = np.maximum(np.asarray(shape, dtype=np.float32) - 1.0, 0.0) * float(resolution)
+    center = origin.astype(np.float32) + extent * 0.5
+    span_xy = max(float(extent[0]), float(extent[1]), float(resolution))
+    return center.astype(np.float32), span_xy
+
+
+def _top_down_camera_pose(look_at: np.ndarray, span_xy: float, fov_deg: float) -> tuple[np.ndarray, float]:
+    fov_deg = float(np.clip(fov_deg, 1.0, 120.0))
+    half_span = max(span_xy * 0.6, 0.5)
+    distance = max(half_span / np.tan(np.deg2rad(fov_deg) * 0.5), 1.0)
+    position = np.asarray(look_at, dtype=np.float32) + np.array([0.0, 0.0, distance], dtype=np.float32)
+    return position, fov_deg
+
+
 def _open_infra1_video_db(map_dir: Path) -> VideoDB | None:
     db_dir = map_dir / "infra1_images_db"
     if not db_dir.exists():
@@ -609,6 +635,11 @@ def main(
     server = viser.ViserServer()
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
+    scene_bounds = {
+        "center": np.zeros(3, dtype=np.float32),
+        "span_xy": 5.0,
+        "near": 0.05,
+    }
     
     # POI management
     poi_points = {}
@@ -708,6 +739,12 @@ def main(
         # occupancy_meta format: [origin_x, origin_y, origin_z, resolution]
         origin = occupancy_meta[:3]
         resolution = occupancy_meta[3]
+        scene_bounds["center"], scene_bounds["span_xy"] = _center_and_span_from_map(
+            origin.astype(np.float32),
+            float(resolution),
+            occupancy_grid.shape,
+        )
+        scene_bounds["near"] = max(float(resolution) * 0.2, 0.01)
         
         print(f"Occupancy grid shape: {occupancy_grid.shape}")
         print(f"Origin: ({origin[0]:.3f}, {origin[1]:.3f}, {origin[2]:.3f})")
@@ -963,6 +1000,9 @@ def main(
                 print(path_status.value)
 
     poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
+    if occupancy_grid is None:
+        pose_positions = np.asarray([camera_pose[:3, 3] for camera_pose in poses.values()], dtype=np.float32)
+        scene_bounds["center"], scene_bounds["span_xy"] = _center_and_span_from_positions(pose_positions)
     if (tinynav_map_path / "intrinsics.npy").exists():
         camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
     elif (tinynav_map_path / "rgb_camera_intrinsics.npy").exists():
@@ -972,6 +1012,49 @@ def main(
 
     fx, _, cx, cy = camera_K[0, 0], camera_K[1, 1], camera_K[0, 2], camera_K[1, 2]
     infra1_db = _open_infra1_video_db(tinynav_map_path)
+
+    def apply_top_down_view(client: viser.ClientHandle | None, fov_deg: float, label: str) -> None:
+        look_at = np.asarray(scene_bounds["center"], dtype=np.float32).copy()
+        position, applied_fov_deg = _top_down_camera_pose(look_at, float(scene_bounds["span_xy"]), fov_deg)
+        clients = [client] if client is not None else list(server.get_clients().values())
+        if not clients:
+            print(f"{label}: no connected clients")
+            return
+        up_direction = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        camera_distance = float(np.linalg.norm(position - look_at))
+        near = max(min(camera_distance * 0.01, 1.0), float(scene_bounds["near"]), 0.01)
+        far = max(camera_distance + float(scene_bounds["span_xy"]) * 4.0, 50.0)
+        for target_client in clients:
+            target_client.camera.position = position
+            target_client.camera.look_at = look_at
+            target_client.camera.up_direction = up_direction
+            target_client.camera.fov = float(np.deg2rad(applied_fov_deg))
+            target_client.camera.near = near
+            target_client.camera.far = far
+        print(
+            f"{label}: span={scene_bounds['span_xy']:.1f}m, "
+            f"height={camera_distance:.1f}m, fov={applied_fov_deg:.1f}deg"
+        )
+
+    with server.gui.add_folder("Camera View") as _:
+        ortho_fov_deg = server.gui.add_slider(
+            "Orthographic FOV (deg)", min=1.0, max=20.0, step=0.5, initial_value=3.0
+        )
+        top_view_button = server.gui.add_button("Top View", color=(80, 160, 255))
+        ortho_top_view_button = server.gui.add_button("Orthographic Top View", color=(120, 200, 120))
+
+        @top_view_button.on_click
+        def _(event) -> None:
+            apply_top_down_view(getattr(event, "client", None), fov_deg=50.0, label="Top view")
+
+        @ortho_top_view_button.on_click
+        def _(event) -> None:
+            apply_top_down_view(
+                getattr(event, "client", None),
+                fov_deg=float(ortho_fov_deg.value),
+                label="Orthographic top view (approx)",
+            )
+
     with server.gui.add_folder("cameras") as _:
         for timestamp, camera_pose in list(poses.items())[::8]:
             R = vtf.SO3.from_matrix(camera_pose[:3, :3])
@@ -1087,3 +1170,4 @@ def main(
 
 if __name__ == "__main__":
     tyro.cli(main)
+

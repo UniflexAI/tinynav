@@ -147,6 +147,21 @@ def _load_pointcloud_ply(ply_file_path: Path) -> tuple[np.ndarray, np.ndarray]:
     return positions, colors
 
 
+def _map_center_and_span(origin: np.ndarray, resolution: float, shape: tuple[int, int, int]) -> tuple[np.ndarray, float]:
+    extent = np.maximum(np.asarray(shape, dtype=np.float32) - 1.0, 0.0) * float(resolution)
+    center = origin.astype(np.float32) + extent * 0.5
+    span_xy = max(float(extent[0]), float(extent[1]), float(resolution))
+    return center, span_xy
+
+
+def _top_down_camera_pose(look_at: np.ndarray, span_xy: float, fov_deg: float) -> tuple[np.ndarray, float]:
+    fov_deg = float(np.clip(fov_deg, 1.0, 120.0))
+    half_span = max(span_xy * 0.6, 0.5)
+    distance = max(half_span / np.tan(np.deg2rad(fov_deg) * 0.5), 1.0)
+    position = np.asarray(look_at, dtype=np.float32) + np.array([0.0, 0.0, distance], dtype=np.float32)
+    return position, fov_deg
+
+
 class PathEditor:
     def __init__(self, args: Args):
         self.args = args
@@ -205,6 +220,7 @@ class PathEditor:
     def run(self) -> None:
         self._add_static_map_layers()
         self._add_optional_pointcloud()
+        self._add_camera_view_ui()
         self._add_path_editor_ui()
         self._refresh_all_paths()
         self._refresh_sdf_preview()
@@ -273,6 +289,50 @@ class PathEditor:
                     free_handle.point_size = point_size.value
                 if occupied_handle is not None:
                     occupied_handle.point_size = point_size.value
+
+    def _apply_top_down_view(self, client: viser.ClientHandle | None, fov_deg: float, label: str) -> None:
+        center, span_xy = _map_center_and_span(self.origin, self.resolution, self.shape)
+        look_at = center.astype(np.float32).copy()
+        look_at[2] = float(self.origin[2])
+        position, applied_fov_deg = _top_down_camera_pose(look_at, span_xy, fov_deg)
+        clients = [client] if client is not None else list(self.server.get_clients().values())
+        if not clients:
+            self._set_status(f"{label}: no connected clients")
+            return
+        camera_distance = float(np.linalg.norm(position - look_at))
+        near = max(min(camera_distance * 0.01, 1.0), self.resolution * 0.2, 0.01)
+        far = max(camera_distance + span_xy * 4.0, 50.0)
+        up_direction = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        for target_client in clients:
+            target_client.camera.position = position
+            target_client.camera.look_at = look_at
+            target_client.camera.up_direction = up_direction
+            target_client.camera.fov = float(np.deg2rad(applied_fov_deg))
+            target_client.camera.near = near
+            target_client.camera.far = far
+        self._set_status(
+            f"{label}: span={span_xy:.1f}m, height={camera_distance:.1f}m, fov={applied_fov_deg:.1f}deg"
+        )
+
+    def _add_camera_view_ui(self) -> None:
+        with self.server.gui.add_folder("Camera View"):
+            ortho_fov_deg = self.server.gui.add_slider(
+                "Orthographic FOV (deg)", min=1.0, max=20.0, step=0.5, initial_value=3.0
+            )
+            top_view_button = self.server.gui.add_button("Top View", color=(80, 160, 255))
+            ortho_top_view_button = self.server.gui.add_button("Orthographic Top View", color=(120, 200, 120))
+
+            @top_view_button.on_click
+            def _(event) -> None:
+                self._apply_top_down_view(getattr(event, "client", None), fov_deg=50.0, label="Top view")
+
+            @ortho_top_view_button.on_click
+            def _(event) -> None:
+                self._apply_top_down_view(
+                    getattr(event, "client", None),
+                    fov_deg=float(ortho_fov_deg.value),
+                    label="Orthographic top view (approx)",
+                )
 
     def _add_optional_pointcloud(self) -> None:
         pointcloud_path = self.map_dir / "pointcloud.ply"
@@ -500,3 +560,4 @@ def main(args: Args) -> None:
 
 if __name__ == "__main__":
     main(tyro.cli(Args))
+
