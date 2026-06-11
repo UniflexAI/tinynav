@@ -1,6 +1,16 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+class VioStatus {
+  final String data;
+
+  const VioStatus({required this.data});
+
+  factory VioStatus.fromJson(Map<String, dynamic> json) => VioStatus(
+        data: json['vio_status'] as String? ?? '',
+      );
+}
+
 class NavProgress {
   final int poiIndex;
   final double percent;

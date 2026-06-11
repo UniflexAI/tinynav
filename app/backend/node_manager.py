@@ -88,6 +88,8 @@ class BackendNode(Ros2NodeManager):
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
+        self._vio_status: str = ''
+
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
         self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
         self.create_subscription(
@@ -112,6 +114,9 @@ class BackendNode(Ros2NodeManager):
         )
         self.create_subscription(
             PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+        )
+        self.create_subscription(
+            String, '/insight/vio_status', self._on_vio_status, 10
         )
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -322,6 +327,10 @@ class BackendNode(Ros2NodeManager):
         except Exception:
             pass
 
+    def _on_vio_status(self, msg: String):
+        with self._lock:
+            self._vio_status = msg.data
+
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
@@ -497,6 +506,10 @@ class BackendNode(Ros2NodeManager):
                 cb(frame)
             except Exception:
                 pass
+
+    def get_vio_status(self) -> str:
+        with self._lock:
+            return self._vio_status
 
     def get_planning_snapshot(self) -> dict:
         with self._lock:
