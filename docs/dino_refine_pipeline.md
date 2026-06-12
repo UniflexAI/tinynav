@@ -41,6 +41,29 @@ These paths are the latest verified Beijing DINO refinement run. Example command
 - TensorRT engine: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628/tensorrt/dinov2_refined_20_54_21_map_thr085_x86_64.plan`
 - Refined map embedding cache: `/mnt/nas/share-all/junlinp/tinynav_dino_dataset/refine_runs/nas_refine_20_54_21_map_thr085_20260605_145628/retrieval_eval/map_embeddings_refined_20_54_21_map_thr085.npz`
 
+## Current Hugging Face Dataset
+
+The reviewed retrieval dataset has been uploaded to:
+
+```text
+Junlinp/tinynav-retrieval-reviewed-public
+```
+
+Dataset URL:
+
+```text
+https://huggingface.co/datasets/Junlinp/tinynav-retrieval-reviewed-public
+```
+
+Last confirmed upload: 2026-06-12.
+
+Current verified dataset contents:
+
+- Rows: 93
+- Images: 186
+- `true_match`: 27
+- `false_match`: 66
+
 ## Common Run Parameters
 
 - Query topic: `/camera/camera/infra1/image_rect_raw`
@@ -139,6 +162,14 @@ python3 scripts/sync_retrieval_hf_dataset.py merge_upload \
   --repo_id Junlinp/tinynav-retrieval-reviewed-public \
   --split train \
   --work_dir /tinynav/tinynav_temp/hf_merge_work
+```
+
+If the local HF-format dataset is already exported and only needs to be uploaded:
+
+```bash
+python3 scripts/sync_retrieval_hf_dataset.py upload \
+  --local_dir /tinynav/datasets/tinynav-retrieval-reviewed-20_54_21-map-thr085 \
+  --repo_id Junlinp/tinynav-retrieval-reviewed-public
 ```
 
 If Hugging Face is rate-limited, keep the local dataset and copy it to NAS:
