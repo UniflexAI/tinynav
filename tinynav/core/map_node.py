@@ -1,6 +1,8 @@
 import rclpy
 import os
 import time
+import threading
+import queue
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -268,6 +270,12 @@ class MapNode(Node):
 
         self._save_completed = False
 
+        self._current_path: np.ndarray | None = None
+        self._path_lock = threading.Lock()
+        self._plan_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._planning_thread = threading.Thread(target=self._run_planning_loop, daemon=True)
+        self._planning_thread.start()
+
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
         try:
@@ -292,6 +300,8 @@ class MapNode(Node):
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None
+            with self._path_lock:
+                self._current_path = None
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
@@ -339,11 +349,7 @@ class MapNode(Node):
             self.compute_transform_from_map_to_odom()
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.try_publish_nav_path(keyframe_image_timestamp_ns)
-            # timer or queue for publish the nav path
-            # and record the map pose
-            # compute the coordinate transform from the map pose to the keyframe pose
-            # publish the nav path from the map pose to the keyframe pose with the cost map
+            self._update_nav(keyframe_image_timestamp_ns)
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -579,6 +585,165 @@ class MapNode(Node):
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
+    def _update_nav(self, timestamp: int):
+        """Fast path called every keyframe: POI check + lookahead on cached path.
+        Enqueues a replanning request for the background thread but never blocks on it."""
+        if self.T_from_map_to_odom is None:
+            self.get_logger().info("Relocalization not successful yet, skip nav update")
+            return
+        if self.poi_index == -1 or self.poi_index >= len(self.pois):
+            return
+        if timestamp not in self.pose_graph_used_pose:
+            return
+
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
+        pose_in_map_position = pose_in_map[:3, 3]
+
+        # POI arrival check — advance poi_index if close enough
+        while self.poi_index < len(self.pois):
+            poi = self.pois[self.poi_index]
+            diff_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
+            diff_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
+            if diff_xy < 0.5 and diff_z < 2.0:
+                if self._leg_initial_length is not None:
+                    arrived_msg = String()
+                    arrived_msg.data = json.dumps({
+                        "poi_index": self.poi_index,
+                        "percent": 100.0,
+                        "path_remaining_m": 0.0,
+                        "path_total_m": round(self._leg_initial_length, 2),
+                        "estimated_remaining_s": 0.0,
+                    })
+                    self.nav_progress_pub.publish(arrived_msg)
+                self.poi_index += 1
+                self._leg_initial_length = None
+                self._leg_start_time = None
+                with self._path_lock:
+                    self._current_path = None
+                stamp_msg = self.get_clock().now().to_msg()
+                stamp_msg.sec = int(timestamp / 1e9)
+                stamp_msg.nanosec = int(timestamp % 1e9)
+                self.poi_change_pub.publish(np2msg(np.eye(4), stamp_msg, "world", "map"))
+                continue
+            else:
+                break
+
+        if self.poi_index >= len(self.pois):
+            if not self._nav_completed:
+                self._nav_completed = True
+                self.get_logger().info("All POIs have been visited, nav done")
+                self.nav_done_pub.publish(Bool(data=True))
+            return
+
+        target_poi = self.pois[self.poi_index]
+        poi_pose = np.eye(4)
+        poi_pose[:3, 3] = target_poi
+        self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
+
+        # Enqueue replanning request (non-blocking, drop stale request if thread is busy)
+        try:
+            self._plan_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._plan_queue.put_nowait((pose_in_map.copy(), target_poi.copy(), timestamp))
+        except queue.Full:
+            pass
+
+        # Fast lookahead on cached path
+        with self._path_lock:
+            current_path = self._current_path
+
+        if current_path is None or len(current_path) == 0:
+            return
+
+        # Progress tracking
+        remaining_length = sum(
+            np.linalg.norm(current_path[i + 1] - current_path[i])
+            for i in range(len(current_path) - 1)
+        ) if len(current_path) > 1 else 0.0
+
+        now = time.time()
+        if self._leg_initial_length is None:
+            self._leg_initial_length = remaining_length
+            self._leg_start_time = now
+
+        covered = self._leg_initial_length - remaining_length
+        elapsed = now - self._leg_start_time
+        if covered > 0.1 and elapsed > 1.0:
+            self._speed_estimate = covered / elapsed
+
+        initial = self._leg_initial_length
+        percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
+        estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
+
+        progress_msg = String()
+        progress_msg.data = json.dumps({
+            "poi_index": self.poi_index,
+            "percent": round(percent, 1),
+            "path_remaining_m": round(remaining_length, 2),
+            "path_total_m": round(initial, 2),
+            "estimated_remaining_s": round(estimated_remaining_s, 1),
+        })
+        self.nav_progress_pub.publish(progress_msg)
+
+        # Lookahead: find target ~2.5 m ahead along path
+        max_speed = 0.5
+        if len(current_path) > 1:
+            accumulated_distance = 0.0
+            start_point = pose_in_map_position[:3]
+            target_position = current_path[-1]
+            for i in range(len(current_path) - 1):
+                accumulated_distance += np.linalg.norm(current_path[i][:2] - start_point[:2])
+                if accumulated_distance > max_speed * 5:
+                    target_position = current_path[i]
+                    break
+                start_point = current_path[i]
+        else:
+            target_position = current_path[0]
+
+        pose_in_origin_odom = self.odom[timestamp]
+        T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
+        target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
+        dummy_pose = np.eye(4)
+        dummy_pose[:3, 3] = target_position_in_odom
+        print(f"target_position_in_odom: {target_position_in_odom}")
+        self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+        self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+
+    def _run_planning_loop(self):
+        """Background thread: runs SDF A* without blocking the keyframe pipeline."""
+        while True:
+            try:
+                pose_in_map, target_poi, timestamp = self._plan_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            with Timer(name="generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+
+            with self._path_lock:
+                self._current_path = path
+
+            if path is not None and len(path) > 0:
+                path_msg = Path()
+                path_msg.header.stamp = self.get_clock().now().to_msg()
+                path_msg.header.frame_id = "map"
+                for x, y, z in path:
+                    pose = PoseStamped()
+                    pose.header = path_msg.header
+                    pose.pose.position.x = x
+                    pose.pose.position.y = y
+                    pose.pose.position.z = z
+                    pose.pose.orientation.w = 1.0
+                    path_msg.poses.append(pose)
+                self.global_plan_pub.publish(path_msg)
+            else:
+                self.get_logger().warning(
+                    f"Planning thread: no path found from current pose to POI {self.poi_index}"
+                )
+
     def try_publish_nav_path(self, timestamp: int):
         self.get_logger().info(f"try_publish_nav_path, timestamp: {timestamp}")
         if self.T_from_map_to_odom is None:
@@ -718,9 +883,6 @@ class MapNode(Node):
             logging.info("No path found in map")
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
-        dummy_poi_pose = np.eye(4)
-        dummy_poi_pose[:3, 3] = target_poi
-        self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         occupancy_map_origin = self.occupancy_map_meta[:3]
         resolution = self.occupancy_map_meta[3]
         start_idx = np.array([
