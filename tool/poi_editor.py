@@ -786,10 +786,6 @@ def main(
             if loaded_sdf_map.shape == occupancy_grid.shape:
                 sdf_map = loaded_sdf_map
         with server.gui.add_folder("SDF POI Path Test") as _:
-            server.gui.add_markdown(
-                "Uses `sdf_map.npy` read-only for path planning/debug visualization; "
-                "this tool does not write or modify the map SDF file."
-            )
             path_status = server.gui.add_text("Status", initial_value="Pick POI start/goal, then Plan SDF Path")
             stop_distance_slider = server.gui.add_slider(
                 "SDF Stop Distance", min=0.05, max=1.0, step=0.05, initial_value=0.2
@@ -847,7 +843,7 @@ def main(
                 )
                 refresh_nav_markers()
                 path_len = float(np.sum(np.linalg.norm(np.diff(world_path, axis=0), axis=1)))
-                path_status.value = f"{message}; len={path_len:.2f}m; time={elapsed_ms:.0f}ms; sdf_map=read-only"
+                path_status.value = f"{message}; len={path_len:.2f}m; time={elapsed_ms:.0f}ms"
                 print(path_status.value)
 
             @clear_button.on_click
