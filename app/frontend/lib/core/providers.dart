@@ -148,6 +148,19 @@ final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   );
 });
 
+/// Streams VioStatus from WS /ws/vio-status (~1 s interval).
+final vioStatusProvider = StreamProvider<VioStatus>((ref) {
+  final ip = ref.watch(deviceIpProvider);
+  if (ip == null) return const Stream.empty();
+
+  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/vio-status'));
+  ref.onDispose(() => channel.sink.close());
+
+  return channel.stream.map(
+    (data) => VioStatus.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+  );
+});
+
 /// One-shot system info from GET /device/sysinfo. autoDispose → re-fetches on each page enter.
 final sysInfoProvider = FutureProvider.autoDispose<SysInfo>((ref) async {
   final dio = ref.watch(dioProvider);
