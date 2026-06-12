@@ -16,12 +16,12 @@ import  viser.transforms as vtf
 import viser
 from viser import transforms as tf
 import json
-import heapq
 import cv2
 from rclpy.node import Node
 import rclpy
 import os
 from math_utils import msg2np, matrix_to_quat
+from map_node import search_close_to_sdf_map, search_within_sdf_map
 from tool.video_db import VideoDB
 
 class SplatFile(TypedDict):
@@ -195,121 +195,6 @@ def _grid_indices_to_world(path: list[tuple[int, int, int]], origin: np.ndarray,
     return np.asarray(path, dtype=np.float32) * float(resolution) + origin[None, :]
 
 
-def _heuristic_sdf(start, goal, resolution: float) -> float:
-    vec_start = np.array(start)
-    vec_goal = np.array(goal)
-    return np.linalg.norm((vec_start - vec_goal) * resolution) + 20 * np.abs(vec_start[2] - vec_goal[2]) * resolution
-
-
-def _reconstruct_path_sdf(parent: dict, current: tuple) -> list[tuple[int, int, int]]:
-    path = []
-    while current in parent:
-        path.append(current)
-        if current == parent[current]:
-            break
-        current = parent[current]
-    return path[::-1]
-
-
-def _search_close_to_sdf_map(
-    start_index: tuple[int, int, int],
-    sdf_map: np.ndarray,
-    occupancy_map: np.ndarray,
-    stop_distance: float,
-) -> list[tuple[int, int, int]]:
-    # Same semantics as map_node.search_close_to_sdf_map: walk from an arbitrary
-    # POI voxel to the nearest low-SDF corridor voxel, avoiding occupied cells.
-    start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else tuple(start_index)
-    open_heap = [(float(sdf_map[start_index]), start_index)]
-    open_heap_set = {start_index}
-    parent = {start_index: start_index}
-    visited = set()
-    while len(open_heap) > 0:
-        current_sdf, current = heapq.heappop(open_heap)
-        open_heap_set.remove(current)
-        visited.add(current)
-        if current_sdf < stop_distance:
-            return _reconstruct_path_sdf(parent, current)
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    if dx == 0 and dy == 0 and dz == 0:
-                        continue
-                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
-                    if not _grid_index_in_bounds(neighbor, sdf_map.shape):
-                        continue
-                    if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
-                        open_heap_set.add(neighbor)
-                        heapq.heappush(open_heap, (float(sdf_map[neighbor]), neighbor))
-                        parent[neighbor] = current
-    return []
-
-
-def _search_within_sdf_map(
-    start: tuple[int, int, int],
-    goal: tuple[int, int, int],
-    sdf_map: np.ndarray,
-    occupancy_map: np.ndarray,
-    resolution: float,
-) -> list[tuple[int, int, int]]:
-    # Same bucketed SDF search policy as map_node.search_within_sdf_map.
-    start = tuple(start.flatten()) if isinstance(start, np.ndarray) else tuple(start)
-    goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else tuple(goal)
-    sdf_bins = [0.15, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
-
-    def get_queue_index(sdf_value: float) -> int:
-        for idx, threshold in enumerate(sdf_bins):
-            if sdf_value < threshold:
-                return idx
-        return len(sdf_bins)
-
-    open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
-    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
-    start_queue_idx = get_queue_index(float(sdf_map[start]))
-    heapq.heappush(open_heaps[start_queue_idx], (_heuristic_sdf(start, goal, resolution), start))
-    open_sets[start_queue_idx].add(start)
-    parent = {start: start}
-    visited = set()
-
-    while True:
-        queue_idx = -1
-        for i, q in enumerate(open_heaps):
-            if len(q) > 0:
-                queue_idx = i
-                break
-        if queue_idx == -1:
-            break
-
-        _, current = heapq.heappop(open_heaps[queue_idx])
-        open_sets[queue_idx].remove(current)
-        if current in visited:
-            continue
-        visited.add(current)
-        if current == goal:
-            return _reconstruct_path_sdf(parent, current)
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    if dx == 0 and dy == 0 and dz == 0:
-                        continue
-                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
-                    if not _grid_index_in_bounds(neighbor, sdf_map.shape):
-                        continue
-                    if neighbor in visited or occupancy_map[neighbor] == 2:
-                        continue
-                    neighbor_queue_idx = get_queue_index(float(sdf_map[neighbor]))
-                    if neighbor in open_sets[neighbor_queue_idx]:
-                        continue
-                    open_sets[neighbor_queue_idx].add(neighbor)
-                    heapq.heappush(
-                        open_heaps[neighbor_queue_idx],
-                        (_heuristic_sdf(neighbor, goal, resolution), neighbor),
-                    )
-                    if neighbor not in parent:
-                        parent[neighbor] = current
-    return []
-
-
 def _segment_is_shortcut_safe(
     start: tuple[int, int, int],
     goal: tuple[int, int, int],
@@ -402,8 +287,8 @@ def _plan_sdf_path_between_points(
     if occupancy_map[goal_idx] == 2:
         return None, f"Goal is occupied: {goal_idx}"
 
-    sdf_start_path = _search_close_to_sdf_map(start_idx, sdf_map, occupancy_map, stop_distance)
-    sdf_goal_path = _search_close_to_sdf_map(goal_idx, sdf_map, occupancy_map, stop_distance)
+    sdf_start_path = search_close_to_sdf_map(start_idx, sdf_map, occupancy_map, stop_distance)
+    sdf_goal_path = search_close_to_sdf_map(goal_idx, sdf_map, occupancy_map, stop_distance)
     if len(sdf_start_path) == 0:
         return None, f"No low-SDF corridor reachable from start: {start_idx}"
     if len(sdf_goal_path) == 0:
@@ -411,7 +296,7 @@ def _plan_sdf_path_between_points(
 
     sdf_start = sdf_start_path[-1]
     sdf_goal = sdf_goal_path[-1]
-    path_sdf = _search_within_sdf_map(sdf_start, sdf_goal, sdf_map, occupancy_map, resolution)
+    path_sdf = search_within_sdf_map(sdf_start, sdf_goal, sdf_map, occupancy_map, resolution)
     if len(path_sdf) == 0:
         return None, f"No SDF path between corridor voxels: {sdf_start} -> {sdf_goal}"
 
@@ -901,6 +786,10 @@ def main(
             if loaded_sdf_map.shape == occupancy_grid.shape:
                 sdf_map = loaded_sdf_map
         with server.gui.add_folder("SDF POI Path Test") as _:
+            server.gui.add_markdown(
+                "Uses `sdf_map.npy` read-only for path planning/debug visualization; "
+                "this tool does not write or modify the map SDF file."
+            )
             path_status = server.gui.add_text("Status", initial_value="Pick POI start/goal, then Plan SDF Path")
             stop_distance_slider = server.gui.add_slider(
                 "SDF Stop Distance", min=0.05, max=1.0, step=0.05, initial_value=0.2
@@ -958,7 +847,7 @@ def main(
                 )
                 refresh_nav_markers()
                 path_len = float(np.sum(np.linalg.norm(np.diff(world_path, axis=0), axis=1)))
-                path_status.value = f"{message}; len={path_len:.2f}m; time={elapsed_ms:.0f}ms"
+                path_status.value = f"{message}; len={path_len:.2f}m; time={elapsed_ms:.0f}ms; sdf_map=read-only"
                 print(path_status.value)
 
             @clear_button.on_click
