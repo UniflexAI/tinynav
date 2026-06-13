@@ -249,6 +249,11 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                 right: 10,
                 child: _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
               ),
+              Positioned(
+                bottom: 50,
+                right: 10,
+                child: _LocAssistToggle(statusAsync: ref.watch(deviceStatusProvider)),
+              ),
             ],
           ),
         ),
@@ -1411,6 +1416,67 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
               size: 16,
             ),
       label: Text(running ? 'Nav ON' : 'Nav'),
+    );
+  }
+}
+
+// ── Localization assist toggle ────────────────────────────────────────────────
+
+class _LocAssistToggle extends ConsumerStatefulWidget {
+  final AsyncValue<DeviceStatus> statusAsync;
+  const _LocAssistToggle({required this.statusAsync});
+
+  @override
+  ConsumerState<_LocAssistToggle> createState() => _LocAssistToggleState();
+}
+
+class _LocAssistToggleState extends ConsumerState<_LocAssistToggle> {
+  bool _loading = false;
+
+  Future<void> _toggle(bool currentlyEnabled) async {
+    setState(() => _loading = true);
+    try {
+      await ref.read(dioProvider).post(
+        '/nav/loc-assist',
+        data: {'enabled': !currentlyEnabled},
+      );
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.statusAsync.valueOrNull;
+    final enabled = status?.locAssistEnabled ?? false;
+
+    return FilledButton.icon(
+      onPressed: _loading ? null : () => _toggle(enabled),
+      style: FilledButton.styleFrom(
+        backgroundColor: enabled
+            ? const Color(0xFFFFB74D).withOpacity(0.9)
+            : Colors.black87,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+      icon: _loading
+          ? const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            )
+          : Icon(
+              enabled ? Icons.explore : Icons.explore_off_outlined,
+              size: 16,
+            ),
+      label: Text(enabled ? 'Assist ON' : 'Assist'),
     );
   }
 }

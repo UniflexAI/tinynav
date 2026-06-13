@@ -191,6 +191,11 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
 
+        # Auto-localization assist: sweep yaw while waiting for localization
+        self._loc_assist_enabled: bool = False
+        self._loc_assist_thread: threading.Thread | None = None
+        self._loc_assist_stop_event = threading.Event()
+
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
 
@@ -249,10 +254,13 @@ class BackendNode(Ros2NodeManager):
     def _on_pose_in_map(self, msg: Odometry):
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
+            was_localized = self._localized
             self.current_pose = pose
             self._map_pose = pose
             self._odom_pose_at_kf = self._odom_pose  # freeze odom at this keyframe
             self._localized = True
+        if not was_localized:
+            self._on_localization_achieved()
         for cb in self.pose_callbacks:
             try:
                 cb(pose)
@@ -262,8 +270,11 @@ class BackendNode(Ros2NodeManager):
     def _on_relocalization(self, msg: Odometry):
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
+            was_localized = self._localized
             self._map_pose = pose
             self._localized = True
+        if not was_localized:
+            self._on_localization_achieved()
 
     def _on_nav_target_pose(self, msg: Odometry):
         with self._lock:
@@ -631,6 +642,7 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             nav_active = self._nav_active
+            loc_assist = self._loc_assist_enabled
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -644,6 +656,7 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
+            'locAssistEnabled': loc_assist,
         }
 
     @staticmethod
@@ -749,17 +762,24 @@ class BackendNode(Ros2NodeManager):
             ],
             env=_env,
         )
-        self._cmd_vel_proc = self._launch_proc(
-            'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
-            env=_env,
-        )
+        with self._lock:
+            loc_assist = self._loc_assist_enabled
+        if loc_assist:
+            # Don't start cmd_vel_control yet; start localization assist sweep
+            self._start_loc_assist(_env)
+        else:
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+                env=_env,
+            )
         with self._lock:
             self._nav_nodes_running = True
         self.get_logger().info('Nav nodes started')
 
     def cmd_stop_nav_nodes(self):
         self._set_nav_active(False)
+        self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
@@ -775,6 +795,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_restart_nav_nodes(self):
         self._set_nav_active(False)
+        self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
         self._kill_proc(self._cmd_vel_proc)
@@ -810,6 +831,125 @@ class BackendNode(Ros2NodeManager):
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
+
+    # ------------------------------------------------------------------ #
+    # Localization assist: yaw sweep until localized                        #
+    # ------------------------------------------------------------------ #
+
+    def cmd_set_loc_assist(self, enabled: bool):
+        """Enable or disable the auto-localization assist toggle."""
+        with self._lock:
+            self._loc_assist_enabled = enabled
+        self.get_logger().info(f'Localization assist {"enabled" if enabled else "disabled"}')
+
+    def _start_loc_assist(self, env: dict):
+        """Start the yaw sweep thread (no cmd_vel_control process)."""
+        self._loc_assist_stop_event.clear()
+        self._loc_assist_thread = threading.Thread(
+            target=self._loc_assist_loop, daemon=True
+        )
+        self._loc_assist_thread.start()
+        self.get_logger().info('Localization assist sweep started')
+
+    def _stop_loc_assist(self):
+        """Stop the yaw sweep thread if running, publish zero cmd_vel."""
+        self._loc_assist_stop_event.set()
+        if self._loc_assist_thread is not None:
+            self._loc_assist_thread.join(timeout=6.0)
+            self._loc_assist_thread = None
+        # Ensure robot stops
+        self._publish_cmd_vel(0.0, 0.0)
+
+    def _publish_cmd_vel(self, linear_x: float, angular_z: float):
+        msg = Twist()
+        msg.linear.x = float(linear_x)
+        msg.angular.z = float(angular_z)
+        self._cmd_vel_pub.publish(msg)
+
+    def _loc_assist_loop(self):
+        """
+        Yaw sweep pattern:
+        - Start facing current direction, wait dwell_s
+        - Turn CW 20°, wait dwell_s
+        - Turn CCW 40° (net -20° from start), wait dwell_s
+        - Turn CW 60° (net +40° from start), wait dwell_s
+        - Turn CCW 80° (net -40° from start), wait dwell_s
+        - ... expanding sweep until localized
+
+        Uses angular velocity to turn for a computed duration, then dwells.
+        Stops immediately when localized or stop event is set.
+        """
+        dwell_s = 5.0
+        angular_speed = 0.4  # rad/s
+        step_deg = 20.0
+        step_rad = math.radians(step_deg)
+        stop = self._loc_assist_stop_event
+
+        # Dwell at initial position
+        if self._wait_or_localized(dwell_s, stop):
+            return
+
+        turn_index = 1  # 1, 2, 3, 4, ...
+        direction = 1   # +1 = CW, -1 = CCW
+
+        while not stop.is_set():
+            # Turn: angle = turn_index * step_rad
+            angle = turn_index * step_rad
+            duration = angle / angular_speed
+            # Publish angular velocity
+            self._publish_cmd_vel(0.0, -direction * angular_speed)
+            if self._wait_or_localized(duration, stop):
+                return
+            # Stop turning
+            self._publish_cmd_vel(0.0, 0.0)
+            # Dwell
+            if self._wait_or_localized(dwell_s, stop):
+                return
+            # Next sweep: increase index, flip direction
+            turn_index += 1
+            direction *= -1
+
+    def _wait_or_localized(self, duration: float, stop: threading.Event) -> bool:
+        """
+        Wait for `duration` seconds, checking localization and stop event
+        every 0.1s. Returns True if should stop (localized or event set).
+        """
+        elapsed = 0.0
+        interval = 0.1
+        while elapsed < duration:
+            if stop.is_set():
+                self._publish_cmd_vel(0.0, 0.0)
+                return True
+            with self._lock:
+                if self._localized:
+                    self._publish_cmd_vel(0.0, 0.0)
+                    return True
+            time.sleep(interval)
+            elapsed += interval
+        return False
+
+    def _on_localization_achieved(self):
+        """
+        Called when localization succeeds for the first time.
+        Stops the assist sweep and launches cmd_vel_control.
+        """
+        with self._lock:
+            loc_assist = self._loc_assist_enabled
+            nav_running = self._nav_nodes_running
+        if not loc_assist or not nav_running:
+            return
+        # Stop the sweep
+        self._stop_loc_assist()
+        # Now start cmd_vel_control
+        if self._cmd_vel_proc is None:
+            _env = os.environ.copy()
+            _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+                env=_env,
+            )
+            self.get_logger().info('Localization achieved — cmd_vel_control started')
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
