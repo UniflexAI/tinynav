@@ -112,3 +112,19 @@ def nav_nodes_disable():
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_stop_nav_nodes()
     return {'ok': True}
+
+
+@router.post('/loc-assist')
+def nav_loc_assist(req: dict):
+    node = _require_node()
+    enabled = bool(req.get('enabled', False))
+    node.cmd_set_loc_assist(enabled)
+    return {'ok': True, 'enabled': enabled}
+
+
+@router.get('/loc-assist')
+def nav_loc_assist_status():
+    node = _require_node()
+    with node._lock:
+        enabled = node._loc_assist_enabled
+    return {'enabled': enabled}
