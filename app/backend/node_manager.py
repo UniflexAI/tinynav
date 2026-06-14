@@ -109,6 +109,7 @@ class BackendNode(Ros2NodeManager):
 
         # Planning / localization state (read via get_planning_snapshot)
         self._odom_pose: dict | None = None
+        self._odom_pose_received_at: float | None = None
         self._odom_pose_at_kf: dict | None = None  # odom pose snapshotted at last mapPose update
         self._map_pose: dict | None = None
         self._localized: bool = False
@@ -245,6 +246,7 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self.current_pose = pose
             self._odom_pose = pose
+            self._odom_pose_received_at = time.monotonic()
         for cb in self.pose_callbacks:
             try:
                 cb(pose)
@@ -854,7 +856,7 @@ class BackendNode(Ros2NodeManager):
     def _stop_loc_assist(self):
         """Stop the yaw sweep thread if running, publish zero cmd_vel."""
         self._loc_assist_stop_event.set()
-        if self._loc_assist_thread is not None:
+        if self._loc_assist_thread is not None and self._loc_assist_thread is not threading.current_thread():
             self._loc_assist_thread.join(timeout=6.0)
             self._loc_assist_thread = None
         # Ensure robot stops
@@ -876,11 +878,14 @@ class BackendNode(Ros2NodeManager):
         - Turn CCW 80° (net -40° from start), wait dwell_s
         - ... expanding sweep until localized
 
-        Uses angular velocity to turn for a computed duration, then dwells.
-        Stops immediately when localized or stop event is set.
+        The turn amount is closed-loop against SLAM odometry yaw. While turning,
+        publish cmd_vel continuously so downstream controllers do not need to
+        latch a single Twist command.
         """
         dwell_s = 5.0
         angular_speed = 0.4  # rad/s
+        cmd_rate_hz = 10.0
+        yaw_tolerance = math.radians(2.0)
         step_deg = 20.0
         step_rad = math.radians(step_deg)
         stop = self._loc_assist_stop_event
@@ -893,21 +898,119 @@ class BackendNode(Ros2NodeManager):
         direction = 1   # +1 = CW, -1 = CCW
 
         while not stop.is_set():
-            # Turn: angle = turn_index * step_rad
+            # Turn relative to the current odom yaw. Positive angular.z is CCW,
+            # so the previous CW command maps to a negative target delta.
             angle = turn_index * step_rad
-            duration = angle / angular_speed
-            # Publish angular velocity
-            self._publish_cmd_vel(0.0, -direction * angular_speed)
-            if self._wait_or_localized(duration, stop):
+            target_delta = -direction * angle
+            if self._turn_relative_by_odom(
+                target_delta=target_delta,
+                angular_speed=angular_speed,
+                cmd_rate_hz=cmd_rate_hz,
+                yaw_tolerance=yaw_tolerance,
+                stop=stop,
+            ):
                 return
-            # Stop turning
-            self._publish_cmd_vel(0.0, 0.0)
             # Dwell
             if self._wait_or_localized(dwell_s, stop):
                 return
             # Next sweep: increase index, flip direction
             turn_index += 1
             direction *= -1
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        """Wrap an angle to [-pi, pi]."""
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _latest_odom_yaw(self, max_age_s: float = 1.0) -> float | None:
+        with self._lock:
+            pose = self._odom_pose
+            received_at = self._odom_pose_received_at
+        if pose is None or received_at is None:
+            return None
+        if time.monotonic() - received_at > max_age_s:
+            return None
+        yaw = pose.get('yaw')
+        return float(yaw) if yaw is not None else None
+
+    def _turn_relative_by_odom(
+        self,
+        target_delta: float,
+        angular_speed: float,
+        cmd_rate_hz: float,
+        yaw_tolerance: float,
+        stop: threading.Event,
+    ) -> bool:
+        """
+        Turn until odometry yaw reaches target_delta relative to the turn start.
+        Returns True if the assist loop should stop (localized or stop event set).
+        """
+        interval = 1.0 / max(cmd_rate_hz, 1.0)
+        max_duration = abs(target_delta) / max(angular_speed, 1e-3) + 3.0
+
+        start_wait = time.monotonic()
+        start_yaw = self._latest_odom_yaw()
+        while start_yaw is None:
+            if self._should_stop_loc_assist(stop):
+                return True
+            # Do not blind-turn without fresh odometry.
+            self._publish_cmd_vel(0.0, 0.0)
+            if time.monotonic() - start_wait > 5.0:
+                self.get_logger().warn('Localization assist waiting for fresh odometry yaw')
+                start_wait = time.monotonic()
+            time.sleep(interval)
+            start_yaw = self._latest_odom_yaw()
+
+        angular_z = math.copysign(abs(angular_speed), target_delta)
+        start_time = time.monotonic()
+        previous_yaw = start_yaw
+        accumulated_delta = 0.0
+
+        while True:
+            if self._should_stop_loc_assist(stop):
+                return True
+
+            current_yaw = self._latest_odom_yaw()
+            if current_yaw is None:
+                # Odometry disappeared; stop rather than continuing open-loop.
+                self._publish_cmd_vel(0.0, 0.0)
+                time.sleep(interval)
+                continue
+
+            accumulated_delta += self._wrap_angle(current_yaw - previous_yaw)
+            previous_yaw = current_yaw
+            remaining = target_delta - accumulated_delta
+            if abs(remaining) <= yaw_tolerance:
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            # If we overshot, stop this segment instead of commanding a reverse
+            # correction sweep. The next sweep segment will continue the pattern.
+            if math.copysign(1.0, remaining) != math.copysign(1.0, target_delta):
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            if time.monotonic() - start_time > max_duration:
+                self.get_logger().warn(
+                    f'Localization assist turn timeout: target_delta={target_delta:.3f} '
+                    f'accumulated_delta={accumulated_delta:.3f} remaining={remaining:.3f}'
+                )
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            self._publish_cmd_vel(0.0, angular_z)
+            time.sleep(interval)
+
+    def _should_stop_loc_assist(self, stop: threading.Event) -> bool:
+        if stop.is_set():
+            self._publish_cmd_vel(0.0, 0.0)
+            return True
+        with self._lock:
+            localized = self._localized
+        if localized:
+            self._publish_cmd_vel(0.0, 0.0)
+            return True
+        return False
 
     def _wait_or_localized(self, duration: float, stop: threading.Event) -> bool:
         """
@@ -917,13 +1020,8 @@ class BackendNode(Ros2NodeManager):
         elapsed = 0.0
         interval = 0.1
         while elapsed < duration:
-            if stop.is_set():
-                self._publish_cmd_vel(0.0, 0.0)
+            if self._should_stop_loc_assist(stop):
                 return True
-            with self._lock:
-                if self._localized:
-                    self._publish_cmd_vel(0.0, 0.0)
-                    return True
             time.sleep(interval)
             elapsed += interval
         return False
