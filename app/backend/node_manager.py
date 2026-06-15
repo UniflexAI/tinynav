@@ -1025,6 +1025,9 @@ class BackendNode(Ros2NodeManager):
 
     def _start_loc_assist(self, env: dict):
         """Start the yaw sweep thread (no cmd_vel_control process)."""
+        if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
+            self.get_logger().info('Localization assist sweep already running')
+            return
         self._loc_assist_stop_event.clear()
         self._loc_assist_thread = threading.Thread(
             target=self._loc_assist_loop, daemon=True
@@ -1213,20 +1216,30 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             loc_assist = self._loc_assist_enabled
             nav_running = self._nav_nodes_running
+            cmd_vel_proc = self._cmd_vel_proc
+            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
+                return
+            if cmd_vel_proc is not None:
+                self._cmd_vel_proc = None
         if not loc_assist or not nav_running:
             return
         # Stop the sweep
         self._stop_loc_assist()
-        # Now start cmd_vel_control
-        if self._cmd_vel_proc is None:
-            _env = os.environ.copy()
-            _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        # Now start cmd_vel_control. Re-check under the lock because both
+        # /mapping/current_pose_in_map and /map/relocalization can report the
+        # first successful localization close together.
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        with self._lock:
+            cmd_vel_proc = self._cmd_vel_proc
+            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
+                return
             self._cmd_vel_proc = self._launch_proc(
                 'cmd_vel_control',
                 ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
                 env=_env,
             )
-            self.get_logger().info('Localization achieved — cmd_vel_control started')
+        self.get_logger().info('Localization achieved — cmd_vel_control started')
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
