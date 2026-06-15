@@ -199,6 +199,8 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
+        self._map_handoff_active: bool = False
+        self._handled_map_handoffs: set[tuple[str, int]] = set()
 
         self._nav_active_pub.publish(Bool(data=False))
 
@@ -222,7 +224,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub.publish(Bool(data=bool(active)))
 
     def _on_nav_done(self, msg: Bool):
-        if msg.data and self.state == 'navigation':
+        if msg.data and self.state == 'navigation' and not self._map_handoff_active:
             self._set_nav_active(False)
             self.state = 'idle'
             self._pub_state()
@@ -234,8 +236,184 @@ class BackendNode(Ros2NodeManager):
                 self._nav_progress = data
             for cb in self.nav_progress_callbacks:
                 cb(data)
+            self._maybe_start_map_handoff(data)
         except json.JSONDecodeError:
             pass
+
+    def _maybe_start_map_handoff(self, progress: dict):
+        """Demo map-collaboration hook.
+
+        If the active map folder contains map_handoff.json and the current
+        route index has a rule, reaching that route index switches to the
+        target map, waits for relocalization, then sends the next POI list.
+
+        Schema, in the currently active map folder:
+          {
+            "0": {"target_map": "map_...", "poi_list": [1, 2]},
+            "2": {"target_map": "map_other", "poi_list": [0]}
+          }
+
+        Keys are matched against POI name first, then POI id, with the old
+        current-route index behavior kept only as a legacy fallback. poi_list
+        values may be POI IDs or POI names in the target map's pois.json.
+        """
+        try:
+            poi_index = int(progress.get('poi_index'))
+            percent = float(progress.get('percent', 0.0))
+        except (TypeError, ValueError):
+            return
+        poi_id = progress.get('poi_id')
+        try:
+            poi_id = int(poi_id) if poi_id is not None else None
+        except (TypeError, ValueError):
+            poi_id = None
+        poi_name = progress.get('poi_name') if isinstance(progress.get('poi_name'), str) else None
+        if percent < 100.0:
+            return
+
+        active_map = self._active_map_name()
+        if not active_map:
+            return
+        key = (active_map, poi_name or poi_id or poi_index)
+        with self._lock:
+            if self._map_handoff_active or key in self._handled_map_handoffs:
+                return
+
+        rule = self._load_map_handoff_rule(poi_index, poi_id=poi_id, poi_name=poi_name)
+        if rule is None:
+            return
+
+        with self._lock:
+            self._map_handoff_active = True
+            self._handled_map_handoffs.add(key)
+        threading.Thread(
+            target=self._run_map_handoff,
+            args=(active_map, poi_index, rule),
+            daemon=True,
+        ).start()
+
+    def _active_map_name(self) -> str | None:
+        try:
+            if os.path.islink(self.map_path):
+                return os.path.basename(os.path.realpath(self.map_path))
+            if os.path.isdir(self.map_path):
+                return os.path.basename(self.map_path)
+        except OSError:
+            return None
+        return None
+
+    def _load_map_handoff_rule(
+        self,
+        poi_index: int,
+        *,
+        poi_id: int | None = None,
+        poi_name: str | None = None,
+    ) -> dict | None:
+        config_path = None
+        for filename in ('nav_flow.json', 'map_handoff.json'):
+            candidate = os.path.join(self.map_path, filename)
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+        if config_path is None:
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read {os.path.basename(config_path)}: {e}')
+            return None
+
+        rule = None
+        if poi_name:
+            if isinstance(config.get('by_name'), dict):
+                rule = config['by_name'].get(poi_name)
+            if rule is None:
+                rule = config.get(poi_name)
+        if rule is None and poi_id is not None:
+            if isinstance(config.get('by_id'), dict):
+                rule = config['by_id'].get(str(poi_id))
+            if rule is None:
+                rule = config.get(str(poi_id))
+        if rule is None and isinstance(config.get('by_index'), dict):
+            rule = config['by_index'].get(str(poi_index))
+        if rule is None and isinstance(config.get('handoffs'), dict):
+            rule = config['handoffs'].get(str(poi_index))
+        if rule is None:
+            rule = config.get(str(poi_index))
+        if not isinstance(rule, dict):
+            return None
+        target_map = rule.get('target_map') or rule.get('map')
+        poi_list = rule.get('poi_list', [])
+        if not isinstance(target_map, str) or not re.match(r'^[a-zA-Z0-9_\-]+$', target_map):
+            self.get_logger().error(f'Invalid map handoff target_map: {target_map!r}')
+            return None
+        if not isinstance(poi_list, list) or not all(isinstance(p, (int, str)) for p in poi_list):
+            self.get_logger().error(f'Invalid map handoff poi_list: {poi_list!r}')
+            return None
+        return {'target_map': target_map, 'poi_list': poi_list}
+
+    def _set_active_map_link(self, map_name: str):
+        import shutil
+        root = self.tinynav_db_path
+        src = os.path.join(root, 'maps', map_name)
+        if not os.path.isdir(src):
+            raise FileNotFoundError(f'Map {map_name!r} not found')
+        link = self.map_path
+        if os.path.islink(link) or os.path.isfile(link):
+            os.remove(link)
+        elif os.path.isdir(link):
+            shutil.rmtree(link)
+        os.symlink(src, link)
+
+    def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
+        target_map = rule['target_map']
+        poi_list = rule['poi_list']
+        self.get_logger().info(
+            f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
+        )
+        try:
+            # Stop current map_node/control hard before changing the active map.
+            self.cmd_stop_nav_nodes()
+            self.state = 'idle'
+            self._pub_state()
+
+            self._set_active_map_link(target_map)
+
+            with self._lock:
+                self._localized = False
+                self._map_pose = None
+                self._global_path = []
+                self._nav_target_pose = None
+                self._nav_progress = None
+
+            self.cmd_start_nav_nodes()
+
+            deadline = time.time() + 60.0
+            while time.time() < deadline:
+                with self._lock:
+                    localized = self._localized
+                if localized:
+                    break
+                time.sleep(0.2)
+            else:
+                self.get_logger().error(f'Map handoff timed out waiting for localization on {target_map}')
+                self.state = 'idle'
+                self._pub_state()
+                return
+
+            if poi_list:
+                self.cmd_send_pois(poi_list)
+            else:
+                self.state = 'idle'
+                self._pub_state()
+        except Exception as e:
+            self.get_logger().error(f'Map handoff failed: {e}')
+            self.state = 'error:map_handoff'
+            self._pub_state()
+        finally:
+            with self._lock:
+                self._map_handoff_active = False
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -1327,8 +1505,12 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
 
-    def cmd_send_pois(self, poi_ids: list[int]):
-        """Publish selected POIs to map_node and transition to navigation state."""
+    def cmd_send_pois(self, poi_ids: list[int | str]):
+        """Publish selected POIs to map_node and transition to navigation state.
+
+        Items may be integer POI IDs or POI names. The payload is re-indexed as
+        a dense queue while preserving each POI's original id/name metadata.
+        """
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)
@@ -1339,14 +1521,27 @@ class BackendNode(Ros2NodeManager):
                 return
             with open(pois_file) as f:
                 all_pois = json.load(f)
+            pois_by_name = {
+                poi.get('name'): poi
+                for poi in all_pois.values()
+                if isinstance(poi, dict) and isinstance(poi.get('name'), str)
+            }
             # Re-index as a dense queue ("0", "1", ...) so downstream
-            # consumers navigate in the same order the UI sent the checked POIs,
+            # consumers navigate in the same order the UI/nav_flow sent POIs,
             # instead of falling back to the original ids / pois.json order.
             payload = {}
-            for pid in poi_ids:
-                key = str(pid)
-                if key in all_pois:
-                    payload[str(len(payload))] = all_pois[key]
+            for poi_ref in poi_ids:
+                poi = None
+                if isinstance(poi_ref, int):
+                    poi = all_pois.get(str(poi_ref))
+                elif isinstance(poi_ref, str):
+                    poi = pois_by_name.get(poi_ref)
+                    if poi is None and poi_ref.isdigit():
+                        poi = all_pois.get(poi_ref)
+                if poi is not None:
+                    payload[str(len(payload))] = poi
+                else:
+                    self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
             self._set_nav_active(bool(payload))
         with self._lock:
