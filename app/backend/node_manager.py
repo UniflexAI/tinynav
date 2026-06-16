@@ -192,7 +192,8 @@ class BackendNode(Ros2NodeManager):
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
         self._map_handoff_active: bool = False
-        self._handled_map_handoffs: set[tuple[str, int]] = set()
+        self._handled_map_handoffs: set[tuple[str, int | str]] = set()
+        self._nav_done_seq: int = 0
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
@@ -209,9 +210,37 @@ class BackendNode(Ros2NodeManager):
             self._battery = float(msg.data)
 
     def _on_nav_done(self, msg: Bool):
-        if msg.data and self.state == 'navigation' and not self._map_handoff_active:
-            self.state = 'idle'
+        if not msg.data or self.state != 'navigation':
+            return
+
+        # map_node publishes the final 100% nav_progress and nav_done back-to-back,
+        # and ROS does not guarantee cross-topic callback ordering.  If the last
+        # POI is also a nav_flow handoff point, nav_done can arrive first.  Give
+        # the progress callback a short grace window to start the handoff before
+        # marking navigation idle.
+        with self._lock:
+            self._nav_done_seq += 1
+            seq = self._nav_done_seq
+            if self._map_handoff_active:
+                return
+
+        def finalize_if_no_handoff():
+            latest_progress = None
+            with self._lock:
+                if seq != self._nav_done_seq or self._map_handoff_active or self.state != 'navigation':
+                    return
+                latest_progress = dict(self._nav_progress) if self._nav_progress else None
+
+            if latest_progress:
+                self._maybe_start_map_handoff(latest_progress)
+
+            with self._lock:
+                if seq != self._nav_done_seq or self._map_handoff_active or self.state != 'navigation':
+                    return
+                self.state = 'idle'
             self._pub_state()
+
+        threading.Timer(0.3, finalize_if_no_handoff).start()
 
     def _on_nav_progress(self, msg: String):
         try:
