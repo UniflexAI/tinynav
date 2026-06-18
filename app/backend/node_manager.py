@@ -317,7 +317,7 @@ class BackendNode(Ros2NodeManager):
             self._handled_map_handoffs.add(key)
         threading.Thread(
             target=self._run_map_handoff,
-            args=(active_map, poi_index, rule),
+            args=(active_map, poi_index, rule, key),
             daemon=True,
         ).start()
 
@@ -380,7 +380,13 @@ class BackendNode(Ros2NodeManager):
         if not isinstance(poi_list, list) or not all(isinstance(p, (int, str)) for p in poi_list):
             self.get_logger().error(f'Invalid map handoff poi_list: {poi_list!r}')
             return None
-        return {'target_map': target_map, 'poi_list': poi_list}
+        rotate_deg = rule.get('rotate_deg', 0.0)
+        try:
+            rotate_deg = float(rotate_deg)
+        except (TypeError, ValueError):
+            self.get_logger().error(f'Invalid map handoff rotate_deg: {rotate_deg!r}')
+            return None
+        return {'target_map': target_map, 'poi_list': poi_list, 'rotate_deg': rotate_deg}
 
     def _set_active_map_link(self, map_name: str):
         import shutil
@@ -395,9 +401,16 @@ class BackendNode(Ros2NodeManager):
             shutil.rmtree(link)
         os.symlink(src, link)
 
-    def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
+    def _run_map_handoff(
+        self,
+        source_map: str,
+        poi_index: int,
+        rule: dict,
+        handoff_key: tuple[str, int | str],
+    ):
         target_map = rule['target_map']
         poi_list = rule['poi_list']
+        rotate_deg = float(rule.get('rotate_deg', 0.0))
         self.get_logger().info(
             f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
         )
@@ -406,6 +419,18 @@ class BackendNode(Ros2NodeManager):
             self.cmd_stop_nav_nodes()
             self.state = 'idle'
             self._pub_state()
+
+            if abs(rotate_deg) > 1e-3:
+                self.get_logger().info(f'Pre-handoff rotate {rotate_deg:.1f} deg')
+                time.sleep(0.2)
+                self._turn_relative_by_odom(
+                    target_delta=math.radians(rotate_deg),
+                    angular_speed=0.4,
+                    cmd_rate_hz=10.0,
+                    yaw_tolerance=math.radians(2.0),
+                    stop=threading.Event(),
+                    stop_on_localized=False,
+                )
 
             self._set_active_map_link(target_map)
 
@@ -443,6 +468,7 @@ class BackendNode(Ros2NodeManager):
         finally:
             with self._lock:
                 self._map_handoff_active = False
+                self._handled_map_handoffs.discard(handoff_key)
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -1151,6 +1177,8 @@ class BackendNode(Ros2NodeManager):
         cmd_rate_hz: float,
         yaw_tolerance: float,
         stop: threading.Event,
+        *,
+        stop_on_localized: bool = True,
     ) -> bool:
         """
         Turn until odometry yaw reaches target_delta relative to the turn start.
@@ -1162,7 +1190,7 @@ class BackendNode(Ros2NodeManager):
         start_wait = time.monotonic()
         start_yaw = self._latest_odom_yaw()
         while start_yaw is None:
-            if self._should_stop_loc_assist(stop):
+            if self._should_stop_turn(stop, stop_on_localized=stop_on_localized):
                 return True
             # Do not blind-turn without fresh odometry.
             self._publish_cmd_vel(0.0, 0.0)
@@ -1178,7 +1206,7 @@ class BackendNode(Ros2NodeManager):
         accumulated_delta = 0.0
 
         while True:
-            if self._should_stop_loc_assist(stop):
+            if self._should_stop_turn(stop, stop_on_localized=stop_on_localized):
                 return True
 
             current_yaw = self._latest_odom_yaw()
@@ -1212,16 +1240,21 @@ class BackendNode(Ros2NodeManager):
             self._publish_cmd_vel(0.0, angular_z)
             time.sleep(interval)
 
-    def _should_stop_loc_assist(self, stop: threading.Event) -> bool:
+    def _should_stop_turn(self, stop: threading.Event, *, stop_on_localized: bool) -> bool:
         if stop.is_set():
             self._publish_cmd_vel(0.0, 0.0)
             return True
+        if not stop_on_localized:
+            return False
         with self._lock:
             localized = self._localized
         if localized:
             self._publish_cmd_vel(0.0, 0.0)
             return True
         return False
+
+    def _should_stop_loc_assist(self, stop: threading.Event) -> bool:
+        return self._should_stop_turn(stop, stop_on_localized=True)
 
     def _wait_or_localized(self, duration: float, stop: threading.Event) -> bool:
         """
@@ -1694,3 +1727,4 @@ class NodeRunner:
                             proc.kill()
                         except Exception:
                             pass
+
