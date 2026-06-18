@@ -249,11 +249,15 @@ class BackendNode(Ros2NodeManager):
             if latest_progress:
                 self._maybe_start_map_handoff(latest_progress)
 
+            should_publish_nav_inactive = False
             with self._lock:
                 if seq != self._nav_done_seq or self._map_handoff_active or self.state != 'navigation':
                     return
-                self._set_nav_active(False)
+                self._nav_active = False
                 self.state = 'idle'
+                should_publish_nav_inactive = True
+            if should_publish_nav_inactive:
+                self._nav_active_pub.publish(Bool(data=False))
             self._pub_state()
 
         threading.Timer(0.3, finalize_if_no_handoff).start()
