@@ -9,13 +9,14 @@ from dataclasses import dataclass
 from numba import njit
 import message_filters
 from rclpy.time import Time
+from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, pose_msg2np
 
 
 @dataclass
@@ -155,7 +156,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    dilation_cells: int = 1
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -197,7 +198,10 @@ def generate_trajectory_library_3d(
 
     num_samples = len(vx_samples) * len(omega_y_samples)
 
-    trajectories = np.empty((num_samples, num_steps, 7))
+    # Per step state layout:
+    # [0:3]=position(x,y,z), [3:7]=quaternion(x,y,z,w),
+    # [7:10]=linear velocity(vx,vy,vz), [10:13]=angular velocity(wx,wy,wz) in world frame.
+    trajectories = np.empty((num_samples, num_steps, 13))
     params = np.empty((num_samples, 2))
 
     k = -1
@@ -208,14 +212,16 @@ def generate_trajectory_library_3d(
             omega_y = omega_y_samples[i_omega]
             p = init_p.copy()
             q = quat_to_matrix(init_q)
-            traj = np.empty((num_steps, 7))
+            traj = np.empty((num_steps, 13))
             for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
                 q = q @ dq
                 v_world = q @ np.array([0.0, 0.0, vx])
                 p += v_world * dt
                 traj[i, :3] = p
-                traj[i, 3:] = matrix_to_quat(q)
+                traj[i, 3:7] = matrix_to_quat(q)
+                traj[i, 7:10] = v_world
+                traj[i, 10:13] = np.array([0.0, omega_y, 0.0])
             #hack
             for i in range(num_steps):
                 traj[i, 2] = traj[0, 2]
@@ -253,6 +259,14 @@ def generate_predefined_trajectory_vocabularies(
     params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
 
     return np.asarray(trajectories), np.asarray(params)
+
+
+def normalize_pose_trajectories(trajectories):
+    if trajectories.ndim != 3:
+        return np.zeros((0, 0, 7), dtype=np.float64)
+    if trajectories.shape[2] >= 7:
+        return trajectories[:, :, :7].astype(np.float64)
+    return np.zeros((0, 0, 7), dtype=np.float64)
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
@@ -366,9 +380,11 @@ class PlanningNode(Node):
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+        self.pose_sub = message_filters.Subscriber(
+            self, PoseStamped, '/insight/vio_20hz'
+        )
 
-        self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
+        self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=30)
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
@@ -386,6 +402,13 @@ class PlanningNode(Node):
         self.current_pose = None  # Store the latest pose from odometry
 
         self.smoothed_velocity = 0.0
+        self.dt = 0.1
+        self.planning_latency_s = 0.2
+        self.seed_fallback_distance_m = 2.0
+        self.target_reached_distance_m = 0.15
+        self.last_planned_traj = None
+        self.last_planned_traj_base_stamp = None
+        self._last_static_log_ns = {}
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -542,14 +565,78 @@ class PlanningNode(Node):
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
+    def _seed_from_last_trajectory(self, query_stamp):
+        if self.last_planned_traj is None or self.last_planned_traj_base_stamp is None:
+            return None
+        traj = self.last_planned_traj
+        if len(traj) < 1:
+            return None
+        rel_t = query_stamp - self.last_planned_traj_base_stamp
+        if rel_t < 0.0:
+            return None
+        traj_end_stamp = self.last_planned_traj_base_stamp + float(len(traj) - 1) * self.dt
+        if query_stamp > traj_end_stamp:
+            return None
+        idx = int(round(rel_t / self.dt))
+        idx = max(0, min(idx, len(traj) - 1))
+        seed_stamp = self.last_planned_traj_base_stamp + float(idx) * self.dt
+        p = traj[idx, :3].copy()
+        q = traj[idx, 3:7].copy()
+        if len(traj) == 1:
+            v = np.zeros(3, dtype=np.float64)
+        elif idx < len(traj) - 1:
+            v = (traj[idx + 1, :3] - traj[idx, :3]) / self.dt
+        else:
+            v = (traj[idx, :3] - traj[idx - 1, :3]) / self.dt
+        v = np.asarray(v, dtype=np.float64)
+        return p, v, q, seed_stamp
+
+    def _make_static_path(self, init_p, init_q, header, base_time, num_steps):
+        """Build a fresh zero-motion path so controllers receive an explicit stop."""
+        path = Path()
+        path.header = Header()
+        path.header.stamp = header.stamp
+        path.header.frame_id = "world"
+        num_steps = max(2, int(num_steps))
+        static_traj = np.empty((num_steps, 7), dtype=np.float64)
+        static_traj[:, :3] = init_p
+        static_traj[:, 3:7] = init_q
+        for j in range(num_steps):
+            pose = PoseStamped()
+            pose.header = Header()
+            pose.header.stamp = (base_time + Duration(seconds=float(j) * self.dt)).to_msg()
+            pose.header.frame_id = "world"
+            pose.pose.position.x = float(init_p[0])
+            pose.pose.position.y = float(init_p[1])
+            pose.pose.position.z = float(init_p[2])
+            pose.pose.orientation.x = float(init_q[0])
+            pose.pose.orientation.y = float(init_q[1])
+            pose.pose.orientation.z = float(init_q[2])
+            pose.pose.orientation.w = float(init_q[3])
+            path.poses.append(pose)
+        return path, static_traj
+
+    def _publish_static_path(self, init_p, init_q, header, base_time, base_stamp, num_steps, reason, log_key=None):
+        path, static_traj = self._make_static_path(init_p, init_q, header, base_time, num_steps)
+        self.last_planned_traj = static_traj.copy()
+        self.last_planned_traj_base_stamp = base_stamp
+        self.path_pub.publish(path)
+
+        now_ns = self.get_clock().now().nanoseconds
+        key = log_key or reason
+        last_ns = self._last_static_log_ns.get(key, 0)
+        if now_ns - last_ns >= 1_000_000_000:
+            self._last_static_log_ns[key] = now_ns
+            self.get_logger().info(f"{reason}, publishing static path.")
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def sync_callback(self, depth_msg, odom_msg):
+    def sync_callback(self, depth_msg, pose_msg):
         if self.K is None:
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
-            stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
-            T,_ = msg2np(odom_msg)
+            stamp = Time.from_msg(pose_msg.header.stamp).nanoseconds / 1e9
+            T = pose_msg2np(pose_msg)
             if self.last_T is None:
                 self.last_T = T.copy()
                 self.smoothed_velocity = 0.0
@@ -584,20 +671,67 @@ class PlanningNode(Node):
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
-            self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
-            self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
-            self.publish_footprint(T, depth_msg.header.stamp)
+            #self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
+            #self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            #self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
+            #self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            init_p = self.camera_to_robot_center(T)
-            init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-            trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-            params = np.concatenate([params, vocab_params], axis=0)
+            query_stamp = stamp + self.planning_latency_s
+            seed = self._seed_from_last_trajectory(query_stamp)
+            planning_base_stamp = stamp
+            if seed is not None:
+                init_p_seed, init_v_seed, init_q_seed, seed_stamp = seed
+                current_center = self.camera_to_robot_center(T)
+                if np.linalg.norm(init_p_seed - current_center) <= self.seed_fallback_distance_m:
+                    init_p, init_v, init_q = init_p_seed, init_v_seed, init_q_seed
+                    planning_base_stamp = seed_stamp
+                else:
+                    seed = None
+            if seed is None:
+                v_dir = T[:3, :3] @ np.array([0, 0, 1])
+                magnitude = np.clip(self.smoothed_velocity, 0.05, 0.5)
+                init_v = v_dir * float(magnitude)
+                init_p = self.camera_to_robot_center(T)
+                init_q = np.array([
+                    pose_msg.pose.orientation.x,
+                    pose_msg.pose.orientation.y,
+                    pose_msg.pose.orientation.z,
+                    pose_msg.pose.orientation.w,
+                ])
             self.last_T = T
             self.last_stamp = stamp
+            base_time = Time(seconds=planning_base_stamp)
+            static_steps = max(2, int(round(2.0 / self.dt)) + 1)
+            if self.target_pose is None:
+                self._publish_static_path(
+                    init_p, init_q, depth_msg.header, base_time, planning_base_stamp, static_steps,
+                    "No target pose"
+                )
+                return
+
+            target_pose = self.target_pose.copy()
+            target_dist_xy = float(np.linalg.norm(init_p[:2] - target_pose[:2]))
+            if target_dist_xy <= self.target_reached_distance_m:
+                self.target_pose = None
+                self._publish_static_path(
+                    init_p, init_q, depth_msg.header, base_time, planning_base_stamp, static_steps,
+                    f"Target pose reached (xy_dist={target_dist_xy:.3f}m)",
+                    log_key="Target pose reached"
+                )
+                return
+
+            trajectories, params = generate_trajectory_library_3d(
+                init_p = init_p,
+                init_q = init_q,
+                dt = self.dt
+            )
+            trajectories = normalize_pose_trajectories(trajectories)
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q, dt=self.dt)
+            vocab_trajs = normalize_pose_trajectories(vocab_trajs)
+            if len(vocab_trajs) > 0:
+                trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+                params = np.concatenate([params, vocab_params], axis=0)
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
@@ -624,29 +758,42 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return score * 100000 + 100 * dist + 40 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+
+            # path
+            path = Path()
+            path.header = Header()
+            path.header.stamp = depth_msg.header.stamp
+            path.header.frame_id = "world"
+
+            if self.target_pose is None:
+                self._publish_static_path(
+                    init_p, init_q, depth_msg.header, base_time, planning_base_stamp, len(trajectories[0]),
+                    "No target pose"
+                )
+                return
+
+            if all(s == float('inf') for s in scores):
+                self._publish_static_path(
+                    init_p, init_q, depth_msg.header, base_time, planning_base_stamp, len(trajectories[0]),
+                    "All trajectories in collision"
+                )
+                return
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
-
-            # path
-            path = Path()
-            path.header = depth_msg.header
-            path.header.frame_id = "world"
-
-            if self.target_pose is None:
-                return
-
-            if all(s == float('inf') for s in scores):
-                self.get_logger().info('All trajectories in collision, stopping path.')
-                return
+            best_idx = int(top_indices[0])
+            self.last_planned_traj = trajectories[best_idx].copy()
+            self.last_planned_traj_base_stamp = planning_base_stamp
 
             for i in top_indices:
-                for j in range(0, len(trajectories[i]), 10):
-                    x,y,z,qx,qy,qz,qw = trajectories[i][j]
+                for j in range(0, len(trajectories[i]), 1):
+                    x,y,z,qx,qy,qz,qw = trajectories[i][j, :7]
                     pose = PoseStamped()
-                    pose.header = depth_msg.header
+                    pose.header = Header()
+                    pose.header.stamp = (base_time + Duration(seconds=float(j) * self.dt)).to_msg()
+                    pose.header.frame_id = "world"
                     pose.pose.position.x = x
                     pose.pose.position.y = y
                     pose.pose.position.z = z
