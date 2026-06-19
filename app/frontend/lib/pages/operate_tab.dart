@@ -1486,9 +1486,14 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
   void _showFullscreen(BuildContext context) {
     final topic = ref.read(selectedPreviewTopicProvider);
     if (topic == null) return;
+    final quality = ref.read(previewQualityProvider);
     showDialog(
       context: context,
-      builder: (_) => _FullscreenPreview(topic: topic, fit: _previewFit),
+      builder: (_) => _FullscreenPreview(
+        topic: topic,
+        quality: quality,
+        fit: _previewFit,
+      ),
     );
   }
 
@@ -1496,6 +1501,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
   Widget build(BuildContext context) {
     final topicsAsync = ref.watch(imageTopicsProvider);
     final selectedTopic = ref.watch(selectedPreviewTopicProvider);
+    final previewQuality = ref.watch(previewQualityProvider);
     final topics = topicsAsync.valueOrNull ?? [];
     final baseUrl = ref.watch(baseUrlProvider);
     final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
@@ -1517,7 +1523,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
 
     if (selectedTopic != null) {
       ref.listen<AsyncValue<Uint8List>>(
-        previewStreamProvider(selectedTopic),
+        previewStreamProvider((topic: selectedTopic, quality: previewQuality)),
         (_, next) {
           if (next case AsyncData(:final value)) {
             if (mounted) setState(() => _latestFrame = value);
@@ -1574,6 +1580,25 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
+                  const SizedBox(width: 6),
+                  DropdownButton<PreviewQuality>(
+                    value: previewQuality,
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                    dropdownColor: Colors.black87,
+                    underline: const SizedBox(),
+                    isDense: true,
+                    items: PreviewQuality.values
+                        .map((quality) => DropdownMenuItem(
+                              value: quality,
+                              child: Text(quality.label),
+                            ))
+                        .toList(),
+                    onChanged: (quality) {
+                      if (quality != null) {
+                        ref.read(previewQualityProvider.notifier).state = quality;
+                      }
+                    },
+                  ),
                   const SizedBox(width: 6),
                   Tooltip(
                     message: _previewCover ? 'Fill preview' : 'Show full preview',
@@ -1649,8 +1674,13 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
 
 class _FullscreenPreview extends ConsumerStatefulWidget {
   final String topic;
+  final PreviewQuality quality;
   final BoxFit fit;
-  const _FullscreenPreview({required this.topic, required this.fit});
+  const _FullscreenPreview({
+    required this.topic,
+    required this.quality,
+    required this.fit,
+  });
 
   @override
   ConsumerState<_FullscreenPreview> createState() => _FullscreenPreviewState();
@@ -1662,7 +1692,7 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
   @override
   Widget build(BuildContext context) {
     ref.listen<AsyncValue<Uint8List>>(
-      previewStreamProvider(widget.topic),
+      previewStreamProvider((topic: widget.topic, quality: widget.quality)),
       (_, next) {
         if (next case AsyncData(:final value)) {
           if (mounted) setState(() => _frame = value);
