@@ -117,23 +117,49 @@ final activeNavPoisProvider = StateProvider<List<Poi>>((ref) => const []);
 /// Currently selected preview topic (null = preview closed).
 final selectedPreviewTopicProvider = StateProvider<String?>((ref) => null);
 
-/// Streams raw JPEG bytes from WS /ws/preview?topic=<topic>.
+enum PreviewQuality {
+  standard('default', 'Default'),
+  high('high', 'High');
+
+  const PreviewQuality(this.queryValue, this.label);
+
+  final String queryValue;
+  final String label;
+}
+
+final previewQualityProvider = StateProvider<PreviewQuality>(
+  (ref) => PreviewQuality.standard,
+);
+
+typedef PreviewStreamRequest = ({String topic, PreviewQuality quality});
+
+/// Streams raw JPEG bytes from WS /ws/preview for a topic and quality level.
 final previewStreamProvider =
-    StreamProvider.family.autoDispose<Uint8List, String>((ref, topic) {
-  final ip = ref.watch(deviceIpProvider);
-  if (ip == null) return const Stream.empty();
+    StreamProvider.family.autoDispose<Uint8List, PreviewStreamRequest>(
+  (ref, request) {
+    final ip = ref.watch(deviceIpProvider);
+    if (ip == null) return const Stream.empty();
 
-  final encoded = Uri.encodeQueryComponent(topic);
-  final channel =
-      WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/preview?topic=$encoded'));
-  ref.onDispose(() => channel.sink.close());
+    final uri = Uri(
+      scheme: 'ws',
+      host: ip,
+      port: 8000,
+      path: '/ws/preview',
+      queryParameters: {
+        'topic': request.topic,
+        'quality': request.quality.queryValue,
+      },
+    );
+    final channel = WebSocketChannel.connect(uri);
+    ref.onDispose(() => channel.sink.close());
 
-  return channel.stream.map((data) {
-    if (data is Uint8List) return data;
-    if (data is List<int>) return Uint8List.fromList(data);
-    return Uint8List(0);
-  }).where((b) => b.isNotEmpty);
-});
+    return channel.stream.map((data) {
+      if (data is Uint8List) return data;
+      if (data is List<int>) return Uint8List.fromList(data);
+      return Uint8List(0);
+    }).where((b) => b.isNotEmpty);
+  },
+);
 
 /// Streams PlanningState from WS /ws/planning at ~5 fps.
 final planningStreamProvider = StreamProvider<PlanningState>((ref) {

@@ -55,7 +55,40 @@ _IMAGE_TOPICS_LOOPER = [
     '/slam/depth',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
-_PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
+_PREVIEW_MIN_INTERVAL = 0.05  # 20 fps
+_PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
+_PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
+_PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
+_PREVIEW_HIGH_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_HIGH_JPEG_QUALITY', '80'))
+_PREVIEW_PROFILES = {
+    'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
+    'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
+}
+
+
+def _resize_preview_frame(arr: np.ndarray, max_edge_px: int = _PREVIEW_MAX_EDGE_PX) -> np.ndarray:
+    """Downscale preview frame so the longest side is <= max_edge_px."""
+    if max_edge_px <= 0 or arr is None or arr.size == 0:
+        return arr
+    height, width = arr.shape[:2]
+    longest = max(height, width)
+    if longest <= max_edge_px:
+        return arr
+    scale = max_edge_px / float(longest)
+    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+    return cv2.resize(arr, new_size, interpolation=cv2.INTER_AREA)
+
+
+def _encode_preview_jpeg(
+    arr: np.ndarray,
+    max_edge_px: int = _PREVIEW_MAX_EDGE_PX,
+    jpeg_quality: int = _PREVIEW_JPEG_QUALITY,
+) -> bytes:
+    arr = _resize_preview_frame(arr, max_edge_px)
+    ok, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+    if not ok:
+        raise RuntimeError('failed to encode preview jpeg')
+    return buf.tobytes()
 
 
 class BackendNode(Ros2NodeManager):
@@ -403,12 +436,18 @@ class BackendNode(Ros2NodeManager):
             self._last_frame_time[topic] = 0.0
             self.preview_callbacks[topic] = []
 
-    def add_preview_callback(self, topic: str, cb) -> bool:
+    def add_preview_callback(
+        self,
+        topic: str,
+        cb,
+        max_edge_px: int = _PREVIEW_MAX_EDGE_PX,
+        jpeg_quality: int = _PREVIEW_JPEG_QUALITY,
+    ) -> bool:
         """Register a frame callback; creates the ROS subscription on the first caller."""
         if topic not in self.preview_callbacks:
             return False
         with self._lock:
-            self.preview_callbacks[topic].append(cb)
+            self.preview_callbacks[topic].append((cb, max_edge_px, jpeg_quality))
             first = len(self.preview_callbacks[topic]) == 1
         if first:
             self._create_image_sub(topic)
@@ -419,10 +458,11 @@ class BackendNode(Ros2NodeManager):
         if topic not in self.preview_callbacks:
             return
         with self._lock:
-            try:
-                self.preview_callbacks[topic].remove(cb)
-            except ValueError:
-                pass
+            self.preview_callbacks[topic] = [
+                registration
+                for registration in self.preview_callbacks[topic]
+                if registration[0] is not cb
+            ]
             empty = len(self.preview_callbacks[topic]) == 0
         if empty:
             self._destroy_image_sub(topic)
@@ -448,19 +488,39 @@ class BackendNode(Ros2NodeManager):
         if sub is not None:
             self.destroy_subscription(sub)
 
+    def _publish_preview_frame(self, topic: str, arr: np.ndarray):
+        with self._lock:
+            callbacks = list(self.preview_callbacks.get(topic, []))
+
+        encoded_frames: dict[tuple[int, int], bytes] = {}
+        for cb, max_edge_px, jpeg_quality in callbacks:
+            profile = (max_edge_px, jpeg_quality)
+            try:
+                frame = encoded_frames.get(profile)
+                if frame is None:
+                    frame = _encode_preview_jpeg(arr, max_edge_px, jpeg_quality)
+                    encoded_frames[profile] = frame
+                cb(frame)
+            except Exception:
+                pass
+
+        if encoded_frames:
+            with self._lock:
+                self._last_frame[topic] = next(iter(encoded_frames.values()))
+
     def _on_compressed_image(self, msg: CompressedImage, topic: str):
         now = time.time()
         if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
             return
         self._last_frame_time[topic] = now
-        frame = bytes(msg.data)
-        with self._lock:
-            self._last_frame[topic] = frame
-        for cb in self.preview_callbacks.get(topic, []):
-            try:
-                cb(frame)
-            except Exception:
-                pass
+
+        try:
+            arr = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if arr is None:
+                return
+        except Exception:
+            return
+        self._publish_preview_frame(topic, arr)
 
     def _on_image(self, msg: Image, topic: str):
         now = time.time()
@@ -484,19 +544,9 @@ class BackendNode(Ros2NodeManager):
                     arr = arr[:, :, 0]
                 elif msg.encoding == 'rgb8':
                     arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 50])
-            frame = buf.tobytes()
         except Exception:
             return
-
-        with self._lock:
-            self._last_frame[topic] = frame
-
-        for cb in self.preview_callbacks.get(topic, []):
-            try:
-                cb(frame)
-            except Exception:
-                pass
+        self._publish_preview_frame(topic, arr)
 
     def get_planning_snapshot(self) -> dict:
         with self._lock:
@@ -540,6 +590,9 @@ class BackendNode(Ros2NodeManager):
     def get_preview_frame(self, topic: str) -> bytes:
         with self._lock:
             return self._last_frame.get(topic, b'')
+
+    def get_preview_profile(self, quality: str) -> tuple[int, int] | None:
+        return _PREVIEW_PROFILES.get(quality)
 
     # ------------------------------------------------------------------ #
     # Command API (called from FastAPI handlers — thread-safe enough)     #

@@ -82,7 +82,7 @@ The interactive API docs are available at `http://<host>:8000/docs`.
 | `/ws/status` | ~1 s | Full device status JSON |
 | `/ws/pose` | On every odometry message | `{x, y, z, yaw, timestamp, source}` |
 | `/ws/map-update` | On map file change | `{event: "map_updated", timestamp}` |
-| `/ws/preview?topic=<topic>` | ~5 fps | Raw JPEG bytes for the selected camera topic |
+| `/ws/preview?topic=<topic>&quality=<default\|high>` | Up to 20 fps | Raw JPEG bytes for the selected camera topic; default is 320px/JPEG 50, high is 640px/JPEG 80 |
 | `/ws/planning` | ~5 fps | `{localized, odom_pose, map_pose, esdf_image, obstacle_image, trajectory, grid_info}` |
 
 ### Sensor / camera
