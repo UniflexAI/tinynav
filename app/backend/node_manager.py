@@ -109,6 +109,7 @@ class BackendNode(Ros2NodeManager):
 
         # Planning / localization state (read via get_planning_snapshot)
         self._odom_pose: dict | None = None
+        self._odom_pose_received_at: float | None = None
         self._odom_pose_at_kf: dict | None = None  # odom pose snapshotted at last mapPose update
         self._map_pose: dict | None = None
         self._localized: bool = False
@@ -189,8 +190,16 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
 
+        # Auto-localization assist: sweep yaw while waiting for localization
+        self._loc_assist_enabled: bool = False
+        self._loc_assist_thread: threading.Thread | None = None
+        self._loc_assist_stop_event = threading.Event()
+
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
+        self._map_handoff_active: bool = False
+        self._handled_map_handoffs: set[tuple[str, int | str]] = set()
+        self._nav_done_seq: int = 0
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
@@ -207,9 +216,37 @@ class BackendNode(Ros2NodeManager):
             self._battery = float(msg.data)
 
     def _on_nav_done(self, msg: Bool):
-        if msg.data and self.state == 'navigation':
-            self.state = 'idle'
+        if not msg.data or self.state != 'navigation':
+            return
+
+        # map_node publishes the final 100% nav_progress and nav_done back-to-back,
+        # and ROS does not guarantee cross-topic callback ordering.  If the last
+        # POI is also a nav_flow handoff point, nav_done can arrive first.  Give
+        # the progress callback a short grace window to start the handoff before
+        # marking navigation idle.
+        with self._lock:
+            self._nav_done_seq += 1
+            seq = self._nav_done_seq
+            if self._map_handoff_active:
+                return
+
+        def finalize_if_no_handoff():
+            latest_progress = None
+            with self._lock:
+                if seq != self._nav_done_seq or self._map_handoff_active or self.state != 'navigation':
+                    return
+                latest_progress = dict(self._nav_progress) if self._nav_progress else None
+
+            if latest_progress:
+                self._maybe_start_map_handoff(latest_progress)
+
+            with self._lock:
+                if seq != self._nav_done_seq or self._map_handoff_active or self.state != 'navigation':
+                    return
+                self.state = 'idle'
             self._pub_state()
+
+        threading.Timer(0.3, finalize_if_no_handoff).start()
 
     def _on_nav_progress(self, msg: String):
         try:
@@ -218,8 +255,184 @@ class BackendNode(Ros2NodeManager):
                 self._nav_progress = data
             for cb in self.nav_progress_callbacks:
                 cb(data)
+            self._maybe_start_map_handoff(data)
         except json.JSONDecodeError:
             pass
+
+    def _maybe_start_map_handoff(self, progress: dict):
+        """Demo map-collaboration hook.
+
+        If the active map folder contains map_handoff.json and the current
+        route index has a rule, reaching that route index switches to the
+        target map, waits for relocalization, then sends the next POI list.
+
+        Schema, in the currently active map folder:
+          {
+            "0": {"target_map": "map_...", "poi_list": [1, 2]},
+            "2": {"target_map": "map_other", "poi_list": [0]}
+          }
+
+        Keys are matched against POI name first, then POI id, with the old
+        current-route index behavior kept only as a legacy fallback. poi_list
+        values may be POI IDs or POI names in the target map's pois.json.
+        """
+        try:
+            poi_index = int(progress.get('poi_index'))
+            percent = float(progress.get('percent', 0.0))
+        except (TypeError, ValueError):
+            return
+        poi_id = progress.get('poi_id')
+        try:
+            poi_id = int(poi_id) if poi_id is not None else None
+        except (TypeError, ValueError):
+            poi_id = None
+        poi_name = progress.get('poi_name') if isinstance(progress.get('poi_name'), str) else None
+        if percent < 100.0:
+            return
+
+        active_map = self._active_map_name()
+        if not active_map:
+            return
+        key = (active_map, poi_name or poi_id or poi_index)
+        with self._lock:
+            if self._map_handoff_active or key in self._handled_map_handoffs:
+                return
+
+        rule = self._load_map_handoff_rule(poi_index, poi_id=poi_id, poi_name=poi_name)
+        if rule is None:
+            return
+
+        with self._lock:
+            self._map_handoff_active = True
+            self._handled_map_handoffs.add(key)
+        threading.Thread(
+            target=self._run_map_handoff,
+            args=(active_map, poi_index, rule),
+            daemon=True,
+        ).start()
+
+    def _active_map_name(self) -> str | None:
+        try:
+            if os.path.islink(self.map_path):
+                return os.path.basename(os.path.realpath(self.map_path))
+            if os.path.isdir(self.map_path):
+                return os.path.basename(self.map_path)
+        except OSError:
+            return None
+        return None
+
+    def _load_map_handoff_rule(
+        self,
+        poi_index: int,
+        *,
+        poi_id: int | None = None,
+        poi_name: str | None = None,
+    ) -> dict | None:
+        config_path = None
+        for filename in ('nav_flow.json', 'map_handoff.json'):
+            candidate = os.path.join(self.map_path, filename)
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+        if config_path is None:
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read {os.path.basename(config_path)}: {e}')
+            return None
+
+        rule = None
+        if poi_name:
+            if isinstance(config.get('by_name'), dict):
+                rule = config['by_name'].get(poi_name)
+            if rule is None:
+                rule = config.get(poi_name)
+        if rule is None and poi_id is not None:
+            if isinstance(config.get('by_id'), dict):
+                rule = config['by_id'].get(str(poi_id))
+            if rule is None:
+                rule = config.get(str(poi_id))
+        if rule is None and isinstance(config.get('by_index'), dict):
+            rule = config['by_index'].get(str(poi_index))
+        if rule is None and isinstance(config.get('handoffs'), dict):
+            rule = config['handoffs'].get(str(poi_index))
+        if rule is None:
+            rule = config.get(str(poi_index))
+        if not isinstance(rule, dict):
+            return None
+        target_map = rule.get('target_map') or rule.get('map')
+        poi_list = rule.get('poi_list', [])
+        if not isinstance(target_map, str) or not re.match(r'^[a-zA-Z0-9_\-]+$', target_map):
+            self.get_logger().error(f'Invalid map handoff target_map: {target_map!r}')
+            return None
+        if not isinstance(poi_list, list) or not all(isinstance(p, (int, str)) for p in poi_list):
+            self.get_logger().error(f'Invalid map handoff poi_list: {poi_list!r}')
+            return None
+        return {'target_map': target_map, 'poi_list': poi_list}
+
+    def _set_active_map_link(self, map_name: str):
+        import shutil
+        root = self.tinynav_db_path
+        src = os.path.join(root, 'maps', map_name)
+        if not os.path.isdir(src):
+            raise FileNotFoundError(f'Map {map_name!r} not found')
+        link = self.map_path
+        if os.path.islink(link) or os.path.isfile(link):
+            os.remove(link)
+        elif os.path.isdir(link):
+            shutil.rmtree(link)
+        os.symlink(src, link)
+
+    def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
+        target_map = rule['target_map']
+        poi_list = rule['poi_list']
+        self.get_logger().info(
+            f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
+        )
+        try:
+            # Stop current map_node/control hard before changing the active map.
+            self.cmd_stop_nav_nodes()
+            self.state = 'idle'
+            self._pub_state()
+
+            self._set_active_map_link(target_map)
+
+            with self._lock:
+                self._localized = False
+                self._map_pose = None
+                self._global_path = []
+                self._nav_target_pose = None
+                self._nav_progress = None
+
+            self.cmd_start_nav_nodes()
+
+            deadline = time.time() + 60.0
+            while time.time() < deadline:
+                with self._lock:
+                    localized = self._localized
+                if localized:
+                    break
+                time.sleep(0.2)
+            else:
+                self.get_logger().error(f'Map handoff timed out waiting for localization on {target_map}')
+                self.state = 'idle'
+                self._pub_state()
+                return
+
+            if poi_list:
+                self.cmd_send_pois(poi_list)
+            else:
+                self.state = 'idle'
+                self._pub_state()
+        except Exception as e:
+            self.get_logger().error(f'Map handoff failed: {e}')
+            self.state = 'error:map_handoff'
+            self._pub_state()
+        finally:
+            with self._lock:
+                self._map_handoff_active = False
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -230,6 +443,7 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self.current_pose = pose
             self._odom_pose = pose
+            self._odom_pose_received_at = time.monotonic()
         for cb in self.pose_callbacks:
             try:
                 cb(pose)
@@ -239,10 +453,13 @@ class BackendNode(Ros2NodeManager):
     def _on_pose_in_map(self, msg: Odometry):
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
+            was_localized = self._localized
             self.current_pose = pose
             self._map_pose = pose
             self._odom_pose_at_kf = self._odom_pose  # freeze odom at this keyframe
             self._localized = True
+        if not was_localized:
+            self._on_localization_achieved()
         for cb in self.pose_callbacks:
             try:
                 cb(pose)
@@ -252,8 +469,11 @@ class BackendNode(Ros2NodeManager):
     def _on_relocalization(self, msg: Odometry):
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
+            was_localized = self._localized
             self._map_pose = pose
             self._localized = True
+        if not was_localized:
+            self._on_localization_achieved()
 
     def _on_nav_target_pose(self, msg: Odometry):
         with self._lock:
@@ -620,6 +840,7 @@ class BackendNode(Ros2NodeManager):
             battery = self._battery
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
+            loc_assist = self._loc_assist_enabled
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -632,6 +853,7 @@ class BackendNode(Ros2NodeManager):
             'rawState': raw,
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
+            'locAssistEnabled': loc_assist,
         }
 
     @staticmethod
@@ -736,16 +958,23 @@ class BackendNode(Ros2NodeManager):
             ],
             env=_env,
         )
-        self._cmd_vel_proc = self._launch_proc(
-            'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
-            env=_env,
-        )
+        with self._lock:
+            loc_assist = self._loc_assist_enabled
+        if loc_assist:
+            # Don't start cmd_vel_control yet; start localization assist sweep
+            self._start_loc_assist(_env)
+        else:
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+                env=_env,
+            )
         with self._lock:
             self._nav_nodes_running = True
         self.get_logger().info('Nav nodes started')
 
     def cmd_stop_nav_nodes(self):
+        self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
@@ -760,6 +989,7 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
+        self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
         self._kill_proc(self._cmd_vel_proc)
@@ -795,6 +1025,237 @@ class BackendNode(Ros2NodeManager):
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
+
+    # ------------------------------------------------------------------ #
+    # Localization assist: yaw sweep until localized                        #
+    # ------------------------------------------------------------------ #
+
+    def cmd_set_loc_assist(self, enabled: bool) -> bool:
+        """Enable or disable localization assist before nav nodes start."""
+        with self._lock:
+            if self._nav_nodes_running:
+                return False
+            self._loc_assist_enabled = enabled
+        self.get_logger().info(f'Localization assist {"enabled" if enabled else "disabled"}')
+        return True
+
+    def _start_loc_assist(self, env: dict):
+        """Start the yaw sweep thread (no cmd_vel_control process)."""
+        if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
+            self.get_logger().info('Localization assist sweep already running')
+            return
+        self._loc_assist_stop_event.clear()
+        self._loc_assist_thread = threading.Thread(
+            target=self._loc_assist_loop, daemon=True
+        )
+        self._loc_assist_thread.start()
+        self.get_logger().info('Localization assist sweep started')
+
+    def _stop_loc_assist(self):
+        """Stop the yaw sweep thread if running, publish zero cmd_vel."""
+        self._loc_assist_stop_event.set()
+        if self._loc_assist_thread is not None and self._loc_assist_thread is not threading.current_thread():
+            self._loc_assist_thread.join(timeout=6.0)
+            self._loc_assist_thread = None
+        # Ensure robot stops
+        self._publish_cmd_vel(0.0, 0.0)
+
+    def _publish_cmd_vel(self, linear_x: float, angular_z: float):
+        msg = Twist()
+        msg.linear.x = float(linear_x)
+        msg.angular.z = float(angular_z)
+        self._cmd_vel_pub.publish(msg)
+
+    def _loc_assist_loop(self):
+        """
+        Yaw sweep pattern:
+        - Start facing current direction, wait dwell_s
+        - Turn CW 20°, wait dwell_s
+        - Turn CCW 40° (net -20° from start), wait dwell_s
+        - Turn CW 60° (net +40° from start), wait dwell_s
+        - Turn CCW 80° (net -40° from start), wait dwell_s
+        - ... expanding sweep until localized
+
+        The turn amount is closed-loop against SLAM odometry yaw. While turning,
+        publish cmd_vel continuously so downstream controllers do not need to
+        latch a single Twist command.
+        """
+        dwell_s = 5.0
+        angular_speed = 0.4  # rad/s
+        cmd_rate_hz = 10.0
+        yaw_tolerance = math.radians(2.0)
+        step_deg = 20.0
+        step_rad = math.radians(step_deg)
+        stop = self._loc_assist_stop_event
+
+        # Dwell at initial position
+        if self._wait_or_localized(dwell_s, stop):
+            return
+
+        turn_index = 1  # 1, 2, 3, 4, ...
+        direction = 1   # +1 = CW, -1 = CCW
+
+        while not stop.is_set():
+            # Turn relative to the current odom yaw. Positive angular.z is CCW,
+            # so the previous CW command maps to a negative target delta.
+            angle = turn_index * step_rad
+            target_delta = -direction * angle
+            if self._turn_relative_by_odom(
+                target_delta=target_delta,
+                angular_speed=angular_speed,
+                cmd_rate_hz=cmd_rate_hz,
+                yaw_tolerance=yaw_tolerance,
+                stop=stop,
+            ):
+                return
+            # Dwell
+            if self._wait_or_localized(dwell_s, stop):
+                return
+            # Next sweep: increase index, flip direction
+            turn_index += 1
+            direction *= -1
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        """Wrap an angle to [-pi, pi]."""
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _latest_odom_yaw(self, max_age_s: float = 1.0) -> float | None:
+        with self._lock:
+            pose = self._odom_pose
+            received_at = self._odom_pose_received_at
+        if pose is None or received_at is None:
+            return None
+        if time.monotonic() - received_at > max_age_s:
+            return None
+        yaw = pose.get('yaw')
+        return float(yaw) if yaw is not None else None
+
+    def _turn_relative_by_odom(
+        self,
+        target_delta: float,
+        angular_speed: float,
+        cmd_rate_hz: float,
+        yaw_tolerance: float,
+        stop: threading.Event,
+    ) -> bool:
+        """
+        Turn until odometry yaw reaches target_delta relative to the turn start.
+        Returns True if the assist loop should stop (localized or stop event set).
+        """
+        interval = 1.0 / max(cmd_rate_hz, 1.0)
+        max_duration = abs(target_delta) / max(angular_speed, 1e-3) + 3.0
+
+        start_wait = time.monotonic()
+        start_yaw = self._latest_odom_yaw()
+        while start_yaw is None:
+            if self._should_stop_loc_assist(stop):
+                return True
+            # Do not blind-turn without fresh odometry.
+            self._publish_cmd_vel(0.0, 0.0)
+            if time.monotonic() - start_wait > 5.0:
+                self.get_logger().warn('Localization assist waiting for fresh odometry yaw')
+                start_wait = time.monotonic()
+            time.sleep(interval)
+            start_yaw = self._latest_odom_yaw()
+
+        angular_z = math.copysign(abs(angular_speed), target_delta)
+        start_time = time.monotonic()
+        previous_yaw = start_yaw
+        accumulated_delta = 0.0
+
+        while True:
+            if self._should_stop_loc_assist(stop):
+                return True
+
+            current_yaw = self._latest_odom_yaw()
+            if current_yaw is None:
+                # Odometry disappeared; stop rather than continuing open-loop.
+                self._publish_cmd_vel(0.0, 0.0)
+                time.sleep(interval)
+                continue
+
+            accumulated_delta += self._wrap_angle(current_yaw - previous_yaw)
+            previous_yaw = current_yaw
+            remaining = target_delta - accumulated_delta
+            if abs(remaining) <= yaw_tolerance:
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            # If we overshot, stop this segment instead of commanding a reverse
+            # correction sweep. The next sweep segment will continue the pattern.
+            if math.copysign(1.0, remaining) != math.copysign(1.0, target_delta):
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            if time.monotonic() - start_time > max_duration:
+                self.get_logger().warn(
+                    f'Localization assist turn timeout: target_delta={target_delta:.3f} '
+                    f'accumulated_delta={accumulated_delta:.3f} remaining={remaining:.3f}'
+                )
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            self._publish_cmd_vel(0.0, angular_z)
+            time.sleep(interval)
+
+    def _should_stop_loc_assist(self, stop: threading.Event) -> bool:
+        if stop.is_set():
+            self._publish_cmd_vel(0.0, 0.0)
+            return True
+        with self._lock:
+            localized = self._localized
+        if localized:
+            self._publish_cmd_vel(0.0, 0.0)
+            return True
+        return False
+
+    def _wait_or_localized(self, duration: float, stop: threading.Event) -> bool:
+        """
+        Wait for `duration` seconds, checking localization and stop event
+        every 0.1s. Returns True if should stop (localized or event set).
+        """
+        elapsed = 0.0
+        interval = 0.1
+        while elapsed < duration:
+            if self._should_stop_loc_assist(stop):
+                return True
+            time.sleep(interval)
+            elapsed += interval
+        return False
+
+    def _on_localization_achieved(self):
+        """
+        Called when localization succeeds for the first time.
+        Stops the assist sweep and launches cmd_vel_control.
+        """
+        with self._lock:
+            loc_assist = self._loc_assist_enabled
+            nav_running = self._nav_nodes_running
+            cmd_vel_proc = self._cmd_vel_proc
+            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
+                return
+            if cmd_vel_proc is not None:
+                self._cmd_vel_proc = None
+        if not loc_assist or not nav_running:
+            return
+        # Stop the sweep
+        self._stop_loc_assist()
+        # Now start cmd_vel_control. Re-check under the lock because both
+        # /mapping/current_pose_in_map and /map/relocalization can report the
+        # first successful localization close together.
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        with self._lock:
+            cmd_vel_proc = self._cmd_vel_proc
+            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
+                return
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+                env=_env,
+            )
+        self.get_logger().info('Localization achieved — cmd_vel_control started')
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
@@ -1005,8 +1466,12 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
 
-    def cmd_send_pois(self, poi_ids: list[int]):
-        """Publish selected POIs to map_node and transition to navigation state."""
+    def cmd_send_pois(self, poi_ids: list[int | str]):
+        """Publish selected POIs to map_node and transition to navigation state.
+
+        Items may be integer POI IDs or POI names. The payload is re-indexed as
+        a dense queue while preserving each POI's original id/name metadata.
+        """
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
         else:
@@ -1016,14 +1481,27 @@ class BackendNode(Ros2NodeManager):
                 return
             with open(pois_file) as f:
                 all_pois = json.load(f)
+            pois_by_name = {
+                poi.get('name'): poi
+                for poi in all_pois.values()
+                if isinstance(poi, dict) and isinstance(poi.get('name'), str)
+            }
             # Re-index as a dense queue ("0", "1", ...) so downstream
-            # consumers navigate in the same order the UI sent the checked POIs,
+            # consumers navigate in the same order the UI/nav_flow sent POIs,
             # instead of falling back to the original ids / pois.json order.
             payload = {}
-            for pid in poi_ids:
-                key = str(pid)
-                if key in all_pois:
-                    payload[str(len(payload))] = all_pois[key]
+            for poi_ref in poi_ids:
+                poi = None
+                if isinstance(poi_ref, int):
+                    poi = all_pois.get(str(poi_ref))
+                elif isinstance(poi_ref, str):
+                    poi = pois_by_name.get(poi_ref)
+                    if poi is None and poi_ref.isdigit():
+                        poi = all_pois.get(poi_ref)
+                if poi is not None:
+                    payload[str(len(payload))] = poi
+                else:
+                    self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         with self._lock:
             nav_running = self._nav_nodes_running
