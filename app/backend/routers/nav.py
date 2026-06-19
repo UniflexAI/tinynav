@@ -118,7 +118,11 @@ def nav_nodes_disable():
 def nav_loc_assist(req: dict):
     node = _require_node()
     enabled = bool(req.get('enabled', False))
-    node.cmd_set_loc_assist(enabled)
+    if not node.cmd_set_loc_assist(enabled):
+        raise HTTPException(
+            409,
+            'Turn Nav off before changing Assist; enable Assist before starting Nav',
+        )
     return {'ok': True, 'enabled': enabled}
 
 

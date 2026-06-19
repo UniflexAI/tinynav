@@ -977,11 +977,14 @@ class BackendNode(Ros2NodeManager):
     # Localization assist: yaw sweep until localized                        #
     # ------------------------------------------------------------------ #
 
-    def cmd_set_loc_assist(self, enabled: bool):
-        """Enable or disable the auto-localization assist toggle."""
+    def cmd_set_loc_assist(self, enabled: bool) -> bool:
+        """Enable or disable localization assist before nav nodes start."""
         with self._lock:
+            if self._nav_nodes_running:
+                return False
             self._loc_assist_enabled = enabled
         self.get_logger().info(f'Localization assist {"enabled" if enabled else "disabled"}')
+        return True
 
     def _start_loc_assist(self, env: dict):
         """Start the yaw sweep thread (no cmd_vel_control process)."""
