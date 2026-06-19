@@ -1433,7 +1433,19 @@ class _LocAssistToggle extends ConsumerStatefulWidget {
 class _LocAssistToggleState extends ConsumerState<_LocAssistToggle> {
   bool _loading = false;
 
-  Future<void> _toggle(bool currentlyEnabled) async {
+  Future<void> _toggle(bool currentlyEnabled, bool navNodesRunning) async {
+    if (navNodesRunning) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Turn Nav off before changing Assist; enable Assist before starting Nav',
+          ),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     setState(() => _loading = true);
     try {
       await ref.read(dioProvider).post(
@@ -1456,9 +1468,10 @@ class _LocAssistToggleState extends ConsumerState<_LocAssistToggle> {
   Widget build(BuildContext context) {
     final status = widget.statusAsync.valueOrNull;
     final enabled = status?.locAssistEnabled ?? false;
+    final navNodesRunning = status?.navNodesRunning ?? false;
 
     return FilledButton.icon(
-      onPressed: _loading ? null : () => _toggle(enabled),
+      onPressed: _loading ? null : () => _toggle(enabled, navNodesRunning),
       style: FilledButton.styleFrom(
         backgroundColor: enabled
             ? const Color(0xFFFFB74D).withOpacity(0.9)
