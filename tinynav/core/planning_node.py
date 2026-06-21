@@ -15,7 +15,8 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
-from tinynav.core.robot_config import RobotConfig, GO2_CONFIG, B2_CONFIG, ROBOT_CONFIGS, get_robot_config
+from tinynav.core.robot_config import GO2_CONFIG
+from dataclasses import dataclass
 
 
 # === Helper functions ===
