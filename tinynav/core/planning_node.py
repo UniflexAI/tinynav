@@ -5,7 +5,6 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
-from dataclasses import dataclass
 from numba import njit
 import message_filters
 from rclpy.time import Time
@@ -16,54 +15,8 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from tinynav.core.robot_config import RobotConfig, GO2_CONFIG, B2_CONFIG, ROBOT_CONFIGS, get_robot_config
 
-
-@dataclass
-class RobotConfig:
-    """Robot geometry. Body frame: +x forward, +y left."""
-    name: str = 'go2'
-    shape: str = 'square'
-    length: float = 0.7
-    width: float = 0.3
-    radius: float = 0.3
-    camera_x: float = 0.35
-    camera_y: float = 0.0
-    control_x: float = 0.0
-    control_y: float = 0.0
-    safety_radius: float = 0.1
-
-    @property
-    def cam_offset_3d(self):
-        """Offset [left, up, forward] from control center to camera in body frame."""
-        return np.array([self.camera_y - self.control_y, 0.0, self.camera_x - self.control_x], dtype=np.float32)
-
-    @property
-    def half_size(self):
-        if self.shape == 'circle':
-            return (self.radius, self.radius)
-        return (self.length / 2.0, self.width / 2.0)
-
-    def footprint_from_control(self):
-        """Returns (front_len, rear_len, half_w) relative to control center."""
-        hl, hw = self.half_size
-        return float(hl - self.control_x), float(hl + self.control_x), float(hw)
-
-
-GO2_CONFIG = RobotConfig(
-    name='go2', shape='square',
-    length=0.4, width=0.3,
-    camera_x=0.2, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
-)
-
-B2_CONFIG = RobotConfig(
-    name='b2', shape='square',
-    length=1.0, width=0.5,
-    camera_x=0.5, camera_y=0.0,
-    control_x=-0.5, control_y=0.0,
-    safety_radius=0.1,
-)
 
 # === Helper functions ===
 @njit(cache=True)

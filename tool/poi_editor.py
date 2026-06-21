@@ -22,6 +22,7 @@ import rclpy
 import os
 from math_utils import msg2np, matrix_to_quat
 from tool.video_db import VideoDB
+from robot_config import get_robot_config, ROBOT_CONFIGS, camera_to_body_position, body_to_camera_position
 
 class SplatFile(TypedDict):
     centers: npt.NDArray[np.floating]
@@ -310,6 +311,22 @@ def main(
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
     
+    # Load robot config
+    from robot_config import get_robot_config, ROBOT_CONFIGS, camera_to_body_position
+    robot_config_path = tinynav_map_path / "robot_config.json"
+    saved_robot_name = "go2"
+    if robot_config_path.exists():
+        try:
+            with open(robot_config_path, "r") as f:
+                saved_robot_name = json.load(f).get("robot", "go2")
+        except Exception:
+            pass
+    robot_config = get_robot_config(saved_robot_name)
+
+    # Load poses for nearest-camera lookup (needed for cam-to-body offset)
+    all_poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
+    all_pose_items = list(all_poses.items())  # [(timestamp, 4x4 matrix), ...]
+
     # POI management
     poi_points = {}
     poi_id_counter = 0
@@ -321,8 +338,94 @@ def main(
             for k, v in poi_points.items():
                 v['position'] = np.array(v['position'])
             poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
-       
-    
+
+    # Robot config GUI
+    with server.gui.add_folder("Robot Config") as _:
+        robot_dropdown = server.gui.add_dropdown(
+            "Robot Type", options=list(ROBOT_CONFIGS.keys()), initial_value=saved_robot_name
+        )
+        apply_offset_checkbox = server.gui.add_checkbox(
+            "Apply cam-to-body offset on save", initial_value=True
+        )
+        show_footprint_checkbox = server.gui.add_checkbox(
+            "Show robot footprint at POIs", initial_value=True
+        )
+
+        @robot_dropdown.on_update
+        def _(_) -> None:
+            nonlocal robot_config
+            robot_config = get_robot_config(robot_dropdown.value)
+            # Persist selection
+            with open(robot_config_path, "w") as f:
+                json.dump({"robot": robot_dropdown.value}, f, indent=2)
+            print(f"Robot config switched to: {robot_config.name}")
+
+    def _find_nearest_pose_R(position: np.ndarray) -> np.ndarray:
+        """Find the rotation matrix of the nearest camera pose to a 3D position."""
+        best_dist = float('inf')
+        best_R = np.eye(3)
+        for _, cam_pose in all_pose_items:
+            cam_pos = cam_pose[:3, 3]
+            dist = np.linalg.norm(cam_pos - position)
+            if dist < best_dist:
+                best_dist = dist
+                best_R = cam_pose[:3, :3]
+        return best_R
+
+    def _get_export_position(poi_position: np.ndarray) -> np.ndarray:
+        """Return the exported POI position, applying cam-to-body offset if enabled."""
+        if not apply_offset_checkbox.value:
+            return poi_position
+        R = _find_nearest_pose_R(poi_position)
+        return camera_to_body_position(poi_position, R, robot_config)
+
+    footprint_handles = {}  # poi_id -> list of viser handles for footprint viz
+
+    def _update_footprint_viz(poi_id: int):
+        """Show/hide robot footprint at a POI position."""
+        # Remove old handles
+        for h in footprint_handles.get(poi_id, []):
+            h.remove()
+        footprint_handles[poi_id] = []
+
+        if not show_footprint_checkbox.value:
+            return
+        if poi_id not in poi_points:
+            return
+
+        pos = poi_points[poi_id]['position']
+        R = _find_nearest_pose_R(pos)
+        # Footprint in camera/world frame: forward=z, left=x
+        forward = R @ np.array([0.0, 0.0, 1.0])
+        left = R @ np.array([1.0, 0.0, 0.0])
+        fl, rl, hw = robot_config.footprint_from_control()
+        corners = [
+            pos + forward * fl + left * hw,
+            pos + forward * fl - left * hw,
+            pos - forward * rl - left * hw,
+            pos - forward * rl + left * hw,
+        ]
+        # Draw 4 line segments as thin boxes (viser doesn't have add_line_segments on scene directly,
+        # use add_line_segments)
+        segments = []
+        for i in range(4):
+            segments.append(np.array([corners[i], corners[(i + 1) % 4]]))
+        segments = np.array(segments)
+        n = len(segments)
+        colors = np.tile(np.array([[0.0, 1.0, 0.0]], dtype=np.float32), (n, 2, 1))
+        handle = server.scene.add_line_segments(
+            f"/footprints/poi_{poi_id}",
+            points=segments,
+            colors=colors,
+            line_width=2,
+        )
+        footprint_handles[poi_id].append(handle)
+
+    @show_footprint_checkbox.on_update
+    def _(_) -> None:
+        for poi_id in list(poi_points.keys()):
+            _update_footprint_viz(poi_id)
+
     # Add POI management UI
     with server.gui.add_folder("Points of Interest (POI)") as _:
         add_poi_button = server.gui.add_button("Add POI Point")
@@ -330,9 +433,18 @@ def main(
 
         @add_save_poi_button.on_click
         def _(_) -> None:
+            # Build export copy with offset applied if enabled
+            export_points = {}
+            for k, v in poi_points.items():
+                export_points[k] = {
+                    'id': v.get('id', k),
+                    'name': v.get('name', f'POI_{k}'),
+                    'position': _get_export_position(np.asarray(v['position'], dtype=float)).tolist(),
+                }
             with open(f"{tinynav_map_path}/pois.json", "w") as f:
-                json.dump(poi_points, f, indent=2, default=lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
-
+                json.dump(export_points, f, indent=2)
+            print(f"Saved {len(export_points)} POIs to {tinynav_map_path}/pois.json"
+                  f" (offset={'on' if apply_offset_checkbox.value else 'off'}, robot={robot_config.name})")
 
         poi_list_container = server.gui.add_folder("POI List")
         for poi_id, poi_point in poi_points.items():
@@ -343,11 +455,10 @@ def main(
                 position=poi_point['position']
             )
             create_poi_ui(server, poi_list_container,int(poi_id), poi_points, sphere_handle)
+            _update_footprint_viz(poi_id)
 
         @add_poi_button.on_click
         def _(_) -> None:
-            # Get camera position as POI location
-            #camera_position = server.camera.position
             nonlocal poi_id_counter
             poi_id = poi_id_counter
             poi_id_counter += 1
@@ -358,7 +469,6 @@ def main(
                 poi_position = previous_position + np.array([0.3, 0.0, 0.0])
             else:
                 poi_position = np.random.randn(3)
-            # Add POI to list
             poi_points[poi_id] = {
                 'id': poi_id,
                 'name': poi_name,
@@ -371,6 +481,7 @@ def main(
                 position=poi_points[poi_id]['position']
             )
             create_poi_ui(server, poi_list_container,poi_id, poi_points, sphere_handle)
+            _update_footprint_viz(poi_id)
     
     # Load and visualize occupancy grid as 2D XY projection (same as build_map_node).
     occupancy_grid_path = tinynav_map_path / "occupancy_grid.npy"
@@ -565,7 +676,7 @@ def main(
         if not occupancy_meta_path.exists():
             print(f"  Missing: {occupancy_meta_path}")
     
-    poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
+    poses = all_poses  # reuse already-loaded poses
     if (tinynav_map_path / "intrinsics.npy").exists():
         camera_K = np.load(tinynav_map_path / "intrinsics.npy", allow_pickle=True)
     elif (tinynav_map_path / "rgb_camera_intrinsics.npy").exists():
