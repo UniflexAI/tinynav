@@ -170,7 +170,15 @@ def _load_infra1_camera_image(infra1_db: VideoDB | None, timestamp: str) -> np.n
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     
-def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphere_handle:viser.SceneHandle):
+def create_poi_ui(
+    server,
+    poi_list_container,
+    poi_index: int,
+    poi_points: dict,
+    sphere_handle: viser.SceneHandle,
+    on_position_update=None,
+    on_delete=None,
+):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
             gui_vector3 = server.gui.add_vector3(
@@ -199,10 +207,12 @@ def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphe
     # Add a transform gizmo attached to the sphere
     gizmo = server.scene.add_transform_controls(f"/{poi_points[poi_index]['name']}_gizmo", position=poi_points[poi_index]['position'], wxyz=(1.0, 0.0, 0.0, 0.0))
     def on_gizmo_update(event):
-        # Update sphere position when gizmo is dragged
+        # Update sphere position when gizmo is dragged.
         sphere_handle.position = event.target.position
         gui_vector3.value = event.target.position
         poi_points[poi_index]['position'] = event.target.position
+        if on_position_update is not None:
+            on_position_update(poi_index)
         #print("Sphere moved to:", event.position)
     gizmo.on_update(on_gizmo_update)
 
@@ -212,6 +222,8 @@ def create_poi_ui(server,poi_list_container,poi_index:int, poi_points:dict, sphe
         poi_container.remove()
         sphere_handle.remove()
         gizmo.remove()
+        if on_delete is not None:
+            on_delete(poi_index)
 
 class RelocalizationPose(Node):
     def __init__(self, viser_server: viser.ViserServer):
@@ -311,8 +323,8 @@ def main(
     server.scene.world_axes.visible = True
     server.scene.set_up_direction("+z")
     
-    # Load robot config
-    from robot_config import get_robot_config, ROBOT_CONFIGS, camera_to_body_position
+    # Load robot config. pois.json remains in map_node format (camera positions),
+    # while the editor displays and edits robot body-center positions.
     robot_config_path = tinynav_map_path / "robot_config.json"
     saved_robot_name = "go2"
     if robot_config_path.exists():
@@ -321,44 +333,13 @@ def main(
                 saved_robot_name = json.load(f).get("robot", "go2")
         except Exception:
             pass
+    if saved_robot_name not in ROBOT_CONFIGS:
+        saved_robot_name = "go2"
     robot_config = get_robot_config(saved_robot_name)
 
-    # Load poses for nearest-camera lookup (needed for cam-to-body offset)
+    # Load poses for nearest-camera lookup (needed for camera/body conversion).
     all_poses = np.load(tinynav_map_path / "poses.npy", allow_pickle=True).item()
     all_pose_items = list(all_poses.items())  # [(timestamp, 4x4 matrix), ...]
-
-    # POI management
-    poi_points = {}
-    poi_id_counter = 0
-
-    if os.path.exists(f"{tinynav_map_path}/pois.json"):
-        with open(f"{tinynav_map_path}/pois.json", "r") as f:
-            poi_points = json.load(f)
-            poi_points = {int(k): v for k, v in poi_points.items()}
-            for k, v in poi_points.items():
-                v['position'] = np.array(v['position'])
-            poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
-
-    # Robot config GUI
-    with server.gui.add_folder("Robot Config") as _:
-        robot_dropdown = server.gui.add_dropdown(
-            "Robot Type", options=list(ROBOT_CONFIGS.keys()), initial_value=saved_robot_name
-        )
-        apply_offset_checkbox = server.gui.add_checkbox(
-            "Apply cam-to-body offset on save", initial_value=True
-        )
-        show_footprint_checkbox = server.gui.add_checkbox(
-            "Show robot footprint at POIs", initial_value=True
-        )
-
-        @robot_dropdown.on_update
-        def _(_) -> None:
-            nonlocal robot_config
-            robot_config = get_robot_config(robot_dropdown.value)
-            # Persist selection
-            with open(robot_config_path, "w") as f:
-                json.dump({"robot": robot_dropdown.value}, f, indent=2)
-            print(f"Robot config switched to: {robot_config.name}")
 
     def _find_nearest_pose_R(position: np.ndarray) -> np.ndarray:
         """Find the rotation matrix of the nearest camera pose to a 3D position."""
@@ -372,20 +353,75 @@ def main(
                 best_R = cam_pose[:3, :3]
         return best_R
 
+    def _camera_json_to_editor_body_position(cam_position: np.ndarray) -> np.ndarray:
+        """Convert pois.json camera position into editor body-center position."""
+        R = _find_nearest_pose_R(cam_position)
+        return camera_to_body_position(cam_position, R, robot_config)
+
+    def _editor_body_to_camera_json_position(body_position: np.ndarray) -> np.ndarray:
+        """Convert editor body-center position into pois.json camera position."""
+        # First estimate orientation near the body point, then re-query near the
+        # resulting camera point. This keeps the nearest-pose approximation stable
+        # for robots with larger camera/body offsets.
+        R = _find_nearest_pose_R(body_position)
+        cam_position = body_to_camera_position(body_position, R, robot_config)
+        R = _find_nearest_pose_R(cam_position)
+        return body_to_camera_position(body_position, R, robot_config)
+
+    # POI management. In memory, poi_points['position'] is editor/body position.
+    poi_points = {}
+    poi_id_counter = 0
+
+    if os.path.exists(f"{tinynav_map_path}/pois.json"):
+        with open(f"{tinynav_map_path}/pois.json", "r") as f:
+            poi_points = json.load(f)
+            poi_points = {int(k): v for k, v in poi_points.items()}
+            for k, v in poi_points.items():
+                cam_position = np.array(v['position'], dtype=float)
+                v['position'] = _camera_json_to_editor_body_position(cam_position)
+            poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
+
+    # Robot config GUI
+    with server.gui.add_folder("Robot Config") as _:
+        robot_dropdown = server.gui.add_dropdown(
+            "Robot Type", options=list(ROBOT_CONFIGS.keys()), initial_value=saved_robot_name
+        )
+        save_as_camera_checkbox = server.gui.add_checkbox(
+            "Save JSON as camera positions (map_node)", initial_value=True
+        )
+        show_footprint_checkbox = server.gui.add_checkbox(
+            "Show robot footprint at POIs", initial_value=True
+        )
+
+        @robot_dropdown.on_update
+        def _(_) -> None:
+            nonlocal robot_config
+            robot_config = get_robot_config(robot_dropdown.value)
+            # Persist selection
+            with open(robot_config_path, "w") as f:
+                json.dump({"robot": robot_dropdown.value}, f, indent=2)
+            print(f"Robot config switched to: {robot_config.name}")
+            for poi_id in list(poi_points.keys()):
+                _update_footprint_viz(poi_id)
+
     def _get_export_position(poi_position: np.ndarray) -> np.ndarray:
-        """Return the exported POI position, applying cam-to-body offset if enabled."""
-        if not apply_offset_checkbox.value:
+        """Return pois.json position. Default format is camera position for map_node."""
+        if not save_as_camera_checkbox.value:
             return poi_position
-        R = _find_nearest_pose_R(poi_position)
-        return camera_to_body_position(poi_position, R, robot_config)
+        return _editor_body_to_camera_json_position(poi_position)
 
     footprint_handles = {}  # poi_id -> list of viser handles for footprint viz
+
+    def _remove_footprint_viz(poi_id: int):
+        """Remove robot footprint visualization for a POI."""
+        for h in footprint_handles.get(poi_id, []):
+            h.remove()
+        footprint_handles.pop(poi_id, None)
 
     def _update_footprint_viz(poi_id: int):
         """Show/hide robot footprint at a POI position."""
         # Remove old handles
-        for h in footprint_handles.get(poi_id, []):
-            h.remove()
+        _remove_footprint_viz(poi_id)
         footprint_handles[poi_id] = []
 
         if not show_footprint_checkbox.value:
@@ -444,7 +480,8 @@ def main(
             with open(f"{tinynav_map_path}/pois.json", "w") as f:
                 json.dump(export_points, f, indent=2)
             print(f"Saved {len(export_points)} POIs to {tinynav_map_path}/pois.json"
-                  f" (offset={'on' if apply_offset_checkbox.value else 'off'}, robot={robot_config.name})")
+                  f" (format={'camera/map_node' if save_as_camera_checkbox.value else 'body/editor'}, "
+                  f"robot={robot_config.name})")
 
         poi_list_container = server.gui.add_folder("POI List")
         for poi_id, poi_point in poi_points.items():
@@ -454,7 +491,15 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_point['position']
             )
-            create_poi_ui(server, poi_list_container,int(poi_id), poi_points, sphere_handle)
+            create_poi_ui(
+                server,
+                poi_list_container,
+                int(poi_id),
+                poi_points,
+                sphere_handle,
+                on_position_update=_update_footprint_viz,
+                on_delete=_remove_footprint_viz,
+            )
             _update_footprint_viz(poi_id)
 
         @add_poi_button.on_click
@@ -480,7 +525,15 @@ def main(
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_points[poi_id]['position']
             )
-            create_poi_ui(server, poi_list_container,poi_id, poi_points, sphere_handle)
+            create_poi_ui(
+                server,
+                poi_list_container,
+                poi_id,
+                poi_points,
+                sphere_handle,
+                on_position_update=_update_footprint_viz,
+                on_delete=_remove_footprint_viz,
+            )
             _update_footprint_viz(poi_id)
     
     # Load and visualize occupancy grid as 2D XY projection (same as build_map_node).
