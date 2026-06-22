@@ -50,11 +50,3 @@ ROBOT_CONFIGS = {'go2': GO2_CONFIG, 'b2': B2_CONFIG}
 
 # Switch robot here
 ROBOT_CONFIG = GO2_CONFIG
-
-
-def camera_to_body_position(cam_pos, cam_R, robot_config=ROBOT_CONFIG):
-    return cam_pos - cam_R @ robot_config.cam_offset_3d
-
-
-def body_to_camera_position(body_pos, cam_R, robot_config=ROBOT_CONFIG):
-    return body_pos + cam_R @ robot_config.cam_offset_3d

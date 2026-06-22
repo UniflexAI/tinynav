@@ -30,7 +30,7 @@ from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
-from tinynav.core.robot_config import ROBOT_CONFIG, body_to_camera_position
+from tinynav.core.robot_config import ROBOT_CONFIG
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
