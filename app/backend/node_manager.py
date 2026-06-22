@@ -192,7 +192,6 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
-        self._map_poses: dict | None = None  # lazy-loaded poses.npy for body-to-cam conversion
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
@@ -970,32 +969,9 @@ class BackendNode(Ros2NodeManager):
         self._stop_all()
         self._start('rosbag_build_map')
 
-    def _load_map_poses(self):
-        """Lazily load poses.npy for body-to-cam conversion. Cached after first call."""
-        if hasattr(self, '_map_poses_cache'):
-            return self._map_poses_cache
-        poses_path = os.path.join(self.map_path, 'poses.npy')
-        if os.path.exists(poses_path):
-            self._map_poses_cache = np.load(poses_path, allow_pickle=True).item()
-        else:
-            self._map_poses_cache = {}
-        return self._map_poses_cache
-
     def _body_to_cam(self, body_pos: list[float]) -> list[float]:
-        """Convert a body-center position to camera position using ROBOT_CONFIG."""
-        poses = self._load_map_poses()
-        if not poses:
-            return body_pos
         body_arr = np.array(body_pos, dtype=float)
-        best_dist = float('inf')
-        best_R = np.eye(3)
-        for _, cam_pose in poses.items():
-            cam_pos = cam_pose[:3, 3]
-            dist = np.linalg.norm(cam_pos - body_arr)
-            if dist < best_dist:
-                best_dist = dist
-                best_R = cam_pose[:3, :3]
-        cam_arr = body_to_camera_position(body_arr, best_R, ROBOT_CONFIG)
+        cam_arr = body_arr + ROBOT_CONFIG.cam_offset_3d
         return cam_arr.tolist()
 
     def _publish_cmd_pois(self, poi_id: int | None):
@@ -1017,7 +993,6 @@ class BackendNode(Ros2NodeManager):
         # Convert body position to camera position for map_node
         poi = dict(pois[key])
         poi['position'] = self._body_to_cam(poi['position'])
-        # Re-index as "0" to match pub_pois.py convention expected by map_node
         payload = {'0': poi}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
 
