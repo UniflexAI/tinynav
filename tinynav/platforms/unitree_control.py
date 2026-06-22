@@ -5,7 +5,7 @@ from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
 from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Bool, Float32, Int32, String
 from enum import Enum
 import logging
 import time
@@ -19,7 +19,15 @@ class RobotStatus(Enum):
     SITTING = "sitting"
 
 
+class ChargeState(Enum):
+    CHARGING = "charging"
+    DISCHARGING = "discharging"
+    IDLE = "idle"
+
+
 class Ros2UnitreeManagerNode(Node):
+    CHARGE_CURRENT_THRESHOLD_MA = 500
+
     def __init__(self, networkInterface: str = "enP8p1s0"):
         super().__init__('ros2_unitree_manager')
         self.channel = ChannelFactoryInitialize(0, networkInterface)
@@ -45,6 +53,8 @@ class Ros2UnitreeManagerNode(Node):
 
         self._robot_status = RobotStatus.STANDUP
         self.battery = 0.0
+        self.battery_current = 0
+        self.charge_state = ChargeState.IDLE
         self.last_twist_time = None
         self.logger = logging.getLogger(__name__)
 
@@ -58,6 +68,9 @@ class Ros2UnitreeManagerNode(Node):
         lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
         
         self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
+        self.publisher_battery_current = self.create_publisher(Int32, '/battery_current', 10)
+        self.publisher_battery_charging = self.create_publisher(Bool, '/battery_charging', 10)
+        self.publisher_battery_charge_state = self.create_publisher(String, '/battery_charge_state', 10)
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
@@ -95,12 +108,34 @@ class Ros2UnitreeManagerNode(Node):
         msg.data = self._robot_status.value
         self.publisher_robot_status.publish(msg)
 
+    def _charge_state_from_current(self, current: int) -> ChargeState:
+        if current > self.CHARGE_CURRENT_THRESHOLD_MA:
+            return ChargeState.CHARGING
+        if current < -self.CHARGE_CURRENT_THRESHOLD_MA:
+            return ChargeState.DISCHARGING
+        return ChargeState.IDLE
+
     def LowStateMessageHandler(self, msg: LowState_):
         try:
             self.battery = float(msg.bms_state.soc)
+            self.battery_current = int(msg.bms_state.current)
+            self.charge_state = self._charge_state_from_current(self.battery_current)
+
             battery_msg = Float32()
             battery_msg.data = float(self.battery)
             self.publisher_battery.publish(battery_msg)
+
+            current_msg = Int32()
+            current_msg.data = self.battery_current
+            self.publisher_battery_current.publish(current_msg)
+
+            charging_msg = Bool()
+            charging_msg.data = self.charge_state == ChargeState.CHARGING
+            self.publisher_battery_charging.publish(charging_msg)
+
+            charge_state_msg = String()
+            charge_state_msg.data = self.charge_state.value
+            self.publisher_battery_charge_state.publish(charge_state_msg)
         except Exception as e:
             self.logger.error(f"Error in LowStateMessageHandler: {e}")
             import traceback
@@ -116,3 +151,4 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
+
