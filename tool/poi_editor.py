@@ -526,6 +526,8 @@ def main(
         "goal_poi_id": None,
         "start_marker": None,
         "goal_marker": None,
+        "start_label": None,
+        "goal_label": None,
         "path_handle": None,
         "poi_role_labels": {},
     }
@@ -539,22 +541,30 @@ def main(
 
     def refresh_nav_markers() -> None:
         refresh_poi_role_labels()
-        for marker_key, poi_key, color, radius in [
-            ("start_marker", "start_poi_id", (0, 255, 0), 0.25),
-            ("goal_marker", "goal_poi_id", (255, 0, 0), 0.25),
+        for marker_key, label_key, poi_key, color, radius, label_text in [
+            ("start_marker", "start_label", "start_poi_id", (0, 255, 0), 0.25, "🟢 START"),
+            ("goal_marker", "goal_label", "goal_poi_id", (255, 165, 0), 0.25, "🟠 END"),
         ]:
-            handle = nav_state.get(marker_key)
-            if handle is not None:
-                handle.remove()
-                nav_state[marker_key] = None
+            for handle_key in (marker_key, label_key):
+                handle = nav_state.get(handle_key)
+                if handle is not None:
+                    handle.remove()
+                    nav_state[handle_key] = None
             poi_id = nav_state.get(poi_key)
             if poi_id is None or poi_id not in poi_points:
                 continue
+            position = np.asarray(poi_points[poi_id]["position"], dtype=np.float32)
             nav_state[marker_key] = server.scene.add_icosphere(
                 f"/sdf_path_test/{poi_key}",
                 radius=radius,
                 color=color,
-                position=np.asarray(poi_points[poi_id]["position"], dtype=np.float32),
+                position=position,
+            )
+            label_position = position + np.array([0.0, 0.0, radius * 1.8], dtype=np.float32)
+            nav_state[label_key] = server.scene.add_label(
+                f"/sdf_path_test/{poi_key}_label",
+                text=label_text,
+                position=label_position,
             )
 
     if os.path.exists(f"{tinynav_map_path}/pois.json"):
