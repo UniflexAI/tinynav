@@ -58,9 +58,9 @@ ROBOT_CONFIGS = {
     'b2': B2_CONFIG,
 }
 
-# ── 换机器人只改这一行 ──
+# -- Change this line to switch robot --
 ACTIVE_ROBOT = 'go2'
-# ──────────────────────
+# ----------------------------------
 
 ROBOT_CONFIG = ROBOT_CONFIGS[ACTIVE_ROBOT]
 
