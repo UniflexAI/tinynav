@@ -15,7 +15,7 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
-from tinynav.core.robot_config import GO2_CONFIG
+from tinynav.core.robot_config import ROBOT_CONFIG
 from dataclasses import dataclass
 
 
@@ -304,7 +304,7 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
-        self.robot = GO2_CONFIG
+        self.robot = ROBOT_CONFIG
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "

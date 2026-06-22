@@ -58,6 +58,12 @@ ROBOT_CONFIGS = {
     'b2': B2_CONFIG,
 }
 
+# ── 换机器人只改这一行 ──
+ACTIVE_ROBOT = 'go2'
+# ──────────────────────
+
+ROBOT_CONFIG = ROBOT_CONFIGS[ACTIVE_ROBOT]
+
 
 def get_robot_config(name: str = 'go2') -> RobotConfig:
     """Look up a robot config by name. Falls back to GO2_CONFIG."""

@@ -30,6 +30,7 @@ from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
+from tinynav.core.robot_config import ROBOT_CONFIG, body_to_camera_position
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
@@ -191,6 +192,7 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
+        self._map_poses: dict | None = None  # lazy-loaded poses.npy for body→cam conversion
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
@@ -968,6 +970,34 @@ class BackendNode(Ros2NodeManager):
         self._stop_all()
         self._start('rosbag_build_map')
 
+    def _load_map_poses(self):
+        """Lazily load poses.npy for body→cam conversion. Cached after first call."""
+        if hasattr(self, '_map_poses_cache'):
+            return self._map_poses_cache
+        poses_path = os.path.join(self.map_path, 'poses.npy')
+        if os.path.exists(poses_path):
+            self._map_poses_cache = np.load(poses_path, allow_pickle=True).item()
+        else:
+            self._map_poses_cache = {}
+        return self._map_poses_cache
+
+    def _body_to_cam(self, body_pos: list[float]) -> list[float]:
+        """Convert a body-center position to camera position using ROBOT_CONFIG."""
+        poses = self._load_map_poses()
+        if not poses:
+            return body_pos
+        body_arr = np.array(body_pos, dtype=float)
+        best_dist = float('inf')
+        best_R = np.eye(3)
+        for _, cam_pose in poses.items():
+            cam_pos = cam_pose[:3, 3]
+            dist = np.linalg.norm(cam_pos - body_arr)
+            if dist < best_dist:
+                best_dist = dist
+                best_R = cam_pose[:3, :3]
+        cam_arr = body_to_camera_position(body_arr, best_R, ROBOT_CONFIG)
+        return cam_arr.tolist()
+
     def _publish_cmd_pois(self, poi_id: int | None):
         """Publish the selected POI to map_node as JSON on /mapping/cmd_pois.
         Sending an empty dict clears the current nav target."""
@@ -984,8 +1014,11 @@ class BackendNode(Ros2NodeManager):
         if key not in pois:
             self.get_logger().warn(f'POI {poi_id} not found in pois.json')
             return
+        # Convert body position to camera position for map_node
+        poi = dict(pois[key])
+        poi['position'] = self._body_to_cam(poi['position'])
         # Re-index as "0" to match pub_pois.py convention expected by map_node
-        payload = {'0': pois[key]}
+        payload = {'0': poi}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
 
     def cmd_manual_target_pose(self, x: float, y: float, z: float):
@@ -1023,7 +1056,9 @@ class BackendNode(Ros2NodeManager):
             for pid in poi_ids:
                 key = str(pid)
                 if key in all_pois:
-                    payload[str(len(payload))] = all_pois[key]
+                    poi = dict(all_pois[key])
+                    poi['position'] = self._body_to_cam(poi['position'])
+                    payload[str(len(payload))] = poi
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         with self._lock:
             nav_running = self._nav_nodes_running
