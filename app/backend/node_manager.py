@@ -170,6 +170,7 @@ class BackendNode(Ros2NodeManager):
         self._vio_guard_recovering: bool = False
         self._vio_resume_poi_refs: list[int | str] = []
         self._active_nav_poi_refs: list[int | str] = []
+        self._vio_status_sub = None
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
@@ -180,7 +181,6 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
-        self.create_subscription(String, '/insight/vio_status', self._on_vio_status, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -705,6 +705,12 @@ class BackendNode(Ros2NodeManager):
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
 
+            if self._sensor_mode == 'looper' and self._vio_status_sub is None:
+                self._vio_status_sub = self.create_subscription(
+                    String, '/insight/vio_status', self._on_vio_status, 10
+                )
+                self.get_logger().info('Insight VIO guard enabled for looper sensor mode')
+
             if self._sensor_mode in ('looper', 'realsense'):
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -884,8 +890,10 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             loc_assist = self._loc_assist_enabled
-            vio_status = self._vio_status
-            vio_guard_stopped = self._vio_guard_stopped
+            sensor_mode = self._sensor_mode
+            vio_status = self._vio_status if sensor_mode == 'looper' else None
+            vio_guard_enabled = sensor_mode == 'looper'
+            vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -899,6 +907,7 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'locAssistEnabled': loc_assist,
+            'vioGuardEnabled': vio_guard_enabled,
             'vioStatus': vio_status,
             'vioGuardStopped': vio_guard_stopped,
         }
