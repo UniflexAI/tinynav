@@ -64,6 +64,7 @@ _PREVIEW_PROFILES = {
     'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
     'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
 }
+_VIO_STATUS_NORMAL = {'TRACKING', 'TRACKING_STATIC'}
 
 
 def _resize_preview_frame(arr: np.ndarray, max_edge_px: int = _PREVIEW_MAX_EDGE_PX) -> np.ndarray:
@@ -195,6 +196,16 @@ class BackendNode(Ros2NodeManager):
         self._loc_assist_thread: threading.Thread | None = None
         self._loc_assist_stop_event = threading.Event()
 
+        # Insight VIO guard is only enabled for looper mode. When VIO loses
+        # tracking, stop nav nodes and later resume the remaining POI ids after
+        # VIO recovers and relocalization succeeds.
+        self._vio_status: str | None = None
+        self._vio_status_sub = None
+        self._vio_guard_stopped: bool = False
+        self._vio_guard_recovering: bool = False
+        self._vio_resume_poi_ids: list[int] = []
+        self._active_nav_poi_ids: list[int] = []
+
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
 
@@ -226,6 +237,92 @@ class BackendNode(Ros2NodeManager):
                 cb(data)
         except json.JSONDecodeError:
             pass
+
+    def _on_vio_status(self, msg: String):
+        status = msg.data.strip().upper()
+        normal = status in _VIO_STATUS_NORMAL
+
+        with self._lock:
+            previous_status = self._vio_status
+            self._vio_status = status
+            already_stopped = self._vio_guard_stopped
+            recovering = self._vio_guard_recovering
+            nav_running = self._nav_nodes_running
+
+        if normal:
+            if already_stopped and not recovering:
+                self._recover_from_vio_guard_stop(status)
+            return
+
+        if already_stopped or not nav_running:
+            return
+
+        self._stop_for_vio_guard(status, previous_status)
+
+    def _stop_for_vio_guard(self, status: str, previous_status: str | None):
+        resume_ids = self._remaining_nav_poi_ids_for_resume()
+        with self._lock:
+            self._vio_guard_stopped = True
+            self._vio_guard_recovering = False
+            self._vio_resume_poi_ids = resume_ids
+            self._localized = False
+
+        self.get_logger().warn(
+            f'Insight VIO abnormal ({previous_status!r} -> {status!r}); '
+            f'stopping nav nodes, remaining_pois={resume_ids!r}'
+        )
+        self.cmd_stop_nav_nodes()
+        with self._lock:
+            if self.state == 'navigation':
+                self.state = 'idle'
+        self._pub_state()
+
+    def _recover_from_vio_guard_stop(self, status: str):
+        with self._lock:
+            resume_ids = list(self._vio_resume_poi_ids)
+            if not self._vio_guard_stopped or self._vio_guard_recovering:
+                return
+            self._vio_guard_recovering = True
+
+        self.get_logger().info(
+            f'Insight VIO recovered ({status!r}); starting nav nodes before resuming POIs={resume_ids!r}'
+        )
+        self.cmd_start_nav_nodes()
+
+    def _remaining_nav_poi_ids_for_resume(self) -> list[int]:
+        with self._lock:
+            poi_ids = list(self._active_nav_poi_ids)
+            progress = dict(self._nav_progress) if self._nav_progress else None
+
+        if not poi_ids:
+            return []
+
+        index = 0
+        if progress:
+            try:
+                index = int(progress.get('poi_index', 0))
+                percent = float(progress.get('percent', 0.0))
+                if percent >= 100.0:
+                    index += 1
+            except (TypeError, ValueError):
+                index = 0
+        index = max(0, min(index, len(poi_ids)))
+        return poi_ids[index:]
+
+    def _resume_vio_pois_after_localized(self):
+        with self._lock:
+            if not self._vio_guard_stopped or not self._vio_guard_recovering:
+                return
+            resume_ids = list(self._vio_resume_poi_ids)
+            self._vio_guard_stopped = False
+            self._vio_guard_recovering = False
+            self._vio_resume_poi_ids = []
+
+        if resume_ids:
+            self.get_logger().info(f'Resuming POIs after VIO recovery localization: {resume_ids!r}')
+            self.cmd_send_pois(resume_ids)
+        else:
+            self.get_logger().info('VIO recovered and localized; no remaining POIs to resume')
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -435,6 +532,12 @@ class BackendNode(Ros2NodeManager):
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
 
+            if self._sensor_mode == 'looper' and self._vio_status_sub is None:
+                self._vio_status_sub = self.create_subscription(
+                    String, '/insight/vio_status', self._on_vio_status, 10
+                )
+                self.get_logger().info('Insight VIO guard enabled for looper sensor mode')
+
             if self._sensor_mode in ('looper', 'realsense'):
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -634,6 +737,9 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             loc_assist = self._loc_assist_enabled
+            vio_guard_enabled = self._sensor_mode == 'looper'
+            vio_status = self._vio_status if vio_guard_enabled else None
+            vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -647,6 +753,9 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'locAssistEnabled': loc_assist,
+            'vioGuardEnabled': vio_guard_enabled,
+            'vioStatus': vio_status,
+            'vioGuardStopped': vio_guard_stopped,
         }
 
     @staticmethod
@@ -1027,10 +1136,19 @@ class BackendNode(Ros2NodeManager):
             nav_running = self._nav_nodes_running
             cmd_vel_proc = self._cmd_vel_proc
             if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
-                return
-            if cmd_vel_proc is not None:
-                self._cmd_vel_proc = None
-        if not loc_assist or not nav_running:
+                already_running = True
+            else:
+                already_running = False
+                if cmd_vel_proc is not None:
+                    self._cmd_vel_proc = None
+        if not nav_running:
+            self._resume_vio_pois_after_localized()
+            return
+        if already_running:
+            self._resume_vio_pois_after_localized()
+            return
+        if not loc_assist:
+            self._resume_vio_pois_after_localized()
             return
         # Stop the sweep
         self._stop_loc_assist()
@@ -1049,6 +1167,7 @@ class BackendNode(Ros2NodeManager):
                 env=_env,
             )
         self.get_logger().info('Localization achieved — cmd_vel_control started')
+        self._resume_vio_pois_after_localized()
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
@@ -1261,6 +1380,9 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""
+        with self._lock:
+            self._active_nav_poi_ids = list(poi_ids)
+            self._nav_progress = None
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
         else:
@@ -1290,6 +1412,9 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_nav_start(self, poi_id: str | None = None):
         if poi_id is not None:
+            with self._lock:
+                self._active_nav_poi_ids = [int(poi_id)]
+                self._nav_progress = None
             self._publish_cmd_pois(int(poi_id))
         with self._lock:
             nav_running = self._nav_nodes_running
@@ -1305,6 +1430,10 @@ class BackendNode(Ros2NodeManager):
         if self.state != 'navigation':
             return
         with self._lock:
+            self._active_nav_poi_ids = []
+            self._vio_resume_poi_ids = []
+            self._vio_guard_stopped = False
+            self._vio_guard_recovering = False
             nav_running = self._nav_nodes_running
         if nav_running:
             # Clear the active nav target so map_node stops pathing.
