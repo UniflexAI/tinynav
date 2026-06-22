@@ -192,7 +192,7 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
-        self._map_poses: dict | None = None  # lazy-loaded poses.npy for body→cam conversion
+        self._map_poses: dict | None = None  # lazy-loaded poses.npy for body-to-cam conversion
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
@@ -971,7 +971,7 @@ class BackendNode(Ros2NodeManager):
         self._start('rosbag_build_map')
 
     def _load_map_poses(self):
-        """Lazily load poses.npy for body→cam conversion. Cached after first call."""
+        """Lazily load poses.npy for body-to-cam conversion. Cached after first call."""
         if hasattr(self, '_map_poses_cache'):
             return self._map_poses_cache
         poses_path = os.path.join(self.map_path, 'poses.npy')
