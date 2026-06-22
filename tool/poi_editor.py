@@ -306,6 +306,20 @@ def _plan_sdf_path_between_points(
     return world_path, f"SDF path OK: raw={len(raw_path)}, pruned={len(pruned_path)}, start_idx={start_idx}, goal_idx={goal_idx}"
 
 
+def _poi_path_role_label(poi_index: int, nav_state: dict | None) -> str:
+    if nav_state is None:
+        return "—"
+    is_start = nav_state.get("start_poi_id") == poi_index
+    is_goal = nav_state.get("goal_poi_id") == poi_index
+    if is_start and is_goal:
+        return "Start & End"
+    if is_start:
+        return "Start"
+    if is_goal:
+        return "End"
+    return "—"
+
+
 def create_poi_ui(
     server,
     poi_list_container,
@@ -317,6 +331,13 @@ def create_poi_ui(
 ):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
+            role_label = None
+            if nav_state is not None:
+                role_label = server.gui.add_text(
+                    "Path Role",
+                    initial_value=_poi_path_role_label(poi_index, nav_state),
+                )
+                nav_state.setdefault("poi_role_labels", {})[poi_index] = role_label
             gui_vector3 = server.gui.add_vector3(
                 "Position",
                 initial_value=poi_points[poi_index]['position'],
@@ -392,6 +413,7 @@ def create_poi_ui(
                 nav_state["start_poi_id"] = None
             if nav_state.get("goal_poi_id") == poi_index:
                 nav_state["goal_poi_id"] = None
+            nav_state.setdefault("poi_role_labels", {}).pop(poi_index, None)
         poi_container.remove()
         sphere_handle.remove()
         gizmo.remove()
@@ -505,9 +527,18 @@ def main(
         "start_marker": None,
         "goal_marker": None,
         "path_handle": None,
+        "poi_role_labels": {},
     }
 
+    def refresh_poi_role_labels() -> None:
+        for poi_id, label in list(nav_state.get("poi_role_labels", {}).items()):
+            if poi_id in poi_points:
+                label.value = _poi_path_role_label(poi_id, nav_state)
+            else:
+                nav_state["poi_role_labels"].pop(poi_id, None)
+
     def refresh_nav_markers() -> None:
+        refresh_poi_role_labels()
         for marker_key, poi_key, color, radius in [
             ("start_marker", "start_poi_id", (0, 255, 0), 0.25),
             ("goal_marker", "goal_poi_id", (255, 0, 0), 0.25),
