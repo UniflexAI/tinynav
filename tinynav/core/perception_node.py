@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 import sys
+import threading
 import time
 import cv2
 from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
@@ -9,6 +10,7 @@ import numpy as np
 import rclpy
 from codetiming import Timer
 from cv_bridge import CvBridge
+from queue import Empty, Full, Queue
 from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -141,6 +143,11 @@ class PerceptionNode(Node):
 
         self.accel_readings = []
         self.last_processed_timestamp = 0.0
+        self.imu_measurements_lock = threading.Lock()
+        self.stopped = False
+        self.stereo_queue = Queue(maxsize=1)
+        self.stereo_worker = threading.Thread(target=self._process_stereo_worker, daemon=True)
+        self.stereo_worker.start()
 
         self.camera_info_msg = None
 
@@ -204,27 +211,50 @@ class PerceptionNode(Node):
         self.imu_last_received_timestamp = current_timestamp
         accel_data = np.array([[imu_msg.linear_acceleration.x], [imu_msg.linear_acceleration.y], [imu_msg.linear_acceleration.z]])
         gyro_data = np.array([[imu_msg.angular_velocity.x], [imu_msg.angular_velocity.y], [imu_msg.angular_velocity.z]])
-        self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
+        with self.imu_measurements_lock:
+            self.imu_measurements.append([current_timestamp, accel_data.flatten(), gyro_data.flatten()])
 
     def _aligned_imu_callback(self, imu_msg):
         self._process_imu_msg(imu_msg)
 
     def _aligned_stereo_callback(self, stereo_pair_msg):
-        left_msg = stereo_pair_msg.left_msg
-        right_msg = stereo_pair_msg.right_msg
-        image_timestamp = stamp2second(left_msg.header.stamp)
+        image_timestamp = stamp2second(stereo_pair_msg.header.stamp)
         if image_timestamp - self.last_processed_timestamp < 0.1333:
             return
 
         self.last_processed_timestamp = image_timestamp
-        loop_start = time.perf_counter()
-        with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-            processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
-        if processed:
-            processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
-            self.stats_pub.publish(String(data=json.dumps(processed)))
+        try:
+            self.stereo_queue.put_nowait(stereo_pair_msg)
+        except Full:
+            self.stereo_queue.get_nowait()
+            self.stereo_queue.put_nowait(stereo_pair_msg)
+
+    def _process_stereo_worker(self):
+        while not self.stopped:
+            stereo_pair_msg = self.stereo_queue.get()
+            if stereo_pair_msg is None:
+                return
+
+            left_msg = stereo_pair_msg.left_msg
+            right_msg = stereo_pair_msg.right_msg
+            loop_start = time.perf_counter()
+            with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
+                processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
+            if processed:
+                processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
+                self.stats_pub.publish(String(data=json.dumps(processed)))
 
     def destroy_node(self):
+        self.stopped = True
+        try:
+            self.stereo_queue.put_nowait(None)
+        except Full:
+            try:
+                self.stereo_queue.get_nowait()
+            except Empty:
+                pass
+            self.stereo_queue.put_nowait(None)
+        self.stereo_worker.join()
         if self._async_loop is not None:
             self._async_loop.close()
             self._async_loop = None
@@ -290,23 +320,25 @@ class PerceptionNode(Node):
                 left_img.shape)
 
         # propagate IMU measurements
-        while len(self.imu_measurements) > 0 and self.imu_measurements[0][0] <= current_timestamp:
-            timestamp, accel, gyro = self.imu_measurements[0]
+        while True:
+            with self.imu_measurements_lock:
+                if len(self.imu_measurements) == 0 or self.imu_measurements[0][0] > current_timestamp:
+                    break
+                timestamp, accel, gyro = self.imu_measurements.popleft()
             dt = timestamp - self.keyframe_queue[-1].latest_imu_timestamp
 
             if timestamp <= self.keyframe_queue[-1].latest_imu_timestamp:
-                self.imu_measurements.popleft()
                 self.logger.warning("should only happen at beginning")
                 continue
 
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt) #todo
             self.keyframe_queue[-1].latest_imu_timestamp = timestamp
             self.keyframe_queue[-1].imu_measurement_count += 1
-
-            self.imu_measurements.popleft()
         # specially process the last imu
-        if len(self.imu_measurements) > 0 and current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.001:
-            timestamp, accel, gyro = self.imu_measurements[0]
+        with self.imu_measurements_lock:
+            next_imu_measurement = self.imu_measurements[0] if len(self.imu_measurements) > 0 else None
+        if next_imu_measurement is not None and current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp > 0.001:
+            timestamp, accel, gyro = next_imu_measurement
             dt = current_timestamp - self.keyframe_queue[-1].latest_imu_timestamp
             self.keyframe_queue[-1].preintegrated_imu.integrateMeasurement(accel, gyro, dt)
             self.keyframe_queue[-1].imu_measurement_count += 1
