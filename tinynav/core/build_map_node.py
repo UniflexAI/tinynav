@@ -740,14 +740,15 @@ class BuildMapNode(Node):
             self.odom[keyframe_image_timestamp] = odom
             self.detect_loop_closure(keyframe_image_timestamp)
 
-        self.maybe_run_global_refinement()
+        refined = self.maybe_run_global_refinement()
 
         with self.stage_timer.timed("publish_local_pointcloud"):
             cloud = depth_to_cloud(depth, self.K, 30, 3)
             self.publish_local_map(cloud, 'camera_'+str(keyframe_image_timestamp))
 
-        with self.stage_timer.timed("pose_graph_trajectory_publish"):
-            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+        if refined:
+            with self.stage_timer.timed("pose_graph_trajectory_publish"):
+                self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_image_timestamp
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
@@ -774,7 +775,7 @@ class BuildMapNode(Node):
                     self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
                     print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
 
-    def maybe_run_global_refinement(self) -> None:
+    def maybe_run_global_refinement(self) -> bool:
         """Run pose-graph optimization and full TF publish when the map has grown enough.
 
         Loop detection still runs every keyframe; this batches the expensive global steps using
@@ -783,7 +784,7 @@ class BuildMapNode(Node):
         """
         num_frames = len(self.pose_graph_used_pose)
         if not check_global_frames_ratio(num_frames, self._global_prev_num_frames, self.global_frames_ratio):
-            return
+            return False
 
         with self.stage_timer.timed("solve_pose_graph_online"):
             self.pose_graph_used_pose = solve_pose_graph(
@@ -792,6 +793,7 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("tf_publish"):
             self.publish_all_transforms()
         self._global_prev_num_frames = num_frames
+        return True
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
@@ -845,6 +847,10 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("tf_publish"):
             self.publish_all_transforms()
         self._global_prev_num_frames = len(self.pose_graph_used_pose)
+        if self.pose_graph_used_pose:
+            final_timestamp = max(self.pose_graph_used_pose.keys())
+            with self.stage_timer.timed("pose_graph_trajectory_publish_final"):
+                self.pose_graph_trajectory_publish(final_timestamp)
 
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
