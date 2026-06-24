@@ -380,8 +380,6 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_T = None
-        self.latest_floor_prob = None
-        self.latest_floor_prob_header = None
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ObstacleConfig()
         self.stamp = None
@@ -393,26 +391,12 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
-        self.floor_prob_sub = self.create_subscription(Image, "/segmentation/floor_prob", self.floor_prob_callback, 10)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
-
-    def floor_prob_callback(self, msg):
-        try:
-            floor_prob = self.bridge.imgmsg_to_cv2(msg, desired_encoding="mono8")
-        except Exception as exc:
-            self.get_logger().warning(f"Failed to decode floor probability image: {exc}")
-            return
-        self.latest_floor_prob = floor_prob.astype(np.float32) / 255.0
-        self.latest_floor_prob_header = msg.header
-        self.get_logger().info(
-            f"Received floor probability image {self.latest_floor_prob.shape} on /segmentation/floor_prob",
-            once=True,
-        )
 
     def info_callback(self, msg):
         if self.K is None:

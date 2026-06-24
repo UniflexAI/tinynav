@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/providers.dart';
 
 const _floorProbTopic = '/segmentation/floor_prob';
+const _floorStableProbTopic = '/segmentation/floor_prob_stable';
 const _floorOverlayTopic = '/segmentation/floor_overlay';
 
 class SegmentationTab extends ConsumerWidget {
@@ -16,6 +17,7 @@ class SegmentationTab extends ConsumerWidget {
     final topics = ref.watch(imageTopicsProvider).valueOrNull ?? const <String>[];
     final quality = ref.watch(previewQualityProvider);
     final hasProb = topics.contains(_floorProbTopic);
+    final hasStableProb = topics.contains(_floorStableProbTopic);
     final hasOverlay = topics.contains(_floorOverlayTopic);
 
     return Container(
@@ -72,7 +74,17 @@ class SegmentationTab extends ConsumerWidget {
                   const SizedBox(width: 10, height: 10),
                   Expanded(
                     child: _SegmentationPreviewPanel(
-                      title: 'Floor probability',
+                      title: 'Stable floor',
+                      topic: _floorStableProbTopic,
+                      available: hasStableProb,
+                      quality: quality,
+                      fit: BoxFit.contain,
+                    ),
+                  ),
+                  const SizedBox(width: 10, height: 10),
+                  Expanded(
+                    child: _SegmentationPreviewPanel(
+                      title: 'Raw probability',
                       topic: _floorProbTopic,
                       available: hasProb,
                       quality: quality,

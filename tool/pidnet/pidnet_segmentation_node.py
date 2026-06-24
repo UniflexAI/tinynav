@@ -21,6 +21,13 @@ class PIDNetSegmentationNode(Node):
         self.floor_channels = args.floor_channels
         self.threshold = float(args.threshold)
         self.alpha = float(args.overlay_alpha)
+        self.ema_current_weight = float(args.ema_current_weight)
+        self.hysteresis_on = float(args.hysteresis_on)
+        self.hysteresis_off = float(args.hysteresis_off)
+        self.morph_open_kernel = int(args.morph_open_kernel)
+        self.morph_close_kernel = int(args.morph_close_kernel)
+        self.ema_prob = None
+        self.stable_floor_mask = None
         self.publish_period = 1.0 / args.publish_hz if args.publish_hz > 0.0 else 0.0
         self.last_publish_time = 0.0
         self.frame_count = 0
@@ -37,10 +44,11 @@ class PIDNetSegmentationNode(Node):
             sensor_qos,
         )
         self.prob_pub = self.create_publisher(Image, args.prob_topic, 10)
+        self.stable_prob_pub = self.create_publisher(Image, args.stable_prob_topic, 10)
         self.overlay_pub = self.create_publisher(Image, args.overlay_topic, 10)
         self.get_logger().info(
-            f"PIDNet segmentation publishing {args.prob_topic} and {args.overlay_topic} "
-            f"from {args.image_topic} at {args.publish_hz:.2f} Hz"
+            f"PIDNet segmentation publishing {args.prob_topic}, {args.stable_prob_topic}, "
+            f"and {args.overlay_topic} from {args.image_topic} at {args.publish_hz:.2f} Hz"
         )
 
     def _should_process(self):
@@ -51,6 +59,40 @@ class PIDNetSegmentationNode(Node):
             return False
         self.last_publish_time = now
         return True
+
+    def _morph_mask(self, mask):
+        mask_u8 = mask.astype(np.uint8) * 255
+        if self.morph_open_kernel > 1:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (self.morph_open_kernel, self.morph_open_kernel),
+            )
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
+        if self.morph_close_kernel > 1:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (self.morph_close_kernel, self.morph_close_kernel),
+            )
+            mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
+        return mask_u8 >= 127
+
+    def _stable_floor_probability(self, prob_full):
+        prob_full = prob_full.astype(np.float32, copy=False)
+        if self.ema_prob is None or self.ema_prob.shape != prob_full.shape:
+            self.ema_prob = prob_full.copy()
+        else:
+            w = np.clip(self.ema_current_weight, 0.0, 1.0)
+            self.ema_prob = (1.0 - w) * self.ema_prob + w * prob_full
+
+        if self.stable_floor_mask is None or self.stable_floor_mask.shape != prob_full.shape:
+            mask = self.ema_prob >= self.threshold
+        else:
+            mask = self.stable_floor_mask.copy()
+            mask[self.ema_prob >= self.hysteresis_on] = True
+            mask[self.ema_prob <= self.hysteresis_off] = False
+
+        self.stable_floor_mask = self._morph_mask(mask)
+        return self.stable_floor_mask.astype(np.float32)
 
     def image_callback(self, msg):
         if not self._should_process():
@@ -67,18 +109,23 @@ class PIDNetSegmentationNode(Node):
                 alpha=self.alpha,
                 threshold=self.threshold,
             )
+            stable_prob_full = self._stable_floor_probability(prob_full)
             elapsed_ms = (time.perf_counter() - start) * 1000.0
         except Exception as exc:
             self.get_logger().error(f"PIDNet segmentation failed: {exc}")
             return
 
         prob_u8 = np.clip(prob_full * 255.0, 0, 255).astype(np.uint8)
+        stable_prob_u8 = np.clip(stable_prob_full * 255.0, 0, 255).astype(np.uint8)
         prob_msg = self.bridge.cv2_to_imgmsg(prob_u8, encoding="mono8")
         prob_msg.header = msg.header
+        stable_prob_msg = self.bridge.cv2_to_imgmsg(stable_prob_u8, encoding="mono8")
+        stable_prob_msg.header = msg.header
         overlay_msg = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
         overlay_msg.header = msg.header
 
         self.prob_pub.publish(prob_msg)
+        self.stable_prob_pub.publish(stable_prob_msg)
         self.overlay_pub.publish(overlay_msg)
         self.frame_count += 1
         if self.frame_count == 1 or self.frame_count % 30 == 0:
@@ -97,6 +144,7 @@ def parse_args():
     )
     parser.add_argument("--image-topic", default="/camera/camera/infra1/image_rect_raw")
     parser.add_argument("--prob-topic", default="/segmentation/floor_prob")
+    parser.add_argument("--stable-prob-topic", default="/segmentation/floor_prob_stable")
     parser.add_argument("--overlay-topic", default="/segmentation/floor_overlay")
     parser.add_argument("--publish-hz", type=float, default=5.0)
     parser.add_argument(
@@ -106,6 +154,11 @@ def parse_args():
     )
     parser.add_argument("--threshold", type=float, default=0.45)
     parser.add_argument("--overlay-alpha", type=float, default=0.45)
+    parser.add_argument("--ema-current-weight", type=float, default=0.3)
+    parser.add_argument("--hysteresis-on", type=float, default=0.65)
+    parser.add_argument("--hysteresis-off", type=float, default=0.35)
+    parser.add_argument("--morph-open-kernel", type=int, default=3)
+    parser.add_argument("--morph-close-kernel", type=int, default=7)
     return parser.parse_args()
 
 

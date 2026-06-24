@@ -31,17 +31,24 @@ python3 /tinynav/tool/pidnet/pidnet_segmentation_node.py \
   --engine /tinynav/tinynav/models/pidnet_s_cityscapes_256x320_aarch64.plan \
   --image-topic /camera/camera/infra1/image_rect_raw \
   --prob-topic /segmentation/floor_prob \
+  --stable-prob-topic /segmentation/floor_prob_stable \
   --overlay-topic /segmentation/floor_overlay \
   --publish-hz 5.0 \
   --floor-channels 0,1 \
-  --threshold 0.45
+  --threshold 0.45 \
+  --ema-current-weight 0.3 \
+  --hysteresis-on 0.65 \
+  --hysteresis-off 0.35 \
+  --morph-open-kernel 3 \
+  --morph-close-kernel 7
 ```
 
 `/segmentation/floor_prob` is a `mono8` image where 0 means non-floor and 255
 means floor candidate. `/segmentation/floor_overlay` is a `bgr8` visualization.
-`planning_node.py` subscribes to `/segmentation/floor_prob` and caches the
-latest probability image; fusion with occupancy scoring can be added on top of
-that topic contract.
+`/segmentation/floor_prob_stable` is the hysteresis + morphology stabilized
+floor mask. At this stage, the segmentation topics are for visualization and
+tuning only; planning fusion should be added later after the stable mask is
+validated.
 
 TensorRT `.plan` files are platform- and TensorRT-version-specific. Build them
 on the Jetson or in a matching JetPack/TensorRT environment, then keep the

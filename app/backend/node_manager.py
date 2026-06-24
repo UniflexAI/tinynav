@@ -56,6 +56,7 @@ _IMAGE_TOPICS_LOOPER = [
 ]
 _SEGMENTATION_TOPICS = [
     '/segmentation/floor_prob',
+    '/segmentation/floor_prob_stable',
     '/segmentation/floor_overlay',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE + _SEGMENTATION_TOPICS  # fallback
