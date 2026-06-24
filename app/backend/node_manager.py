@@ -54,7 +54,11 @@ _IMAGE_TOPICS_LOOPER = [
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
 ]
-_IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
+_SEGMENTATION_TOPICS = [
+    '/segmentation/floor_prob',
+    '/segmentation/floor_overlay',
+]
+_IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE + _SEGMENTATION_TOPICS  # fallback
 _PREVIEW_MIN_INTERVAL = 0.05  # 20 fps
 _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
@@ -440,7 +444,8 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warn(f'Sensor detection failed: {e}')
             self._sensor_mode = 'unknown'
 
-        topics = _IMAGE_TOPICS_LOOPER if self._sensor_mode == 'looper' else _IMAGE_TOPICS_REALSENSE
+        sensor_topics = _IMAGE_TOPICS_LOOPER if self._sensor_mode == 'looper' else _IMAGE_TOPICS_REALSENSE
+        topics = sensor_topics + _SEGMENTATION_TOPICS
         for topic in topics:
             self._last_frame[topic] = b''
             self._last_frame_time[topic] = 0.0
@@ -594,8 +599,8 @@ class BackendNode(Ros2NodeManager):
 
     def get_image_topics(self) -> list[str]:
         if self._sensor_mode == 'looper':
-            return _IMAGE_TOPICS_LOOPER
-        return _IMAGE_TOPICS_REALSENSE
+            return _IMAGE_TOPICS_LOOPER + _SEGMENTATION_TOPICS
+        return _IMAGE_TOPICS_REALSENSE + _SEGMENTATION_TOPICS
 
     def get_preview_frame(self, topic: str) -> bytes:
         with self._lock:
