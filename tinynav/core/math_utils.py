@@ -86,13 +86,25 @@ def matrix_to_quat(R):
 # get rotation matrix from two vectors, so that R @ a = b
 def rot_from_two_vector(a, b):
     """Get rotation matrix that rotates vector a to vector b."""
-    a = a / np.linalg.norm(a)
-    b = b / np.linalg.norm(b)
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    a_norm = np.linalg.norm(a)
+    b_norm = np.linalg.norm(b)
+    if a_norm < 1e-12 or b_norm < 1e-12:
+        raise ValueError("rot_from_two_vector requires non-zero vectors")
+    a = a / a_norm
+    b = b / b_norm
     v = np.cross(a, b)
-    c = np.dot(a, b)
+    c = float(np.dot(a, b))
 
     if np.linalg.norm(v) < 1e-8 and abs(c - 1.0) < 1e-8:
         return np.eye(3)  # No rotation needed
+    if np.linalg.norm(v) < 1e-8 and abs(c + 1.0) < 1e-8:
+        basis = np.zeros(3, dtype=np.float64)
+        basis[int(np.argmin(np.abs(a)))] = 1.0
+        axis = np.cross(a, basis)
+        axis /= np.linalg.norm(axis)
+        return -np.eye(3) + 2.0 * np.outer(axis, axis)
 
     s = np.linalg.norm(v)
     v /= s

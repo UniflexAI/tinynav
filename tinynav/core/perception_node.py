@@ -36,6 +36,10 @@ _M = 1000
 _MIN_FEATURES = 20
 _KEYFRAME_MIN_DISTANCE = 0.1    # unit: meter
 _KEYFRAME_MIN_ROTATE_DEGREE = 0.1 # unit: degree
+_SPARSE_STEREO_MAX_VERTICAL_PX = 2.0
+_SPARSE_STEREO_MIN_DISPARITY_PX = 0.5
+_SPARSE_STEREO_MIN_DEPTH_M = 0.1
+_SPARSE_STEREO_MAX_DEPTH_M = 10.0
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -64,6 +68,77 @@ def stamp2second(stamp):
     return nano_s * 1e-9
 
 
+def filter_sparse_stereo_matches(
+    left_keypoints: np.ndarray,
+    right_keypoints: np.ndarray,
+    match_indices: np.ndarray,
+    fx: float,
+    baseline: float,
+    max_vertical_px: float = _SPARSE_STEREO_MAX_VERTICAL_PX,
+    min_disparity_px: float = _SPARSE_STEREO_MIN_DISPARITY_PX,
+    min_depth_m: float = _SPARSE_STEREO_MIN_DEPTH_M,
+    max_depth_m: float = _SPARSE_STEREO_MAX_DEPTH_M,
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Keep rectified left-right feature matches usable as GTSAM stereo measurements."""
+    left_keypoints = np.asarray(left_keypoints, dtype=np.float32)
+    right_keypoints = np.asarray(right_keypoints, dtype=np.float32)
+    match_indices = np.asarray(match_indices, dtype=np.int32).reshape(-1)
+    filtered = np.full(match_indices.shape, -1, dtype=np.int32)
+
+    n = min(len(left_keypoints), len(match_indices))
+    if n == 0 or len(right_keypoints) == 0:
+        return filtered, {
+            "raw_matches": int(np.count_nonzero(match_indices != -1)),
+            "in_bounds_matches": 0,
+            "valid_matches": 0,
+            "rejected_out_of_bounds": int(np.count_nonzero(match_indices != -1)),
+            "rejected_vertical": 0,
+            "rejected_disparity": 0,
+            "rejected_depth": 0,
+        }
+
+    local_matches = match_indices[:n]
+    raw_mask = local_matches != -1
+    in_bounds_mask = raw_mask & (local_matches >= 0) & (local_matches < len(right_keypoints))
+    positions = np.flatnonzero(in_bounds_mask)
+    if len(positions) == 0:
+        raw_count = int(np.count_nonzero(raw_mask))
+        return filtered, {
+            "raw_matches": raw_count,
+            "in_bounds_matches": 0,
+            "valid_matches": 0,
+            "rejected_out_of_bounds": raw_count,
+            "rejected_vertical": 0,
+            "rejected_disparity": 0,
+            "rejected_depth": 0,
+        }
+
+    left = left_keypoints[positions]
+    right = right_keypoints[local_matches[positions]]
+    vertical_error = np.abs(left[:, 1] - right[:, 1])
+    disparity = left[:, 0] - right[:, 0]
+
+    vertical_ok = vertical_error <= float(max_vertical_px)
+    disparity_ok = disparity > float(min_disparity_px)
+    depth = np.full(disparity.shape, np.inf, dtype=np.float32)
+    depth[disparity_ok] = float(fx) * float(baseline) / disparity[disparity_ok]
+    depth_ok = (depth >= float(min_depth_m)) & (depth <= float(max_depth_m))
+    accepted = vertical_ok & disparity_ok & depth_ok
+    filtered[positions[accepted]] = local_matches[positions[accepted]]
+
+    raw_count = int(np.count_nonzero(raw_mask))
+    in_bounds_count = int(len(positions))
+    return filtered, {
+        "raw_matches": raw_count,
+        "in_bounds_matches": in_bounds_count,
+        "valid_matches": int(np.count_nonzero(accepted)),
+        "rejected_out_of_bounds": raw_count - in_bounds_count,
+        "rejected_vertical": int(np.count_nonzero(~vertical_ok)),
+        "rejected_disparity": int(np.count_nonzero(vertical_ok & ~disparity_ok)),
+        "rejected_depth": int(np.count_nonzero(vertical_ok & disparity_ok & ~depth_ok)),
+    }
+
+
 @dataclass
 class StereoPairMsg:
     header: object
@@ -76,6 +151,7 @@ class StereoPairMsg:
 class Keyframe:
     timestamp: float
     image: np.ndarray
+    right_image: np.ndarray
     disparity: np.ndarray
     depth: np.ndarray
     pose: np.ndarray
@@ -83,6 +159,10 @@ class Keyframe:
     bias: gtsam.imuBias.ConstantBias
     preintegrated_imu: gtsam.PreintegratedCombinedMeasurements
     latest_imu_timestamp: float
+    left_features: dict | None = None
+    right_features: dict | None = None
+    stereo_match_indices: np.ndarray | None = None
+    stereo_stats: dict | None = None
     imu_measurement_count: int = 0
 
 class PerceptionNode(Node):
@@ -273,6 +353,28 @@ class PerceptionNode(Node):
         if self.input_aligner_seen_imu:
             self.input_aligner.dispatchMessages()
 
+    async def _extract_sparse_stereo(self, left_img: np.ndarray, right_img: np.ndarray):
+        left_features = await self.superpoint.infer(left_img)
+        right_features = await self.superpoint.infer(right_img)
+        stereo_match_result = await self.light_glue.infer(
+            left_features["kpts"],
+            right_features["kpts"],
+            left_features["descps"],
+            right_features["descps"],
+            left_features["mask"],
+            right_features["mask"],
+            left_img.shape,
+            right_img.shape,
+        )
+        stereo_match_indices, stereo_stats = filter_sparse_stereo_matches(
+            left_features["kpts"][0],
+            right_features["kpts"][0],
+            stereo_match_result["match_indices"][0],
+            self.K[0, 0],
+            self.baseline,
+        )
+        return left_features, right_features, stereo_match_indices, stereo_stats
+
     async def process(self, left_msg, right_msg):
         if self.K is None or self.T_body_last is None:
             return {
@@ -285,29 +387,37 @@ class PerceptionNode(Node):
         current_timestamp = stamp2second(left_msg.header.stamp)
         if len(self.keyframe_queue) == 0: # first frame
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
+            left_features, right_features, stereo_match_indices, stereo_stats = await self._extract_sparse_stereo(left_img, right_img)
             self.keyframe_queue.append(
                 Keyframe(
                     timestamp=current_timestamp,
                     image=left_img,
+                    right_image=right_img,
                     disparity=disparity,
                     depth=depth,
                     pose=self.T_body_last,
                     velocity=np.zeros(3),
                     bias=gtsam.imuBias.ConstantBias(),
                     preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
-                    latest_imu_timestamp=current_timestamp
+                    latest_imu_timestamp=current_timestamp,
+                    left_features=left_features,
+                    right_features=right_features,
+                    stereo_match_indices=stereo_match_indices,
+                    stereo_stats=stereo_stats,
                 )
             )
             return {
-            "stats": {"process_cnt": 0},
+            "stats": {"process_cnt": 0, "sparse_stereo": stereo_stats},
             "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
         }
 
         with Timer(name="[Stereo Inference]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             disparity, depth = await self.stereo_engine.infer(left_img, right_img, np.array([[self.baseline]]), np.array([[self.K[0,0]]]))
             kf_prev = self.keyframe_queue[-1]
-            prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
-            current_left_extract_result = await self.superpoint.infer(left_img)
+            if kf_prev.left_features is None:
+                kf_prev.left_features = await self.superpoint.infer(kf_prev.image)
+            prev_left_extract_result = kf_prev.left_features
+            current_left_extract_result, current_right_extract_result, current_stereo_match_indices, current_stereo_stats = await self._extract_sparse_stereo(left_img, right_img)
 
             match_result = await self.light_glue.infer(
                 prev_left_extract_result["kpts"],
@@ -367,13 +477,18 @@ class PerceptionNode(Node):
             Keyframe(
                 timestamp=current_timestamp,
                 image=left_img,
+                right_image=right_img,
                 disparity=disparity,
                 depth=depth,
                 pose=self.keyframe_queue[-1].pose @ T_kf_curr,
                 velocity=self.keyframe_queue[-1].velocity,
                 bias=gtsam.imuBias.ConstantBias(),
                 preintegrated_imu=gtsam.PreintegratedCombinedMeasurements(self.pre_integration_params, gtsam.imuBias.ConstantBias()),
-                latest_imu_timestamp=current_timestamp
+                latest_imu_timestamp=current_timestamp,
+                left_features=current_left_extract_result,
+                right_features=current_right_extract_result,
+                stereo_match_indices=current_stereo_match_indices,
+                stereo_stats=current_stereo_stats,
             )
         )
         if len(self.keyframe_queue) > _N:
@@ -432,7 +547,11 @@ class PerceptionNode(Node):
             #current_i = len(self.keyframe_queue[-_N:])
 
             with Timer(name="[init extract info]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-                extract_info = [await self.superpoint.infer(kf.image) for kf in self.keyframe_queue[-_N:]]
+                extract_info = []
+                for kf in self.keyframe_queue[-_N:]:
+                    if kf.left_features is None:
+                        kf.left_features = await self.superpoint.infer(kf.image)
+                    extract_info.append(kf.left_features)
                 uf = uf_init(len(self.keyframe_queue[-_N:]) * _M)
 
             self.logger.debug(f"Processing {len(self.keyframe_queue)} keyframes for data association.")
@@ -449,9 +568,9 @@ class PerceptionNode(Node):
                     self.logger.debug("timestamp prev: ", kf_prev.timestamp)
                     self.logger.debug("timestamp curr: ", kf_curr.timestamp)
                     with Timer(name="[cached result[1.1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
+                        prev_left_extract_result = extract_info[i]
                     with Timer(name="[cached result[1.2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
-                        current_left_extract_result = await self.superpoint.infer(kf_curr.image)
+                        current_left_extract_result = extract_info[j]
 
                     with Timer(name="[cached result[1.3/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         match_result = await self.light_glue.infer(
@@ -512,21 +631,37 @@ class PerceptionNode(Node):
                 self.logger.debug(f"Found {len(tracks)} tracks after data association.")
 
             with Timer(name="[add track]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
+                smart_stereo_factors_added = 0
+                sparse_stereo_observations_added = 0
+                sparse_stereo_observations_missing = 0
+                tracks_skipped_sparse_stereo = 0
                 for landmark in tracks[::1]:
                     # Build a smart factor per track (no explicit landmark variable)
-                    disparity_valid = True
                     observations = []
                     for projection in landmark:
                         pose_idx = projection // _M
                         feature_idx = projection % _M
-                        disparity = self.keyframe_queue[pose_idx].disparity
+                        keyframe = self.keyframe_queue[pose_idx]
+                        stereo_match_indices = keyframe.stereo_match_indices
+                        right_features = keyframe.right_features
                         kpt = extract_info[pose_idx]['kpts'][0][feature_idx]
-                        if disparity[int(kpt[1]), int(kpt[0])] < 0.1:
-                            disparity_valid = False
-                            break
-                        observations.append((pose_idx, kpt, disparity))
+                        if (
+                            stereo_match_indices is None
+                            or right_features is None
+                            or feature_idx >= len(stereo_match_indices)
+                            or stereo_match_indices[feature_idx] < 0
+                        ):
+                            sparse_stereo_observations_missing += 1
+                            continue
+                        right_idx = int(stereo_match_indices[feature_idx])
+                        right_keypoints = right_features["kpts"][0]
+                        if right_idx >= len(right_keypoints):
+                            sparse_stereo_observations_missing += 1
+                            continue
+                        observations.append((pose_idx, kpt, right_keypoints[right_idx]))
 
-                    if not disparity_valid or len(observations) < 2:
+                    if len(observations) < 2:
+                        tracks_skipped_sparse_stereo += 1
                         continue
 
                     # Smart factors require isotropic pixel noise
@@ -537,14 +672,24 @@ class PerceptionNode(Node):
                     calib = gtsam.Cal3_S2Stereo(
                         self.K[0, 0], self.K[1, 1], 0, self.K[0, 2], self.K[1, 2], self.baseline
                     )
-                    for pose_idx, kpt, disparity in observations:
+                    for pose_idx, kpt, right_kpt in observations:
                         stereo_meas = gtsam.StereoPoint2(
                             kpt[0],
-                            kpt[0] - disparity[int(kpt[1]), int(kpt[0])],
+                            right_kpt[0],
                             kpt[1],
                         )
                         smart_factor.add(stereo_meas, X(pose_idx), calib)
                     graph.add(smart_factor)
+                    smart_stereo_factors_added += 1
+                    sparse_stereo_observations_added += len(observations)
+                self.logger.info(
+                    "Sparse stereo factors: added=%d observations=%d missing=%d skipped_tracks=%d current_lr=%s",
+                    smart_stereo_factors_added,
+                    sparse_stereo_observations_added,
+                    sparse_stereo_observations_missing,
+                    tracks_skipped_sparse_stereo,
+                    current_stereo_stats,
+                )
 
         with Timer(name="[Solver]", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             params = gtsam.LevenbergMarquardtParams()
@@ -605,6 +750,7 @@ class PerceptionNode(Node):
         return {
             "stats": {
                 "process_cnt": self.process_cnt,
+                "sparse_stereo": current_stereo_stats,
             },
             "metrics": {
                 "num_keyframes": len(self.keyframe_queue),
@@ -613,6 +759,10 @@ class PerceptionNode(Node):
                 "num_variables": initial_estimate.size(),
                 "initial_error": graph.error(initial_estimate),
                 "final_error": graph.error(result),
+                "smart_stereo_factors_added": smart_stereo_factors_added,
+                "sparse_stereo_observations_added": sparse_stereo_observations_added,
+                "sparse_stereo_observations_missing": sparse_stereo_observations_missing,
+                "tracks_skipped_sparse_stereo": tracks_skipped_sparse_stereo,
             },
         }
 
