@@ -24,6 +24,25 @@ python3 /tinynav/tool/pidnet/pidnet_trt.py \
   --threshold 0.45
 ```
 
+To publish live segmentation for other nodes:
+
+```bash
+python3 /tinynav/tool/pidnet/pidnet_segmentation_node.py \
+  --engine /tinynav/tinynav/models/pidnet_s_cityscapes_256x320_aarch64.plan \
+  --image-topic /camera/camera/infra1/image_rect_raw \
+  --prob-topic /segmentation/floor_prob \
+  --overlay-topic /segmentation/floor_overlay \
+  --publish-hz 5.0 \
+  --floor-channels 0,1 \
+  --threshold 0.45
+```
+
+`/segmentation/floor_prob` is a `mono8` image where 0 means non-floor and 255
+means floor candidate. `/segmentation/floor_overlay` is a `bgr8` visualization.
+`planning_node.py` subscribes to `/segmentation/floor_prob` and caches the
+latest probability image; fusion with occupancy scoring can be added on top of
+that topic contract.
+
 TensorRT `.plan` files are platform- and TensorRT-version-specific. Build them
 on the Jetson or in a matching JetPack/TensorRT environment, then keep the
 engine in `tinynav/models/` on the target machine. Do not commit generated
