@@ -27,6 +27,7 @@ Topics
                /camera/camera/infra1/image_rect_raw   sensor_msgs/Image
                /camera/camera/infra1/camera_info      sensor_msgs/CameraInfo
   Published:   /cmd_vel                               geometry_msgs/Twist
+               /mapping/nav_done                      std_msgs/Bool
   TF:          world → qr_world  (nav mode, after INIT_FRAMES)
 """
 
@@ -42,6 +43,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Bool
 from tf2_ros import TransformBroadcaster
 
 from tinynav.core.math_utils import msg2np, np2msg, np2tf
@@ -54,21 +56,30 @@ TARGET_PATH     = DB_DIR / "tag_target.json"
 ODOM_TOPIC    = "/slam/odometry"
 IMAGE_TOPIC   = "/camera/camera/infra1/image_rect_raw"
 INFO_TOPIC    = "/camera/camera/infra1/camera_info"
-CMD_VEL_TOPIC = "/control/cmd_vel"
+CMD_VEL_TOPIC = "/cmd_vel"
 TARGET_POSE_TOPIC = "/qr_world/target_pose"
+NAV_DONE_TOPIC = "/qr_world/nav_done"
 
 ARUCO_DICT  = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
 FAMILY_NAME = "DICT_APRILTAG_36h11"
 
 INIT_FRAMES = 10
 
-# Proportional controller gains and limits
+# PI controller gains, limits, and drivetrain deadband compensation.
 K_LINEAR        = 0.5   # (m/s) / m
+K_LINEAR_I      = 0.05  # (m/s) / (m*s)
 K_ANGULAR       = 1.0   # (rad/s) / rad
+K_ANGULAR_I     = 0.10  # (rad/s) / (rad*s)
 MAX_LINEAR      = 0.3   # m/s
+MAX_LINEAR_I    = 0.05  # m/s — max integral contribution
 MAX_ANGULAR     = 0.5   # rad/s
-DIST_THRESH     = 0.05  # m  — switch from approach to heading-align
-HEADING_THRESH  = 0.05  # rad — stop when aligned
+MAX_ANGULAR_I   = 0.10  # rad/s — max integral contribution
+MIN_LINEAR      = 0.15  # m/s — below this the base may not move
+MIN_ANGULAR     = 0.15  # rad/s — below this the base may not rotate
+DIST_THRESH     = 0.06  # m  — switch from approach to heading-align
+HEADING_THRESH  = 0.06  # rad — stop when aligned
+CMD_DEADBAND    = 1e-3
+MAX_CONTROL_DT  = 0.1   # s — cap integral step after odom stalls
 
 # LooperBridge publishes /slam/odometry as T_world_camera:
 #   tool/looper_bridge_node.py uses np2msg(T_world_camera, ..., "world", "camera").
@@ -148,6 +159,15 @@ def _load_target() -> tuple[str, list[int], float, float, np.ndarray]:
 
 def _camera_pose_to_robot_pose(T_world_camera: np.ndarray) -> np.ndarray:
     return T_world_camera @ T_CAMERA_ROBOT
+
+
+def _clip_with_min(value: float, min_abs: float, max_abs: float) -> float:
+    if abs(value) < CMD_DEADBAND:
+        return 0.0
+    clipped = float(np.clip(value, -max_abs, max_abs))
+    if abs(clipped) < min_abs:
+        return float(np.sign(clipped) * min_abs)
+    return clipped
 
 
 def _solve_T_world_qrworld(T_world_board_samples: list[np.ndarray]) -> np.ndarray:
@@ -302,12 +322,70 @@ class NavNode(BoardBaseNode):
         self._T_qrworld_robot          = T_qrworld_robot
         self._T_world_qrworld_samples: list[np.ndarray] = []
         self._T_world_goal:            np.ndarray | None = None
+        self._linear_error_i = np.zeros(2, dtype=np.float64)
+        self._heading_error_i = 0.0
+        self._last_control_time: float | None = None
+        self._reached = False
+        self._done = False
         self._cmd_pub        = self.create_publisher(Twist, CMD_VEL_TOPIC, 10)
+        self._nav_done_pub = self.create_publisher(Bool, NAV_DONE_TOPIC, 10)
         self._target_pose_pub = self.create_publisher(Odometry, TARGET_POSE_TOPIC, 10)
         self._tf_broadcaster = TransformBroadcaster(self)
         self.get_logger().info(
             f"Navigation mode: board ids={tag_ids}. "
             f"Collecting {INIT_FRAMES} initial frames to initialize qr_world ..."
+        )
+
+    def _publish_reached_once(self) -> None:
+        if self._reached:
+            return
+        self._reached = True
+        self._nav_done_pub.publish(Bool(data=True))
+        self._done = True
+        self.get_logger().info("qr target reached.")
+
+    def _control_dt(self) -> float:
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._last_control_time is None:
+            self._last_control_time = now
+            return 0.0
+        dt = min(max(now - self._last_control_time, 0.0), MAX_CONTROL_DT)
+        self._last_control_time = now
+        return dt
+
+    def _linear_pi_cmd(self, dx: float, dy: float, dt: float) -> tuple[float, float]:
+        self._linear_error_i += np.array([dx, dy], dtype=np.float64) * dt
+        linear_i_limit = MAX_LINEAR_I / K_LINEAR_I
+        self._linear_error_i = np.clip(
+            self._linear_error_i,
+            -linear_i_limit,
+            linear_i_limit,
+        )
+        return (
+            _clip_with_min(
+                K_LINEAR * dx + K_LINEAR_I * self._linear_error_i[0],
+                MIN_LINEAR,
+                MAX_LINEAR,
+            ),
+            _clip_with_min(
+                K_LINEAR * dy + K_LINEAR_I * self._linear_error_i[1],
+                MIN_LINEAR,
+                MAX_LINEAR,
+            ),
+        )
+
+    def _heading_pi_cmd(self, heading_error: float, dt: float) -> float:
+        self._heading_error_i += heading_error * dt
+        angular_i_limit = MAX_ANGULAR_I / K_ANGULAR_I
+        self._heading_error_i = float(np.clip(
+            self._heading_error_i,
+            -angular_i_limit,
+            angular_i_limit,
+        ))
+        return _clip_with_min(
+            K_ANGULAR * heading_error + K_ANGULAR_I * self._heading_error_i,
+            MIN_ANGULAR,
+            MAX_ANGULAR,
         )
 
     def _on_board_detected(self, T_camera_board: np.ndarray,
@@ -341,15 +419,22 @@ class NavNode(BoardBaseNode):
         dx      = T_robot_goal[0, 3]
         dy      = T_robot_goal[1, 3]
         dist    = np.hypot(dx, dy)
-        bearing = np.arctan2(dy, dx)
-        dtheta  = np.arctan2(T_robot_goal[1, 0], T_robot_goal[0, 0])
+        print(f"dist: {dist}")
+        heading_error = np.arctan2(T_robot_goal[1, 0], T_robot_goal[0, 0])
+        print(f"heading_error: {heading_error}")
+        dt = self._control_dt()
 
         cmd = Twist()
         if dist > DIST_THRESH:
-            cmd.linear.x  = float(np.clip(K_LINEAR  * dx,      -MAX_LINEAR,  MAX_LINEAR))
-            cmd.angular.z = float(np.clip(K_ANGULAR * bearing, -MAX_ANGULAR, MAX_ANGULAR))
-        elif abs(dtheta) > HEADING_THRESH:
-            cmd.angular.z = float(np.clip(K_ANGULAR * dtheta, -MAX_ANGULAR, MAX_ANGULAR))
+            self._heading_error_i = 0.0
+            cmd.linear.x, cmd.linear.y = self._linear_pi_cmd(dx, dy, dt)
+        elif abs(heading_error) > HEADING_THRESH:
+            self._linear_error_i[:] = 0.0
+            cmd.angular.z = self._heading_pi_cmd(heading_error, dt)
+        else:
+            self._linear_error_i[:] = 0.0
+            self._heading_error_i = 0.0
+            self._publish_reached_once()
         self._cmd_pub.publish(cmd)
 
 
@@ -358,7 +443,8 @@ def run_nav() -> None:
     rclpy.init()
     node = NavNode(tag_ids, size_m, spacing_m, T_qrworld_robot)
     try:
-        rclpy.spin(node)
+        while rclpy.ok() and not node._done:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
