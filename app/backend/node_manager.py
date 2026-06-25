@@ -343,6 +343,28 @@ class BackendNode(Ros2NodeManager):
             return None
         return None
 
+    def _load_nav_flow_enable_first_done(self) -> bool:
+        config_path = os.path.join(self.map_path, 'nav_flow.json')
+        if not os.path.exists(config_path):
+            return False
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read nav_flow.json: {e}')
+            return False
+        if not isinstance(config, dict):
+            return False
+        value = config.get('enable_first_done', False)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+        if isinstance(value, (int, float)):
+            return bool(value)
+        self.get_logger().warn(f'Invalid nav_flow enable_first_done value: {value!r}')
+        return False
+
     def _load_map_handoff_rule(
         self,
         poi_index: int,
@@ -1097,12 +1119,15 @@ class BackendNode(Ros2NodeManager):
         self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        map_node_cmd = [
+            'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+            '--tinynav_map_path', self.map_path,
+        ]
+        if self._load_nav_flow_enable_first_done():
+            map_node_cmd.append('--enable_first_done')
         self._map_node_proc = self._launch_proc(
             'map_node',
-            [
-                'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
-                '--tinynav_map_path', self.map_path,
-            ],
+            map_node_cmd,
             env=_env,
         )
         with self._lock:

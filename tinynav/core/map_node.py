@@ -372,17 +372,25 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
     return []
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
+    def __init__(
+        self,
+        tinynav_db_path: str,
+        tinynav_map_path: str,
+        verbose_timer: bool = True,
+        enable_first_done: bool = False,
+    ):
         """Initialization
 
         Args:
             tinynav_db_path (str): Directory to store output data.
             tinynav_map_path (str): Directory to load the pre-built map.
             verbose_timer (bool): Whether to use verbose timer output.
+            enable_first_done (bool): If true, stop keyframe relocalization after the first success.
         """
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
+        self.enable_first_done = enable_first_done
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
@@ -584,7 +592,7 @@ class MapNode(Node):
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
-        if not self.first_done:
+        if not (self.enable_first_done and self.first_done):
             success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
             if success:
                 self.compute_transform_from_map_to_odom()
@@ -1094,10 +1102,17 @@ def main(args=None):
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument(
+        "--enable_first_done",
+        action="store_true",
+        default=False,
+        help="Skip keyframe relocalization after the first successful relocalization",
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
-                   verbose_timer=parsed_args.verbose_timer)
+                   verbose_timer=parsed_args.verbose_timer,
+                   enable_first_done=parsed_args.enable_first_done)
 
     rclpy.spin(node)
     node.destroy_node()
