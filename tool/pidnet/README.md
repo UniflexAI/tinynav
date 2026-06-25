@@ -67,3 +67,47 @@ Override the workspace or build flags when needed:
 make -C /tinynav/tinynav/models pidnet \
   PIDNET_WORKSPACE_FLAGS=--memPoolSize=workspace:256
 ```
+
+## Dataset sampling and mask editing
+
+Record raw infra1 images together with the current PIDNet segmentation outputs:
+
+```bash
+/tinynav/scripts/run_pidnet_dataset_bag_record.sh
+```
+
+Use a fixed output path when collecting a specific scene:
+
+```bash
+/tinynav/scripts/run_pidnet_dataset_bag_record.sh \
+  --output /data/tinynav/rosbags/pidnet_scene_001
+```
+
+Extract frames and start the local web editor:
+
+```bash
+python3 /tinynav/tool/pidnet/pidnet_dataset_tool.py \
+  --bag /data/tinynav/rosbags/pidnet_scene_001 \
+  --workspace /data/tinynav/pidnet_dataset_scene_001 \
+  --host 0.0.0.0 \
+  --port 8765 \
+  --stride 5
+```
+
+Open `http://<device-ip>:8765`, compare the raw image, overlay, current PIDNet
+mask, and editable training mask. The editable mask uses:
+
+- `0`: ignore / unknown
+- `1`: floor
+- `2`: non_floor
+
+After editing, press `Export dataset` in the web UI. It writes:
+
+```text
+<workspace>/exports/tinynav_floor_dataset/
+  images/train/
+  images/val/
+  masks/train/
+  masks/val/
+  labels.json
+```
