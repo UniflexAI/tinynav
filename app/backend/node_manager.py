@@ -60,6 +60,9 @@ _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
 _PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
 _PREVIEW_HIGH_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_HIGH_JPEG_QUALITY', '80'))
+_MAP_HANDOFF_LOCALIZATION_TIMEOUT_S = float(
+    os.environ.get('TINYNAV_MAP_HANDOFF_LOCALIZATION_TIMEOUT_S', '0')
+)
 _PREVIEW_PROFILES = {
     'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
     'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
@@ -379,6 +382,42 @@ class BackendNode(Ros2NodeManager):
             shutil.rmtree(link)
         os.symlink(src, link)
 
+    def _wait_for_map_handoff_localization(self, target_map: str) -> bool:
+        """Wait until the target map is localized before continuing nav_flow.
+
+        By default we do not time out. Relocalization can legitimately take more
+        than a minute in field tests, and dropping the pending poi_list at that
+        point makes the nav_flow silently stop after the map switch.
+        Set TINYNAV_MAP_HANDOFF_LOCALIZATION_TIMEOUT_S to a positive value if a
+        deployment wants an explicit failure timeout.
+        """
+        timeout_s = _MAP_HANDOFF_LOCALIZATION_TIMEOUT_S
+        deadline = time.time() + timeout_s if timeout_s > 0 else None
+        next_log_time = time.time() + 10.0
+
+        while True:
+            with self._lock:
+                localized = self._localized
+                nav_nodes_running = self._nav_nodes_running
+            if localized:
+                return True
+            if not nav_nodes_running:
+                self.get_logger().warn(
+                    f'Map handoff cancelled while waiting for localization on {target_map}'
+                )
+                return False
+            if deadline is not None and time.time() >= deadline:
+                self.get_logger().error(
+                    f'Map handoff timed out waiting for localization on {target_map}'
+                )
+                return False
+            if time.time() >= next_log_time:
+                self.get_logger().info(
+                    f'Map handoff waiting for localization on {target_map}; nav_flow POIs remain pending'
+                )
+                next_log_time = time.time() + 30.0
+            time.sleep(0.2)
+
     def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
         target_map = rule['target_map']
         poi_list = rule['poi_list']
@@ -402,15 +441,7 @@ class BackendNode(Ros2NodeManager):
 
             self.cmd_start_nav_nodes()
 
-            deadline = time.time() + 60.0
-            while time.time() < deadline:
-                with self._lock:
-                    localized = self._localized
-                if localized:
-                    break
-                time.sleep(0.2)
-            else:
-                self.get_logger().error(f'Map handoff timed out waiting for localization on {target_map}')
+            if not self._wait_for_map_handoff_localization(target_map):
                 self.state = 'idle'
                 self._pub_state()
                 return
