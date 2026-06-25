@@ -389,6 +389,7 @@ class MapNode(Node):
         self.tinynav_db_path = tinynav_db_path
 
         self.bridge = CvBridge()
+        self.first_done = False
 
         # subs
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
@@ -583,9 +584,11 @@ class MapNode(Node):
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
-        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
-        if success:
-            self.compute_transform_from_map_to_odom()
+        if not self.first_done:
+            success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+            if success:
+                self.compute_transform_from_map_to_odom()
+                self.first_done = True
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
