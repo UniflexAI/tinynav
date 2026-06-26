@@ -459,7 +459,7 @@ class GlobalPointCloudPublisher(Node):
             return
         sample_u_grid, sample_v_grid = self.get_sample_grid(depth.shape)
 
-        # `/insight/vio_20hz` provides T_w_i, where the world frame is z-up.
+        # `/camera/camera/vio_image` provides T_w_i, where the world frame is z-up.
         # Depth backprojection yields points in the camera optical frame, so we
         # first map them into the IMU/depth rig frame before applying T_w_i.
         T_w_i = pose_msg2np(pose_msg)
@@ -537,7 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Project SLAM depth into a global world-frame point cloud."
     )
-    parser.add_argument("--pose-topic", default="/insight/vio_20hz")
+    parser.add_argument("--pose-topic", default="/camera/camera/vio_image")
     parser.add_argument("--depth-topic", default="/camera/camera/depth/image_rect_raw")
     parser.add_argument("--image-mode", choices=("grayscale", "color"), default="color")
     return parser
