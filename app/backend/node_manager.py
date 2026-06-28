@@ -162,6 +162,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
         self._nav_paused = False
         self._nav_active = False
+        self._manual_target_active = False
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -266,10 +267,16 @@ class BackendNode(Ros2NodeManager):
             self._localized = True
 
     def _on_nav_target_pose(self, msg: Odometry):
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            with self._lock:
+                self._nav_target_pose = None
+            return
         with self._lock:
             self._nav_target_pose = {
-                'x': msg.pose.pose.position.x,
-                'y': msg.pose.pose.position.y,
+                'x': x,
+                'y': y,
             }
 
     def _on_height_map(self, msg: Image):
@@ -631,6 +638,7 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             nav_active = self._nav_active
+            manual_target_active = self._manual_target_active
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -644,6 +652,7 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
+            'manualTargetActive': manual_target_active,
         }
 
     @staticmethod
@@ -771,6 +780,7 @@ class BackendNode(Ros2NodeManager):
             self._global_path = []
             self._nav_target_pose = None
             self._nav_paused = False
+            self._manual_target_active = False
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
@@ -1005,11 +1015,13 @@ class BackendNode(Ros2NodeManager):
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         return True
 
-    def cmd_manual_target_pose(self, x: float, y: float, z: float):
+    def cmd_manual_target_pose(self, x: float, y: float, z: float, activate: bool = True):
         """Publish a manually selected local-planner target pose.
 
         planning_node subscribes to /control/target_pose and only reads the
         position vector, so Odometry is used here to match that existing API.
+        When requested, mark navigation active so cmd_vel_control consumes the
+        resulting /planning/trajectory_path and publishes /cmd_vel.
         """
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -1021,6 +1033,32 @@ class BackendNode(Ros2NodeManager):
         self._target_pose_pub.publish(msg)
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
+            nav_running = self._nav_nodes_running
+        if activate and nav_running:
+            with self._lock:
+                self._manual_target_active = True
+            self._set_nav_active(True)
+            self.state = 'navigation'
+            self._pub_state()
+
+    def cmd_clear_manual_target_pose(self):
+        """Clear the manually selected local-planner target pose."""
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.position.x = math.nan
+        msg.pose.pose.position.y = math.nan
+        msg.pose.pose.position.z = math.nan
+        msg.pose.pose.orientation.w = 1.0
+        self._target_pose_pub.publish(msg)
+        self._set_nav_active(False)
+        with self._lock:
+            self._nav_target_pose = None
+            self._manual_target_active = False
+            nav_running = self._nav_nodes_running
+        if nav_running and self.state == 'navigation':
+            self.state = 'idle'
+            self._pub_state()
 
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""
@@ -1045,6 +1083,7 @@ class BackendNode(Ros2NodeManager):
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
             self._set_nav_active(bool(payload))
         with self._lock:
+            self._manual_target_active = False
             nav_running = self._nav_nodes_running
         if nav_running:
             self.state = 'navigation'
@@ -1054,6 +1093,8 @@ class BackendNode(Ros2NodeManager):
             self._start('navigation')
 
     def cmd_nav_start(self, poi_id: str | None = None):
+        with self._lock:
+            self._manual_target_active = False
         if poi_id is not None:
             self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         else:

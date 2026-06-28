@@ -396,7 +396,16 @@ class PlanningNode(Node):
         self.target_pose = None
 
     def target_pose_callback(self, msg):
-        self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        target_pose = np.array([
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            msg.pose.pose.position.z,
+        ])
+        if not np.all(np.isfinite(target_pose)):
+            self.target_pose = None
+            self.get_logger().info("Manual target pose cleared.")
+            return
+        self.target_pose = target_pose
 
     def info_callback(self, msg):
         if self.K is None:
