@@ -19,6 +19,9 @@ class CmdVelControlNode(Node):
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
+        self.pose_visual_sub = self.create_subscription(
+            Odometry, '/slam/odometry_visual', self.pose_callback, 10
+        )
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],

@@ -191,6 +191,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_nodes_running: bool = False
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
+        self._proc_log_paths: dict[str, str] = {}
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
@@ -639,6 +640,12 @@ class BackendNode(Ros2NodeManager):
             nav_paused = self._nav_paused
             nav_active = self._nav_active
             manual_target_active = self._manual_target_active
+            planning_running = (
+                self._proc_running(self._planning_proc)
+                or self._proc_running(self.processes.get('planning'))
+            )
+            cmd_vel_running = self._proc_running(self._cmd_vel_proc)
+            unitree_running = self._proc_running(self._unitree_proc)
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -653,6 +660,9 @@ class BackendNode(Ros2NodeManager):
             'navPaused': nav_paused,
             'navActive': nav_active,
             'manualTargetActive': manual_target_active,
+            'planningRunning': planning_running,
+            'cmdVelControlRunning': cmd_vel_running,
+            'unitreeControlRunning': unitree_running,
         }
 
     @staticmethod
@@ -688,6 +698,7 @@ class BackendNode(Ros2NodeManager):
         os.makedirs(logs_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
         path = os.path.join(logs_dir, f'{ts}_{name}.txt')
+        self._proc_log_paths[name] = path
         return open(path, 'w')
 
     def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
@@ -706,6 +717,14 @@ class BackendNode(Ros2NodeManager):
     def _proc_running(proc: subprocess.Popen | None) -> bool:
         return proc is not None and proc.poll() is None
 
+    def _require_proc_running(self, name: str, proc: subprocess.Popen | None):
+        time.sleep(0.2)
+        if self._proc_running(proc):
+            return
+        log_path = self._proc_log_paths.get(name)
+        suffix = f'; see {log_path}' if log_path else ''
+        raise RuntimeError(f'{name} failed to start{suffix}')
+
     def _ensure_unitree_running(self):
         if self._proc_running(self._unitree_proc):
             return
@@ -721,6 +740,7 @@ class BackendNode(Ros2NodeManager):
             ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
             env=_env,
         )
+        self._require_proc_running('planning', self._planning_proc)
 
     def _ensure_nav_nodes_running(self):
         if self._proc_running(self._map_node_proc) and self._proc_running(self._cmd_vel_proc):
@@ -729,6 +749,7 @@ class BackendNode(Ros2NodeManager):
             return
         self.cmd_stop_nav_nodes()
         self.cmd_start_nav_nodes()
+        self._require_proc_running('cmd_vel_control', self._cmd_vel_proc)
 
     def _stop_sensor_procs(self):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
