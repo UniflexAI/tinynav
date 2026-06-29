@@ -163,7 +163,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         showFootprint: _showFootprint,
                         fillViewport: _localMapFill,
                         show3d: _showLocal3d,
-                        activateManualTarget: status?.navNodesRunning == true,
+                        manualTargetActive: status?.manualTargetActive == true,
                         manualTargetDisabled: manualTargetDisabled,
                       ),
               ),
@@ -340,7 +340,7 @@ class _LocalPlanningView extends ConsumerStatefulWidget {
   final bool showFootprint;
   final bool fillViewport;
   final bool show3d;
-  final bool activateManualTarget;
+  final bool manualTargetActive;
   final bool manualTargetDisabled;
 
   const _LocalPlanningView({
@@ -352,7 +352,7 @@ class _LocalPlanningView extends ConsumerStatefulWidget {
     this.showFootprint = true,
     this.fillViewport = false,
     this.show3d = false,
-    this.activateManualTarget = false,
+    this.manualTargetActive = false,
     this.manualTargetDisabled = false,
   });
 
@@ -495,14 +495,12 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
           'x': target.x,
           'y': target.y,
           'z': target.z,
-          'activate': widget.activateManualTarget,
+          'activate': true,
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(widget.activateManualTarget
-                  ? 'Manual target published and navigation activated'
-                  : 'Manual target published to planning only'),
+            const SnackBar(
+              content: Text('Manual target published and navigation activated'),
             ),
           );
         }
@@ -537,7 +535,7 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
   Widget build(BuildContext context) {
     final p = widget.planning;
     final gi = p?.gridInfo;
-    final hasManualTarget = _pendingTarget != null || p?.navTargetPose != null;
+    final hasManualTarget = _pendingTarget != null || widget.manualTargetActive;
     final localAspectRatio =
         (gi != null && gi.height > 0) ? gi.width / gi.height : 1.0;
 

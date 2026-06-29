@@ -54,8 +54,6 @@ def nav_manual_target(req: ManualTargetRequest):
         raise HTTPException(409, 'Odometry not ready')
     if node.state == 'navigation' and not node._manual_target_active:
         raise HTTPException(409, 'Manual target is disabled while POI navigation is running')
-    if req.activate and not node._nav_nodes_running:
-        raise HTTPException(409, 'Nav nodes not running')
     node.cmd_manual_target_pose(req.x, req.y, req.z, activate=req.activate)
     return {
         'ok': True,

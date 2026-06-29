@@ -702,6 +702,34 @@ class BackendNode(Ros2NodeManager):
         lf.close()
         return proc
 
+    @staticmethod
+    def _proc_running(proc: subprocess.Popen | None) -> bool:
+        return proc is not None and proc.poll() is None
+
+    def _ensure_unitree_running(self):
+        if self._proc_running(self._unitree_proc):
+            return
+        self._start_unitree_if_configured()
+
+    def _ensure_planning_running(self):
+        if self._proc_running(self._planning_proc) or self._proc_running(self.processes.get('planning')):
+            return
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        self._planning_proc = self._launch_proc(
+            'planning',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            env=_env,
+        )
+
+    def _ensure_nav_nodes_running(self):
+        if self._proc_running(self._map_node_proc) and self._proc_running(self._cmd_vel_proc):
+            with self._lock:
+                self._nav_nodes_running = True
+            return
+        self.cmd_stop_nav_nodes()
+        self.cmd_start_nav_nodes()
+
     def _stop_sensor_procs(self):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
@@ -1023,6 +1051,10 @@ class BackendNode(Ros2NodeManager):
         When requested, mark navigation active so cmd_vel_control consumes the
         resulting /planning/trajectory_path and publishes /cmd_vel.
         """
+        if activate:
+            self._ensure_unitree_running()
+            self._ensure_planning_running()
+            self._ensure_nav_nodes_running()
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
