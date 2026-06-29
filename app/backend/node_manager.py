@@ -196,6 +196,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
 
+        self._pause_pub.publish(Bool(data=False))
         self._nav_active_pub.publish(Bool(data=False))
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
@@ -216,6 +217,11 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._nav_active = bool(active)
         self._nav_active_pub.publish(Bool(data=bool(active)))
+
+    def _set_nav_paused(self, paused: bool):
+        with self._lock:
+            self._nav_paused = bool(paused)
+        self._pause_pub.publish(Bool(data=bool(paused)))
 
     def _on_nav_done(self, msg: Bool):
         if msg.data and self.state == 'navigation':
@@ -796,6 +802,7 @@ class BackendNode(Ros2NodeManager):
     # ------------------------------------------------------------------ #
 
     def cmd_start_nav_nodes(self):
+        self._set_nav_paused(False)
         self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -818,6 +825,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_stop_nav_nodes(self):
         self._set_nav_active(False)
+        self._set_nav_paused(False)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
@@ -828,11 +836,11 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
-            self._nav_paused = False
             self._manual_target_active = False
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
+        self._set_nav_paused(False)
         self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
@@ -1076,6 +1084,7 @@ class BackendNode(Ros2NodeManager):
             self._ensure_unitree_running()
             self._ensure_planning_running()
             self._ensure_nav_nodes_running()
+            self._set_nav_paused(False)
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
@@ -1105,6 +1114,7 @@ class BackendNode(Ros2NodeManager):
         msg.pose.pose.orientation.w = 1.0
         self._target_pose_pub.publish(msg)
         self._set_nav_active(False)
+        self._set_nav_paused(False)
         with self._lock:
             self._nav_target_pose = None
             self._manual_target_active = False
@@ -1115,6 +1125,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""
+        self._set_nav_paused(False)
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)
@@ -1146,6 +1157,7 @@ class BackendNode(Ros2NodeManager):
             self._start('navigation')
 
     def cmd_nav_start(self, poi_id: str | None = None):
+        self._set_nav_paused(False)
         with self._lock:
             self._manual_target_active = False
         if poi_id is not None:
@@ -1177,14 +1189,10 @@ class BackendNode(Ros2NodeManager):
             self._stop_all()
 
     def cmd_nav_pause(self):
-        with self._lock:
-            self._nav_paused = True
-        self._pause_pub.publish(Bool(data=True))
+        self._set_nav_paused(True)
 
     def cmd_nav_resume(self):
-        with self._lock:
-            self._nav_paused = False
-        self._pause_pub.publish(Bool(data=False))
+        self._set_nav_paused(False)
 
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))
