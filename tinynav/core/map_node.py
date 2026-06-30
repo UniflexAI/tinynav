@@ -218,6 +218,7 @@ class MapNode(Node):
         self.continuous_odom_recorder = OdomPoseRecorder(tinynav_db_path, "localization")
 
         self.odom = {}
+        self.latest_odom_pose = None
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
@@ -254,6 +255,8 @@ class MapNode(Node):
         self._leg_initial_length: float | None = None
         self._leg_start_time: float | None = None
         self._speed_estimate: float | None = None
+        self.cached_nav_path_in_map = None
+        self.cached_nav_path_poi_index = -1
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -267,6 +270,7 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -281,6 +285,7 @@ class MapNode(Node):
 
             if not self.pois:
                 self.poi_index = -1
+                self.cached_nav_path_in_map = None
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -292,6 +297,8 @@ class MapNode(Node):
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None
+            self.cached_nav_path_in_map = None
+            self.cached_nav_path_poi_index = -1
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
@@ -308,6 +315,7 @@ class MapNode(Node):
 
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
+        self.latest_odom_pose, _ = msg2np(odom_msg)
 
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
@@ -599,123 +607,135 @@ class MapNode(Node):
         poi_pose[:3, 3] = poi
         self.poi_pub.publish(np2msg(poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         # get the pose from the map to the odom
-        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.pose_graph_used_pose[timestamp]
+        odom_pose = self.latest_odom_pose if self.latest_odom_pose is not None else self.pose_graph_used_pose[timestamp]
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
-
-        pose_in_map_position = pose_in_map[:3, 3]
-
-        while self.poi_index < len(self.pois):
-            poi = self.pois[self.poi_index]
-            diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
-            diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
-                if self._leg_initial_length is not None:
-                    arrived_msg = String()
-                    arrived_msg.data = json.dumps({
-                        "poi_index": self.poi_index,
-                        "percent": 100.0,
-                        "path_remaining_m": 0.0,
-                        "path_total_m": round(self._leg_initial_length, 2),
-                        "estimated_remaining_s": 0.0,
-                    })
-                    self.nav_progress_pub.publish(arrived_msg)
-                self.poi_index += 1
-                self._leg_initial_length = None
-                self._leg_start_time = None
-                dummy_pose = np.eye(4)
-
-                stamp_msg = self.get_clock().now().to_msg()
-                stamp_msg.sec = int(timestamp / 1e9)
-                stamp_msg.nanosec = int(timestamp % 1e9)
-                self.poi_change_pub.publish(np2msg(dummy_pose, stamp_msg, "world", "map"))
-                continue
-            else:
-                break
-
-        if self.poi_index >= len(self.pois):
-            if not self._nav_completed:
-                self._nav_completed = True
-                self.get_logger().info("All POIs have been visited, nav done")
-                self.nav_done_pub.publish(Bool(data=True))
-            return
 
         target_poi = self.pois[self.poi_index]
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             paths_in_map = self.generate_nav_path_in_map(pose_in_map = pose_in_map, target_poi = target_poi)
 
         if paths_in_map is not None:
-            remaining_length = sum(
-                np.linalg.norm(paths_in_map[i + 1] - paths_in_map[i])
-                for i in range(len(paths_in_map) - 1)
-            ) if len(paths_in_map) > 1 else 0.0
+            self.cached_nav_path_in_map = paths_in_map
+            self.cached_nav_path_poi_index = self.poi_index
 
-            now = time.time()
-            if self._leg_initial_length is None:
-                self._leg_initial_length = remaining_length
-                self._leg_start_time = now
-
-            covered = self._leg_initial_length - remaining_length
-            elapsed = now - self._leg_start_time
-            if covered > 0.1 and elapsed > 1.0:
-                self._speed_estimate = covered / elapsed
-
-            initial = self._leg_initial_length
-            percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
-            estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
-
-            progress_msg = String()
-            progress_msg.data = json.dumps({
-                "poi_index": self.poi_index,
-                "percent": round(percent, 1),
-                "path_remaining_m": round(remaining_length, 2),
-                "path_total_m": round(initial, 2),
-                "estimated_remaining_s": round(estimated_remaining_s, 1),
-            })
-            self.nav_progress_pub.publish(progress_msg)
-
-            # use the max_speed to publish the position the robot should be after 5 seconds
-            with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                max_speed = 0.5
-                if len(paths_in_map) > 1:
-                    accumulated_distance = 0.0
-                    start_point = pose_in_map_position[:3]
-                    target_position = paths_in_map[-1]
-                    for i in range(len(paths_in_map) - 1):
-                        accumulated_distance += np.linalg.norm(paths_in_map[i][:2] - start_point[:2])
-                        if accumulated_distance > max_speed * 5:
-                            target_position = paths_in_map[i]
-                            break
-                        start_point = paths_in_map[i]
-                else:
-                    target_position = paths_in_map[0]
-                target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
-                pose_in_origin_odom = self.odom[timestamp]
-                T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
-                target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
-                dummy_pose = np.eye(4)
-                dummy_pose[:3, 3] = target_position_in_odom
-                #logging.info(f"target_position_in_odom: {target_position_in_odom}")
-                print(f"target_position_in_odom: {target_position_in_odom}")
-
-                self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-                path_msg = Path()
-                path_msg.header.stamp = self.get_clock().now().to_msg()
-                path_msg.header.frame_id = "map"
-                for x, y, z in paths_in_map:
-                    pose = PoseStamped()
-                    pose.header = path_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = 0.0
-                    pose.pose.orientation.y = 0.0
-                    pose.pose.orientation.z = 0.0
-                    pose.pose.orientation.w = 1.0
-                    path_msg.poses.append(pose)
-                self.global_plan_pub.publish(path_msg)
-                self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+            path_msg = Path()
+            path_msg.header.stamp = self.get_clock().now().to_msg()
+            path_msg.header.frame_id = "map"
+            for x, y, z in paths_in_map:
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = z
+                pose.pose.orientation.x = 0.0
+                pose.pose.orientation.y = 0.0
+                pose.pose.orientation.z = 0.0
+                pose.pose.orientation.w = 1.0
+                path_msg.poses.append(pose)
+            self.global_plan_pub.publish(path_msg)
         else:
+            self.cached_nav_path_in_map = None
+            self.cached_nav_path_poi_index = -1
             logging.info("No path found in map")
+
+    def nav_target_timer_callback(self):
+        if (
+            self.poi_index < 0
+            or self.poi_index >= len(self.pois)
+            or self.T_from_map_to_odom is None
+            or self.latest_odom_pose is None
+        ):
+            return
+
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
+        self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
+
+        poi = self.pois[self.poi_index]
+        pose_in_map_position = pose_in_map[:3, 3]
+        diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
+        diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
+        if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+            if self._leg_initial_length is not None:
+                arrived_msg = String()
+                arrived_msg.data = json.dumps({
+                    "poi_index": self.poi_index,
+                    "percent": 100.0,
+                    "path_remaining_m": 0.0,
+                    "path_total_m": round(self._leg_initial_length, 2),
+                    "estimated_remaining_s": 0.0,
+                })
+                self.nav_progress_pub.publish(arrived_msg)
+            self.poi_index += 1
+            self._leg_initial_length = None
+            self._leg_start_time = None
+            self._speed_estimate = None
+            self.cached_nav_path_in_map = None
+            self.cached_nav_path_poi_index = -1
+
+            dummy_pose = np.eye(4)
+            self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
+            if self.poi_index >= len(self.pois) and not self._nav_completed:
+                self._nav_completed = True
+                self.get_logger().info("All POIs have been visited, nav done")
+                self.nav_done_pub.publish(Bool(data=True))
+            return
+
+        if self.cached_nav_path_in_map is None or self.cached_nav_path_poi_index != self.poi_index:
+            return
+
+        paths_in_map = self.cached_nav_path_in_map
+        closest_idx = int(np.argmin(np.linalg.norm(paths_in_map[:, :2] - pose_in_map_position[:2], axis=1)))
+
+        remaining_length = sum(
+            np.linalg.norm(paths_in_map[i + 1] - paths_in_map[i])
+            for i in range(closest_idx, len(paths_in_map) - 1)
+        ) if closest_idx < len(paths_in_map) - 1 else 0.0
+
+        now = time.time()
+        if self._leg_initial_length is None:
+            self._leg_initial_length = remaining_length
+            self._leg_start_time = now
+
+        covered = self._leg_initial_length - remaining_length
+        elapsed = now - self._leg_start_time
+        if covered > 0.1 and elapsed > 1.0:
+            self._speed_estimate = covered / elapsed
+
+        initial = self._leg_initial_length
+        percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
+        estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
+
+        progress_msg = String()
+        progress_msg.data = json.dumps({
+            "poi_index": self.poi_index,
+            "percent": round(percent, 1),
+            "path_remaining_m": round(remaining_length, 2),
+            "path_total_m": round(initial, 2),
+            "estimated_remaining_s": round(estimated_remaining_s, 1),
+        })
+        self.nav_progress_pub.publish(progress_msg)
+
+        max_speed = 0.5
+        accumulated_distance = 0.0
+        start_point = pose_in_map_position[:3]
+        target_position = paths_in_map[-1]
+        for i in range(closest_idx, len(paths_in_map) - 1):
+            accumulated_distance += np.linalg.norm(paths_in_map[i][:2] - start_point[:2])
+            if accumulated_distance > max_speed * 5:
+                target_position = paths_in_map[i]
+                break
+            start_point = paths_in_map[i]
+
+        target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
+        T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
+        target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+        dummy_pose = np.eye(4)
+        dummy_pose[:3, 3] = target_position_in_odom
+        self.get_logger().debug(f"target_position_in_odom: {target_position_in_odom}")
+
+        self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+        self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
