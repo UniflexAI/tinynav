@@ -3,12 +3,18 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
+from tinynav.core.latency_trace import (
+    TRACE_TOPIC,
+    make_trace_publisher,
+    parse_trace_event,
+    publish_trace,
+)
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
@@ -23,6 +29,10 @@ class CmdVelControlNode(Node):
             Odometry, '/slam/odometry_visual', self.pose_callback, 10
         )
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
+        self.create_subscription(String, TRACE_TOPIC, self.trace_callback, 10)
+        self.latency_trace_pub = make_trace_publisher(self)
+        self.active_trace_id = None
+        self._trace_cmd_published_for_path = False
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -90,6 +100,30 @@ class CmdVelControlNode(Node):
     def pose_callback(self, msg):
         self.pose = msg
 
+    def trace_callback(self, msg: String):
+        event = parse_trace_event(msg.data)
+        if not event:
+            return
+        if event.get("stage") in ("backend", "planning") and event.get("trace_id"):
+            self.active_trace_id = event.get("trace_id")
+        if event.get("stage") == "planning" and event.get("event") == "trajectory_published":
+            self._trace_cmd_published_for_path = False
+
+    def _publish_cmd_trace(self, out: Twist):
+        if self._trace_cmd_published_for_path:
+            return
+        publish_trace(
+            self,
+            self.latency_trace_pub,
+            self.active_trace_id,
+            "cmd_vel_control",
+            "cmd_vel_published",
+            vx=float(out.linear.x),
+            vy=float(out.linear.y),
+            wz=float(out.angular.z),
+        )
+        self._trace_cmd_published_for_path = True
+
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
@@ -129,6 +163,7 @@ class CmdVelControlNode(Node):
             out.linear.x = target_cmd.linear.x
             out.angular.z = 0.0
             self.cmd_pub.publish(out)
+            self._publish_cmd_trace(out)
             self.prev_cmd = out
             return
 
@@ -156,6 +191,7 @@ class CmdVelControlNode(Node):
                 out.angular.z = 0.0
 
         self.cmd_pub.publish(out)
+        self._publish_cmd_trace(out)
         self.prev_cmd = out
         
     def path_callback(self, msg):
@@ -166,6 +202,16 @@ class CmdVelControlNode(Node):
         if len(msg.poses) < 2:
             return
         self.path = msg
+        self._trace_cmd_published_for_path = False
+        publish_trace(
+            self,
+            self.latency_trace_pub,
+            self.active_trace_id,
+            "cmd_vel_control",
+            "path_received",
+            source_stamp=msg.header.stamp,
+            path_len=len(msg.poses),
+        )
 
         ros_now = self.get_clock().now().to_msg()
         self.last_path_time = ros_now.sec + ros_now.nanosec * 1e-9

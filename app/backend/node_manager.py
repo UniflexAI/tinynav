@@ -29,6 +29,12 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
+from tinynav.core.latency_trace import (
+    encode_trace_frame,
+    make_trace_id,
+    make_trace_publisher,
+    publish_trace,
+)
 from tool.ros2_node_manager import Ros2NodeManager
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
@@ -155,6 +161,7 @@ class BackendNode(Ros2NodeManager):
 
         # Manual local target for planning_node, used by the operate tab long-press tool.
         self._target_pose_pub = self.create_publisher(Odometry, '/control/target_pose', 10)
+        self._latency_trace_pub = make_trace_publisher(self)
 
         # Latched publisher — new subscribers (cmd_vel_control) get current state immediately on connect
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -1085,14 +1092,35 @@ class BackendNode(Ros2NodeManager):
             self._ensure_planning_running()
             self._ensure_nav_nodes_running()
             self._set_nav_paused(False)
+        trace_id = make_trace_id()
+        publish_trace(
+            self,
+            self._latency_trace_pub,
+            trace_id,
+            "backend",
+            "manual_target_requested",
+            x=float(x),
+            y=float(y),
+            z=float(z),
+            activate=bool(activate),
+        )
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
+        msg.child_frame_id = encode_trace_frame(trace_id)
         msg.pose.pose.position.x = float(x)
         msg.pose.pose.position.y = float(y)
         msg.pose.pose.position.z = float(z)
         msg.pose.pose.orientation.w = 1.0
         self._target_pose_pub.publish(msg)
+        publish_trace(
+            self,
+            self._latency_trace_pub,
+            trace_id,
+            "backend",
+            "target_pose_published",
+            source_stamp=msg.header.stamp,
+        )
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
             nav_running = self._nav_nodes_running
