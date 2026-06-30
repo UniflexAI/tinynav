@@ -105,9 +105,12 @@ class CmdVelControlNode(Node):
         event = parse_trace_event(msg.data)
         if not event:
             return
-        if event.get("stage") in ("backend", "planning") and event.get("trace_id"):
+        if (
+            event.get("stage") == "planning"
+            and event.get("event") == "trajectory_published"
+            and event.get("trace_id")
+        ):
             self.active_trace_id = event.get("trace_id")
-        if event.get("stage") == "planning" and event.get("event") == "trajectory_published":
             self._trace_cmd_published_for_path = False
             self._trace_path_received_for_current_path = False
 

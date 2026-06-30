@@ -75,7 +75,7 @@ SUMMARY_SEGMENTS = [
 class LatencyTraceRecorder(Node):
     def __init__(self, csv_path: str | None, summary_csv_path: str | None):
         super().__init__("latency_trace_recorder")
-        self.events_by_trace = defaultdict(dict)
+        self.events_by_trace = defaultdict(lambda: defaultdict(list))
         self.summary_written = set()
         self.event_writer = None
         self.summary_writer = None
@@ -129,7 +129,7 @@ class LatencyTraceRecorder(Node):
             return
 
         key = (stage, event_name)
-        self.events_by_trace[trace_id].setdefault(key, event)
+        self.events_by_trace[trace_id][key].append(event)
         if self.event_writer:
             self.event_writer.writerow({
                 "trace_id": trace_id,
@@ -160,13 +160,15 @@ class LatencyTraceRecorder(Node):
                 self.summary_written.add(trace_id)
 
     def _build_summary(self, trace_id: str) -> dict | None:
-        events = self.events_by_trace[trace_id]
-        if not all(key in events for key in STAGE_EVENTS[:7]):
+        selected = self._select_ordered_events(trace_id, STAGE_EVENTS)
+        if selected is None:
+            selected = self._select_ordered_events(trace_id, STAGE_EVENTS[:7])
+        if selected is None:
             return None
         summary = {"trace_id": trace_id}
         for name, start_key, end_key in SUMMARY_SEGMENTS:
-            start = events.get(start_key)
-            end = events.get(end_key)
+            start = selected.get(start_key)
+            end = selected.get(end_key)
             if start is None or end is None:
                 summary[name] = None
                 continue
@@ -174,8 +176,28 @@ class LatencyTraceRecorder(Node):
         return summary
 
     def _has_full_summary(self, trace_id: str) -> bool:
+        return self._select_ordered_events(trace_id, STAGE_EVENTS) is not None
+
+    def _select_ordered_events(self, trace_id: str, keys: list[tuple[str, str]]) -> dict | None:
         events = self.events_by_trace[trace_id]
-        return all(key in events for key in STAGE_EVENTS)
+        selected = {}
+        last_t = -1
+        for key in keys:
+            candidates = sorted(
+                events.get(key, []),
+                key=lambda event: int(event.get("t_ros_ns", 0)),
+            )
+            match = None
+            for event in candidates:
+                event_t = int(event.get("t_ros_ns", 0))
+                if event_t >= last_t:
+                    match = event
+                    last_t = event_t
+                    break
+            if match is None:
+                return None
+            selected[key] = match
+        return selected
 
 
 def main():

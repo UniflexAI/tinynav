@@ -60,7 +60,8 @@ class Ros2UnitreeManagerNode(Node):
         if not event:
             return
         if (
-            event.get("stage") in ("backend", "planning", "cmd_vel_control")
+            event.get("stage") == "cmd_vel_control"
+            and event.get("event") == "cmd_vel_published"
             and event.get("trace_id")
         ):
             self.active_trace_id = event.get("trace_id")
