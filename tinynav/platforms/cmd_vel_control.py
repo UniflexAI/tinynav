@@ -33,6 +33,7 @@ class CmdVelControlNode(Node):
         self.latency_trace_pub = make_trace_publisher(self)
         self.active_trace_id = None
         self._trace_cmd_published_for_path = False
+        self._trace_path_received_for_current_path = False
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -108,8 +109,11 @@ class CmdVelControlNode(Node):
             self.active_trace_id = event.get("trace_id")
         if event.get("stage") == "planning" and event.get("event") == "trajectory_published":
             self._trace_cmd_published_for_path = False
+            self._trace_path_received_for_current_path = False
 
     def _publish_cmd_trace(self, out: Twist):
+        if not self._trace_path_received_for_current_path:
+            return
         if self._trace_cmd_published_for_path:
             return
         publish_trace(
@@ -203,6 +207,7 @@ class CmdVelControlNode(Node):
             return
         self.path = msg
         self._trace_cmd_published_for_path = False
+        self._trace_path_received_for_current_path = True
         publish_trace(
             self,
             self.latency_trace_pub,

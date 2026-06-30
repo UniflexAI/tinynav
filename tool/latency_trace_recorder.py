@@ -129,7 +129,7 @@ class LatencyTraceRecorder(Node):
             return
 
         key = (stage, event_name)
-        self.events_by_trace[trace_id][key] = event
+        self.events_by_trace[trace_id].setdefault(key, event)
         if self.event_writer:
             self.event_writer.writerow({
                 "trace_id": trace_id,
