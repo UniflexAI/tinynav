@@ -29,6 +29,12 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
+from tinynav.core.latency_trace import (
+    encode_trace_frame,
+    make_trace_id,
+    make_trace_publisher,
+    publish_trace,
+)
 from tool.ros2_node_manager import Ros2NodeManager
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
@@ -155,6 +161,7 @@ class BackendNode(Ros2NodeManager):
 
         # Manual local target for planning_node, used by the operate tab long-press tool.
         self._target_pose_pub = self.create_publisher(Odometry, '/control/target_pose', 10)
+        self._latency_trace_pub = make_trace_publisher(self)
 
         # Latched publisher — new subscribers (cmd_vel_control) get current state immediately on connect
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -162,6 +169,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
         self._nav_paused = False
         self._nav_active = False
+        self._manual_target_active = False
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -190,10 +198,12 @@ class BackendNode(Ros2NodeManager):
         self._nav_nodes_running: bool = False
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
+        self._proc_log_paths: dict[str, str] = {}
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
 
+        self._pause_pub.publish(Bool(data=False))
         self._nav_active_pub.publish(Bool(data=False))
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
@@ -214,6 +224,11 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._nav_active = bool(active)
         self._nav_active_pub.publish(Bool(data=bool(active)))
+
+    def _set_nav_paused(self, paused: bool):
+        with self._lock:
+            self._nav_paused = bool(paused)
+        self._pause_pub.publish(Bool(data=bool(paused)))
 
     def _on_nav_done(self, msg: Bool):
         if msg.data and self.state == 'navigation':
@@ -266,10 +281,16 @@ class BackendNode(Ros2NodeManager):
             self._localized = True
 
     def _on_nav_target_pose(self, msg: Odometry):
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            with self._lock:
+                self._nav_target_pose = None
+            return
         with self._lock:
             self._nav_target_pose = {
-                'x': msg.pose.pose.position.x,
-                'y': msg.pose.pose.position.y,
+                'x': x,
+                'y': y,
             }
 
     def _on_height_map(self, msg: Image):
@@ -631,6 +652,13 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             nav_active = self._nav_active
+            manual_target_active = self._manual_target_active
+            planning_running = (
+                self._proc_running(self._planning_proc)
+                or self._proc_running(self.processes.get('planning'))
+            )
+            cmd_vel_running = self._proc_running(self._cmd_vel_proc)
+            unitree_running = self._proc_running(self._unitree_proc)
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -644,6 +672,10 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
+            'manualTargetActive': manual_target_active,
+            'planningRunning': planning_running,
+            'cmdVelControlRunning': cmd_vel_running,
+            'unitreeControlRunning': unitree_running,
         }
 
     @staticmethod
@@ -679,6 +711,7 @@ class BackendNode(Ros2NodeManager):
         os.makedirs(logs_dir, exist_ok=True)
         ts = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
         path = os.path.join(logs_dir, f'{ts}_{name}.txt')
+        self._proc_log_paths[name] = path
         return open(path, 'w')
 
     def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
@@ -692,6 +725,44 @@ class BackendNode(Ros2NodeManager):
         )
         lf.close()
         return proc
+
+    @staticmethod
+    def _proc_running(proc: subprocess.Popen | None) -> bool:
+        return proc is not None and proc.poll() is None
+
+    def _require_proc_running(self, name: str, proc: subprocess.Popen | None):
+        time.sleep(0.2)
+        if self._proc_running(proc):
+            return
+        log_path = self._proc_log_paths.get(name)
+        suffix = f'; see {log_path}' if log_path else ''
+        raise RuntimeError(f'{name} failed to start{suffix}')
+
+    def _ensure_unitree_running(self):
+        if self._proc_running(self._unitree_proc):
+            return
+        self._start_unitree_if_configured()
+
+    def _ensure_planning_running(self):
+        if self._proc_running(self._planning_proc) or self._proc_running(self.processes.get('planning')):
+            return
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        self._planning_proc = self._launch_proc(
+            'planning',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            env=_env,
+        )
+        self._require_proc_running('planning', self._planning_proc)
+
+    def _ensure_nav_nodes_running(self):
+        if self._proc_running(self._map_node_proc) and self._proc_running(self._cmd_vel_proc):
+            with self._lock:
+                self._nav_nodes_running = True
+            return
+        self.cmd_stop_nav_nodes()
+        self.cmd_start_nav_nodes()
+        self._require_proc_running('cmd_vel_control', self._cmd_vel_proc)
 
     def _stop_sensor_procs(self):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
@@ -738,6 +809,7 @@ class BackendNode(Ros2NodeManager):
     # ------------------------------------------------------------------ #
 
     def cmd_start_nav_nodes(self):
+        self._set_nav_paused(False)
         self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -760,6 +832,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_stop_nav_nodes(self):
         self._set_nav_active(False)
+        self._set_nav_paused(False)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
@@ -770,10 +843,11 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
-            self._nav_paused = False
+            self._manual_target_active = False
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
+        self._set_nav_paused(False)
         self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
@@ -1005,25 +1079,81 @@ class BackendNode(Ros2NodeManager):
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         return True
 
-    def cmd_manual_target_pose(self, x: float, y: float, z: float):
+    def cmd_manual_target_pose(self, x: float, y: float, z: float, activate: bool = True):
         """Publish a manually selected local-planner target pose.
 
         planning_node subscribes to /control/target_pose and only reads the
         position vector, so Odometry is used here to match that existing API.
+        When requested, mark navigation active so cmd_vel_control consumes the
+        resulting /planning/trajectory_path and publishes /cmd_vel.
         """
+        if activate:
+            self._ensure_unitree_running()
+            self._ensure_planning_running()
+            self._ensure_nav_nodes_running()
+            self._set_nav_paused(False)
+        trace_id = make_trace_id()
+        publish_trace(
+            self,
+            self._latency_trace_pub,
+            trace_id,
+            "backend",
+            "manual_target_requested",
+            x=float(x),
+            y=float(y),
+            z=float(z),
+            activate=bool(activate),
+        )
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'odom'
+        msg.child_frame_id = encode_trace_frame(trace_id)
         msg.pose.pose.position.x = float(x)
         msg.pose.pose.position.y = float(y)
         msg.pose.pose.position.z = float(z)
         msg.pose.pose.orientation.w = 1.0
         self._target_pose_pub.publish(msg)
+        publish_trace(
+            self,
+            self._latency_trace_pub,
+            trace_id,
+            "backend",
+            "target_pose_published",
+            source_stamp=msg.header.stamp,
+        )
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
+            nav_running = self._nav_nodes_running
+        if activate and nav_running:
+            with self._lock:
+                self._manual_target_active = True
+            self._set_nav_active(True)
+            self.state = 'navigation'
+            self._pub_state()
+
+    def cmd_clear_manual_target_pose(self):
+        """Clear the manually selected local-planner target pose."""
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.position.x = math.nan
+        msg.pose.pose.position.y = math.nan
+        msg.pose.pose.position.z = math.nan
+        msg.pose.pose.orientation.w = 1.0
+        self._target_pose_pub.publish(msg)
+        self._set_nav_active(False)
+        self._set_nav_paused(False)
+        with self._lock:
+            self._nav_target_pose = None
+            self._manual_target_active = False
+            nav_running = self._nav_nodes_running
+        if nav_running and self.state == 'navigation':
+            self.state = 'idle'
+            self._pub_state()
 
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""
+        self._set_nav_paused(False)
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)
@@ -1045,6 +1175,7 @@ class BackendNode(Ros2NodeManager):
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
             self._set_nav_active(bool(payload))
         with self._lock:
+            self._manual_target_active = False
             nav_running = self._nav_nodes_running
         if nav_running:
             self.state = 'navigation'
@@ -1054,6 +1185,9 @@ class BackendNode(Ros2NodeManager):
             self._start('navigation')
 
     def cmd_nav_start(self, poi_id: str | None = None):
+        self._set_nav_paused(False)
+        with self._lock:
+            self._manual_target_active = False
         if poi_id is not None:
             self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         else:
@@ -1083,14 +1217,10 @@ class BackendNode(Ros2NodeManager):
             self._stop_all()
 
     def cmd_nav_pause(self):
-        with self._lock:
-            self._nav_paused = True
-        self._pause_pub.publish(Bool(data=True))
+        self._set_nav_paused(True)
 
     def cmd_nav_resume(self):
-        with self._lock:
-            self._nav_paused = False
-        self._pause_pub.publish(Bool(data=False))
+        self._set_nav_paused(False)
 
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))

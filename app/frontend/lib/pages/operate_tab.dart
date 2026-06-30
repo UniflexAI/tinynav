@@ -132,6 +132,8 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
     final status = ref.watch(deviceStatusProvider).valueOrNull;
     final isNavigating = status?.rawState == 'navigation';
+    final manualTargetDisabled =
+        status?.rawState == 'navigation' && status?.manualTargetActive != true;
     final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
 
     return Column(
@@ -161,6 +163,8 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         showFootprint: _showFootprint,
                         fillViewport: _localMapFill,
                         show3d: _showLocal3d,
+                        manualTargetActive: status?.manualTargetActive == true,
+                        manualTargetDisabled: manualTargetDisabled,
                       ),
               ),
               if (planning != null)
@@ -336,6 +340,8 @@ class _LocalPlanningView extends ConsumerStatefulWidget {
   final bool showFootprint;
   final bool fillViewport;
   final bool show3d;
+  final bool manualTargetActive;
+  final bool manualTargetDisabled;
 
   const _LocalPlanningView({
     this.planning,
@@ -346,6 +352,8 @@ class _LocalPlanningView extends ConsumerStatefulWidget {
     this.showFootprint = true,
     this.fillViewport = false,
     this.show3d = false,
+    this.manualTargetActive = false,
+    this.manualTargetDisabled = false,
   });
 
   @override
@@ -444,6 +452,14 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
   }
 
   Future<void> _handleLongPress(Offset localPos, Size viewportSize) async {
+    if (widget.manualTargetDisabled) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Manual target is disabled during POI navigation'),
+        ),
+      );
+      return;
+    }
     final target = _targetFromLocalPosition(localPos, viewportSize);
     if (target == null || !mounted) return;
     setState(() => _pendingTarget = target);
@@ -479,10 +495,13 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
           'x': target.x,
           'y': target.y,
           'z': target.z,
+          'activate': true,
         });
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Manual target published')),
+            const SnackBar(
+              content: Text('Manual target published and navigation activated'),
+            ),
           );
         }
       } catch (e) {
@@ -496,10 +515,27 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
     if (mounted) setState(() => _pendingTarget = null);
   }
 
+  Future<void> _clearManualTarget() async {
+    try {
+      await ref.read(dioProvider).post('/nav/manual-target/clear');
+      if (!mounted) return;
+      setState(() => _pendingTarget = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Manual target stopped')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to stop target: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = widget.planning;
     final gi = p?.gridInfo;
+    final hasManualTarget = _pendingTarget != null || widget.manualTargetActive;
     final localAspectRatio =
         (gi != null && gi.height > 0) ? gi.width / gi.height : 1.0;
 
@@ -668,6 +704,25 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
             ),
           ),
         ),
+        if (hasManualTarget)
+          Positioned(
+            top: 14,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFD32F2F),
+                  foregroundColor: Colors.white,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                ),
+                onPressed: _clearManualTarget,
+                icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                label: const Text('Stop Target'),
+              ),
+            ),
+          ),
       ],
     );
   }

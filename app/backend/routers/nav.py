@@ -24,6 +24,7 @@ class ManualTargetRequest(BaseModel):
     x: float
     y: float
     z: float
+    activate: bool = True
 
 
 @router.post('/send-pois')
@@ -51,8 +52,24 @@ def nav_manual_target(req: ManualTargetRequest):
     node = _require_node()
     if node._odom_pose is None:
         raise HTTPException(409, 'Odometry not ready')
-    node.cmd_manual_target_pose(req.x, req.y, req.z)
-    return {'ok': True, 'target': {'x': req.x, 'y': req.y, 'z': req.z}}
+    if node.state == 'navigation' and not node._manual_target_active:
+        raise HTTPException(409, 'Manual target is disabled while POI navigation is running')
+    try:
+        node.cmd_manual_target_pose(req.x, req.y, req.z, activate=req.activate)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        'ok': True,
+        'target': {'x': req.x, 'y': req.y, 'z': req.z},
+        'active': req.activate,
+    }
+
+
+@router.post('/manual-target/clear')
+def nav_manual_target_clear():
+    node = _require_node()
+    node.cmd_clear_manual_target_pose()
+    return {'ok': True}
 
 
 @router.post('/cancel')

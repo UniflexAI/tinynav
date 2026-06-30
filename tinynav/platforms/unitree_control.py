@@ -9,6 +9,12 @@ from std_msgs.msg import Float32, String
 from enum import Enum
 import logging
 import time
+from tinynav.core.latency_trace import (
+    TRACE_TOPIC,
+    make_trace_publisher,
+    parse_trace_event,
+    publish_trace,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -31,6 +37,7 @@ class Ros2UnitreeManagerNode(Node):
         self.battery = 0.0
         self.last_twist_time = None
         self.logger = logging.getLogger(__name__)
+        self.active_trace_id = None
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -43,8 +50,21 @@ class Ros2UnitreeManagerNode(Node):
         
         self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
+        self.latency_trace_pub = make_trace_publisher(self)
+        self.create_subscription(String, TRACE_TOPIC, self.TraceMessageHandler, 10)
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+
+    def TraceMessageHandler(self, msg: String):
+        event = parse_trace_event(msg.data)
+        if not event:
+            return
+        if (
+            event.get("stage") == "cmd_vel_control"
+            and event.get("event") == "cmd_vel_published"
+            and event.get("trace_id")
+        ):
+            self.active_trace_id = event.get("trace_id")
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
@@ -53,12 +73,32 @@ class Ros2UnitreeManagerNode(Node):
             time_interval = current_time - self.last_twist_time
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_twist_time = current_time
+        publish_trace(
+            self,
+            self.latency_trace_pub,
+            self.active_trace_id,
+            "unitree_control",
+            "cmd_vel_received",
+            vx=float(msg.linear.x),
+            vy=float(msg.linear.y),
+            wz=float(msg.angular.z),
+        )
         
         if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
             self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
             self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
+            command = "Move"
         else:
             self.sport_client.StopMove()
+            command = "StopMove"
+        publish_trace(
+            self,
+            self.latency_trace_pub,
+            self.active_trace_id,
+            "unitree_control",
+            "robot_command_sent",
+            command=command,
+        )
         time.sleep(0.02)
 
     def ActionMessageHandler(self, msg: String_):

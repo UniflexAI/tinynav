@@ -15,6 +15,11 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
+from tinynav.core.latency_trace import (
+    decode_trace_frame,
+    make_trace_publisher,
+    publish_trace,
+)
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 
@@ -389,14 +394,43 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
+        self.target_trace_id = None
+        self._trace_planning_input_reported = None
+        self._latency_trace_pub = make_trace_publisher(self)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self.target_trace_id = None
+        self._trace_planning_input_reported = None
 
     def target_pose_callback(self, msg):
-        self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        target_pose = np.array([
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            msg.pose.pose.position.z,
+        ])
+        if not np.all(np.isfinite(target_pose)):
+            self.target_pose = None
+            self.target_trace_id = None
+            self._trace_planning_input_reported = None
+            self.get_logger().info("Manual target pose cleared.")
+            return
+        self.target_pose = target_pose
+        self.target_trace_id = decode_trace_frame(msg.child_frame_id)
+        self._trace_planning_input_reported = None
+        publish_trace(
+            self,
+            self._latency_trace_pub,
+            self.target_trace_id,
+            "planning",
+            "target_pose_received",
+            source_stamp=msg.header.stamp,
+            x=float(target_pose[0]),
+            y=float(target_pose[1]),
+            z=float(target_pose[2]),
+        )
 
     def info_callback(self, msg):
         if self.K is None:
@@ -546,6 +580,22 @@ class PlanningNode(Node):
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
             return
+        if (
+            self.target_pose is not None
+            and self.target_trace_id is not None
+            and self._trace_planning_input_reported != self.target_trace_id
+        ):
+            self._trace_planning_input_reported = self.target_trace_id
+            publish_trace(
+                self,
+                self._latency_trace_pub,
+                self.target_trace_id,
+                "planning",
+                "planning_input_received",
+                source_stamp=odom_msg.header.stamp,
+                depth_stamp_ns=int(depth_msg.header.stamp.sec) * 1_000_000_000
+                + int(depth_msg.header.stamp.nanosec),
+            )
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
@@ -655,6 +705,15 @@ class PlanningNode(Node):
                     pose.pose.orientation.z = qz
                     pose.pose.orientation.w = qw
                     path.poses.append(pose)
+            publish_trace(
+                self,
+                self._latency_trace_pub,
+                self.target_trace_id,
+                "planning",
+                "trajectory_published",
+                source_stamp=path.header.stamp,
+                path_len=len(path.poses),
+            )
             self.path_pub.publish(path)
 
 def main(args=None):
