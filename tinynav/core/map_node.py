@@ -73,80 +73,6 @@ def transform_point_cloud(point_cloud: np.ndarray, T: np.ndarray) -> np.ndarray:
     transformed_points = homogeneous_points @ T.T
     return transformed_points[:, :3]
 
-def _line_of_sight(p0: np.ndarray, p1: np.ndarray, occupancy_map: np.ndarray) -> bool:
-    """Bresenham 3-D line check: True if no occupied cell between p0 and p1 (voxel coords)."""
-    x0, y0, z0 = int(p0[0]), int(p0[1]), int(p0[2])
-    x1, y1, z1 = int(p1[0]), int(p1[1]), int(p1[2])
-    dx, dy, dz = abs(x1 - x0), abs(y1 - y0), abs(z1 - z0)
-    sx = 1 if x1 > x0 else -1
-    sy = 1 if y1 > y0 else -1
-    sz = 1 if z1 > z0 else -1
-    if dx >= dy and dx >= dz:
-        ey, ez = 2 * dy - dx, 2 * dz - dx
-        for _ in range(dx + 1):
-            if occupancy_map[x0, y0, z0] == 2:
-                return False
-            if ey >= 0:
-                y0 += sy; ey -= 2 * dx
-            if ez >= 0:
-                z0 += sz; ez -= 2 * dx
-            x0 += sx; ey += 2 * dy; ez += 2 * dz
-    elif dy >= dx and dy >= dz:
-        ex, ez = 2 * dx - dy, 2 * dz - dy
-        for _ in range(dy + 1):
-            if occupancy_map[x0, y0, z0] == 2:
-                return False
-            if ex >= 0:
-                x0 += sx; ex -= 2 * dy
-            if ez >= 0:
-                z0 += sz; ez -= 2 * dy
-            y0 += sy; ex += 2 * dx; ez += 2 * dz
-    else:
-        ex, ey = 2 * dx - dz, 2 * dy - dz
-        for _ in range(dz + 1):
-            if occupancy_map[x0, y0, z0] == 2:
-                return False
-            if ex >= 0:
-                x0 += sx; ex -= 2 * dz
-            if ey >= 0:
-                y0 += sy; ey -= 2 * dz
-            z0 += sz; ex += 2 * dx; ey += 2 * dy
-    return True
-
-
-def _shortcut_path(path_world: np.ndarray, occupancy_map: np.ndarray,
-                   occupancy_origin: np.ndarray, resolution: float) -> np.ndarray:
-    """Greedy shortcutting: skip waypoints when line-of-sight is clear."""
-    if len(path_world) <= 2:
-        return path_world
-    voxels = np.round((path_world - occupancy_origin) / resolution).astype(np.int32)
-    result = [0]
-    i = 0
-    while i < len(voxels) - 1:
-        j = len(voxels) - 1
-        while j > i + 1:
-            if _line_of_sight(voxels[i], voxels[j], occupancy_map):
-                break
-            j -= 1
-        result.append(j)
-        i = j
-    return path_world[result]
-
-
-def _chaikin_smooth(path: np.ndarray, iterations: int = 2) -> np.ndarray:
-    """Chaikin corner-cutting: iteratively insert 1/4 and 3/4 points."""
-    for _ in range(iterations):
-        if len(path) <= 2:
-            break
-        new_path = [path[0]]
-        for i in range(len(path) - 1):
-            new_path.append(0.75 * path[i] + 0.25 * path[i + 1])
-            new_path.append(0.25 * path[i] + 0.75 * path[i + 1])
-        new_path.append(path[-1])
-        path = np.array(new_path)
-    return path
-
-
 def heuristic(start, goal, resolution):
     vec_start = np.array(start)
     vec_goal = np.array(goal)
@@ -719,7 +645,7 @@ class MapNode(Node):
         if not needs_replan:
             paths = self.cached_nav_path_in_map
             closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
-            if np.linalg.norm(paths[closest_idx, :2] - pos[:2]) > 1.0:
+            if np.linalg.norm(paths[closest_idx, :2] - pos[:2]) > 0.5:
                 needs_replan = True
 
         if needs_replan:
@@ -826,8 +752,6 @@ class MapNode(Node):
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
-            converted_path = _shortcut_path(converted_path, self.occupancy_map, occupancy_map_origin, resolution)
-            converted_path = _chaikin_smooth(converted_path)
             return converted_path
         return None
 
