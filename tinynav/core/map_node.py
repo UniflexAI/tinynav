@@ -265,6 +265,7 @@ class MapNode(Node):
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
+        self.map_tf_timer = self.create_timer(0.1, self.publish_map_tf)
 
         self._save_completed = False
 
@@ -556,6 +557,13 @@ class MapNode(Node):
             # Ignore errors during destruction as resources may already be freed
             pass
 
+
+    def publish_map_tf(self):
+        """Continuously re-broadcast world->map"""
+        if self.T_from_map_to_odom is None:
+            return
+        self.tf_broadcaster.sendTransform(
+            np2tf(self.T_from_map_to_odom, self.get_clock().now().to_msg(), "world", "map"))
 
     def compute_transform_from_map_to_odom(self):
         """

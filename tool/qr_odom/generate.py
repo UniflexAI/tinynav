@@ -1,142 +1,188 @@
 #!/usr/bin/env python3
-"""Generate a satellite QR code to use as a spatial anchor.
+"""Generate a print-ready PDF for an NxN AprilTag 36h11 GridBoard.
 
-Writes:
-  qr_satellite.png  — preview image
-  qr_satellite.pdf  — A4 print-ready PDF (QR active area at exact physical size)
-  qr_satellite.json — parameters loaded by qr_target_node.py record mode
+Writes to tinynav_db/qrcode/:
+  tag_grid_NxN.pdf   — A4 / A3 PDF at exact physical size
+  tag_grid_NxN.json  — board params loaded by odom_node.py / record_node.py
 
 Usage:
-  python qr_generate.py                         # random UUID, 0.20 m
-  python qr_generate.py <content> <size_m>      # e.g. python qr_generate.py dock-A 0.15
+  python tool/qr_odom/generate.py --grid 2
+  python tool/qr_odom/generate.py --grid 3
+  python tool/qr_odom/generate.py --grid 4
+  python tool/qr_odom/generate.py --grid 4 --size 0.10 --spacing 0.02
 
-size_m is the physical side length of the QR active area (corner-to-corner of the
-finder patterns, quiet zone excluded).  Red corner marks in the PDF indicate the
-active area boundary.  After printing at 100% scale, measure between the marks
-and update size_m in qr_satellite.json if it differs from the intended value.
+Page selection (auto, based on board size):
+  fits on A4  → A4 portrait
+  fits on A3  → A3 portrait
 """
 
+import argparse
 import io
 import json
-import sys
-import uuid
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image as PILImage
-from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-OUT_PNG = Path("qr_satellite.png")
-OUT_PDF = Path("qr_satellite.pdf")
-OUT_JSON = Path("qr_satellite.json")
+DB_DIR      = Path("tinynav_db/qrcode")
+ARUCO_DICT  = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+FAMILY_NAME = "DICT_APRILTAG_36h11"
 
-A4_W, A4_H = A4   # points (595.28 × 841.89)
+TAG_PX   = 300   # pixels per tag active area (image resolution)
+QUIET_PX = 24    # quiet-zone margin in pixels
+
+A4_MM = (210.0, 297.0)   # portrait (width, height)
+A3_MM = (297.0, 420.0)
 
 
-def _encode_qr(content: str) -> np.ndarray:
-    """Return the raw QR module grid as a uint8 grayscale array (0=black, 255=white)."""
-    return cv2.QRCodeEncoder.create().encode(content)
+def _page_for(grid: int) -> tuple[float, float]:
+    """Grid 1–2 → A4 portrait, grid 3–4 → A3 portrait."""
+    return A4_MM if grid <= 2 else A3_MM
 
 
-def _save_png(qr_modules: np.ndarray, border_px: int = 20, module_px: int = 10) -> None:
-    n = qr_modules.shape[0]
-    scaled = cv2.resize(qr_modules, (n * module_px, n * module_px),
-                        interpolation=cv2.INTER_NEAREST)
-    with_border = cv2.copyMakeBorder(
-        scaled, border_px, border_px, border_px, border_px,
-        cv2.BORDER_CONSTANT, value=255,
+def generate(grid: int, size_m: float, spacing_m: float) -> None:
+    n          = grid
+    tag_ids    = list(range(n * n))
+    size_mm    = size_m    * 1000
+    spacing_mm = spacing_m * 1000
+    board_mm   = n * size_mm + (n - 1) * spacing_mm
+
+    board = cv2.aruco.GridBoard(
+        size=(n, n),
+        markerLength=size_m,
+        markerSeparation=spacing_m,
+        dictionary=ARUCO_DICT,
+        ids=np.array(tag_ids, dtype=np.int32),
     )
-    cv2.imwrite(str(OUT_PNG), with_border)
 
+    # Render board image
+    spacing_px      = int(round(spacing_m / size_m * TAG_PX))
+    active_board_px = n * TAG_PX + (n - 1) * spacing_px
+    total_px        = active_board_px + 2 * QUIET_PX
+    img = board.generateImage((total_px, total_px), marginSize=QUIET_PX, borderBits=1)
 
-def _save_pdf(qr_modules: np.ndarray, content: str, size_m: float) -> None:
-    n = qr_modules.shape[0]
-    size_mm = size_m * 1000
-    active_pt = size_mm * mm          # active area in PDF points
-    quiet_pt = 4 * active_pt / n      # standard 4-module quiet zone
+    # Page and scaling
+    pw_mm, ph_mm = _page_for(n)
+    margin_mm = (pw_mm - board_mm) / 2
+    if margin_mm < 0:
+        print(f"WARNING: board {board_mm:.0f} mm exceeds {pw_mm:.0f} mm paper width by "
+              f"{-margin_mm*2:.0f} mm. Print with 'fit to page' or use smaller --size.")
+    elif margin_mm < 10:
+        print(f"WARNING: only {margin_mm:.1f} mm margin per side on "
+              f"{pw_mm:.0f}×{ph_mm:.0f} mm paper.")
 
-    # Page centre
-    cx, cy = A4_W / 2, A4_H / 2
+    PW = pw_mm * mm
+    PH = ph_mm * mm
+    active_board_pt = board_mm * mm
+    scale           = active_board_pt / active_board_px
+    total_img_pt    = total_px * scale
+    margin_pt       = QUIET_PX * scale
 
-    # Active-area bounding box (bottom-left origin, as reportlab uses)
-    ax0 = cx - active_pt / 2
-    ay0 = cy - active_pt / 2
+    cx    = PW / 2
+    cy    = PH / 2
+    img_x = cx - total_img_pt / 2
+    img_y = cy - total_img_pt / 2
+    ax0   = img_x + margin_pt
+    ay0   = img_y + margin_pt
+    ax1   = ax0 + active_board_pt
 
-    c = canvas.Canvas(str(OUT_PDF), pagesize=A4)
+    _smm     = int(round(size_m * 1000))
+    out_pdf  = DB_DIR / f"tag_grid_{n}x{n}_s{_smm}mm.pdf"
+    out_json = DB_DIR / f"tag_grid_{n}x{n}_s{_smm}mm.json"
 
-    # ── QR image (active area only, no quiet zone) ──────────────────────
-    pil = PILImage.fromarray(qr_modules).convert("RGB")
+    c = canvas.Canvas(str(out_pdf), pagesize=(PW, PH))
+
+    # Board image
     buf = io.BytesIO()
-    pil.save(buf, format="PNG")
+    PILImage.fromarray(img).convert("RGB").save(buf, format="PNG")
     buf.seek(0)
-    c.drawImage(ImageReader(buf), ax0, ay0, width=active_pt, height=active_pt,
-                preserveAspectRatio=True)
+    c.drawImage(ImageReader(buf), img_x, img_y,
+                width=total_img_pt, height=total_img_pt, preserveAspectRatio=True)
 
-    # ── Red corner registration marks ────────────────────────────────────
-    tick = 5 * mm
-    c.setStrokeColorRGB(0.9, 0, 0)
-    c.setLineWidth(0.6)
-    for sx, sy in [
-        (ax0,              ay0),
-        (ax0 + active_pt,  ay0),
-        (ax0,              ay0 + active_pt),
-        (ax0 + active_pt,  ay0 + active_pt),
-    ]:
-        dx = tick if sx < cx else -tick
-        dy = tick if sy < cy else -tick
-        c.line(sx, sy, sx + dx, sy)
-        c.line(sx, sy, sx, sy + dy)
+    # Red corner marks per tag
+    size_pt    = size_mm    * mm
+    spacing_pt = spacing_mm * mm
+    tick       = 3.5 * mm
+    c.setStrokeColorRGB(0.85, 0, 0)
+    c.setLineWidth(0.5)
+    for row in range(n):
+        for col in range(n):
+            tx0 = ax0 + col * (size_pt + spacing_pt)
+            ty0 = ay0 + row * (size_pt + spacing_pt)
+            tx1 = tx0 + size_pt
+            ty1 = ty0 + size_pt
+            tcx = (tx0 + tx1) / 2
+            tcy = (ty0 + ty1) / 2
+            for sx, sy in [(tx0, ty0), (tx1, ty0), (tx0, ty1), (tx1, ty1)]:
+                dx = tick if sx < tcx else -tick
+                dy = tick if sy < tcy else -tick
+                c.line(sx, sy, sx + dx, sy)
+                c.line(sx, sy, sx, sy + dy)
 
-    # ── Horizontal dimension line below the QR ───────────────────────────
+    # Board outline
+    c.setStrokeColorRGB(0.65, 0.65, 0.65)
+    c.setLineWidth(0.3)
+    c.rect(ax0, ay0, active_board_pt, active_board_pt)
+
+    # Dimension line
     dim_y = ay0 - 8 * mm
     c.setStrokeColorRGB(0, 0, 0)
     c.setLineWidth(0.5)
-    c.line(ax0, dim_y, ax0 + active_pt, dim_y)
-    c.line(ax0, dim_y - 2 * mm, ax0, dim_y + 2 * mm)
-    c.line(ax0 + active_pt, dim_y - 2 * mm, ax0 + active_pt, dim_y + 2 * mm)
+    c.line(ax0, dim_y, ax1, dim_y)
+    for bx in (ax0, ax1):
+        c.line(bx, dim_y - 2 * mm, bx, dim_y + 2 * mm)
 
-    # ── Labels ────────────────────────────────────────────────────────────
     c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(cx, dim_y - 5 * mm, f"{size_mm:.0f} mm")
-
+    c.setFont("Helvetica-Bold", 9)
+    c.drawCentredString(cx, dim_y - 5 * mm,
+        f"board: {board_mm:.0f} mm  |  per tag: {size_mm:.0f} mm  |  gap: {spacing_mm:.0f} mm")
     c.setFont("Helvetica", 8)
-    c.drawCentredString(cx, ay0 - 17 * mm,
-                        f"Satellite QR  |  active area: {size_mm:.0f} × {size_mm:.0f} mm  |  {content}")
+    c.drawCentredString(cx, dim_y - 11 * mm,
+        f"AprilTag 36h11  |  {n}×{n} grid  |  ids: 0 – {n*n - 1}")
     c.setFillColorRGB(0.4, 0.4, 0.4)
-    c.drawCentredString(cx, ay0 - 22 * mm,
-                        "Print at 100% scale (no 'fit to page'). "
-                        "Measure between red corner marks. "
-                        f"Update size_m in {OUT_JSON} if it differs.")
-
+    c.drawCentredString(cx, dim_y - 17 * mm,
+        f"Print at 100% on {pw_mm:.0f}×{ph_mm:.0f} mm paper (no 'fit to page').  "
+        f"Measure one tag between red marks — should be {size_mm:.0f} mm.  "
+        f"Update size_m in {out_json.name} if it differs.")
     c.save()
 
+    # JSON
+    out_json.write_text(json.dumps({
+        "tag_family": FAMILY_NAME,
+        "grid":       f"{n}x{n}",
+        "tag_ids":    tag_ids,
+        "size_m":     size_m,
+        "spacing_m":  spacing_m,
+    }, indent=2))
 
-def generate(content: str, size_m: float) -> None:
-    qr_modules = _encode_qr(content)
-    _save_png(qr_modules)
-    _save_pdf(qr_modules, content, size_m)
-    OUT_JSON.write_text(json.dumps({"content": content, "size_m": size_m}, indent=2))
-
-    size_mm = size_m * 1000
-    print(f"Content : {content}")
-    print(f"size_m  : {size_m} m  ({size_mm:.0f} mm)  — active area, quiet zone excluded")
-    print(f"PNG     : {OUT_PNG}")
-    print(f"PDF     : {OUT_PDF}  ← print this on A4 at 100% scale")
-    print(f"JSON    : {OUT_JSON}")
+    print(f"Grid     : {n}×{n}  ({n*n} tags, ids 0–{n*n-1})")
+    print(f"Tag size : {size_mm:.0f} mm  gap: {spacing_mm:.0f} mm  board: {board_mm:.0f}×{board_mm:.0f} mm")
+    print(f"Paper    : {pw_mm:.0f}×{ph_mm:.0f} mm")
+    print(f"PDF      : {out_pdf}")
+    print(f"JSON     : {out_json}")
     print()
-    print("After printing: measure between the red corner marks.")
-    print(f"They should be {size_mm:.0f} mm apart. If not, update size_m in {OUT_JSON}.")
+    print(f"After printing: measure one tag between its red corner marks.")
+    print(f"Should be {size_mm:.0f} mm. Update size_m in {out_json.name} if it differs.")
 
 
-def main() -> None:
-    content = sys.argv[1] if len(sys.argv) > 1 else str(uuid.uuid4())
-    size_m = float(sys.argv[2]) if len(sys.argv) > 2 else 0.20
-    generate(content, size_m)
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate a print-ready AprilTag GridBoard PDF."
+    )
+    parser.add_argument("--grid",    type=int,   required=True,
+                        help="Grid size N for NxN board (e.g. 2, 3, 4)")
+    parser.add_argument("--size",    type=float, default=0.076,
+                        help="Tag marker size in meters (default: 0.076)")
+    parser.add_argument("--spacing", type=float, default=0.019,
+                        help="Tag spacing in meters (default: 0.019)")
+    args = parser.parse_args()
+
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    generate(args.grid, args.size, args.spacing)
 
 
 if __name__ == "__main__":
