@@ -389,13 +389,184 @@ class BackendNode(Ros2NodeManager):
         if not isinstance(poi_list, list) or not all(isinstance(p, (int, str)) for p in poi_list):
             self.get_logger().error(f'Invalid map handoff poi_list: {poi_list!r}')
             return None
+        def _validate_edge_list(edges, field_name: str):
+            if not isinstance(edges, list):
+                self.get_logger().error(f'Invalid map handoff {field_name}: {edges!r}')
+                return None
+            normalized_edges = []
+            for edge in edges:
+                if (
+                    not isinstance(edge, list)
+                    or len(edge) != 2
+                    or not all(isinstance(p, (int, str)) for p in edge)
+                ):
+                    self.get_logger().error(
+                        f'Invalid map handoff {field_name} entry: {edge!r}'
+                    )
+                    return None
+                normalized_edges.append([edge[0], edge[1]])
+            return normalized_edges
+
+        def _validate_single_edge(edge, field_name: str):
+            if edge is None:
+                return None
+            if (
+                not isinstance(edge, list)
+                or len(edge) != 2
+                or not all(isinstance(p, (int, str)) for p in edge)
+            ):
+                self.get_logger().error(f'Invalid map handoff {field_name}: {edge!r}')
+                return None
+            return [edge[0], edge[1]]
+
+        vio_only_config = rule.get('vio_only')
+        if vio_only_config is not None:
+            if not isinstance(vio_only_config, dict):
+                self.get_logger().error(
+                    f'Invalid map handoff vio_only: {vio_only_config!r}'
+                )
+                return None
+            vio_only_enabled = vio_only_config.get('enabled', True)
+            vio_only_edges = _validate_edge_list(
+                vio_only_config.get('edges', []), 'vio_only.edges'
+            )
+            vio_only_entry_edge = _validate_single_edge(
+                vio_only_config.get('entry_edge'), 'vio_only.entry_edge'
+            )
+            vio_only_start_margin_m = vio_only_config.get(
+                'start_margin_m', 0.3
+            )
+            vio_only_goal_margin_m = vio_only_config.get(
+                'goal_margin_m', 0.3
+            )
+        else:
+            vio_only_enabled = True
+            vio_only_edges = []
+            vio_only_entry_edge = None
+            vio_only_start_margin_m = 0.3
+            vio_only_goal_margin_m = 0.3
+        if vio_only_edges is None:
+            return None
+        if vio_only_config is not None and vio_only_entry_edge is None and (
+            'entry_edge' in vio_only_config
+        ):
+            return None
+        if not isinstance(vio_only_enabled, bool):
+            self.get_logger().error(
+                f'Invalid map handoff vio_only enabled flag: {vio_only_enabled!r}'
+            )
+            return None
+        try:
+            vio_only_start_margin_m = float(
+                vio_only_start_margin_m
+            )
+        except (TypeError, ValueError):
+            self.get_logger().error(
+                f'Invalid map handoff vio_only start margin: {vio_only_start_margin_m!r}'
+            )
+            return None
+        if vio_only_start_margin_m < 0.0:
+            self.get_logger().error(
+                f'Invalid map handoff vio_only start margin: {vio_only_start_margin_m!r}'
+            )
+            return None
+        try:
+            vio_only_goal_margin_m = float(
+                vio_only_goal_margin_m
+            )
+        except (TypeError, ValueError):
+            self.get_logger().error(
+                f'Invalid map handoff vio_only goal margin: {vio_only_goal_margin_m!r}'
+            )
+            return None
+        if vio_only_goal_margin_m < 0.0:
+            self.get_logger().error(
+                f'Invalid map handoff vio_only goal margin: {vio_only_goal_margin_m!r}'
+            )
+            return None
+
+        occupancy_grid_decay_rules = rule.get('occupancy_grid_decay', [])
+        obstacle_dilation_rules = rule.get('obstacle_dilation', [])
+        if not isinstance(occupancy_grid_decay_rules, list):
+            self.get_logger().error(
+                f'Invalid map handoff occupancy_grid_decay: {occupancy_grid_decay_rules!r}'
+            )
+            return None
+        if not isinstance(obstacle_dilation_rules, list):
+            self.get_logger().error(
+                f'Invalid map handoff obstacle_dilation: {obstacle_dilation_rules!r}'
+            )
+            return None
+        normalized_occupancy_grid_decay = []
+        for item in occupancy_grid_decay_rules:
+            if not isinstance(item, dict):
+                self.get_logger().error(
+                    f'Invalid map handoff occupancy_grid_decay entry: {item!r}'
+                )
+                return None
+            edge = _validate_single_edge(item.get('edge'), 'occupancy_grid_decay.edge')
+            if edge is None:
+                return None
+            try:
+                value = float(item.get('value'))
+            except (TypeError, ValueError):
+                self.get_logger().error(
+                    f'Invalid map handoff occupancy_grid_decay value: {item!r}'
+                )
+                return None
+            if value < 0.0:
+                self.get_logger().error(
+                    f'Invalid map handoff occupancy_grid_decay value: {item!r}'
+                )
+                return None
+            normalized_occupancy_grid_decay.append({
+                'edge': edge,
+                'value': value,
+            })
+        normalized_obstacle_dilation = []
+        for item in obstacle_dilation_rules:
+            if not isinstance(item, dict):
+                self.get_logger().error(
+                    f'Invalid map handoff obstacle_dilation entry: {item!r}'
+                )
+                return None
+            edge = _validate_single_edge(item.get('edge'), 'obstacle_dilation.edge')
+            if edge is None:
+                return None
+            try:
+                cells = int(item.get('cells'))
+            except (TypeError, ValueError):
+                self.get_logger().error(
+                    f'Invalid map handoff obstacle_dilation cells: {item!r}'
+                )
+                return None
+            if cells < 0:
+                self.get_logger().error(
+                    f'Invalid map handoff obstacle_dilation cells: {item!r}'
+                )
+                return None
+            normalized_obstacle_dilation.append({
+                'edge': edge,
+                'cells': cells,
+            })
         rotate_deg = rule.get('rotate_deg', 0.0)
         try:
             rotate_deg = float(rotate_deg)
         except (TypeError, ValueError):
             self.get_logger().error(f'Invalid map handoff rotate_deg: {rotate_deg!r}')
             return None
-        return {'target_map': target_map, 'poi_list': poi_list, 'rotate_deg': rotate_deg}
+        return {
+            'target_map': target_map,
+            'poi_list': poi_list,
+            'rotate_deg': rotate_deg,
+            'vio_only_enabled': vio_only_enabled,
+            'vio_only_edges': vio_only_edges,
+            'vio_only_entry_edge': vio_only_entry_edge,
+            'vio_only_start_margin_m': vio_only_start_margin_m,
+            'vio_only_goal_margin_m': vio_only_goal_margin_m,
+            'occupancy_grid_decay': normalized_occupancy_grid_decay,
+            'obstacle_dilation': normalized_obstacle_dilation,
+        }
 
     def _set_active_map_link(self, map_name: str):
         import shutil
@@ -456,6 +627,15 @@ class BackendNode(Ros2NodeManager):
         target_map = rule['target_map']
         poi_list = rule['poi_list']
         rotate_deg = float(rule.get('rotate_deg', 0.0))
+        vio_only_enabled = bool(rule.get('vio_only_enabled', True))
+        vio_only_edges = rule.get('vio_only_edges', [])
+        vio_only_entry_edge = rule.get('vio_only_entry_edge')
+        vio_only_start_margin_m = float(rule.get('vio_only_start_margin_m', 0.3))
+        vio_only_goal_margin_m = float(rule.get('vio_only_goal_margin_m', 0.3))
+        occupancy_grid_decay_rules = rule.get('occupancy_grid_decay', [])
+        obstacle_dilation_rules = rule.get('obstacle_dilation', [])
+        with self._lock:
+            handoff_start_odom_pose = dict(self._odom_pose) if self._odom_pose is not None else None
         self.get_logger().info(
             f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
         )
@@ -494,7 +674,17 @@ class BackendNode(Ros2NodeManager):
                 return
 
             if poi_list:
-                self.cmd_send_pois(poi_list)
+                self.cmd_send_pois(
+                    poi_list,
+                    vio_only_enabled=vio_only_enabled,
+                    vio_only_edges=vio_only_edges,
+                    vio_only_entry_edge=vio_only_entry_edge,
+                    vio_only_entry_start_odom_pose=handoff_start_odom_pose,
+                    vio_only_start_margin_m=vio_only_start_margin_m,
+                    vio_only_goal_margin_m=vio_only_goal_margin_m,
+                    occupancy_grid_decay_rules=occupancy_grid_decay_rules,
+                    obstacle_dilation_rules=obstacle_dilation_rules,
+                )
             else:
                 self.state = 'idle'
                 self._pub_state()
@@ -708,24 +898,11 @@ class BackendNode(Ros2NodeManager):
     def _detect_and_init_sensor(self):
         domain = os.environ.get('ROS_DOMAIN_ID', '0')
         self.get_logger().info(f'BackendNode ROS_DOMAIN_ID={domain}')
-        try:
-            result = subprocess.run(
-                ['ros2', 'node', 'list'], capture_output=True, text=True, timeout=3
-            )
-            if '/insight_full' in result.stdout.splitlines():
-                self._sensor_mode = 'looper'
-                self.get_logger().info('Sensor mode: looper — launching looper bridge + planning')
-            else:
-                self._sensor_mode = 'realsense'
-                self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
-
-            if self._sensor_mode in ('looper', 'realsense'):
-                _env = os.environ.copy()
-                _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
-                self._launch_sensor_procs(_env)
-        except Exception as e:
-            self.get_logger().warn(f'Sensor detection failed: {e}')
-            self._sensor_mode = 'unknown'
+        self._sensor_mode = 'looper'
+        self.get_logger().info('Sensor mode forced: looper — launching looper bridge + planning')
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        self._launch_sensor_procs(_env)
 
         topics = _IMAGE_TOPICS_LOOPER if self._sensor_mode == 'looper' else _IMAGE_TOPICS_REALSENSE
         for topic in topics:
@@ -1617,7 +1794,19 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
 
-    def cmd_send_pois(self, poi_ids: list[int | str]):
+    def cmd_send_pois(
+        self,
+        poi_ids: list[int | str],
+        *,
+        vio_only_enabled: bool = True,
+        vio_only_edges: list[list[int | str]] | None = None,
+        vio_only_entry_edge: list[int | str] | None = None,
+        vio_only_entry_start_odom_pose: dict | None = None,
+        vio_only_start_margin_m: float = 0.3,
+        vio_only_goal_margin_m: float = 0.3,
+        occupancy_grid_decay_rules: list[dict] | None = None,
+        obstacle_dilation_rules: list[dict] | None = None,
+    ):
         """Publish selected POIs to map_node and transition to navigation state.
 
         Items may be integer POI IDs or POI names. The payload is re-indexed as
@@ -1638,10 +1827,46 @@ class BackendNode(Ros2NodeManager):
                 for poi in all_pois.values()
                 if isinstance(poi, dict) and isinstance(poi.get('name'), str)
             }
+            vio_only_edge_keys = {
+                (str(edge[0]), str(edge[1]))
+                for edge in (vio_only_edges or [])
+            } if vio_only_enabled else set()
+            occupancy_grid_decay_by_edge = {}
+            for rule in (occupancy_grid_decay_rules or []):
+                edge = rule.get('edge')
+                if isinstance(edge, list) and len(edge) == 2 and 'value' in rule:
+                    occupancy_grid_decay_by_edge[(str(edge[0]), str(edge[1]))] = float(
+                        rule['value']
+                    )
+            obstacle_dilation_by_edge = {}
+            for rule in (obstacle_dilation_rules or []):
+                edge = rule.get('edge')
+                if isinstance(edge, list) and len(edge) == 2 and 'cells' in rule:
+                    obstacle_dilation_by_edge[(str(edge[0]), str(edge[1]))] = int(
+                        rule['cells']
+                    )
+            entry_edge_key = None
+            entry_start_odom_position = None
+            if vio_only_enabled and vio_only_entry_edge is not None:
+                entry_edge_key = (
+                    str(vio_only_entry_edge[0]),
+                    str(vio_only_entry_edge[1]),
+                )
+                if vio_only_entry_start_odom_pose is None:
+                    self.get_logger().warn(
+                        'vio_only.entry_edge requested without handoff odom start pose'
+                    )
+                else:
+                    entry_start_odom_position = [
+                        float(vio_only_entry_start_odom_pose['x']),
+                        float(vio_only_entry_start_odom_pose['y']),
+                        float(vio_only_entry_start_odom_pose['z']),
+                    ]
             # Re-index as a dense queue ("0", "1", ...) so downstream
             # consumers navigate in the same order the UI/nav_flow sent POIs,
             # instead of falling back to the original ids / pois.json order.
             payload = {}
+            prev_poi_ref_key = None
             for poi_ref in poi_ids:
                 poi = None
                 if isinstance(poi_ref, int):
@@ -1651,7 +1876,59 @@ class BackendNode(Ros2NodeManager):
                     if poi is None and poi_ref.isdigit():
                         poi = all_pois.get(poi_ref)
                 if poi is not None:
-                    payload[str(len(payload))] = poi
+                    poi_payload = dict(poi)
+                    poi_ref_key = str(poi_ref)
+                    occupancy_grid_decay = None
+                    obstacle_dilation = None
+                    is_disabled_entry_edge = (
+                        len(payload) == 0
+                        and entry_edge_key is not None
+                        and entry_edge_key[1] == poi_ref_key
+                        and entry_start_odom_position is not None
+                    )
+                    if prev_poi_ref_key is not None and (
+                        prev_poi_ref_key, poi_ref_key
+                    ) in vio_only_edge_keys:
+                        poi_payload['vio_only'] = True
+                        poi_payload['vio_only_start_margin_m'] = float(
+                            vio_only_start_margin_m
+                        )
+                        poi_payload['vio_only_goal_margin_m'] = float(
+                            vio_only_goal_margin_m
+                        )
+                    if is_disabled_entry_edge:
+                        poi_payload['vio_only'] = True
+                        poi_payload['vio_only_entry_start_name'] = entry_edge_key[0]
+                        poi_payload['vio_only_entry_start_odom_position'] = (
+                            entry_start_odom_position
+                        )
+                        poi_payload['vio_only_start_margin_m'] = float(
+                            vio_only_start_margin_m
+                        )
+                        poi_payload['vio_only_goal_margin_m'] = float(
+                            vio_only_goal_margin_m
+                        )
+                    if prev_poi_ref_key is not None:
+                        edge_key = (prev_poi_ref_key, poi_ref_key)
+                        occupancy_grid_decay = occupancy_grid_decay_by_edge.get(edge_key)
+                        obstacle_dilation = obstacle_dilation_by_edge.get(edge_key)
+                    elif len(payload) == 0:
+                        for edge_key, value in occupancy_grid_decay_by_edge.items():
+                            if edge_key[1] == poi_ref_key:
+                                occupancy_grid_decay = value
+                                break
+                        for edge_key, cells in obstacle_dilation_by_edge.items():
+                            if edge_key[1] == poi_ref_key:
+                                obstacle_dilation = cells
+                                break
+                    if occupancy_grid_decay is not None:
+                        poi_payload['occupancy_grid_decay'] = float(occupancy_grid_decay)
+                    if obstacle_dilation is not None:
+                        poi_payload['obstacle_dilation_cells'] = int(
+                            obstacle_dilation
+                        )
+                    payload[str(len(payload))] = poi_payload
+                    prev_poi_ref_key = poi_ref_key
                 else:
                     self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
@@ -1764,5 +2041,4 @@ class NodeRunner:
                             proc.kill()
                         except Exception:
                             pass
-
 

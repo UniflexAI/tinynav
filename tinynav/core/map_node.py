@@ -462,6 +462,9 @@ class MapNode(Node):
         self._replan_tf_translation_threshold = 0.3
         self._replan_tf_yaw_threshold = np.deg2rad(10.0)
         self._replan_path_deviation_threshold = 0.8
+        self._poi_arrival_xy_threshold = 0.3
+        self._poi_arrival_z_threshold = 2.0
+        self._vio_only_log_key: tuple[str, str, float, float] | None = None
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -490,6 +493,27 @@ class MapNode(Node):
                 poi_meta[index] = {
                     "id": raw_poi.get("id", key),
                     "name": raw_poi.get("name"),
+                    "vio_only": bool(raw_poi.get("vio_only", False)),
+                    "vio_only_entry_start_name": raw_poi.get(
+                        "vio_only_entry_start_name"
+                    ),
+                    "vio_only_entry_start_odom_position": (
+                        np.asarray(
+                            raw_poi["vio_only_entry_start_odom_position"],
+                            dtype=np.float64,
+                        )
+                        if isinstance(
+                            raw_poi.get("vio_only_entry_start_odom_position"), list
+                        )
+                        and len(raw_poi["vio_only_entry_start_odom_position"]) == 3
+                        else None
+                    ),
+                    "vio_only_start_margin_m": float(
+                        raw_poi.get("vio_only_start_margin_m", self._poi_arrival_xy_threshold)
+                    ),
+                    "vio_only_goal_margin_m": float(
+                        raw_poi.get("vio_only_goal_margin_m", self._poi_arrival_xy_threshold)
+                    ),
                 }
             self.pois = pois_dict
             self.poi_meta = poi_meta
@@ -509,12 +533,14 @@ class MapNode(Node):
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None
+            self._vio_only_log_key = None
             self._clear_global_path_cache()
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
             self.poi_meta = {}
+            self._vio_only_log_key = None
             self._clear_global_path_cache()
 
     def _clear_global_path_cache(self):
@@ -534,6 +560,114 @@ class MapNode(Node):
             "path_total_m": path_total_m,
             "estimated_remaining_s": estimated_remaining_s,
         }
+
+    def _is_within_poi_window(
+        self,
+        pose_in_map_position: np.ndarray,
+        poi_position: np.ndarray,
+        *,
+        xy_threshold: float | None = None,
+        z_threshold: float | None = None,
+    ) -> bool:
+        diff_position_norm_xy = np.linalg.norm(poi_position[:2] - pose_in_map_position[:2])
+        diff_position_norm_z = np.linalg.norm(poi_position[2] - pose_in_map_position[2])
+        return (
+            diff_position_norm_xy < (
+                self._poi_arrival_xy_threshold if xy_threshold is None else float(xy_threshold)
+            )
+            and diff_position_norm_z < (
+                self._poi_arrival_z_threshold if z_threshold is None else float(z_threshold)
+            )
+        )
+
+    def _vio_only_context_for_leg(
+        self, pose_in_origin_odom: np.ndarray | None
+    ) -> dict | None:
+        if pose_in_origin_odom is None or self.T_from_map_to_odom is None:
+            return None
+        if not (0 <= self.poi_index < len(self.pois)):
+            return None
+        meta = self.poi_meta.get(self.poi_index, {})
+        if not bool(meta.get("vio_only", False)):
+            return None
+        entry_start_odom_position = meta.get("vio_only_entry_start_odom_position")
+        is_entry_leg = self.poi_index == 0 and isinstance(entry_start_odom_position, np.ndarray)
+        if not is_entry_leg and (self.poi_index <= 0 or (self.poi_index - 1) not in self.pois):
+            return None
+
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
+        pose_in_map_position = pose_in_map[:3, 3]
+        target_poi = self.pois[self.poi_index]
+        start_margin_xy = float(
+            meta.get("vio_only_start_margin_m", self._poi_arrival_xy_threshold)
+        )
+        goal_margin_xy = float(
+            meta.get("vio_only_goal_margin_m", self._poi_arrival_xy_threshold)
+        )
+
+        # Only disable in the open interval: after leaving the start POI window
+        # and before entering the goal POI arrival window.
+        if is_entry_leg:
+            current_odom_position = pose_in_origin_odom[:3, 3]
+            has_left_start = not self._is_within_poi_window(
+                current_odom_position,
+                entry_start_odom_position,
+                xy_threshold=start_margin_xy,
+            )
+            start_name = str(
+                meta.get("vio_only_entry_start_name", "handoff_entry")
+            )
+        else:
+            start_poi = self.pois[self.poi_index - 1]
+            has_left_start = not self._is_within_poi_window(
+                pose_in_map_position,
+                start_poi,
+                xy_threshold=start_margin_xy,
+            )
+            start_name = str(self.poi_meta.get(self.poi_index - 1, {}).get("name", self.poi_index - 1))
+        has_reached_goal_window = self._is_within_poi_window(
+            pose_in_map_position,
+            target_poi,
+            xy_threshold=goal_margin_xy,
+        )
+        if not (has_left_start and not has_reached_goal_window):
+            return None
+
+        target_name = str(meta.get("name", self.poi_index))
+        return {
+            "start_name": start_name,
+            "target_name": target_name,
+            "start_margin_xy": start_margin_xy,
+            "goal_margin_xy": goal_margin_xy,
+        }
+
+    def _update_vio_only_log(self, vio_only_ctx: dict | None):
+        current_key = None
+        if vio_only_ctx is not None:
+            current_key = (
+                vio_only_ctx["start_name"],
+                vio_only_ctx["target_name"],
+                vio_only_ctx["start_margin_xy"],
+                vio_only_ctx["goal_margin_xy"],
+            )
+
+        if current_key == self._vio_only_log_key:
+            return
+
+        if current_key is not None:
+            self.get_logger().info(
+                "VIO-only enabled on edge "
+                f"{vio_only_ctx['start_name']} -> {vio_only_ctx['target_name']} "
+                f"(start_margin={vio_only_ctx['start_margin_xy']:.2f}m, "
+                f"goal_margin={vio_only_ctx['goal_margin_xy']:.2f}m)"
+            )
+        elif self._vio_only_log_key is not None:
+            start_name, target_name, _, _ = self._vio_only_log_key
+            self.get_logger().info(
+                f"VIO-only cleared after edge {start_name} -> {target_name}"
+            )
+
+        self._vio_only_log_key = current_key
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -583,9 +717,14 @@ class MapNode(Node):
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
-        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
-        if success:
-            self.compute_transform_from_map_to_odom()
+        keyframe_odom_pose, _ = msg2np(keyframe_odom_msg)
+        vio_only_ctx = self._vio_only_context_for_leg(keyframe_odom_pose)
+        self._update_vio_only_log(vio_only_ctx)
+        if vio_only_ctx is None:
+            success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+            if success:
+                self.compute_transform_from_map_to_odom()
+
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
@@ -911,9 +1050,7 @@ class MapNode(Node):
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
-            diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
-            diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.3 and diff_position_norm_z < 2.0:
+            if self._is_within_poi_window(pose_in_map_position, poi):
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
@@ -1156,3 +1293,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+

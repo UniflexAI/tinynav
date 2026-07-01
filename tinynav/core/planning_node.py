@@ -3,6 +3,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
+import json
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -60,7 +61,7 @@ GO2_CONFIG = RobotConfig(
 B2_CONFIG = RobotConfig(
     name='b2', shape='square',
     length=0.8, width=0.4,
-    camera_x=0.5, camera_y=0.0,
+    camera_x=0.4, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
 )
@@ -390,13 +391,91 @@ class PlanningNode(Node):
         self.create_subscription(Odometry, '/mapping/lookahead_target', self.target_pose_callback, 10)
         self.target_pose = None
 
+        self._default_occupancy_grid_decay = 0.994
+        self._default_obstacle_dilation_cells = int(self.obstacle_config.dilation_cells)
+        self._occupancy_grid_leg_overrides = {}
+        self._active_planning_poi_index = -1
+        self._occupancy_grid_override_log_key = None
+        self.create_subscription(String, '/mapping/cmd_pois', self.cmd_pois_callback, 10)
+        self.create_subscription(String, '/mapping/nav_progress', self.nav_progress_callback, 10)
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
+
+    def cmd_pois_callback(self, msg: String):
+        try:
+            raw_pois = json.loads(msg.data)
+        except json.JSONDecodeError as e:
+            self.get_logger().error(f"Failed to parse cmd_pois JSON in planning_node: {e}")
+            return
+
+        overrides = {}
+        keys = sorted([int(key) for key in raw_pois.keys()])
+        for index, key in enumerate(keys):
+            raw_poi = raw_pois[str(key)]
+            override = {}
+            if "occupancy_grid_decay" in raw_poi:
+                override["occupancy_grid_decay"] = float(raw_poi["occupancy_grid_decay"])
+            if "obstacle_dilation_cells" in raw_poi:
+                override["dilation_cells"] = int(raw_poi["obstacle_dilation_cells"])
+            if override:
+                override["target_name"] = raw_poi.get("name", index)
+                overrides[index] = override
+        self._occupancy_grid_leg_overrides = overrides
+        self._active_planning_poi_index = 0 if keys else -1
+        self._occupancy_grid_override_log_key = None
+
+    def nav_progress_callback(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        poi_index = payload.get("poi_index")
+        if isinstance(poi_index, int):
+            self._active_planning_poi_index = poi_index
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        if self._active_planning_poi_index >= 0:
+            self._active_planning_poi_index += 1
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+
+    def _active_occupancy_grid_override(self):
+        override = self._occupancy_grid_leg_overrides.get(self._active_planning_poi_index)
+        occupancy_grid_decay = self._default_occupancy_grid_decay
+        dilation_cells = self._default_obstacle_dilation_cells
+        if override is None:
+            return None, occupancy_grid_decay, dilation_cells
+        occupancy_grid_decay = float(
+            override.get("occupancy_grid_decay", occupancy_grid_decay)
+        )
+        dilation_cells = int(override.get("dilation_cells", dilation_cells))
+        return override, occupancy_grid_decay, dilation_cells
+
+    def _update_occupancy_grid_override_log(self, override, occupancy_grid_decay, dilation_cells):
+        current_key = None
+        if override is not None:
+            current_key = (
+                self._active_planning_poi_index,
+                str(override.get("target_name", self._active_planning_poi_index)),
+                occupancy_grid_decay,
+                dilation_cells,
+            )
+        if current_key == self._occupancy_grid_override_log_key:
+            return
+        if current_key is not None:
+            _, target_name, _, _ = current_key
+            self.get_logger().info(
+                "Occupancy grid override enabled for leg toward "
+                f"{target_name}: occupancy_grid_decay={occupancy_grid_decay:.4f}, "
+                f"dilation_cells={dilation_cells}"
+            )
+        elif self._occupancy_grid_override_log_key is not None:
+            _, target_name, _, _ = self._occupancy_grid_override_log_key
+            self.get_logger().info(
+                f"Occupancy grid override cleared after leg toward {target_name}; back to defaults"
+            )
+        self._occupancy_grid_override_log_key = current_key
 
     def info_callback(self, msg):
         if self.K is None:
@@ -562,14 +641,22 @@ class PlanningNode(Node):
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-            robot_pos = T[:3, 3]
-            delta = robot_pos - center
+            robot_center = self.camera_to_robot_center(T)
+            delta = robot_center - center
             if np.linalg.norm(delta) > .1:
-                new_center = robot_pos
+                new_center = robot_center
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.994
+            occupancy_grid_override, occupancy_grid_decay, dilation_cells = (
+                self._active_occupancy_grid_override()
+            )
+            self._update_occupancy_grid_override_log(
+                occupancy_grid_override,
+                occupancy_grid_decay,
+                dilation_cells,
+            )
+            self.occupancy_grid *= occupancy_grid_decay
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
@@ -578,7 +665,14 @@ class PlanningNode(Node):
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
-                robot_z=T[2, 3], config=self.obstacle_config,
+                robot_z=robot_center[2],
+                config=ObstacleConfig(
+                    robot_z_bottom=self.obstacle_config.robot_z_bottom,
+                    robot_z_top=self.obstacle_config.robot_z_top,
+                    occ_threshold=self.obstacle_config.occ_threshold,
+                    min_wall_span_m=self.obstacle_config.min_wall_span_m,
+                    dilation_cells=dilation_cells,
+                ),
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
@@ -674,3 +768,4 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+

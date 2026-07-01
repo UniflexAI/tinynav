@@ -54,6 +54,8 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(30.0)
+        self.high_speed_yaw_comp_linear_threshold = 0.3
+        self.high_speed_yaw_compensation = 0.05
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -150,6 +152,9 @@ class CmdVelControlNode(Node):
                 out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
             else:
                 out.angular.z = 0.0
+
+        if out.linear.x >= self.high_speed_yaw_comp_linear_threshold:
+            out.angular.z = float(out.angular.z + self.high_speed_yaw_compensation)
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
@@ -253,3 +258,4 @@ def main(args=None):
         
 if __name__ == '__main__':
     main()
+
