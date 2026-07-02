@@ -29,6 +29,11 @@ Predict (SLAM odometry delta → T_delta)
   Covariance propagation:
     P' = F @ P @ F.T + Q
 
+  Predict has no innovation/S to Mahalanobis-gate, so instead each frame's
+  raw per-axis delta |Δp_x|, |Δp_y|, |Δp_z| is rejected outright if it exceeds
+  SLAM_PREDICT_POS_GATE_M (VIO glitch/jump guard); the reference frame still
+  advances so later deltas aren't computed against a stale pose.
+
 Update (pose6 or pos3 measurement)
 -------
   Innovation in error-state space:
@@ -107,6 +112,11 @@ GATE: dict[str, float] = {
     'qr':    10.0,
     'rtk':   16.0,
 }
+
+# Reject a SLAM predict step outright if the per-axis frame-to-frame delta
+# exceeds this (m) — guards against VIO glitches/jumps corrupting predict,
+# which has no Mahalanobis gate of its own (predict has no innovation/S).
+SLAM_PREDICT_POS_GATE_M = 0.5
 
 # Initial error-state covariance P0
 P0_DIAG = np.array([
@@ -337,6 +347,13 @@ class EKFOdomNode(Node):
 
         if self._state is None:
             self._init(T, stamp)
+            return
+
+        dp = T_delta[:3, 3]
+        if np.any(np.abs(dp) > SLAM_PREDICT_POS_GATE_M):
+            self.get_logger().warn(
+                f'[slam] predict delta outlier rejected: dp={dp.tolist()} '
+                f'(> {SLAM_PREDICT_POS_GATE_M} m per axis)', throttle_duration_sec=1.0)
             return
 
         self._state = ekf_predict(self._state, T_delta, self._Q, dt)
