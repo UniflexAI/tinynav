@@ -753,12 +753,51 @@ def main(
                         point_size=resolution * 0.8,
                         point_shape="rounded",
                     )
-        
+
+        # Full 3D occupancy voxels (true per-voxel height, not the flattened Z-max projection).
+        # Off by default: useful when placing POIs/paths at a specific height, but can be a lot of points.
+        max_3d_points = 300_000
+
+        def _capped_indices(mask: np.ndarray) -> np.ndarray:
+            indices_all = np.argwhere(mask)
+            if len(indices_all) > max_3d_points:
+                stride = int(np.ceil(len(indices_all) / max_3d_points))
+                return indices_all[::stride]
+            return indices_all
+
+        occupied_3d_indices = _capped_indices(occupancy_grid == 2)
+        free_3d_indices = _capped_indices(occupancy_grid == 1)
+        occupied_3d_points = _xyz_to_world_points(occupied_3d_indices)
+        free_3d_points = _xyz_to_world_points(free_3d_indices)
+
+        occupied_3d_handle = None
+        free_3d_handle = None
+        if len(occupied_3d_points) > 0:
+            occupied_3d_handle = server.scene.add_point_cloud(
+                "/occupancy_3d/occupied",
+                points=occupied_3d_points,
+                colors=np.tile(np.array([[0.6, 0.6, 0.6]], dtype=np.float32), (len(occupied_3d_points), 1)),
+                point_size=resolution * 0.8,
+                point_shape="rounded",
+            )
+            occupied_3d_handle.visible = False
+        if len(free_3d_points) > 0:
+            free_3d_handle = server.scene.add_point_cloud(
+                "/occupancy_3d/free",
+                points=free_3d_points,
+                colors=np.tile(np.array([[0.2, 0.4, 1.0]], dtype=np.float32), (len(free_3d_points), 1)),
+                point_size=resolution * 0.8,
+                point_shape="rounded",
+            )
+            free_3d_handle.visible = False
+
         if (
             unknown_handle is not None
             or free_handle is not None
             or occupied_handle is not None
             or sdf_search_handle is not None
+            or occupied_3d_handle is not None
+            or free_3d_handle is not None
         ):
             # Default visibility for projected 2D occupancy.
             if unknown_handle is not None:
@@ -775,6 +814,8 @@ def main(
                 show_free = server.gui.add_checkbox("Show Free", initial_value=True)
                 show_occupied = server.gui.add_checkbox("Show Occupied", initial_value=True)
                 show_sdf_search_region = server.gui.add_checkbox("Show SDF<0.2m Region", initial_value=False)
+                show_occupied_3d = server.gui.add_checkbox("Show 3D Occupied (true height)", initial_value=False)
+                show_free_3d = server.gui.add_checkbox("Show 3D Free (true height)", initial_value=False)
                 point_size_slider = server.gui.add_slider(
                     "Point Size", min=0.001, max=point_size_max, step=0.001, initial_value=point_size_init
                 )
@@ -783,7 +824,7 @@ def main(
                 def _(_) -> None:
                     if free_handle is not None:
                         free_handle.visible = show_free.value
-                
+
                 @show_occupied.on_update
                 def _(_) -> None:
                     if occupied_handle is not None:
@@ -793,6 +834,16 @@ def main(
                 def _(_) -> None:
                     if sdf_search_handle is not None:
                         sdf_search_handle.visible = show_sdf_search_region.value
+
+                @show_occupied_3d.on_update
+                def _(_) -> None:
+                    if occupied_3d_handle is not None:
+                        occupied_3d_handle.visible = show_occupied_3d.value
+
+                @show_free_3d.on_update
+                def _(_) -> None:
+                    if free_3d_handle is not None:
+                        free_3d_handle.visible = show_free_3d.value
 
                 @point_size_slider.on_update
                 def _(_) -> None:
@@ -804,6 +855,10 @@ def main(
                         occupied_handle.point_size = point_size_slider.value
                     if sdf_search_handle is not None:
                         sdf_search_handle.point_size = point_size_slider.value
+                    if occupied_3d_handle is not None:
+                        occupied_3d_handle.point_size = point_size_slider.value
+                    if free_3d_handle is not None:
+                        free_3d_handle.point_size = point_size_slider.value
     else:
         print(f"Warning: Occupancy grid files not found in {tinynav_map_path}")
         if not occupancy_grid_path.exists():
