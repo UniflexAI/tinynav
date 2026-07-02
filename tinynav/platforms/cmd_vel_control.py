@@ -50,7 +50,12 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = 0.1
         self.min_effective_angular_speed = 0.1
+        # Hysteresis: once moving, stay engaged until the target drops below this
+        # (lower) threshold, instead of re-testing against min_effective_* every
+        # cycle. Avoids bang-bang snapping between 0 and min when the planner's
+        # target hovers near min_effective_*.
         self.linear_engage_threshold = 0.04
+        self.angular_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
@@ -58,6 +63,8 @@ class CmdVelControlNode(Node):
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
+        self._linear_engaged = False
+        self._angular_engaged = False
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
@@ -72,6 +79,8 @@ class CmdVelControlNode(Node):
         if not self._paused:
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
+            self._linear_engaged = False
+            self._angular_engaged = False
 
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
@@ -79,6 +88,8 @@ class CmdVelControlNode(Node):
         if was_active and not self._nav_active:
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
+            self._linear_engaged = False
+            self._angular_engaged = False
             self.last_path_update_time = None
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
@@ -101,6 +112,8 @@ class CmdVelControlNode(Node):
         if self._paused:
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
+            self._linear_engaged = False
+            self._angular_engaged = False
             return
 
         # Stale-path protection: slow down, then stop if planner has not refreshed.
@@ -125,6 +138,8 @@ class CmdVelControlNode(Node):
         if target_cmd.linear.x < 0.0:
             out.linear.x = target_cmd.linear.x
             out.angular.z = 0.0
+            self._linear_engaged = False
+            self._angular_engaged = False
             self.cmd_pub.publish(out)
             self.prev_cmd = out
             return
@@ -139,18 +154,36 @@ class CmdVelControlNode(Node):
         out.angular.z = float(np.clip(target_cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
 
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
-        # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
-        if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
-        elif abs(out.linear.x) < self.min_effective_linear_speed:
-            out.linear.x = 0.0
+        # Hysteresis: reaching min_effective_linear_speed engages motion; once engaged,
+        # stay engaged (snap to min) until target truly drops below the lower
+        # linear_engage_threshold, instead of re-testing against min_effective_linear_speed
+        # every cycle. Avoids bang-bang snapping between 0 and min on noisy targets.
+        if out.linear.x >= self.min_effective_linear_speed:
+            self._linear_engaged = True
+        elif out.linear.x > 0.0:
+            required = self.linear_engage_threshold if self._linear_engaged else self.min_effective_linear_speed
+            if target_cmd.linear.x >= required:
+                out.linear.x = self.min_effective_linear_speed
+                self._linear_engaged = True
+            else:
+                out.linear.x = 0.0
+                self._linear_engaged = False
+        else:
+            self._linear_engaged = False
 
-        # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
-        if 0.0 < abs(out.angular.z) < self.min_effective_angular_speed:
-            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed:
+        # Angular z: same hysteresis idea as linear x above.
+        if abs(out.angular.z) >= self.min_effective_angular_speed:
+            self._angular_engaged = True
+        elif abs(out.angular.z) > 0.0:
+            required = self.angular_engage_threshold if self._angular_engaged else self.min_effective_angular_speed
+            if abs(target_cmd.angular.z) >= required:
                 out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
+                self._angular_engaged = True
             else:
                 out.angular.z = 0.0
+                self._angular_engaged = False
+        else:
+            self._angular_engaged = False
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
