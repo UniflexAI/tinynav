@@ -223,6 +223,13 @@ class PathEditor:
             points[:, 2] = z_plane
             return points
 
+        def xyz_world(xyz_indices: np.ndarray) -> np.ndarray:
+            points = np.zeros((len(xyz_indices), 3), dtype=np.float32)
+            points[:, 0] = float(self.origin[0]) + xyz_indices[:, 0] * self.resolution
+            points[:, 1] = float(self.origin[1]) + xyz_indices[:, 1] * self.resolution
+            points[:, 2] = float(self.origin[2]) + xyz_indices[:, 2] * self.resolution
+            return points
+
         free_indices = np.argwhere(x_y_plane == 1)
         occupied_indices = np.argwhere(x_y_plane == 2)
         free_handle = None
@@ -250,9 +257,45 @@ class PathEditor:
                 point_shape="rounded",
             )
 
+        # Full 3D occupancy voxels (true per-voxel height, not the flattened Z-max projection).
+        # Off by default: useful when placing waypoints at a specific height, but can be a lot of points.
+        max_3d_points = 300_000
+
+        def capped_indices(mask: np.ndarray) -> np.ndarray:
+            indices_all = np.argwhere(mask)
+            if len(indices_all) > max_3d_points:
+                stride = int(np.ceil(len(indices_all) / max_3d_points))
+                return indices_all[::stride]
+            return indices_all
+
+        free_3d_points = xyz_world(capped_indices(self.occupancy_grid == 1))
+        occupied_3d_points = xyz_world(capped_indices(self.occupancy_grid == 2))
+        free_3d_handle = None
+        occupied_3d_handle = None
+        if len(free_3d_points) > 0:
+            free_3d_handle = self.server.scene.add_point_cloud(
+                "/occupancy_3d/free",
+                points=free_3d_points,
+                colors=np.tile(np.array([[0.2, 0.4, 1.0]], dtype=np.float32), (len(free_3d_points), 1)),
+                point_size=self.resolution * 0.8,
+                point_shape="rounded",
+            )
+            free_3d_handle.visible = False
+        if len(occupied_3d_points) > 0:
+            occupied_3d_handle = self.server.scene.add_point_cloud(
+                "/occupancy_3d/occupied",
+                points=occupied_3d_points,
+                colors=np.tile(np.array([[0.6, 0.6, 0.6]], dtype=np.float32), (len(occupied_3d_points), 1)),
+                point_size=self.resolution * 0.8,
+                point_shape="rounded",
+            )
+            occupied_3d_handle.visible = False
+
         with self.server.gui.add_folder("Occupancy 2D Map"):
             show_free = self.server.gui.add_checkbox("Show Free", initial_value=True)
             show_occupied = self.server.gui.add_checkbox("Show Occupied", initial_value=True)
+            show_free_3d = self.server.gui.add_checkbox("Show 3D Free (true height)", initial_value=False)
+            show_occupied_3d = self.server.gui.add_checkbox("Show 3D Occupied (true height)", initial_value=False)
             point_size = self.server.gui.add_slider(
                 "Point Size", min=0.001, max=max(0.1, self.resolution), step=0.001, initial_value=self.resolution * 0.8
             )
@@ -267,12 +310,26 @@ class PathEditor:
                 if occupied_handle is not None:
                     occupied_handle.visible = show_occupied.value
 
+            @show_free_3d.on_update
+            def _(_) -> None:
+                if free_3d_handle is not None:
+                    free_3d_handle.visible = show_free_3d.value
+
+            @show_occupied_3d.on_update
+            def _(_) -> None:
+                if occupied_3d_handle is not None:
+                    occupied_3d_handle.visible = show_occupied_3d.value
+
             @point_size.on_update
             def _(_) -> None:
                 if free_handle is not None:
                     free_handle.point_size = point_size.value
                 if occupied_handle is not None:
                     occupied_handle.point_size = point_size.value
+                if free_3d_handle is not None:
+                    free_3d_handle.point_size = point_size.value
+                if occupied_3d_handle is not None:
+                    occupied_3d_handle.point_size = point_size.value
 
     def _add_optional_pointcloud(self) -> None:
         pointcloud_path = self.map_dir / "pointcloud.ply"
