@@ -1773,12 +1773,30 @@ class _MapPip extends StatelessWidget {
 
 // ── Joystick panel ────────────────────────────────────────────────────────────
 
-class _JoystickPanel extends ConsumerWidget {
+class _JoystickPanel extends ConsumerStatefulWidget {
   final void Function(double x, double y) onLeft;
   final void Function(double x, double y) onRight;
   final Future<void> Function() onStop;
 
   const _JoystickPanel({required this.onLeft, required this.onRight, required this.onStop});
+
+  @override
+  ConsumerState<_JoystickPanel> createState() => _JoystickPanelState();
+}
+
+class _JoystickPanelState extends ConsumerState<_JoystickPanel> {
+  final _agentController = TextEditingController();
+  final _agentScrollController = ScrollController();
+  final List<_AgentChatMessage> _messages = [];
+  bool _chatMode = false;
+  bool _sending = false;
+
+  @override
+  void dispose() {
+    _agentController.dispose();
+    _agentScrollController.dispose();
+    super.dispose();
+  }
 
   Future<void> _sendAction(WidgetRef ref, BuildContext context, String command) async {
     try {
@@ -1793,55 +1811,318 @@ class _JoystickPanel extends ConsumerWidget {
     }
   }
 
+  Future<void> _sendAgentMessage() async {
+    final text = _agentController.text.trim();
+    if (text.isEmpty || _sending) return;
+    setState(() {
+      _messages.add(_AgentChatMessage.user(text));
+      _agentController.clear();
+      _sending = true;
+    });
+    _scrollChatToBottom();
+
+    try {
+      final resp = await ref.read(dioProvider).post(
+        '/agent/command',
+        data: {'text': text, 'execute': true},
+      );
+      final data = resp.data as Map<String, dynamic>;
+      setState(() {
+        _messages.add(_AgentChatMessage.assistant(_formatAgentResponse(data)));
+      });
+    } on DioException catch (e) {
+      setState(() {
+        _messages.add(_AgentChatMessage.assistant(
+          e.response?.data?['detail']?.toString() ?? e.message ?? 'Error',
+          isError: true,
+        ));
+      });
+    } catch (e) {
+      setState(() {
+        _messages.add(_AgentChatMessage.assistant(e.toString(), isError: true));
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _sending = false);
+        _scrollChatToBottom();
+      }
+    }
+  }
+
+  void _scrollChatToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_agentScrollController.hasClients) return;
+      _agentScrollController.animateTo(
+        _agentScrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  String _formatAgentResponse(Map<String, dynamic> data) {
+    final intent = data['intent'] as Map<String, dynamic>?;
+    final action = intent?['action']?.toString();
+    final message = data['message']?.toString();
+    if (message != null && message.isNotEmpty) return message;
+
+    if (action == 'unknown') {
+      final reason = intent?['reason']?.toString();
+      return reason == null || reason.isEmpty ? "I didn't understand that." : "I didn't understand: $reason";
+    }
+
+    if (action == 'list_maps') {
+      final maps = (data['availableMaps'] as List? ?? []).map((e) => e.toString()).toList();
+      if (maps.isEmpty) return 'No maps found.';
+      return 'Available maps:\n${maps.map((m) => '• $m').join('\n')}';
+    }
+    if (action == 'current_map') {
+      final active = data['activeMap']?.toString();
+      return active == null || active == 'null' ? 'No active map selected.' : 'Current map: $active';
+    }
+    if (action == 'list_pois') {
+      final active = data['activeMap']?.toString();
+      final pois = (data['pois'] as List? ?? [])
+          .map((p) => p is Map ? (p['name']?.toString() ?? p.toString()) : p.toString())
+          .toList();
+      if (pois.isEmpty) return 'No POIs found${active == null ? '' : ' in $active'}.';
+      return 'POIs${active == null ? '' : ' in $active'}:\n${pois.map((p) => '• $p').join('\n')}';
+    }
+    if (action == 'status') {
+      final status = data['status'] as Map<String, dynamic>?;
+      final active = data['activeMap']?.toString();
+      return [
+        if (active != null && active != 'null') 'Map: $active',
+        if (status != null) 'State: ${status['rawState'] ?? 'unknown'}',
+        if (status != null) 'Nav nodes: ${status['navNodesRunning'] == true ? 'on' : 'off'}',
+        if (status != null) 'Localized: ${status['localized'] == true ? 'yes' : 'no'}',
+      ].join('\n');
+    }
+    if (action == 'select_map') {
+      final active = data['activeMap']?.toString() ?? intent?['map_name']?.toString();
+      return active == null ? 'Map selected.' : 'Selected map: $active';
+    }
+    if (action == 'go_pois') {
+      final names = (intent?['poi_names'] as List? ?? []).map((e) => e.toString()).toList();
+      return names.isEmpty ? 'Navigation command sent.' : 'Navigating to ${names.join(' → ')}.';
+    }
+    if (action == 'start_localization') return 'Localization started.';
+    if (action == 'stop_localization') return 'Localization stopped.';
+    if (action == 'pause_nav') return 'Navigation paused.';
+    if (action == 'resume_nav') return 'Navigation resumed.';
+    if (action == 'cancel_nav') return 'Navigation cancelled.';
+    if (intent != null) {
+      return 'Done.';
+    }
+    return const JsonEncoder.withIndent('  ').convert(data);
+  }
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return Container(
       color: const Color(0xFFF5F5F5),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
+      child: Column(
         children: [
-          // ── Left joystick (Move) ────────────────────────────────────
-          Expanded(
-            child: Column(
-              children: [
-                const Text('Move', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 4),
-                Expanded(child: _JoystickPad(onChange: onLeft)),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          // ── Center: STOP + Sit / Stand ───────────────────────────────
-          Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+          Row(
             children: [
-              _ActionButton(
-                icon: Icons.airline_seat_recline_extra_rounded,
-                label: 'Sit',
-                onTap: () => _sendAction(ref, context, 'sit'),
-              ),
-              const SizedBox(height: 8),
-              _EStopButton(onStop: onStop),
-              const SizedBox(height: 8),
-              _ActionButton(
-                icon: Icons.directions_walk_rounded,
-                label: 'Stand',
-                onTap: () => _sendAction(ref, context, 'stand'),
+              const Spacer(),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, icon: Icon(Icons.gamepad_rounded, size: 14), label: Text('Control')),
+                  ButtonSegment(value: true, icon: Icon(Icons.chat_bubble_outline_rounded, size: 14), label: Text('Chat')),
+                ],
+                selected: {_chatMode},
+                showSelectedIcon: false,
+                style: ButtonStyle(
+                  visualDensity: VisualDensity.compact,
+                  textStyle: MaterialStateProperty.all(const TextStyle(fontSize: 11)),
+                ),
+                onSelectionChanged: (v) => setState(() => _chatMode = v.first),
               ),
             ],
           ),
-          const SizedBox(width: 12),
-          // ── Right joystick (Rotate) ─────────────────────────────────
+          const SizedBox(height: 6),
           Expanded(
-            child: Column(
+            child: _chatMode
+                ? _AgentChatPanel(
+                    messages: _messages,
+                    controller: _agentController,
+                    scrollController: _agentScrollController,
+                    sending: _sending,
+                    onSend: _sendAgentMessage,
+                  )
+                : Row(
+                    children: [
+                      // ── Left joystick (Move) ────────────────────────────────
+                      Expanded(
+                        child: Column(
+                          children: [
+                            const Text('Move', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
+                            const SizedBox(height: 4),
+                            Expanded(child: _JoystickPad(onChange: widget.onLeft)),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      // ── Center: STOP + Sit / Stand ───────────────────────────
+                      Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _ActionButton(
+                            icon: Icons.airline_seat_recline_extra_rounded,
+                            label: 'Sit',
+                            onTap: () => _sendAction(ref, context, 'sit'),
+                          ),
+                          const SizedBox(height: 8),
+                          _EStopButton(onStop: widget.onStop),
+                          const SizedBox(height: 8),
+                          _ActionButton(
+                            icon: Icons.directions_walk_rounded,
+                            label: 'Stand',
+                            onTap: () => _sendAction(ref, context, 'stand'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(width: 12),
+                      // ── Right joystick (Rotate) ─────────────────────────────
+                      Expanded(
+                        child: Column(
+                          children: [
+                            const Text('Rotate', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
+                            const SizedBox(height: 4),
+                            Expanded(child: _JoystickPad(onChange: widget.onRight, axisOnly: Axis.horizontal)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AgentChatMessage {
+  final String text;
+  final bool fromUser;
+  final bool isError;
+
+  const _AgentChatMessage._(this.text, {required this.fromUser, this.isError = false});
+  factory _AgentChatMessage.user(String text) => _AgentChatMessage._(text, fromUser: true);
+  factory _AgentChatMessage.assistant(String text, {bool isError = false}) =>
+      _AgentChatMessage._(text, fromUser: false, isError: isError);
+}
+
+class _AgentChatPanel extends StatelessWidget {
+  final List<_AgentChatMessage> messages;
+  final TextEditingController controller;
+  final ScrollController scrollController;
+  final bool sending;
+  final VoidCallback onSend;
+
+  const _AgentChatPanel({
+    required this.messages,
+    required this.controller,
+    required this.scrollController,
+    required this.sending,
+    required this.onSend,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE0E0E0)),
+      ),
+      child: Column(
+        children: [
+          Expanded(
+            child: messages.isEmpty
+                ? const Center(
+                    child: Text(
+                      'Ask TinyNav…\nTry: list maps / current map / list POIs',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey, fontSize: 12),
+                    ),
+                  )
+                : ListView.builder(
+                    controller: scrollController,
+                    padding: const EdgeInsets.all(10),
+                    itemCount: messages.length,
+                    itemBuilder: (context, index) => _AgentChatBubble(message: messages[index]),
+                  ),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 8, 6),
+            child: Row(
               children: [
-                const Text('Rotate', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 4),
-                Expanded(child: _JoystickPad(onChange: onRight, axisOnly: Axis.horizontal)),
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    minLines: 1,
+                    maxLines: 2,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => onSend(),
+                    decoration: const InputDecoration(
+                      hintText: 'Type a command or question…',
+                      isDense: true,
+                      border: InputBorder.none,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  onPressed: sending ? null : onSend,
+                  icon: sending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send_rounded, size: 20),
+                ),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AgentChatBubble extends StatelessWidget {
+  final _AgentChatMessage message;
+  const _AgentChatBubble({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final align = message.fromUser ? Alignment.centerRight : Alignment.centerLeft;
+    final color = message.fromUser
+        ? const Color(0xFF1565C0)
+        : message.isError
+            ? const Color(0xFFFFEBEE)
+            : const Color(0xFFF1F3F4);
+    final textColor = message.fromUser
+        ? Colors.white
+        : message.isError
+            ? const Color(0xFFC62828)
+            : const Color(0xFF2B3A42);
+    return Align(
+      alignment: align,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 280),
+        margin: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Text(message.text, style: TextStyle(color: textColor, fontSize: 12, height: 1.25)),
       ),
     );
   }
