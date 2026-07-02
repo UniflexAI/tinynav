@@ -81,6 +81,7 @@ INFO_TOPIC   = "/camera/camera/infra1/camera_info"
 RECORD_FRAMES = 20      # valid detections to collect before solving
 MIN_TAGS      = 2       # minimum visible board tags per frame
 MAX_REPROJ_PX = 3.0     # reprojection error threshold (px)
+ROTATION_OUTLIER_DEG = 5.0  # warn if a sample's rotation strays this far from the running mean
 
 # camera → robot frame (same convention as target_node.py / nav_node.py)
 R_CAMERA_ROBOT = np.array([
@@ -105,6 +106,12 @@ def _mean_T(samples: list[np.ndarray]) -> np.ndarray:
     T_mean[:3, :3] = R_mean
     T_mean[:3,  3] = p_mean
     return T_mean
+
+
+def _rotation_angle_deg(R_a: np.ndarray, R_b: np.ndarray) -> float:
+    """Angle (deg) of the relative rotation between two 3×3 rotation matrices."""
+    relative = Rotation.from_matrix(R_a.T @ R_b)
+    return float(np.degrees(relative.magnitude()))
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +217,16 @@ class RecordNode(Node):
         T_camera_board[:3,  3] = tvec.ravel()
 
         T_world_board = self._T_world_camera @ T_camera_board
+
+        if self._samples:
+            R_mean = _mean_T(self._samples)[:3, :3]
+            angle_deg = _rotation_angle_deg(R_mean, T_world_board[:3, :3])
+            if angle_deg > ROTATION_OUTLIER_DEG:
+                self.get_logger().warn(
+                    f"Rotation outlier: sample differs from running mean by "
+                    f"{angle_deg:.1f}° (> {ROTATION_OUTLIER_DEG}°)"
+                )
+
         self._samples.append(T_world_board)
 
         n = len(self._samples)
