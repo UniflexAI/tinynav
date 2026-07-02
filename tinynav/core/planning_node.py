@@ -384,6 +384,7 @@ class PlanningNode(Node):
         self.obstacle_config = ObstacleConfig()
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
+        self._reverse_mode = False  # Hysteresis state for the forward/reverse gate
 
         self.smoothed_velocity = 0.0
 
@@ -607,12 +608,21 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
+            # Hysteresis: enter reverse mode at enter_threshold, but require more
+            # clearance (exit_threshold) before returning to forward-only trajectories.
+            # A single threshold caused the gate to flip every cycle when front_clearance
+            # hovered right at the boundary.
             enter_threshold = 0.30
+            exit_threshold = 0.40
+            if front_clearance <= enter_threshold:
+                self._reverse_mode = True
+            elif front_clearance > exit_threshold:
+                self._reverse_mode = False
+            should_reverse = self._reverse_mode
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= enter_threshold
                 reverse_gate_penalty = 0.0
                 if should_reverse and not is_backward_traj:
                         reverse_gate_penalty = 1e9
