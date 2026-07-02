@@ -7,6 +7,9 @@ RUN echo "ARCH is $ARCH"
 # Configure image
 ARG PYTHON_VERSION=3.10
 ARG DEBIAN_FRONTEND=noninteractive
+ARG LLAMA_CPP_REF=4fc4ec5541b243957ae5099edb67372f8f3b550e
+ARG TINYNAV_LLM_MODEL_URL=https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+ARG TINYNAV_LLM_MODEL_PATH=/tinynav/llm/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 
 # Install apt dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -166,6 +169,26 @@ RUN apt-get update && apt-get install -y \
     ros-humble-foxglove-msgs \
     ros-humble-foxglove-compressed-video-transport \
     && rm -rf /var/lib/apt/lists/*
+
+# llama.cpp runtime for local LLM command parsing
+RUN git clone https://github.com/ggml-org/llama.cpp.git /3rdparty/llama.cpp \
+    && cd /3rdparty/llama.cpp \
+    && git checkout "${LLAMA_CPP_REF}" \
+    && cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
+    && cmake --build build --config Release -j"$(nproc)" --target llama-server llama-cli \
+    && mkdir -p /tinynav/llm/bin \
+    && cp -a build/bin/. /tinynav/llm/bin/ \
+    && ln -sf /tinynav/llm/bin/llama-server /usr/bin/llama-server \
+    && ln -sf /tinynav/llm/bin/llama-cli /usr/bin/llama-cli
+
+ENV LD_LIBRARY_PATH="/tinynav/llm/bin:${LD_LIBRARY_PATH}"
+ENV TINYNAV_LLM_MODEL_PATH="${TINYNAV_LLM_MODEL_PATH}"
+ENV TINYNAV_LLM_HOST=127.0.0.1
+ENV TINYNAV_LLM_PORT=8888
+
+RUN mkdir -p "$(dirname "${TINYNAV_LLM_MODEL_PATH}")" \
+    && curl -fL "${TINYNAV_LLM_MODEL_URL}" -o "${TINYNAV_LLM_MODEL_PATH}" \
+    && test -s "${TINYNAV_LLM_MODEL_PATH}"
 
 # Override apt-installed message_filters with UniflexAI/message_filters humble branch
 RUN mkdir -p /3rdparty/message_filters_ws/src \
