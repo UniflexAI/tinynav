@@ -49,13 +49,26 @@ Update (pose6 or pos3 measurement)
 
 All inputs must be  frame_id="world", child_frame_id="camera"  (T_world_camera).
 
+Wheel/lidar delta-referencing
+------------------------------
+  Wheel and lidar odometry are published in each source's own local/drifting
+  frame, not necessarily aligned with the fused "world" frame — so their raw
+  absolute pose can't be compared directly against the nominal state. Instead,
+  each source's *delta* since its own last reading is re-anchored onto the
+  fused nominal pose at that time:
+    T_delta = inv(T_raw_prev) @ T_raw_curr        (source's own frame, offset cancels)
+    T_meas  = T_nom_at_prev_reading @ T_delta     (re-expressed in world frame)
+  T_meas then goes through the normal pose6 update. QR and RTK are exempt —
+  both are already globally referenced (QR via tag_mappose.json + world→map
+  TF, RTK via GPS), so their absolute pose is used directly.
+
 Topics
 ------
   Predict:  /slam/odometry       → ekf_predict
-  Update:   /wheel/odom_camera   → ekf_update_pose6  (6-DOF)
-            /lidar/odom_camera   → ekf_update_pose6  (6-DOF)
-            /qr/odom             → ekf_update_pose6  (6-DOF)
-            /rtk/odom_camera     → ekf_update_pos3   (3-DOF, pos only)
+  Update:   /wheel/odom_camera   → ekf_update_pose6  (6-DOF, delta-referenced)
+            /lidar/odom_camera   → ekf_update_pose6  (6-DOF, delta-referenced)
+            /qr/odom             → ekf_update_pose6  (6-DOF, absolute)
+            /rtk/odom_camera     → ekf_update_pos3   (3-DOF, pos only, absolute)
   Output:   /slam/odometry_fused
 """
 
@@ -275,6 +288,16 @@ class EKFOdomNode(Node):
         self._last_slam_T:     np.ndarray | None = None
         self._last_slam_stamp: float | None      = None
 
+        # wheel/lidar publish in their own (possibly unaligned/drifting) local
+        # odometry frame, so their raw pose can't be compared directly against
+        # the fused nominal pose. Track each source's last raw reading and the
+        # fused nominal pose at that time, so only the *delta* since then is
+        # used as the observation (delta is frame-offset invariant).
+        self._last_wheel_raw: np.ndarray | None = None
+        self._last_wheel_nom: np.ndarray | None = None
+        self._last_lidar_raw: np.ndarray | None = None
+        self._last_lidar_nom: np.ndarray | None = None
+
         self.create_subscription(
             Odometry, '/slam/odometry',     self._slam_cb,   100)
         self.create_subscription(
@@ -320,10 +343,12 @@ class EKFOdomNode(Node):
         self._publish(msg.header.stamp)
 
     def _wheel_cb(self, msg: Odometry) -> None:
-        self._update_pose6(msg, R_WHEEL, GATE['wheel'], 'wheel')
+        self._update_pose6_delta(
+            msg, R_WHEEL, GATE['wheel'], 'wheel', '_last_wheel_raw', '_last_wheel_nom')
 
     def _lidar_cb(self, msg: Odometry) -> None:
-        self._update_pose6(msg, R_LIDAR, GATE['lidar'], 'lidar')
+        self._update_pose6_delta(
+            msg, R_LIDAR, GATE['lidar'], 'lidar', '_last_lidar_raw', '_last_lidar_nom')
 
     def _qr_cb(self, msg: Odometry) -> None:
         self._update_pose6(msg, R_QR, GATE['qr'], 'qr')
@@ -356,6 +381,38 @@ class EKFOdomNode(Node):
                 f'[{source}] outlier rejected', throttle_duration_sec=1.0)
         else:
             self._publish(msg.header.stamp)
+
+    def _update_pose6_delta(self, msg: Odometry, R_noise: np.ndarray, gate: float,
+                            source: str, raw_attr: str, nom_attr: str) -> None:
+        """Update using only the motion delta since this source's last reading,
+        re-anchored onto the fused nominal pose at that time. Avoids trusting
+        the source's own absolute origin/heading, which need not agree with
+        the EKF's world frame."""
+        T_raw = msg2np(msg)[0]
+        if self._state is None:
+            self._init(T_raw, _stamp_to_sec(msg.header.stamp))
+            setattr(self, raw_attr, T_raw)
+            setattr(self, nom_attr, _T_from_nominal(self._state.nom))
+            return
+
+        last_raw = getattr(self, raw_attr)
+        if last_raw is None:
+            setattr(self, raw_attr, T_raw)
+            setattr(self, nom_attr, _T_from_nominal(self._state.nom))
+            return
+
+        T_delta = np.linalg.inv(last_raw) @ T_raw
+        T_meas  = getattr(self, nom_attr) @ T_delta
+
+        self._state, ok = ekf_update_pose6(self._state, T_meas, R_noise, gate)
+        if not ok:
+            self.get_logger().warn(
+                f'[{source}] outlier rejected', throttle_duration_sec=1.0)
+        else:
+            self._publish(msg.header.stamp)
+
+        setattr(self, raw_attr, T_raw)
+        setattr(self, nom_attr, _T_from_nominal(self._state.nom))
 
     def _init(self, T: np.ndarray, stamp: float) -> None:
         q   = Rotation.from_matrix(T[:3, :3]).as_quat()
