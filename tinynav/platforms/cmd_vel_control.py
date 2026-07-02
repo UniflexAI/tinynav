@@ -60,11 +60,18 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
+        # Minimal rotate-first gate, with hysteresis: engage at rotate_first_enter_threshold,
+        # stay engaged until heading_err drops below the smaller rotate_first_exit_threshold.
+        # A single threshold flip-flopped between "drive+turn" and "rotate only" when the
+        # planner's selected heading jittered near the boundary.
+        self.rotate_first_enter_threshold = 0.45  # rad, ~26 deg
+        self.rotate_first_exit_threshold = np.deg2rad(15.0)
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self._linear_engaged = False
         self._angular_engaged = False
+        self._rotate_first_engaged = False
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
         self._paused = False
@@ -81,6 +88,7 @@ class CmdVelControlNode(Node):
             self.prev_cmd = Twist()
             self._linear_engaged = False
             self._angular_engaged = False
+            self._rotate_first_engaged = False
 
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
@@ -90,6 +98,7 @@ class CmdVelControlNode(Node):
             self.prev_cmd = Twist()
             self._linear_engaged = False
             self._angular_engaged = False
+            self._rotate_first_engaged = False
             self.last_path_update_time = None
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
@@ -245,10 +254,16 @@ class CmdVelControlNode(Node):
         if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
             vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
-        # Minimal rotate-first gate: apply only for forward motion.
-        elif vx > 0.0 and abs(heading_err) > 0.45:
+            self._rotate_first_engaged = True
+        # Minimal rotate-first gate: apply only for forward motion. Hysteresis: engaging
+        # requires rotate_first_enter_threshold, but once engaged, stays engaged until
+        # heading_err drops below the smaller rotate_first_exit_threshold.
+        elif vx > 0.0 and abs(heading_err) > (self.rotate_first_exit_threshold if self._rotate_first_engaged else self.rotate_first_enter_threshold):
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
+            self._rotate_first_engaged = True
+        else:
+            self._rotate_first_engaged = False
 
         vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
 
