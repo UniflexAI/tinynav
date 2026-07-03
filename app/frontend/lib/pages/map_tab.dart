@@ -74,11 +74,69 @@ class _BagRecordCard extends ConsumerStatefulWidget {
 
 class _BagRecordCardState extends ConsumerState<_BagRecordCard> {
   bool _busy = false;
+  int? _localPoiMarkCount;
 
   Future<void> _call(String path) async {
     setState(() => _busy = true);
     try {
       await ref.read(dioProvider).post(path);
+      if (path == '/bag/start' && mounted) {
+        setState(() => _localPoiMarkCount = 0);
+      }
+    } on DioException catch (e) {
+      if (mounted) _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _setPoiMark() async {
+    final defaultName =
+        'poi_${(_localPoiMarkCount ?? widget.status.poiMarkCount) + 1}';
+    final controller = TextEditingController(text: defaultName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Set POI'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'POI name',
+            hintText: 'printer',
+          ),
+          textInputAction: TextInputAction.done,
+          onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty) return;
+
+    setState(() => _busy = true);
+    try {
+      final resp = await ref
+          .read(dioProvider)
+          .post('/bag/poi-marks', data: {'name': name});
+      final count =
+          resp.data is Map<String, dynamic> ? resp.data['count'] as int? : null;
+      if (mounted) {
+        setState(() {
+          _localPoiMarkCount =
+              count ?? ((_localPoiMarkCount ?? widget.status.poiMarkCount) + 1);
+        });
+        _snack(context, 'POI "$name" marked');
+      }
     } on DioException catch (e) {
       if (mounted) _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
     } finally {
@@ -92,6 +150,7 @@ class _BagRecordCardState extends ConsumerState<_BagRecordCard> {
     final isRecording = s.rawState == 'realsense_bag_record';
     final canStart = s.online && s.rawState == 'idle';
     final canStop = s.online && isRecording;
+    final poiMarkCount = _localPoiMarkCount ?? s.poiMarkCount;
 
     return _SectionCard(
       icon: Icons.videocam_outlined,
@@ -103,6 +162,7 @@ class _BagRecordCardState extends ConsumerState<_BagRecordCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _InfoRow('Status', s.bagStatus),
+          if (poiMarkCount > 0) _InfoRow('POI marks', '$poiMarkCount'),
           const SizedBox(height: 12),
           Row(children: [
             Expanded(
@@ -122,6 +182,15 @@ class _BagRecordCardState extends ConsumerState<_BagRecordCard> {
               ),
             ),
           ]),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: isRecording && !_busy ? _setPoiMark : null,
+              icon: const Icon(Icons.add_location_alt_outlined),
+              label: const Text('Set POI'),
+            ),
+          ),
         ],
       ),
     );

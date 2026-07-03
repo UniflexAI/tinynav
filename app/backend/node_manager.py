@@ -64,6 +64,7 @@ _PREVIEW_PROFILES = {
     'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
     'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
 }
+_POI_MARKS_FILE = 'poi_marks.json'
 
 
 def _resize_preview_frame(arr: np.ndarray, max_edge_px: int = _PREVIEW_MAX_EDGE_PX) -> np.ndarray:
@@ -120,8 +121,15 @@ class BackendNode(Ros2NodeManager):
         self._voxel_points: list = []
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
+        self._last_mapping_image_stamp_ns: int | None = None
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
+        self.create_subscription(
+            Image,
+            '/camera/camera/infra1/image_rect_raw',
+            self._on_mapping_image_stamp,
+            10,
+        )
         self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
@@ -234,6 +242,11 @@ class BackendNode(Ros2NodeManager):
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
             self.mapping_percent = float(msg.data)
+
+    def _on_mapping_image_stamp(self, msg: Image):
+        timestamp_ns = int(msg.header.stamp.sec * 1_000_000_000) + int(msg.header.stamp.nanosec)
+        with self._lock:
+            self._last_mapping_image_stamp_ns = timestamp_ns
 
     def _on_slam_odom(self, msg: Odometry):
         pose = self._odom_to_dict(msg, source='slam')
@@ -608,6 +621,50 @@ class BackendNode(Ros2NodeManager):
     # Command API (called from FastAPI handlers — thread-safe enough)     #
     # ------------------------------------------------------------------ #
 
+    def _poi_marks_path(self, bag_path: str | None = None) -> str:
+        return os.path.join(bag_path or self.bag_path, _POI_MARKS_FILE)
+
+    def _load_poi_marks(self, bag_path: str | None = None) -> list[dict]:
+        path = self._poi_marks_path(bag_path)
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+
+    def _save_poi_marks(self, marks: list[dict], bag_path: str | None = None):
+        path = self._poi_marks_path(bag_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(marks, f, indent=2)
+
+    def record_poi_mark(self, name: str, timestamp_ns: int | None = None) -> dict:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError('POI name is required')
+        if timestamp_ns is None:
+            with self._lock:
+                timestamp_ns = self._last_mapping_image_stamp_ns
+        if timestamp_ns is None:
+            raise ValueError('No camera timestamp available')
+        if not os.path.isdir(self.bag_path):
+            raise ValueError('Bag directory is not ready yet')
+
+        marks = self._load_poi_marks()
+        mark = {
+            'id': len(marks),
+            'name': clean_name,
+            'timestamp_ns': int(timestamp_ns),
+            'created_at': time.time(),
+        }
+        marks.append(mark)
+        self._save_poi_marks(marks)
+        self.get_logger().info(f'Recorded POI mark {clean_name} at {timestamp_ns}')
+        return mark
+
+    def get_poi_mark_count(self, bag_path: str | None = None) -> int:
+        return len(self._load_poi_marks(bag_path))
+
     def set_active_bag(self, bag_name: str):
         """Select a bag from rosbags/ by name for map building."""
         path = os.path.join(self.tinynav_db_path, 'rosbags', bag_name)
@@ -637,6 +694,7 @@ class BackendNode(Ros2NodeManager):
             'battery': battery,
             'bagStatus': 'recording' if raw == 'realsense_bag_record' else 'idle',
             'bagFileReady': bag_files_exist,
+            'poiMarkCount': self.get_poi_mark_count(),
             'mapStatus': self._derive_map_status(raw, pct, map_files_exist),
             'mappingPercent': pct,
             'navStatus': 'navigating' if raw == 'navigation' else 'idle',
@@ -945,6 +1003,7 @@ class BackendNode(Ros2NodeManager):
         """Wait for build_map to finish, then convert, archive, and restart."""
         import shutil
         from datetime import datetime
+        active_bag = self.active_bag_path
         proc_build = self.processes.get('build_map')
         if proc_build:
             proc_build.wait()
@@ -961,10 +1020,10 @@ class BackendNode(Ros2NodeManager):
         shutil.move(self.map_path, dest)
         os.symlink(dest, self.map_path)
 
-        # Auto-create a home POI at the SLAM origin (0,0,0) if none exist.
-        # map_node requires at least one POI as a global localization anchor.
-        pois_path = os.path.join(dest, 'pois.json')
-        if not os.path.exists(pois_path):
+        if not self._generate_pois_from_marks(active_bag, dest):
+            # Auto-create a home POI at the SLAM origin (0,0,0) if none exist.
+            # map_node requires at least one POI as a global localization anchor.
+            pois_path = os.path.join(dest, 'pois.json')
             with open(pois_path, 'w') as _f:
                 json.dump(
                     {'0': {'id': 0, 'name': 'home', 'position': [0.0, 0.0, 0.0]}},
@@ -976,6 +1035,72 @@ class BackendNode(Ros2NodeManager):
         self.state = 'idle'
         self._pub_state()
         self._restart_sensor_procs()
+
+    @staticmethod
+    def _nearest_pose(poses: dict, timestamp_ns: int):
+        if not poses:
+            return None, None
+        items = [(int(key), pose) for key, pose in poses.items()]
+        nearest_key, nearest_pose = min(items, key=lambda item: abs(item[0] - timestamp_ns))
+        return nearest_key, nearest_pose
+
+    def _generate_pois_from_marks(self, bag_path: str | None, map_path: str) -> bool:
+        if bag_path is None:
+            return False
+        marks = self._load_poi_marks(bag_path)
+        if not marks:
+            return False
+
+        poses_path = os.path.join(map_path, 'poses.npy')
+        if not os.path.exists(poses_path):
+            self.get_logger().warn('Cannot generate POIs: poses.npy not found')
+            return False
+
+        try:
+            optimized_poses = np.load(poses_path, allow_pickle=True).item()
+            continuous_path = os.path.join(map_path, 'mapping_continuous_odom.npy')
+            continuous_poses = (
+                np.load(continuous_path, allow_pickle=True).item()
+                if os.path.exists(continuous_path)
+                else {}
+            )
+        except Exception as e:
+            self.get_logger().warn(f'Cannot load map poses for POI marks: {e}')
+            return False
+
+        pois: dict[str, dict] = {}
+        for mark in marks:
+            timestamp_ns = int(mark.get('timestamp_ns', 0))
+            keyframe_ts, optimized_keyframe_pose = self._nearest_pose(optimized_poses, timestamp_ns)
+            if keyframe_ts is None:
+                continue
+
+            pose = optimized_keyframe_pose
+            mark_ts, raw_mark_pose = self._nearest_pose(continuous_poses, timestamp_ns)
+            raw_key_ts, raw_keyframe_pose = self._nearest_pose(continuous_poses, keyframe_ts)
+            if mark_ts is not None and raw_key_ts is not None:
+                try:
+                    pose = optimized_keyframe_pose @ np.linalg.inv(raw_keyframe_pose) @ raw_mark_pose
+                except Exception as e:
+                    self.get_logger().warn(f'Failed to correct POI mark pose: {e}')
+                    pose = optimized_keyframe_pose
+
+            position = [float(v) for v in pose[:3, 3]]
+            poi_id = len(pois)
+            pois[str(poi_id)] = {
+                'id': poi_id,
+                'name': str(mark.get('name') or f'poi_{poi_id + 1}'),
+                'position': position,
+            }
+
+        if not pois:
+            return False
+
+        pois_path = os.path.join(map_path, 'pois.json')
+        with open(pois_path, 'w') as f:
+            json.dump(pois, f, indent=2)
+        self.get_logger().info(f'Generated {len(pois)} POIs from bag marks')
+        return True
 
 
     def cmd_map_build(self):

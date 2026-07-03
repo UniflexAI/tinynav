@@ -234,6 +234,9 @@ def _run_router_tests():
                 'rawState': self.state,
             }
 
+        def get_poi_mark_count(self, bag_path=None):
+            return 0
+
         def cmd_bag_start(self):
             self.state = 'realsense_bag_record'
             self._started.append('bag')

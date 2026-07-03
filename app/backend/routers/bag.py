@@ -1,4 +1,8 @@
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
 from ..state import runner
 
 router = APIRouter(tags=['bag'])
@@ -8,6 +12,11 @@ def _require_node():
     if runner.node is None:
         raise HTTPException(503, 'ROS node not ready')
     return runner.node
+
+
+class PoiMarkRequest(BaseModel):
+    name: str
+    timestamp_ns: Optional[int] = None
 
 
 @router.post('/start')
@@ -39,4 +48,17 @@ def bag_status():
         'status': 'recording' if node.state == 'realsense_bag_record' else 'idle',
         'bagFileReady': os.path.exists(bag_file),
         'bagPath': node.bag_path,
+        'poiMarkCount': node.get_poi_mark_count(),
     }
+
+
+@router.post('/poi-marks')
+def bag_poi_mark(req: PoiMarkRequest):
+    node = _require_node()
+    if node.state != 'realsense_bag_record':
+        raise HTTPException(409, 'POI marks can only be recorded while bag recording')
+    try:
+        mark = node.record_poi_mark(req.name, req.timestamp_ns)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {'ok': True, 'mark': mark, 'count': node.get_poi_mark_count()}
