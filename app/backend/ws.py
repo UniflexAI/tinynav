@@ -175,12 +175,20 @@ async def ws_planning(ws: WebSocket):
 # --------------------------------------------------------------------------- #
 
 @router.websocket('/ws/preview')
-async def ws_preview(ws: WebSocket, topic: str = Query(...)):
+async def ws_preview(
+    ws: WebSocket,
+    topic: str = Query(...),
+    quality: str = Query('default'),
+):
     await ws.accept()
 
     node = runner.node
     if node is None or topic not in node.preview_callbacks:
         await ws.close(code=1013)
+        return
+    profile = node.get_preview_profile(quality)
+    if profile is None:
+        await ws.close(code=1008)
         return
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=4)
@@ -190,7 +198,8 @@ async def ws_preview(ws: WebSocket, topic: str = Query(...)):
         # Drop oldest frame if full — always keep the latest.
         loop.call_soon_threadsafe(lambda: _safe_put(queue, frame))
 
-    if not node.add_preview_callback(topic, _on_frame):
+    max_edge_px, jpeg_quality = profile
+    if not node.add_preview_callback(topic, _on_frame, max_edge_px, jpeg_quality):
         await ws.close(code=1013)
         return
     try:

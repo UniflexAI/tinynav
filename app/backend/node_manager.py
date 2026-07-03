@@ -55,8 +55,41 @@ _IMAGE_TOPICS_LOOPER = [
     '/slam/depth',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
-_PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
+_PREVIEW_MIN_INTERVAL = 0.05  # 20 fps
+_PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
+_PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
+_PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
+_PREVIEW_HIGH_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_HIGH_JPEG_QUALITY', '80'))
+_PREVIEW_PROFILES = {
+    'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
+    'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
+}
 _VIO_STATUS_NORMAL = {'TRACKING', 'TRACKING_STATIC'}
+
+
+def _resize_preview_frame(arr: np.ndarray, max_edge_px: int = _PREVIEW_MAX_EDGE_PX) -> np.ndarray:
+    """Downscale preview frame so the longest side is <= max_edge_px."""
+    if max_edge_px <= 0 or arr is None or arr.size == 0:
+        return arr
+    height, width = arr.shape[:2]
+    longest = max(height, width)
+    if longest <= max_edge_px:
+        return arr
+    scale = max_edge_px / float(longest)
+    new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+    return cv2.resize(arr, new_size, interpolation=cv2.INTER_AREA)
+
+
+def _encode_preview_jpeg(
+    arr: np.ndarray,
+    max_edge_px: int = _PREVIEW_MAX_EDGE_PX,
+    jpeg_quality: int = _PREVIEW_JPEG_QUALITY,
+) -> bytes:
+    arr = _resize_preview_frame(arr, max_edge_px)
+    ok, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+    if not ok:
+        raise RuntimeError('failed to encode preview jpeg')
+    return buf.tobytes()
 
 
 class BackendNode(Ros2NodeManager):
@@ -128,7 +161,9 @@ class BackendNode(Ros2NodeManager):
         # Latched publisher — new subscribers (cmd_vel_control) get current state immediately on connect
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._pause_pub = self.create_publisher(Bool, '/nav/paused', _latched_qos)
+        self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
         self._nav_paused = False
+        self._nav_active = False
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -178,6 +213,8 @@ class BackendNode(Ros2NodeManager):
         self._handled_map_handoffs: set[tuple[str, int | str]] = set()
         self._nav_done_seq: int = 0
 
+        self._nav_active_pub.publish(Bool(data=False))
+
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
@@ -191,6 +228,11 @@ class BackendNode(Ros2NodeManager):
     def _on_battery(self, msg: Float32):
         with self._lock:
             self._battery = float(msg.data)
+
+    def _set_nav_active(self, active: bool):
+        with self._lock:
+            self._nav_active = bool(active)
+        self._nav_active_pub.publish(Bool(data=bool(active)))
 
     def _on_nav_done(self, msg: Bool):
         if not msg.data or self.state != 'navigation':
@@ -220,6 +262,7 @@ class BackendNode(Ros2NodeManager):
             with self._lock:
                 if seq != self._nav_done_seq or self._map_handoff_active or self.state != 'navigation':
                     return
+                self._set_nav_active(False)
                 self.state = 'idle'
             self._pub_state()
 
@@ -725,12 +768,18 @@ class BackendNode(Ros2NodeManager):
             self._last_frame_time[topic] = 0.0
             self.preview_callbacks[topic] = []
 
-    def add_preview_callback(self, topic: str, cb) -> bool:
+    def add_preview_callback(
+        self,
+        topic: str,
+        cb,
+        max_edge_px: int = _PREVIEW_MAX_EDGE_PX,
+        jpeg_quality: int = _PREVIEW_JPEG_QUALITY,
+    ) -> bool:
         """Register a frame callback; creates the ROS subscription on the first caller."""
         if topic not in self.preview_callbacks:
             return False
         with self._lock:
-            self.preview_callbacks[topic].append(cb)
+            self.preview_callbacks[topic].append((cb, max_edge_px, jpeg_quality))
             first = len(self.preview_callbacks[topic]) == 1
         if first:
             self._create_image_sub(topic)
@@ -741,10 +790,11 @@ class BackendNode(Ros2NodeManager):
         if topic not in self.preview_callbacks:
             return
         with self._lock:
-            try:
-                self.preview_callbacks[topic].remove(cb)
-            except ValueError:
-                pass
+            self.preview_callbacks[topic] = [
+                registration
+                for registration in self.preview_callbacks[topic]
+                if registration[0] is not cb
+            ]
             empty = len(self.preview_callbacks[topic]) == 0
         if empty:
             self._destroy_image_sub(topic)
@@ -770,19 +820,39 @@ class BackendNode(Ros2NodeManager):
         if sub is not None:
             self.destroy_subscription(sub)
 
+    def _publish_preview_frame(self, topic: str, arr: np.ndarray):
+        with self._lock:
+            callbacks = list(self.preview_callbacks.get(topic, []))
+
+        encoded_frames: dict[tuple[int, int], bytes] = {}
+        for cb, max_edge_px, jpeg_quality in callbacks:
+            profile = (max_edge_px, jpeg_quality)
+            try:
+                frame = encoded_frames.get(profile)
+                if frame is None:
+                    frame = _encode_preview_jpeg(arr, max_edge_px, jpeg_quality)
+                    encoded_frames[profile] = frame
+                cb(frame)
+            except Exception:
+                pass
+
+        if encoded_frames:
+            with self._lock:
+                self._last_frame[topic] = next(iter(encoded_frames.values()))
+
     def _on_compressed_image(self, msg: CompressedImage, topic: str):
         now = time.time()
         if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
             return
         self._last_frame_time[topic] = now
-        frame = bytes(msg.data)
-        with self._lock:
-            self._last_frame[topic] = frame
-        for cb in self.preview_callbacks.get(topic, []):
-            try:
-                cb(frame)
-            except Exception:
-                pass
+
+        try:
+            arr = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if arr is None:
+                return
+        except Exception:
+            return
+        self._publish_preview_frame(topic, arr)
 
     def _on_image(self, msg: Image, topic: str):
         now = time.time()
@@ -806,19 +876,9 @@ class BackendNode(Ros2NodeManager):
                     arr = arr[:, :, 0]
                 elif msg.encoding == 'rgb8':
                     arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 50])
-            frame = buf.tobytes()
         except Exception:
             return
-
-        with self._lock:
-            self._last_frame[topic] = frame
-
-        for cb in self.preview_callbacks.get(topic, []):
-            try:
-                cb(frame)
-            except Exception:
-                pass
+        self._publish_preview_frame(topic, arr)
 
     def get_planning_snapshot(self) -> dict:
         with self._lock:
@@ -863,6 +923,9 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             return self._last_frame.get(topic, b'')
 
+    def get_preview_profile(self, quality: str) -> tuple[int, int] | None:
+        return _PREVIEW_PROFILES.get(quality)
+
     # ------------------------------------------------------------------ #
     # Command API (called from FastAPI handlers — thread-safe enough)     #
     # ------------------------------------------------------------------ #
@@ -894,6 +957,7 @@ class BackendNode(Ros2NodeManager):
             vio_status = self._vio_status if sensor_mode == 'looper' else None
             vio_guard_enabled = sensor_mode == 'looper'
             vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
+            nav_active = self._nav_active
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -910,6 +974,7 @@ class BackendNode(Ros2NodeManager):
             'vioGuardEnabled': vio_guard_enabled,
             'vioStatus': vio_status,
             'vioGuardStopped': vio_guard_stopped,
+            'navActive': nav_active,
         }
 
     @staticmethod
@@ -1004,6 +1069,7 @@ class BackendNode(Ros2NodeManager):
     # ------------------------------------------------------------------ #
 
     def cmd_start_nav_nodes(self):
+        self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._map_node_proc = self._launch_proc(
@@ -1031,6 +1097,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_stop_nav_nodes(self):
         self._stop_loc_assist()
+        self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
@@ -1046,6 +1113,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_restart_nav_nodes(self):
         self._stop_loc_assist()
+        self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
         self._kill_proc(self._cmd_vel_proc)
@@ -1495,25 +1563,27 @@ class BackendNode(Ros2NodeManager):
         self._stop_all()
         self._start('rosbag_build_map')
 
-    def _publish_cmd_pois(self, poi_id: int | None):
+    def _publish_cmd_pois(self, poi_id: int | None) -> bool:
         """Publish the selected POI to map_node as JSON on /mapping/cmd_pois.
-        Sending an empty dict clears the current nav target."""
+        Sending an empty dict clears the current nav target. Returns whether a
+        non-empty navigation target was published."""
         if poi_id is None:
             self._cmd_pois_pub.publish(String(data='{}'))
-            return
+            return False
         pois_file = os.path.join(self.map_path, 'pois.json')
         if not os.path.exists(pois_file):
             self.get_logger().warn('No pois.json found, cannot publish cmd_pois')
-            return
+            return False
         with open(pois_file) as f:
             pois = json.load(f)
         key = str(poi_id)
         if key not in pois:
             self.get_logger().warn(f'POI {poi_id} not found in pois.json')
-            return
+            return False
         # Re-index as "0" to match pub_pois.py convention expected by map_node
         payload = {'0': pois[key]}
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
+        return True
 
     def cmd_manual_target_pose(self, x: float, y: float, z: float):
         """Publish a manually selected local-planner target pose.
@@ -1543,6 +1613,7 @@ class BackendNode(Ros2NodeManager):
             self._nav_progress = None
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
+            self._set_nav_active(False)
         else:
             pois_file = os.path.join(self.map_path, 'pois.json')
             if not os.path.exists(pois_file):
@@ -1572,6 +1643,7 @@ class BackendNode(Ros2NodeManager):
                 else:
                     self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
+            self._set_nav_active(bool(payload))
         with self._lock:
             nav_running = self._nav_nodes_running
         if nav_running:
@@ -1586,7 +1658,7 @@ class BackendNode(Ros2NodeManager):
             with self._lock:
                 self._active_nav_poi_refs = [int(poi_id)]
                 self._nav_progress = None
-            self._publish_cmd_pois(int(poi_id))
+            self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         with self._lock:
             nav_running = self._nav_nodes_running
         if nav_running:
@@ -1610,6 +1682,7 @@ class BackendNode(Ros2NodeManager):
         if nav_running:
             # Clear the active nav target so map_node stops pathing.
             self._publish_cmd_pois(None)
+            self._set_nav_active(False)
             self.state = 'idle'
             self._pub_state()
         else:

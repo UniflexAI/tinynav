@@ -38,5 +38,5 @@ ros2 bag record \
     /camera/camera/color/image_raw \
     /camera/camera/color/camera_info \
     /camera/camera/color/image_rect_raw/compressed \
-    /insight/vio_20hz \
+    /camera/camera/vio_image \
     /tf_static
