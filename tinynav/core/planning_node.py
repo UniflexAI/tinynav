@@ -381,6 +381,8 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
+        self.behind_target_mode = False
+        self.behind_turn_sign = 0.0
         self.obstacle_config = ObstacleConfig()
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -397,6 +399,35 @@ class PlanningNode(Node):
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+
+    def _target_heading_error(self, T, target_pose):
+        if target_pose is None:
+            return None
+        center = self.camera_to_robot_center(T)
+        forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        left = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
+        to_target = target_pose - center
+        forward_dist = float(np.dot(to_target[:2], forward[:2]))
+        left_dist = float(np.dot(to_target[:2], left[:2]))
+        return float(np.arctan2(left_dist, forward_dist))
+
+    def _update_behind_target_mode(self, heading_error):
+        if heading_error is None:
+            self.behind_target_mode = False
+            self.behind_turn_sign = 0.0
+            return
+
+        abs_error = abs(heading_error)
+        enter_threshold = np.deg2rad(110.0)
+        exit_threshold = np.deg2rad(70.0)
+
+        if self.behind_target_mode:
+            if abs_error < exit_threshold:
+                self.behind_target_mode = False
+                self.behind_turn_sign = 0.0
+        elif abs_error > enter_threshold:
+            self.behind_target_mode = True
+            self.behind_turn_sign = 1.0 if heading_error >= 0.0 else -1.0
 
     def info_callback(self, msg):
         if self.K is None:
@@ -608,13 +639,18 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
+            target_heading_error = self._target_heading_error(T, self.target_pose)
+            self._update_behind_target_mode(target_heading_error)
+            behind_target_mode = self.behind_target_mode
+            behind_turn_sign = self.behind_turn_sign
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
+                is_rotate_in_place = abs(param[0]) < 1e-6 and abs(param[1]) > 1e-3
                 should_reverse = front_clearance <= enter_threshold
                 reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
+                if should_reverse and not is_backward_traj and not (behind_target_mode and is_rotate_in_place):
                         reverse_gate_penalty = 1e9
                 elif not should_reverse and is_backward_traj:
                         reverse_gate_penalty = 1e9
@@ -623,8 +659,20 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
+                behind_target_penalty = 0.0
+                if behind_target_mode:
+                    correct_turn = is_rotate_in_place and np.sign(param[1]) == behind_turn_sign
+                    if not correct_turn:
+                        behind_target_penalty = 1e6
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return (
+                    score * 100000
+                    + 100 * dist
+                    + 10 * abs(self.last_param[0] - param[0])
+                    + 10 * abs(self.last_param[1] - param[1])
+                    + reverse_gate_penalty
+                    + behind_target_penalty
+                )
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
