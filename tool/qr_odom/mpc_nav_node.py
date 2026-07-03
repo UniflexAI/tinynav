@@ -563,7 +563,16 @@ class MPCNavNode(Node):
                                    throttle_duration_sec=1.0)
             v0, w0 = self._fallback_cmd(x, y, theta)
 
-        self._u_prev = np.array([v0, w0])
+        # Deadzone compensation: the platform doesn't reliably move on a
+        # nonzero-but-tiny command, so floor any non-negligible v0/w0 up to
+        # the minimum effective command (same _clip_with_min pattern as
+        # nav_node.py's PI output). Genuinely-near-zero commands (e.g. v
+        # during an in-place turn phase) stay at exactly 0 — only commands
+        # that are meant to produce motion get floored.
+        v_cmd = _clip_with_min(v0, MIN_LINEAR, MAX_LINEAR)
+        w_cmd = _clip_with_min(w0, MIN_ANGULAR, MAX_ANGULAR)
+
+        self._u_prev = np.array([v_cmd, w_cmd])
         self._t_plan += dt
 
         dist_to_goal = float(np.hypot(x - self._xg, y - self._yg))
@@ -577,9 +586,14 @@ class MPCNavNode(Node):
             return
 
         cmd = Twist()
-        cmd.linear.x = v0
-        cmd.angular.z = w0
+        cmd.linear.x = v_cmd
+        cmd.angular.z = w_cmd
         self._cmd_pub.publish(cmd)
+        self.get_logger().info(
+            f"x={x:.3f} y={y:.3f} th={np.degrees(theta):.1f}deg  "
+            f"dist_to_goal={dist_to_goal:.3f}m head_to_goal={np.degrees(head_to_goal):.1f}deg  "
+            f"-> v0={v0:.3f} w0={w0:.3f}  (published v={v_cmd:.3f} w={w_cmd:.3f})",
+            throttle_duration_sec=0.5)
 
 
 def main(args=None):
