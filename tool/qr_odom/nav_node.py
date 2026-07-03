@@ -45,6 +45,7 @@ from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformListener
 
 from tinynav.core.math_utils import msg2np, tf2np
+from tool.qr_odom.robot_frame import T_CAMERA_ROBOT
 
 DB_DIR           = Path("tinynav_db/qrcode")
 TAG_MAPPOSE_PATH = DB_DIR / "tag_mappose.json"
@@ -71,14 +72,8 @@ HEADING_THRESH  = 0.06  # rad — stop when aligned
 CMD_DEADBAND    = 1e-3
 MAX_CONTROL_DT  = 0.1   # s — cap integral step after odom stalls
 
-# camera → robot frame transform (same convention as qr_target_node.py)
-R_CAMERA_ROBOT = np.array([
-    [0.0, -1.0,  0.0],
-    [0.0,  0.0, -1.0],
-    [1.0,  0.0,  0.0],
-], dtype=np.float64)
-T_CAMERA_ROBOT = np.eye(4, dtype=np.float64)
-T_CAMERA_ROBOT[:3, :3] = R_CAMERA_ROBOT
+# camera → robot frame transform lives in robot_frame.py, shared by every
+# qr_odom node.
 
 
 def _clip_with_min(value: float, min_abs: float, max_abs: float) -> float:

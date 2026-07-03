@@ -56,6 +56,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import Buffer, TransformListener
 
 from tinynav.core.math_utils import msg2np, tf2np
+from tool.qr_odom.robot_frame import T_CAMERA_ROBOT
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -83,14 +84,8 @@ MIN_TAGS      = 2       # minimum visible board tags per frame
 MAX_REPROJ_PX = 3.0     # reprojection error threshold (px)
 ROTATION_OUTLIER_DEG = 5.0  # warn if a sample's rotation strays this far from the running mean
 
-# camera → robot frame (same convention as target_node.py / nav_node.py)
-R_CAMERA_ROBOT = np.array([
-    [0.0, -1.0,  0.0],
-    [0.0,  0.0, -1.0],
-    [1.0,  0.0,  0.0],
-], dtype=np.float64)
-T_CAMERA_ROBOT = np.eye(4, dtype=np.float64)
-T_CAMERA_ROBOT[:3, :3] = R_CAMERA_ROBOT
+# camera → robot frame transform lives in robot_frame.py, shared by every
+# qr_odom node.
 
 
 # ---------------------------------------------------------------------------
