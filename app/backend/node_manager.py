@@ -487,6 +487,7 @@ class BackendNode(Ros2NodeManager):
 
         occupancy_grid_decay_rules = rule.get('occupancy_grid_decay', [])
         obstacle_dilation_rules = rule.get('obstacle_dilation', [])
+        path_rules = rule.get('path', [])
         if not isinstance(occupancy_grid_decay_rules, list):
             self.get_logger().error(
                 f'Invalid map handoff occupancy_grid_decay: {occupancy_grid_decay_rules!r}'
@@ -495,6 +496,11 @@ class BackendNode(Ros2NodeManager):
         if not isinstance(obstacle_dilation_rules, list):
             self.get_logger().error(
                 f'Invalid map handoff obstacle_dilation: {obstacle_dilation_rules!r}'
+            )
+            return None
+        if not isinstance(path_rules, list):
+            self.get_logger().error(
+                f'Invalid map handoff path: {path_rules!r}'
             )
             return None
         normalized_occupancy_grid_decay = []
@@ -549,13 +555,60 @@ class BackendNode(Ros2NodeManager):
                 'edge': edge,
                 'cells': cells,
             })
+        normalized_path_rules = []
+        for item in path_rules:
+            if not isinstance(item, dict):
+                self.get_logger().error(
+                    f'Invalid map handoff path entry: {item!r}'
+                )
+                return None
+            edge = _validate_single_edge(item.get('edge'), 'path.edge')
+            if edge is None:
+                return None
+            padding = item.get('padding', [0.0, float('inf')])
+            if (
+                not isinstance(padding, list)
+                or len(padding) != 2
+            ):
+                self.get_logger().error(
+                    f'Invalid map handoff path padding: {item!r}'
+                )
+                return None
+            try:
+                padding_start_m = float(padding[0])
+                padding_end_m = float(padding[1])
+            except (TypeError, ValueError):
+                self.get_logger().error(
+                    f'Invalid map handoff path padding: {item!r}'
+                )
+                return None
+            if (
+                padding_start_m < 0.0
+                or padding_end_m < 0.0
+                or padding_end_m < padding_start_m
+            ):
+                self.get_logger().error(
+                    f'Invalid map handoff path padding: {item!r}'
+                )
+                return None
+            is_inverse = item.get('isInverse', False)
+            if not isinstance(is_inverse, bool):
+                self.get_logger().error(
+                    f'Invalid map handoff path isInverse: {item!r}'
+                )
+                return None
+            normalized_path_rules.append({
+                'edge': edge,
+                'padding': [padding_start_m, padding_end_m],
+                'isInverse': is_inverse,
+            })
         rotate_deg = rule.get('rotate_deg', 0.0)
         try:
             rotate_deg = float(rotate_deg)
         except (TypeError, ValueError):
             self.get_logger().error(f'Invalid map handoff rotate_deg: {rotate_deg!r}')
             return None
-        return {
+        normalized_rule = {
             'target_map': target_map,
             'poi_list': poi_list,
             'rotate_deg': rotate_deg,
@@ -566,7 +619,14 @@ class BackendNode(Ros2NodeManager):
             'vio_only_goal_margin_m': vio_only_goal_margin_m,
             'occupancy_grid_decay': normalized_occupancy_grid_decay,
             'obstacle_dilation': normalized_obstacle_dilation,
+            'path': normalized_path_rules,
         }
+        self.get_logger().info(
+            'Loaded nav_flow rule '
+            f'{poi_name or poi_id or poi_index!r}: target_map={target_map}, poi_list={poi_list}, '
+            f'path_rules={normalized_path_rules}'
+        )
+        return normalized_rule
 
     def _set_active_map_link(self, map_name: str):
         import shutil
@@ -634,10 +694,12 @@ class BackendNode(Ros2NodeManager):
         vio_only_goal_margin_m = float(rule.get('vio_only_goal_margin_m', 0.3))
         occupancy_grid_decay_rules = rule.get('occupancy_grid_decay', [])
         obstacle_dilation_rules = rule.get('obstacle_dilation', [])
+        path_rules = rule.get('path', [])
         with self._lock:
             handoff_start_odom_pose = dict(self._odom_pose) if self._odom_pose is not None else None
         self.get_logger().info(
-            f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
+            f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, '
+            f'poi_list={poi_list}, path_rules={path_rules}'
         )
         try:
             # Stop current map_node/control hard before changing the active map.
@@ -684,6 +746,7 @@ class BackendNode(Ros2NodeManager):
                     vio_only_goal_margin_m=vio_only_goal_margin_m,
                     occupancy_grid_decay_rules=occupancy_grid_decay_rules,
                     obstacle_dilation_rules=obstacle_dilation_rules,
+                    path_rules=path_rules,
                 )
             else:
                 self.state = 'idle'
@@ -1806,6 +1869,7 @@ class BackendNode(Ros2NodeManager):
         vio_only_goal_margin_m: float = 0.3,
         occupancy_grid_decay_rules: list[dict] | None = None,
         obstacle_dilation_rules: list[dict] | None = None,
+        path_rules: list[dict] | None = None,
     ):
         """Publish selected POIs to map_node and transition to navigation state.
 
@@ -1845,6 +1909,20 @@ class BackendNode(Ros2NodeManager):
                     obstacle_dilation_by_edge[(str(edge[0]), str(edge[1]))] = int(
                         rule['cells']
                     )
+            path_rule_by_edge = {}
+            for rule in (path_rules or []):
+                edge = rule.get('edge')
+                padding = rule.get('padding')
+                if (
+                    isinstance(edge, list)
+                    and len(edge) == 2
+                    and isinstance(padding, list)
+                    and len(padding) == 2
+                ):
+                    path_rule_by_edge[(str(edge[0]), str(edge[1]))] = {
+                        'padding': [float(padding[0]), float(padding[1])],
+                        'isInverse': bool(rule.get('isInverse', False)),
+                    }
             entry_edge_key = None
             entry_start_odom_position = None
             if vio_only_enabled and vio_only_entry_edge is not None:
@@ -1866,6 +1944,7 @@ class BackendNode(Ros2NodeManager):
             # consumers navigate in the same order the UI/nav_flow sent POIs,
             # instead of falling back to the original ids / pois.json order.
             payload = {}
+            payload_debug = []
             prev_poi_ref_key = None
             for poi_ref in poi_ids:
                 poi = None
@@ -1880,6 +1959,7 @@ class BackendNode(Ros2NodeManager):
                     poi_ref_key = str(poi_ref)
                     occupancy_grid_decay = None
                     obstacle_dilation = None
+                    path_rule = None
                     is_disabled_entry_edge = (
                         len(payload) == 0
                         and entry_edge_key is not None
@@ -1912,6 +1992,7 @@ class BackendNode(Ros2NodeManager):
                         edge_key = (prev_poi_ref_key, poi_ref_key)
                         occupancy_grid_decay = occupancy_grid_decay_by_edge.get(edge_key)
                         obstacle_dilation = obstacle_dilation_by_edge.get(edge_key)
+                        path_rule = path_rule_by_edge.get(edge_key)
                     elif len(payload) == 0:
                         for edge_key, value in occupancy_grid_decay_by_edge.items():
                             if edge_key[1] == poi_ref_key:
@@ -1921,16 +2002,42 @@ class BackendNode(Ros2NodeManager):
                             if edge_key[1] == poi_ref_key:
                                 obstacle_dilation = cells
                                 break
+                        for edge_key, path_rule_candidate in path_rule_by_edge.items():
+                            if edge_key[1] == poi_ref_key:
+                                path_rule = path_rule_candidate
+                                break
                     if occupancy_grid_decay is not None:
                         poi_payload['occupancy_grid_decay'] = float(occupancy_grid_decay)
                     if obstacle_dilation is not None:
                         poi_payload['obstacle_dilation_cells'] = int(
                             obstacle_dilation
                         )
+                    if path_rule is not None:
+                        poi_payload['isInverse'] = bool(path_rule['isInverse'])
+                        poi_payload['path_padding'] = [
+                            float(path_rule['padding'][0]),
+                            float(path_rule['padding'][1]),
+                        ]
+                    payload_debug.append({
+                        'queue_index': len(payload),
+                        'poi_ref': poi_ref_key,
+                        'resolved_name': poi_payload.get('name'),
+                        'matched_edge': (
+                            [prev_poi_ref_key, poi_ref_key]
+                            if prev_poi_ref_key is not None
+                            else None
+                        ),
+                        'path_rule': path_rule,
+                        'isInverse': poi_payload.get('isInverse'),
+                        'path_padding': poi_payload.get('path_padding'),
+                    })
                     payload[str(len(payload))] = poi_payload
                     prev_poi_ref_key = poi_ref_key
                 else:
                     self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
+            self.get_logger().info(
+                f'cmd_send_pois payload_debug={payload_debug}'
+            )
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
             self._set_nav_active(bool(payload))
         with self._lock:
@@ -1944,6 +2051,10 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_nav_start(self, poi_id: str | None = None):
         if poi_id is not None:
+            self.get_logger().info(
+                f'cmd_nav_start direct POI={poi_id}; this publishes only pois.json '
+                'and does not apply nav_flow path rules until a handoff rule is triggered'
+            )
             self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         else:
             self._set_nav_active(False)

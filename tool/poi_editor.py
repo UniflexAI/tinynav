@@ -226,6 +226,51 @@ def _heuristic_sdf(start, goal, resolution: float) -> float:
     return np.linalg.norm((vec_start - vec_goal) * resolution) + 20 * np.abs(vec_start[2] - vec_goal[2]) * resolution
 
 
+def _right_bias_sort_key(
+    current: tuple[int, int, int],
+    offset: tuple[int, int, int],
+    reference: tuple[int, int, int],
+) -> tuple[int, float, int, int]:
+    ref_xy = np.array(
+        [reference[0] - current[0], reference[1] - current[1]],
+        dtype=np.float32,
+    )
+    if float(np.linalg.norm(ref_xy)) < 1e-6:
+        ref_xy = np.array([1.0, 0.0], dtype=np.float32)
+    offset_xy = np.array([offset[0], offset[1]], dtype=np.float32)
+    cross_z = float(ref_xy[0] * offset_xy[1] - ref_xy[1] * offset_xy[0])
+    if float(np.linalg.norm(offset_xy)) < 1e-6:
+        side_bucket = 1
+    elif cross_z < -1e-6:
+        side_bucket = 0  # right
+    elif cross_z > 1e-6:
+        side_bucket = 2  # left
+    else:
+        side_bucket = 1  # straight
+    return (
+        side_bucket,
+        cross_z,
+        abs(offset[2]),
+        offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2],
+    )
+
+
+def _iter_neighbor_offsets_prefer_right(
+    current: tuple[int, int, int],
+    reference: tuple[int, int, int],
+) -> list[tuple[int, int, int]]:
+    offsets: list[tuple[tuple[int, float, int, int], tuple[int, int, int]]] = []
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            for dz in [-1, 0, 1]:
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                offset = (dx, dy, dz)
+                offsets.append((_right_bias_sort_key(current, offset, reference), offset))
+    offsets.sort(key=lambda item: item[0])
+    return [offset for _, offset in offsets]
+
+
 def _reconstruct_path_sdf(parent: dict, current: tuple) -> list[tuple[int, int, int]]:
     path = []
     while current in parent:
@@ -245,28 +290,33 @@ def _search_close_to_sdf_map(
     # Same semantics as map_node.search_close_to_sdf_map: walk from an arbitrary
     # POI voxel to the nearest low-SDF corridor voxel, avoiding occupied cells.
     start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else tuple(start_index)
-    open_heap = [(float(sdf_map[start_index]), start_index)]
+    open_heap = [(float(sdf_map[start_index]), (1, 0.0, 0, 0), start_index)]
     open_heap_set = {start_index}
     parent = {start_index: start_index}
     visited = set()
     while len(open_heap) > 0:
-        current_sdf, current = heapq.heappop(open_heap)
+        current_sdf, _, current = heapq.heappop(open_heap)
         open_heap_set.remove(current)
         visited.add(current)
         if current_sdf < stop_distance:
             return _reconstruct_path_sdf(parent, current)
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    if dx == 0 and dy == 0 and dz == 0:
-                        continue
-                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
-                    if not _grid_index_in_bounds(neighbor, sdf_map.shape):
-                        continue
-                    if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
-                        open_heap_set.add(neighbor)
-                        heapq.heappush(open_heap, (float(sdf_map[neighbor]), neighbor))
-                        parent[neighbor] = current
+        if current == start_index:
+            reference = (start_index[0] + 1, start_index[1], start_index[2])
+        else:
+            reference = (
+                current[0] + (current[0] - start_index[0]),
+                current[1] + (current[1] - start_index[1]),
+                current[2] + (current[2] - start_index[2]),
+            )
+        for dx, dy, dz in _iter_neighbor_offsets_prefer_right(current, reference):
+            neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+            if not _grid_index_in_bounds(neighbor, sdf_map.shape):
+                continue
+            if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
+                open_heap_set.add(neighbor)
+                tie_break = _right_bias_sort_key(current, (dx, dy, dz), reference)
+                heapq.heappush(open_heap, (float(sdf_map[neighbor]), tie_break, neighbor))
+                parent[neighbor] = current
     return []
 
 
@@ -291,7 +341,10 @@ def _search_within_sdf_map(
     open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
     open_sets = [set() for _ in range(len(sdf_bins) + 1)]
     start_queue_idx = get_queue_index(float(sdf_map[start]))
-    heapq.heappush(open_heaps[start_queue_idx], (_heuristic_sdf(start, goal, resolution), start))
+    heapq.heappush(
+        open_heaps[start_queue_idx],
+        (_heuristic_sdf(start, goal, resolution), (1, 0.0, 0, 0), start),
+    )
     open_sets[start_queue_idx].add(start)
     parent = {start: start}
     visited = set()
@@ -305,33 +358,30 @@ def _search_within_sdf_map(
         if queue_idx == -1:
             break
 
-        _, current = heapq.heappop(open_heaps[queue_idx])
+        _, _, current = heapq.heappop(open_heaps[queue_idx])
         open_sets[queue_idx].remove(current)
         if current in visited:
             continue
         visited.add(current)
         if current == goal:
             return _reconstruct_path_sdf(parent, current)
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                for dz in [-1, 0, 1]:
-                    if dx == 0 and dy == 0 and dz == 0:
-                        continue
-                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
-                    if not _grid_index_in_bounds(neighbor, sdf_map.shape):
-                        continue
-                    if neighbor in visited or occupancy_map[neighbor] == 2:
-                        continue
-                    neighbor_queue_idx = get_queue_index(float(sdf_map[neighbor]))
-                    if neighbor in open_sets[neighbor_queue_idx]:
-                        continue
-                    open_sets[neighbor_queue_idx].add(neighbor)
-                    heapq.heappush(
-                        open_heaps[neighbor_queue_idx],
-                        (_heuristic_sdf(neighbor, goal, resolution), neighbor),
-                    )
-                    if neighbor not in parent:
-                        parent[neighbor] = current
+        for dx, dy, dz in _iter_neighbor_offsets_prefer_right(current, goal):
+            neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+            if not _grid_index_in_bounds(neighbor, sdf_map.shape):
+                continue
+            if neighbor in visited or occupancy_map[neighbor] == 2:
+                continue
+            neighbor_queue_idx = get_queue_index(float(sdf_map[neighbor]))
+            if neighbor in open_sets[neighbor_queue_idx]:
+                continue
+            open_sets[neighbor_queue_idx].add(neighbor)
+            tie_break = _right_bias_sort_key(current, (dx, dy, dz), goal)
+            heapq.heappush(
+                open_heaps[neighbor_queue_idx],
+                (_heuristic_sdf(neighbor, goal, resolution), tie_break, neighbor),
+            )
+            if neighbor not in parent:
+                parent[neighbor] = current
     return []
 
 
@@ -412,11 +462,14 @@ def _plan_sdf_path_between_points(
     occupancy_meta: np.ndarray,
     sdf_map: np.ndarray,
     stop_distance: float = 0.2,
+    inverse: bool = False,
 ) -> tuple[np.ndarray | None, str]:
     origin = occupancy_meta[:3].astype(np.float32)
     resolution = float(occupancy_meta[3])
-    start_idx = _world_to_grid_index(start_position, origin, resolution)
-    goal_idx = _world_to_grid_index(goal_position, origin, resolution)
+    path_start_position = goal_position if inverse else start_position
+    path_goal_position = start_position if inverse else goal_position
+    start_idx = _world_to_grid_index(path_start_position, origin, resolution)
+    goal_idx = _world_to_grid_index(path_goal_position, origin, resolution)
 
     if not _grid_index_in_bounds(start_idx, occupancy_map.shape):
         return None, f"Start out of map bounds: {start_idx}"
@@ -443,7 +496,13 @@ def _plan_sdf_path_between_points(
     raw_path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
     pruned_path = _shortcut_prune_path(raw_path, sdf_map, occupancy_map, resolution)
     world_path = _grid_indices_to_world(pruned_path, origin, resolution)
-    return world_path, f"SDF path OK: raw={len(raw_path)}, pruned={len(pruned_path)}, start_idx={start_idx}, goal_idx={goal_idx}"
+    if inverse:
+        world_path = world_path[::-1].copy()
+    inverse_suffix = ", inverse=True" if inverse else ""
+    return world_path, (
+        f"SDF path OK: raw={len(raw_path)}, pruned={len(pruned_path)}, "
+        f"start_idx={start_idx}, goal_idx={goal_idx}{inverse_suffix}"
+    )
 
 
 def _poi_path_role_label(poi_index: int, nav_state: dict | None) -> str:
@@ -489,6 +548,10 @@ def create_poi_ui(
             color_r_slider = server.gui.add_slider("Color R", min=0, max=255, step=1, initial_value=int(sphere_handle.color[0]))
             color_g_slider = server.gui.add_slider("Color G", min=0, max=255, step=1, initial_value=int(sphere_handle.color[1]))
             color_b_slider = server.gui.add_slider("Color B", min=0, max=255, step=1, initial_value=int(sphere_handle.color[2]))
+            inverse_checkbox = server.gui.add_checkbox(
+                "isInverse",
+                initial_value=bool(poi_points[poi_index].get("isInverse", False)),
+            )
             set_start_button = None
             set_goal_button = None
             if nav_state is not None:
@@ -519,6 +582,10 @@ def create_poi_ui(
     color_r_slider.on_update(update_color)
     color_g_slider.on_update(update_color)
     color_b_slider.on_update(update_color)
+
+    def update_inverse(_event):
+        poi_points[poi_index]["isInverse"] = bool(inverse_checkbox.value)
+    inverse_checkbox.on_update(update_inverse)
 
     # Add a transform gizmo attached to the sphere
     gizmo = server.scene.add_transform_controls(f"/{poi_points[poi_index]['name']}_gizmo", position=poi_points[poi_index]['position'], wxyz=(1.0, 0.0, 0.0, 0.0))
@@ -718,6 +785,7 @@ def main(
             poi_points = {int(k): v for k, v in poi_points.items()}
             for k, v in poi_points.items():
                 v['position'] = np.array(v['position'])
+                v['isInverse'] = bool(v.get('isInverse', False))
             poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
        
     
@@ -755,6 +823,7 @@ def main(
                 'id': poi_id,
                 'name': poi_name,
                 'position': np.random.randn(3),
+                'isInverse': False,
             }
             sphere_handle = server.scene.add_icosphere(
                 f"/{poi_name}",
@@ -1004,6 +1073,7 @@ def main(
                     nav_state["path_handle"] = None
                 start_position = np.asarray(poi_points[start_id]["position"], dtype=np.float32)
                 goal_position = np.asarray(poi_points[goal_id]["position"], dtype=np.float32)
+                inverse = bool(poi_points[goal_id].get("isInverse", False))
                 t0 = time.time()
                 world_path, message = _plan_sdf_path_between_points(
                     start_position,
@@ -1012,6 +1082,7 @@ def main(
                     occupancy_meta,
                     sdf_map,
                     stop_distance=float(stop_distance_slider.value),
+                    inverse=inverse,
                 )
                 elapsed_ms = (time.time() - t0) * 1000.0
                 if world_path is None or len(world_path) < 2:

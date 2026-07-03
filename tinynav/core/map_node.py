@@ -465,6 +465,8 @@ class MapNode(Node):
         self._poi_arrival_xy_threshold = 0.3
         self._poi_arrival_z_threshold = 2.0
         self._vio_only_log_key: tuple[str, str, float, float] | None = None
+        self._inverse_path_log_key: tuple[str, bool, tuple[float, float] | None] | None = None
+        self._inverse_path_latched_poi_index: int | None = None
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -493,6 +495,16 @@ class MapNode(Node):
                 poi_meta[index] = {
                     "id": raw_poi.get("id", key),
                     "name": raw_poi.get("name"),
+                    "is_inverse": bool(raw_poi.get("isInverse", False)),
+                    "path_padding": (
+                        [
+                            float(raw_poi["path_padding"][0]),
+                            float(raw_poi["path_padding"][1]),
+                        ]
+                        if isinstance(raw_poi.get("path_padding"), list)
+                        and len(raw_poi["path_padding"]) == 2
+                        else None
+                    ),
                     "vio_only": bool(raw_poi.get("vio_only", False)),
                     "vio_only_entry_start_name": raw_poi.get(
                         "vio_only_entry_start_name"
@@ -525,6 +537,7 @@ class MapNode(Node):
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
                 self.poi_meta = {}
+                self._inverse_path_latched_poi_index = None
                 self.get_logger().info("POIs cleared, navigation cancelled")
                 return
 
@@ -534,13 +547,18 @@ class MapNode(Node):
             self._leg_start_time = None
             self._speed_estimate = None
             self._vio_only_log_key = None
+            self._inverse_path_log_key = None
+            self._inverse_path_latched_poi_index = None
             self._clear_global_path_cache()
             self.get_logger().info(f"Parsed POIs: {self.pois}")
+            self.get_logger().info(f"Parsed POI meta: {self.poi_meta}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
             self.poi_meta = {}
             self._vio_only_log_key = None
+            self._inverse_path_log_key = None
+            self._inverse_path_latched_poi_index = None
             self._clear_global_path_cache()
 
     def _clear_global_path_cache(self):
@@ -579,6 +597,20 @@ class MapNode(Node):
                 self._poi_arrival_z_threshold if z_threshold is None else float(z_threshold)
             )
         )
+
+    def _inverse_path_active_for_leg(
+        self,
+        meta: dict,
+        forward_covered_length: float,
+    ) -> bool:
+        if not bool(meta.get("is_inverse", False)):
+            return False
+        padding = meta.get("path_padding")
+        if not isinstance(padding, list) or len(padding) != 2:
+            return True
+        start_m = float(padding[0])
+        end_m = float(padding[1])
+        return start_m <= float(forward_covered_length) <= end_m
 
     def _vio_only_context_for_leg(
         self, pose_in_origin_odom: np.ndarray | None
@@ -668,6 +700,42 @@ class MapNode(Node):
             )
 
         self._vio_only_log_key = current_key
+
+    def _update_inverse_path_log(
+        self,
+        target_name: str,
+        meta: dict,
+        *,
+        forward_total_length: float,
+        forward_remaining_length: float,
+        forward_covered_length: float,
+        active: bool,
+    ):
+        padding = meta.get("path_padding")
+        padding_tuple = None
+        if isinstance(padding, list) and len(padding) == 2:
+            padding_tuple = (float(padding[0]), float(padding[1]))
+        latched = self._inverse_path_latched_poi_index == self.poi_index
+        current_key = (target_name, active, padding_tuple, latched)
+        if current_key == self._inverse_path_log_key:
+            return
+
+        if bool(meta.get("is_inverse", False)):
+            self.get_logger().info(
+                "Inverse path rule "
+                f"{'ACTIVE' if active else 'inactive'} for target {target_name} "
+                f"(covered={forward_covered_length:.2f}m, "
+                f"remaining={forward_remaining_length:.2f}m, "
+                f"total={forward_total_length:.2f}m, "
+                f"padding={padding_tuple}, latched={latched})"
+            )
+        elif self._inverse_path_log_key is not None:
+            previous_target, _, _, _ = self._inverse_path_log_key
+            self.get_logger().info(
+                f"Inverse path rule cleared after target {previous_target}"
+            )
+
+        self._inverse_path_log_key = current_key
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -1062,6 +1130,7 @@ class MapNode(Node):
                 self.poi_index += 1
                 self._leg_initial_length = None
                 self._leg_start_time = None
+                self._inverse_path_latched_poi_index = None
                 self._clear_global_path_cache()
                 dummy_pose = np.eye(4)
 
@@ -1082,10 +1151,60 @@ class MapNode(Node):
             return
 
         target_poi = self.pois[self.poi_index]
-        paths_in_map = self._get_or_replan_global_path(pose_in_map, target_poi)
+        target_meta = self.poi_meta.get(self.poi_index, {})
+        forward_path_in_map = self._get_or_replan_global_path(
+            pose_in_map,
+            target_poi,
+            inverse=False,
+        )
+        paths_in_map = forward_path_in_map
+        remaining_length = None
+        if forward_path_in_map is not None:
+            _, remaining_length = self._path_progress(
+                forward_path_in_map,
+                pose_in_map_position[:3],
+            )
+            forward_total_length = 0.0
+            for i in range(len(forward_path_in_map) - 1):
+                forward_total_length += np.linalg.norm(
+                    forward_path_in_map[i + 1] - forward_path_in_map[i]
+                )
+            forward_covered_length = max(
+                0.0,
+                float(forward_total_length - remaining_length),
+            )
+            inverse_requested = self._inverse_path_active_for_leg(
+                target_meta, forward_covered_length
+            )
+            inverse_active = False
+            if bool(target_meta.get("is_inverse", False)):
+                if self._inverse_path_latched_poi_index == self.poi_index:
+                    inverse_active = True
+                elif inverse_requested:
+                    self._inverse_path_latched_poi_index = self.poi_index
+                    inverse_active = True
+            else:
+                self._inverse_path_latched_poi_index = None
+            self._update_inverse_path_log(
+                str(target_meta.get("name") or target_meta.get("id") or self.poi_index),
+                target_meta,
+                forward_total_length=forward_total_length,
+                forward_remaining_length=float(remaining_length),
+                forward_covered_length=forward_covered_length,
+                active=inverse_active,
+            )
+            if inverse_active:
+                inverse_path_in_map = self._get_or_replan_global_path(
+                    pose_in_map,
+                    target_poi,
+                    inverse=True,
+                )
+                if inverse_path_in_map is not None:
+                    paths_in_map = inverse_path_in_map
 
         if paths_in_map is not None:
-            closest_position, remaining_length = self._path_progress(paths_in_map, pose_in_map_position[:3])
+            if remaining_length is None:
+                _, remaining_length = self._path_progress(paths_in_map, pose_in_map_position[:3])
 
             now = time.time()
             if self._leg_initial_length is None:
@@ -1169,9 +1288,19 @@ class MapNode(Node):
         else:
             self.get_logger().debug("No path found in map")
 
-    def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
+    def _get_or_replan_global_path(
+        self,
+        pose_in_map: np.ndarray,
+        target_poi: np.ndarray,
+        *,
+        inverse: bool = False,
+    ) -> np.ndarray | None:
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            return self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+            return self.generate_nav_path_in_map(
+                pose_in_map=pose_in_map,
+                target_poi=target_poi,
+                inverse=inverse,
+            )
 
     def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
         if len(path) == 1:
@@ -1213,21 +1342,29 @@ class MapNode(Node):
             current = next_point
         return path[-1]
 
-    def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
+    def generate_nav_path_in_map(
+        self,
+        pose_in_map: np.ndarray,
+        target_poi: np.ndarray,
+        *,
+        inverse: bool = False,
+    ) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
         dummy_poi_pose[:3, 3] = target_poi
         self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         occupancy_map_origin = self.occupancy_map_meta[:3]
         resolution = self.occupancy_map_meta[3]
+        path_start_position = target_poi if inverse else pose_in_map[:3, 3]
+        path_goal_position = pose_in_map[:3, 3] if inverse else target_poi
         start_idx = np.array([
-            int((pose_in_map[0, 3] - occupancy_map_origin[0]) / resolution),
-            int((pose_in_map[1, 3] - occupancy_map_origin[1]) / resolution),
-            int((pose_in_map[2, 3] - occupancy_map_origin[2]) / resolution)
+            int((path_start_position[0] - occupancy_map_origin[0]) / resolution),
+            int((path_start_position[1] - occupancy_map_origin[1]) / resolution),
+            int((path_start_position[2] - occupancy_map_origin[2]) / resolution)
         ], dtype=np.int32)
         poi_goal_idx = np.array([
-            int((target_poi[0] - occupancy_map_origin[0]) / resolution),
-            int((target_poi[1] - occupancy_map_origin[1]) / resolution),
-            int((target_poi[2] - occupancy_map_origin[2]) / resolution)
+            int((path_goal_position[0] - occupancy_map_origin[0]) / resolution),
+            int((path_goal_position[1] - occupancy_map_origin[1]) / resolution),
+            int((path_goal_position[2] - occupancy_map_origin[2]) / resolution)
         ], dtype=np.int32)
 
         if (
@@ -1263,6 +1400,8 @@ class MapNode(Node):
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
+            if inverse:
+                path = path[::-1]
             pruned_path = shortcut_prune_path(path, self.sdf_map, self.occupancy_map, resolution)
             if len(pruned_path) < len(path):
                 self.get_logger().info(f"shortcut pruned nav path: {len(path)} -> {len(pruned_path)} points")
