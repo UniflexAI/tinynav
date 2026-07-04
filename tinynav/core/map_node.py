@@ -19,7 +19,8 @@ from codetiming import Timer
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.anyloc_embedding import AnyLocEmbedding
+from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
@@ -188,7 +189,7 @@ class MapNode(Node):
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
-        self.dinov2_model = Dinov2TRT()
+        self.retrieval_model = AnyLocEmbedding()
         self.tinynav_db_path = tinynav_db_path
 
         self.bridge = CvBridge()
@@ -406,8 +407,7 @@ class MapNode(Node):
 
 
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
-        # shape: (1, 768)
-        return asyncio.run(self.dinov2_model.infer(image))
+        return asyncio.run(self.retrieval_model.infer(image))
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
