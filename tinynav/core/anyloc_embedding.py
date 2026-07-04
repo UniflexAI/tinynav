@@ -27,20 +27,19 @@ class AnyLocEmbedding:
     ):
         try:
             import torch
-            from transformers import AutoImageProcessor, AutoModel
         except ImportError as exc:
             raise ImportError(
-                "AnyLocEmbedding requires torch and transformers. "
+                "AnyLocEmbedding requires torch. "
                 "Install them in the x64 test environment before using this branch."
             ) from exc
 
         self.torch = torch
-        self.model_name = model_name or os.environ.get("TINYNAV_ANYLOC_MODEL", "facebook/dinov2-base")
+        self.model_name = model_name or os.environ.get("TINYNAV_ANYLOC_MODEL", "dinov2_vitb14")
         self.image_size = int(image_size or os.environ.get("TINYNAV_ANYLOC_IMAGE_SIZE", "224"))
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.processor = AutoImageProcessor.from_pretrained(self.model_name)
-        self.model = AutoModel.from_pretrained(self.model_name).to(self.device)
+        hub_repo = os.environ.get("TINYNAV_ANYLOC_HUB_REPO", "facebookresearch/dinov2")
+        self.model = torch.hub.load(hub_repo, self.model_name).to(self.device)
         self.model.eval()
 
     def _to_rgb(self, image: np.ndarray) -> np.ndarray:
@@ -61,12 +60,15 @@ class AnyLocEmbedding:
 
     async def infer(self, image: np.ndarray) -> np.ndarray:
         rgb = self._to_rgb(image)
-        inputs = self.processor(images=rgb, return_tensors="pt")
-        inputs = {key: value.to(self.device) for key, value in inputs.items()}
+        tensor = self.torch.from_numpy(rgb).to(self.device)
+        tensor = tensor.permute(2, 0, 1).float().div(255.0)
+        mean = self.torch.tensor([0.485, 0.456, 0.406], device=self.device).view(3, 1, 1)
+        std = self.torch.tensor([0.229, 0.224, 0.225], device=self.device).view(3, 1, 1)
+        tensor = ((tensor - mean) / std).unsqueeze(0)
 
         with self.torch.inference_mode():
-            outputs = self.model(**inputs)
-            tokens = outputs.last_hidden_state[:, 1:, :]  # patch tokens, [1, N, C]
+            features = self.model.forward_features(tensor)
+            tokens = features["x_norm_patchtokens"]  # patch tokens, [1, N, C]
             tokens = self.torch.nn.functional.normalize(tokens, dim=-1)
             mean_desc = tokens.mean(dim=1)
             max_desc = tokens.max(dim=1).values
