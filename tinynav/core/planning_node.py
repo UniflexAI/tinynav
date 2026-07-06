@@ -661,7 +661,7 @@ class PlanningNode(Node):
             if behind_target_mode:
                 # In behind-target mode, do not let the normal cost planner compete.
                 # Publish a fixed in-place rotation trajectory until heading error exits the hysteresis band.
-                fixed_turn_speed = 0.6
+                fixed_turn_speed = 1.0
                 rotate_costs = np.where(
                     (np.abs(params[:, 0]) < 1e-6) & (np.sign(params[:, 1]) == behind_turn_sign),
                     np.abs(np.abs(params[:, 1]) - fixed_turn_speed),
