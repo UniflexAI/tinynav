@@ -4,7 +4,7 @@ tool/qr_nav_node.py
 
 Navigate to a fixed target pose defined relative to an AprilTag board.
 Does NOT use camera — pure odometry-based control after goal is set.
-Holonomic PI controller (same as tool/qr_odom/target_node.py).
+Holonomic PI controller.
 
 Frame chain
 -----------
@@ -55,8 +55,7 @@ ODOM_TOPIC     = "/slam/odometry_fused"
 CMD_VEL_TOPIC  = "/control/cmd_vel"
 NAV_DONE_TOPIC = "/qr_world/nav_done"
 
-# PI controller gains, limits, and drivetrain deadband compensation
-# (same as tool/qr_odom/target_node.py).
+# PI controller gains, limits, and drivetrain deadband compensation.
 K_LINEAR        = 0.5   # (m/s) / m
 K_LINEAR_I      = 0.05  # (m/s) / (m*s)
 K_ANGULAR       = 1.0   # (rad/s) / rad

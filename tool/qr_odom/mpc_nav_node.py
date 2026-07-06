@@ -84,23 +84,32 @@ CMD_VEL_TOPIC  = "/control/cmd_vel"
 NAV_DONE_TOPIC = "/qr_world/nav_done"
 
 # Control loop, decoupled from the (up to 100Hz) EKF-fused odometry rate.
-CONTROL_HZ = 10.0
+# HORIZON_N=6 @ 20Hz gives only 0.3s lookahead (vs 1.5s at the old 15/10Hz) —
+# short relative to how long it now takes to ramp to MAX_LINEAR/MAX_ANGULAR
+# (~0.83s / ~1.0s at MAX_LINEAR_ACC/MAX_ANGULAR_ACC below). Start here and
+# check the "solve_ms=" figure in the MPC-solve-failure log line: if solves
+# are comfortably under SOLVE_TIME_BUDGET_S, raise HORIZON_N for more
+# foresight; if they're already close to it, go lower instead.
+CONTROL_HZ = 20.0
 DT_MPC     = 1.0 / CONTROL_HZ
-HORIZON_N  = 15
-HORIZON_N_DEGRADED = 8   # fallback if solves are too slow for CONTROL_HZ
-SOLVE_TIME_BUDGET_S = 0.07
+HORIZON_N  = 6
+HORIZON_N_DEGRADED = 4   # fallback if solves are too slow for CONTROL_HZ
+SOLVE_TIME_BUDGET_S = 0.03   # 60% of the 50ms period, leaving headroom
 
-# Velocity/acceleration limits — v/MAX_LINEAR/MAX_ANGULAR reused from
-# nav_node.py; MAX_LINEAR_ACC/MAX_ANGULAR_ACC reused from
+# Velocity/acceleration limits — MAX_LINEAR_ACC/MAX_ANGULAR_ACC reused from
 # tinynav/platforms/cmd_vel_control.py (the latter is defined there but
 # currently unused for yaw).
-MAX_LINEAR      = 0.3   # m/s  (v >= 0: the turn-drive-turn plan never needs reverse)
-MAX_ANGULAR     = 0.5   # rad/s
+MAX_LINEAR      = 0.5   # m/s  (v >= 0: the turn-drive-turn plan never needs reverse)
+MAX_ANGULAR     = 0.8   # rad/s
 MAX_LINEAR_ACC  = 0.6   # m/s^2
 MAX_ANGULAR_ACC = 0.8   # rad/s^2
 
-# Deadband floors, used only by the emergency P-controller fallback (see
-# _fallback_cmd) — the MPC's own output is used as-is otherwise.
+# Deadband floors: the platform doesn't reliably move on a nonzero-but-tiny
+# command, so both the MPC's published output (_control_tick) and the
+# emergency P-controller fallback (_fallback_cmd) floor any non-negligible
+# command up to at least this value. Values below CMD_DEADBAND are treated
+# as a genuine zero and left unfloored. Retune from
+# calibrate_cmd_vel_deadzone.py's measured deadzone.
 MIN_LINEAR  = 0.15
 MIN_ANGULAR = 0.15
 CMD_DEADBAND = 1e-3
@@ -374,7 +383,13 @@ def solve_mpc(x: float, y: float, theta: float,
               max_linear: float = MAX_LINEAR, max_angular: float = MAX_ANGULAR,
               max_linear_acc: float = MAX_LINEAR_ACC, max_angular_acc: float = MAX_ANGULAR_ACC,
               maxiter: int = SLSQP_MAXITER):
-    """Single-shooting nonlinear MPC solve. Returns (v0, w0, success, U_opt)."""
+    """Single-shooting nonlinear MPC solve.
+
+    Returns (v0, w0, success, U_opt, diag), where diag is a dict with the
+    raw scipy result's nit/status/message/fun — kept separate from the
+    success bool so callers can log *why* a solve failed, not just that it
+    did.
+    """
     ref_xr, ref_yr, ref_thr = ref_xyth
     u0 = warm_start if warm_start is not None else np.zeros(2 * n)
     bounds = [(0.0, max_linear)] * n + [(-max_angular, max_angular)] * n
@@ -387,7 +402,8 @@ def solve_mpc(x: float, y: float, theta: float,
         options={"maxiter": maxiter, "ftol": 1e-6},
     )
     u_opt = res.x
-    return float(u_opt[0]), float(u_opt[n]), bool(res.success), u_opt
+    diag = {"nit": res.nit, "status": res.status, "message": res.message, "fun": res.fun}
+    return float(u_opt[0]), float(u_opt[n]), bool(res.success), u_opt, diag
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +555,7 @@ class MPCNavNode(Node):
             ref_xr, ref_yr, ref_thr = self._sample_reference(self._t_plan)
 
         t_solve0 = time.monotonic()
-        v0, w0, success, u_opt = solve_mpc(
+        v0, w0, success, u_opt, diag = solve_mpc(
             x, y, theta, (ref_xr, ref_yr, ref_thr), self._u_prev, DT_MPC,
             self._horizon_n, self._warm_start, maxiter=self._maxiter)
         solve_dt = time.monotonic() - t_solve0
@@ -551,6 +567,13 @@ class MPCNavNode(Node):
             self._horizon_n = HORIZON_N_DEGRADED
             self._maxiter = SLSQP_MAXITER_DEGRADED
             self._warm_start = None
+
+        if not success:
+            self.get_logger().warn(
+                f"MPC solve did not converge: status={diag['status']} "
+                f"nit={diag['nit']}/{self._maxiter} cost={diag['fun']:.3f} "
+                f"solve_ms={solve_dt * 1000:.0f} msg={diag['message']!r}",
+                throttle_duration_sec=1.0)
 
         if success:
             self._warm_start = shift_warm_start(u_opt, self._horizon_n)

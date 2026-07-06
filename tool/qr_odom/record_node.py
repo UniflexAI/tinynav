@@ -63,7 +63,7 @@ from tool.qr_odom.robot_frame import T_CAMERA_ROBOT
 # ---------------------------------------------------------------------------
 
 DB_DIR           = Path("tinynav_db/qrcode")
-TAG_PARAMS_PATH  = DB_DIR / "tag_satellite.json"
+TAG_PARAMS_PATH  = DB_DIR / "tag_grid_2x2_s76mm.json"   # written by qr_odom/generate.py --grid 2
 TARGET_PATH      = DB_DIR / "tag_target.json"
 MAPPOSE_PATH     = DB_DIR / "tag_mappose.json"
 

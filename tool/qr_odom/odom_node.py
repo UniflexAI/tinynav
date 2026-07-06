@@ -13,7 +13,7 @@ Frame chain
 
 Calibration files
 -----------------
-  tinynav_db/qrcode/tag_satellite.json   tag ids, size, spacing
+  tinynav_db/qrcode/tag_grid_2x2_s76mm.json   tag ids, size, spacing (from qr_odom/generate.py)
   tinynav_db/qrcode/tag_mappose.json     T_map_qrworld  ← NEW, created at map-build time
 
 Topics
@@ -39,7 +39,7 @@ from tf2_ros import Buffer, TransformListener
 from tinynav.core.math_utils import np2msg, tf2np
 
 DB_DIR         = Path("tinynav_db/qrcode")
-TAG_PARAMS_PATH = DB_DIR / "tag_satellite.json"
+TAG_PARAMS_PATH = DB_DIR / "tag_grid_2x2_s76mm.json"   # written by qr_odom/generate.py --grid 2
 TAG_MAPPOSE_PATH = DB_DIR / "tag_mappose.json"
 
 IMAGE_TOPIC  = "/camera/camera/infra1/image_rect_raw"
