@@ -98,3 +98,43 @@ Additional benchmark pipelines will be added to evaluate:
 - Multi-session mapping accuracy
 - Computational performance and resource usage
 - Robustness to different lighting and environmental conditions
+
+
+## Benchmark Pipeline 2: Cross-Map Retrieval Evaluation
+
+`map_retrieval_eval.py` evaluates whether keyframe image retrieval can recover the correct location across two independently built maps.
+
+### Process Overview
+
+1. Build map A and map B from two captures of the same scene.
+2. Align map B into map A coordinates and provide `Tba` (`B -> A`).
+3. Use each map B keyframe image as a query.
+4. Retrieve top-K candidate keyframes from map A using the saved map embeddings.
+5. Transform the map B keyframe pose into map A coordinates:
+
+```text
+pose_a_gt = Tba * pose_b
+```
+
+6. Compare each retrieved map A keyframe pose against `pose_a_gt`.
+7. Report top-K error, recall, precision, and IoU over several distance thresholds.
+
+### Usage
+
+```bash
+uv run python tool/benchmark/map_retrieval_eval.py \
+  --map-a /tinynav/output/map_a \
+  --map-b /tinynav/output/map_b \
+  --tba-json /tinynav/output/tba.json \
+  --topk 1,3,5,10 \
+  --distance-thresholds 0.5,1.0,2.0,3.0,5.0 \
+  --output-dir /tinynav/output/map_retrieval_eval
+```
+
+If `--tba-json` is omitted, the identity transform is used. This is useful for smoke tests where map A and map B are generated from the same bag and are expected to share the same coordinate frame.
+
+### Outputs
+
+- `summary.json`: overall metrics and configuration
+- `metrics.csv`: recall / precision / IoU per top-K and distance threshold
+- `per_query_results.jsonl`: retrieved keyframes and per-query errors
