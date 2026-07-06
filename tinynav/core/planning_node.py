@@ -418,8 +418,8 @@ class PlanningNode(Node):
             return
 
         abs_error = abs(heading_error)
-        enter_threshold = np.deg2rad(110.0)
-        exit_threshold = np.deg2rad(70.0)
+        enter_threshold = np.deg2rad(120.0)
+        exit_threshold = np.deg2rad(100.0)
 
         if self.behind_target_mode:
             if abs_error < exit_threshold:
@@ -427,7 +427,9 @@ class PlanningNode(Node):
                 self.behind_turn_sign = 0.0
         elif abs_error > enter_threshold:
             self.behind_target_mode = True
-            self.behind_turn_sign = 1.0 if heading_error >= 0.0 else -1.0
+            # Trajectory param[1] is camera-frame omega_y. After conversion to robot cmd_vel,
+            # its sign is opposite to robot yaw: positive omega_y turns the robot right.
+            self.behind_turn_sign = -1.0 if heading_error >= 0.0 else 1.0
 
     def info_callback(self, msg):
         if self.K is None:
