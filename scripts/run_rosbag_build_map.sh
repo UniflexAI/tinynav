@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_looper)
-rosbag_path=/tinynav/datasets--rosbag2_go2_simulation
-map_save_path=/tinynav/output/map_rosbag2_go2_simulation
+rosbag_path=/tinynav/rosbags/map_record_20260703_103310
+map_save_path=/tinynav/output/map_record_20260703_103310
 
 mode="${1:-perception}" # looper_direct | perception
 
