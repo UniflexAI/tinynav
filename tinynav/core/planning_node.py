@@ -646,40 +646,6 @@ class PlanningNode(Node):
             behind_target_mode = self.behind_target_mode
             behind_turn_sign = self.behind_turn_sign
 
-            def cost_function(traj, param, score, target_pose):
-                # predefined backward trajectory penalty
-                is_backward_traj = param[0] < 0.0
-                is_rotate_in_place = abs(param[0]) < 1e-6 and abs(param[1]) > 1e-3
-                should_reverse = front_clearance <= enter_threshold
-                reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj and not (behind_target_mode and is_rotate_in_place):
-                        reverse_gate_penalty = 1e9
-                elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
-
-                # regular trajectory penalty
-                traj_end = np.array(traj[-1,:3])
-                target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
-                behind_target_penalty = 0.0
-                if behind_target_mode:
-                    correct_turn = is_rotate_in_place and np.sign(param[1]) == behind_turn_sign
-                    if not correct_turn:
-                        behind_target_penalty = 1e6
-
-                return (
-                    score * 100000
-                    + 100 * dist
-                    + 10 * abs(self.last_param[0] - param[0])
-                    + 10 * abs(self.last_param[1] - param[1])
-                    + reverse_gate_penalty
-                    + behind_target_penalty
-                )
-
-            top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
-            self.last_param = params[top_indices[0]]
-
             # path
             path = Path()
             path.header = depth_msg.header
@@ -691,6 +657,39 @@ class PlanningNode(Node):
             if all(s == float('inf') for s in scores):
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 return
+
+            if behind_target_mode:
+                # In behind-target mode, do not let the normal cost planner compete.
+                # Publish a fixed in-place rotation trajectory until heading error exits the hysteresis band.
+                fixed_turn_speed = 0.6
+                rotate_costs = np.where(
+                    (np.abs(params[:, 0]) < 1e-6) & (np.sign(params[:, 1]) == behind_turn_sign),
+                    np.abs(np.abs(params[:, 1]) - fixed_turn_speed),
+                    np.inf,
+                )
+                top_indices = np.array([int(np.argmin(rotate_costs))])
+            else:
+                def cost_function(traj, param, score, target_pose):
+                    # predefined backward trajectory penalty
+                    is_backward_traj = param[0] < 0.0
+                    should_reverse = front_clearance <= enter_threshold
+                    reverse_gate_penalty = 0.0
+                    if should_reverse and not is_backward_traj:
+                            reverse_gate_penalty = 1e9
+                    elif not should_reverse and is_backward_traj:
+                            reverse_gate_penalty = 1e9
+
+                    # regular trajectory penalty
+                    traj_end = np.array(traj[-1,:3])
+                    target_end = target_pose if target_pose is not None else traj_end
+                    dist = np.linalg.norm(traj_end - target_end)
+
+                    return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+
+                top_k = 1
+                top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+
+            self.last_param = params[top_indices[0]]
 
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
