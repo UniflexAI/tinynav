@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_looper)
-map_save_path=/tinynav/output/map_go2_looper
+# rosbag_path=$(uv run hf download --repo-type dataset --cache-dir /tinynav UniflexAI/rosbag2_go2_looper)
+rosbag_path=/tinynav/rosbags/map_record_20260703_103310
+map_save_path=/tinynav/output/map_record_20260703_103310
 
 mode="${1:-perception}" # looper_direct | perception
 

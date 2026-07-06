@@ -12,15 +12,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+timestamp="$(date +%Y%m%d_%H%M%S)"
 if [ -z "$output_dir" ]; then
     xdg_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
     record_root="${xdg_data_home}/tinynav/rosbags"
-    timestamp="$(date +%Y%m%d_%H%M%S)"
-    output_dir="${record_root}/map_record_${timestamp}"
-    mkdir -p "${record_root}"
 else
-    mkdir -p "$(dirname "$output_dir")"
+    record_root="$output_dir"
 fi
+output_dir="${record_root}/map_record_${timestamp}"
+mkdir -p "${record_root}"
 
 ros2 bag record \
     --output "${output_dir}" \

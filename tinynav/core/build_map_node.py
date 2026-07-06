@@ -37,6 +37,7 @@ from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.tinynav_cpp_bind import pose_graph_solve
+from tool.loop_sequence_filter import SequenceConsistencyChecker
 from tool.video_db import VideoDB
 
 logger = logging.getLogger(__name__)
@@ -616,6 +617,8 @@ class BuildMapNode(Node):
         self.loop_top_k = 1
 
         self.map_save_path = map_save_path
+        self._loopchk = open(f"{map_save_path}/loop_check.log", "w")
+        self._seq_checker = SequenceConsistencyChecker(window=8, min_len=4, sim_thresh=0.85, step_max=3)
         self._save_completed = False
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
@@ -755,24 +758,62 @@ class BuildMapNode(Node):
         return asyncio.run(self.dinov2_model.infer(image))
 
     def detect_loop_closure(self, timestamp: int) -> None:
+        # 1.Candidate recall
         target_embedding = self.db.get_embedding(timestamp)
         valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
+        if len(valid_timestamp) == 0:
+            return
         valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
-        idx_to_timestamp = {i: t for i, t in enumerate(valid_timestamp)}
 
-        with self.stage_timer.timed("find_loop"):
-            loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
+        # 2.Appearance matching (Select the best candidate)
+        t_emb = np.asarray(target_embedding).reshape(-1)
+        E = np.asarray(valid_embeddings).reshape(len(valid_timestamp), -1)
+        sims = E @ t_emb
+        best = int(np.argmax(sims))
+        best_sim = float(sims[best])
+        best_prev_ts = valid_timestamp[best]
+
+        # 3.Timing consistency gate
+        all_ts = sorted(self.pose_graph_used_pose.keys())
+        ts_to_idx = {t: i for i, t in enumerate(all_ts)}
+        curr_idx, cand_idx = ts_to_idx[timestamp], ts_to_idx[best_prev_ts]
+
+        confirmed, run_len = self._seq_checker.update(curr_idx, cand_idx, best_sim)
+        self._loopchk.write(f"SEQ curr={timestamp} cand={best_prev_ts} sim={best_sim:.3f} "
+                            f"run_len={run_len} confirmed={confirmed}\n")
+        self._loopchk.flush()
+        if not confirmed:
+            return
+
+        # 4.Geometric verification (relative pose estimation)
         with self.stage_timer.timed("relative_pose_estimation"):
-            for idx, _similarity in loop_list:
-                prev_timestamp = idx_to_timestamp[idx]
-                curr_timestamp = timestamp
-                prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
-                curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
-                prev_matched_keypoints, curr_matched_keypoints, _matches = self.match_keypoints(prev_features, curr_features)
-                success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
-                if success and len(inliers) >= 100:
-                    self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                    print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+            prev_timestamp, curr_timestamp = best_prev_ts, timestamp
+            prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
+            curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
+            prev_kpts, curr_kpts, _ = self.match_keypoints(prev_features, curr_features)
+
+            n_match = len(curr_kpts)
+
+            n_valid_depth = 0
+            if n_match > 0:
+                uv = curr_kpts.astype(int)
+                h, w = curr_depth.shape[:2]
+                inb = (uv[:,0] >= 0) & (uv[:,0] < w) & (uv[:,1] >= 0) & (uv[:,1] < h)
+                d = np.zeros(n_match)
+                d[inb] = curr_depth[uv[inb,1], uv[inb,0]]
+                n_valid_depth = int(np.sum(d > 0.1))
+            
+            success, T_prev_curr, _, _, inliers = estimate_pose(prev_kpts, curr_kpts, curr_depth, self.K)
+            n_in = len(inliers) if success else 0
+
+            accept = success and n_in >= 50
+            self._loopchk.write(f"GEO curr={curr_timestamp} prev={prev_timestamp} success={success} "
+                                f"matches={n_match} valid_depth={n_valid_depth} inliers={n_in} "
+                                f"accept={accept}\n")
+            self._loopchk.flush()
+            if accept:
+                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
 
     def maybe_run_global_refinement(self) -> None:
         """Run pose-graph optimization and full TF publish when the map has grown enough.
