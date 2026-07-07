@@ -106,9 +106,11 @@ def infer_t_rgb_to_infra1_from_tf_messages(
         for edge_key, transform in tf_messages[timestamp_ns].items():
             latest_tf[edge_key] = np.asarray(transform, dtype=np.float64)
 
-    # Looper bags use cam_left/cam_rgb directly as camera frames.
-    if "cam_left->cam_rgb" in latest_tf:
-        return latest_tf["cam_left->cam_rgb"]
+    # Looper bags use cam_left/cam_rgb (or camera_camera_left/camera_camera_rgb, a
+    # differently-prefixed build of the same driver) directly as camera frames.
+    for looper_edge in ("cam_left->cam_rgb", "camera_camera_left->camera_camera_rgb"):
+        if looper_edge in latest_tf:
+            return latest_tf[looper_edge]
 
     required_keys = [
         "camera_link->camera_infra1_frame",

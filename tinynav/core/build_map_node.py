@@ -19,6 +19,7 @@ from message_filters import Subscriber, ApproximateTimeSynchronizer
 from nav_msgs.msg import Path, Odometry
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.serialization import deserialize_message
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
 from rosgraph_msgs.msg import Clock
@@ -445,7 +446,16 @@ class BagPlayer(Node):
         # Build publishers for all topics in the bag
         for topic_info in topic_infos:
             msg_type = get_message(topic_info.type)
-            pub = self.create_publisher(msg_type, topic_info.name, 10)
+            if topic_info.name == "/tf_static":
+                qos = QoSProfile(
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=10,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                )
+            else:
+                qos = 10
+            pub = self.create_publisher(msg_type, topic_info.name, qos)
             self._topic_publishers[topic_info.name] = (pub, msg_type)
 
         self.get_logger().info("Bag topics and message types:")
@@ -619,7 +629,17 @@ class BuildMapNode(Node):
         self._save_completed = False
         self.tf_sub = Subscriber(self, TFMessage, "/tf")
         self.tf_sub.registerCallback(self.tf_callback)
-        self.tf_static_sub = Subscriber(self, TFMessage, "/tf_static")
+        # /tf_static is conventionally latched (published once, TRANSIENT_LOCAL) —
+        # request the matching durability so a late-matching subscriber (e.g. behind
+        # BagPlayer's own publisher, see BagPlayer.__init__) still gets the retained
+        # message instead of silently missing it if discovery finishes late.
+        tf_static_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.tf_static_sub = Subscriber(self, TFMessage, "/tf_static", qos_profile=tf_static_qos)
         self.tf_static_sub.registerCallback(self.tf_callback)
         self.T_rgb_to_infra1 = None
         self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
@@ -646,9 +666,13 @@ class BuildMapNode(Node):
                 T_rgb_optical_to_rgb = T
             if frame_id == "camera_link" and child_frame_id == "camera_color_frame":
                 T_rgb_to_link = T
-            # Looper bags use cam_left/cam_rgb directly as camera frames.
-            # In this code path, TF matrix is interpreted as child -> frame.
-            if frame_id == "cam_left" and child_frame_id == "cam_rgb":
+            # Looper bags use cam_left/cam_rgb (or camera_camera_left/camera_camera_rgb,
+            # a differently-prefixed build of the same driver) directly as camera
+            # frames. In this code path, TF matrix is interpreted as child -> frame.
+            if (frame_id, child_frame_id) in (
+                ("cam_left", "cam_rgb"),
+                ("camera_camera_left", "camera_camera_rgb"),
+            ):
                 self.T_rgb_to_infra1 = T
 
         if T_infra1_optical_to_infra1 is not None and T_rgb_optical_to_rgb is not None and T_infra1_to_link is not None and T_rgb_to_link is not None:
