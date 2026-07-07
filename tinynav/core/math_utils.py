@@ -1,5 +1,6 @@
 import numpy as np
 from numba import njit
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
@@ -193,6 +194,124 @@ def depth_to_cloud(depth, K, step=10, max_dist=1e9):
         return np.empty((0, 3), dtype=np.float64)
     # convert typed list → ndarray
     return np.array(pts)
+
+def backproject_depth_with_normals(depth, K, step=6, max_dist=4.0, min_view_cos=0.2):
+    """Grid-strided pinhole back-projection with a per-point surface normal
+    (central-difference on the depth grid, oriented to face the camera).
+
+    Border pixels (no full 4-neighbor set) and grazing-incidence points
+    (normal more than ~acos(min_view_cos) off the viewing ray — the classic
+    source of noisy/unreliable depth-derived geometry) are dropped.
+
+    Returns flat (points[N,3], normals[N,3]) in the depth camera's own frame
+    (not vectorized via numba: this runs once per keyframe pair for ICP, not
+    per-pixel-per-frame at high rate, so plain numpy is fast enough).
+    """
+    h, w = depth.shape
+    us = np.arange(0, w, step)
+    vs = np.arange(0, h, step)
+    grid_u, grid_v = np.meshgrid(us, vs)
+    z = depth[grid_v, grid_u]
+    valid = (z > 0.0) & (z <= max_dist)
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    x = (grid_u - cx) * z / fx
+    y = (grid_v - cy) * z / fy
+    pts_grid = np.stack([x, y, z], axis=-1)
+
+    rows, cols = pts_grid.shape[0], pts_grid.shape[1]
+    if rows < 3 or cols < 3:
+        return np.empty((0, 3)), np.empty((0, 3))
+
+    center = pts_grid[1:-1, 1:-1]
+    du = pts_grid[1:-1, 2:] - pts_grid[1:-1, :-2]
+    dv = pts_grid[2:, 1:-1] - pts_grid[:-2, 1:-1]
+    n = np.cross(du, dv)
+    n_norm = np.linalg.norm(n, axis=-1)
+    finite = n_norm > 1e-9
+    safe_norm = np.where(finite, n_norm, 1.0)
+    unit_n = n / safe_norm[..., None]
+
+    # Camera is at the origin of its own frame, so each point's own position
+    # is exactly the viewing ray from camera to point.
+    view_dist = np.linalg.norm(center, axis=-1)
+    safe_view_dist = np.where(view_dist > 1e-9, view_dist, 1.0)
+    view_cos = -np.sum(unit_n * center, axis=-1) / safe_view_dist
+    flip = view_cos < 0
+    unit_n[flip] *= -1
+    view_cos = np.abs(view_cos)
+
+    neighbors_valid = (
+        valid[1:-1, 1:-1] & valid[1:-1, 2:] & valid[1:-1, :-2]
+        & valid[2:, 1:-1] & valid[:-2, 1:-1]
+    )
+    keep = neighbors_valid & finite & (view_dist > 1e-9) & (view_cos >= min_view_cos)
+    return center[keep], unit_n[keep]
+
+
+def point_to_plane_icp(source_points, target_points, target_normals, T_init,
+                        max_iters=20, max_corr_dist=0.15, tol=1e-6):
+    """Point-to-plane ICP (Gauss-Newton). `target_points`/`target_normals`
+    define the fixed reference surface; `source_points` are transformed by
+    successive estimates of T (maps source frame -> target frame) until the
+    update step shrinks below `tol` or `max_iters` is reached.
+
+    Returns (T, info). info = {converged, n_iters, inlier_ratio,
+    mean_residual, min_eigval}: `min_eigval` is the smallest eigenvalue of
+    the last iteration's 6x6 normal-equations matrix (J^T J) — a low value
+    means the alignment is poorly constrained along some direction (e.g.
+    sliding along a flat wall or down a corridor), the standard ICP
+    degeneracy signal. Callers should gate acceptance on all of these, not
+    just `converged` (a degenerate problem can "converge" to a wrong answer).
+    """
+    T = np.array(T_init, dtype=np.float64, copy=True)
+    n_src = len(source_points)
+    info = {"converged": False, "n_iters": 0, "inlier_ratio": 0.0,
+            "mean_residual": float("inf"), "min_eigval": 0.0}
+    if n_src == 0 or len(target_points) == 0:
+        return T, info
+
+    tree = cKDTree(target_points)
+
+    for it in range(max_iters):
+        info["n_iters"] = it + 1
+        src_t = (T[:3, :3] @ source_points.T).T + T[:3, 3]
+        dists, idx = tree.query(src_t, k=1)
+        mask = dists <= max_corr_dist
+        n_corr = int(np.count_nonzero(mask))
+        if n_corr < 6:
+            break
+
+        p = src_t[mask]
+        q = target_points[idx[mask]]
+        n = target_normals[idx[mask]]
+        r0 = np.sum(n * (p - q), axis=1)
+
+        # Point-to-plane linearization: for a small rigid perturbation
+        # p' = p + dtheta x p + dt applied on the left (world/target frame),
+        # residual' ~= dot(n, p-q) + dtheta.(p x n) + dt.n.
+        J = np.concatenate([np.cross(p, n), n], axis=1)  # (n_corr, 6): [dtheta | dt]
+        H = J.T @ J
+        g = -J.T @ r0
+        info["min_eigval"] = float(np.linalg.eigvalsh(H)[0])
+        info["inlier_ratio"] = n_corr / n_src
+        info["mean_residual"] = float(np.mean(np.abs(r0)))
+
+        try:
+            x = np.linalg.solve(H + 1e-9 * np.eye(6), g)
+        except np.linalg.LinAlgError:
+            break
+
+        T_delta = np.eye(4)
+        T_delta[:3, :3] = rotvec_to_matrix(x[:3])
+        T_delta[:3, 3] = x[3:]
+        T = T_delta @ T
+
+        if np.linalg.norm(x) < tol:
+            info["converged"] = True
+            break
+
+    return T, info
+
 
 @njit(cache=True)
 def process_keypoints(kpts_prev, kpts_curr, idx_valid, depth, K):

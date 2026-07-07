@@ -34,7 +34,10 @@ from tf2_ros import TransformBroadcaster
 from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
-from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
+from tinynav.core.math_utils import (
+    matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud,
+    backproject_depth_with_normals, point_to_plane_icp,
+)
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.tinynav_cpp_bind import pose_graph_solve
@@ -52,6 +55,18 @@ class BuildMapArgs:
     # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
+    # Point-to-plane ICP refinement of the consecutive-keyframe odometry edge
+    # (VIO relative pose as the initial guess). Falls back to the raw VIO
+    # pose whenever ICP doesn't converge, fits poorly, or the scene is
+    # geometrically degenerate (e.g. a flat wall/corridor) -- see
+    # refine_odometry_edge_with_icp().
+    icp_pixel_step: int = 6
+    icp_depth_max_range_m: float = 6.0
+    icp_max_iters: int = 20
+    icp_max_corr_dist_m: float = 0.15
+    icp_min_inlier_ratio: float = 0.5
+    icp_max_mean_residual_m: float = 0.03
+    icp_degeneracy_eigen_thresh: float = 1e-3
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
@@ -64,6 +79,39 @@ def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_rati
     last global refinement. Set ``frames_ratio`` to 1.0 to refine on every keyframe.
     """
     return num_frames >= frames_ratio * prev_num_frames
+
+
+def refine_odometry_edge_with_icp(
+    depth_prev: np.ndarray, depth_curr: np.ndarray, K: np.ndarray, T_init: np.ndarray,
+    pixel_step: int, depth_max_range_m: float, max_iters: int, max_corr_dist_m: float,
+    min_inlier_ratio: float, max_mean_residual_m: float, degeneracy_eigen_thresh: float,
+) -> tuple[np.ndarray, bool, dict]:
+    """Point-to-plane ICP refinement of a consecutive-keyframe odometry edge,
+    with T_init (the raw VIO relative pose) as both the initial guess and the
+    fallback: whenever ICP doesn't converge, fits poorly, or the scene is
+    geometrically degenerate (e.g. a flat wall/corridor -- see
+    point_to_plane_icp's min_eigval), T_init is returned unchanged.
+
+    Returns (T_prev_curr, accepted, info). `info` always has a "reason" key
+    when accepted is False, plus whatever point_to_plane_icp reported.
+    """
+    src, _ = backproject_depth_with_normals(depth_curr, K, pixel_step, depth_max_range_m)
+    tgt, tgt_n = backproject_depth_with_normals(depth_prev, K, pixel_step, depth_max_range_m)
+    if len(src) < 200 or len(tgt) < 200:
+        return T_init, False, {"reason": "too_few_points", "n_src": len(src), "n_tgt": len(tgt)}
+
+    T, info = point_to_plane_icp(src, tgt, tgt_n, T_init,
+                                  max_iters=max_iters, max_corr_dist=max_corr_dist_m)
+    accepted = (
+        info["converged"]
+        and info["inlier_ratio"] >= min_inlier_ratio
+        and info["mean_residual"] <= max_mean_residual_m
+        and info["min_eigval"] >= degeneracy_eigen_thresh
+    )
+    if not accepted:
+        info["reason"] = "gated_out"
+        return T_init, False, info
+    return T, True, info
 
 
 @dataclass
@@ -567,6 +615,13 @@ class BuildMapNode(Node):
         map_save_path: str,
         verbose_timer: bool = True,
         global_frames_ratio: float = 1.1,
+        icp_pixel_step: int = 6,
+        icp_depth_max_range_m: float = 4.0,
+        icp_max_iters: int = 20,
+        icp_max_corr_dist_m: float = 0.15,
+        icp_min_inlier_ratio: float = 0.5,
+        icp_max_mean_residual_m: float = 0.03,
+        icp_degeneracy_eigen_thresh: float = 1e-3,
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
@@ -575,6 +630,15 @@ class BuildMapNode(Node):
         self.global_frames_ratio = global_frames_ratio
         # Keyframe count at the last global refinement (COLMAP: ba_prev_num_reg_frames).
         self._global_prev_num_frames = 0
+        self.icp_pixel_step = icp_pixel_step
+        self.icp_depth_max_range_m = icp_depth_max_range_m
+        self.icp_max_iters = icp_max_iters
+        self.icp_max_corr_dist_m = icp_max_corr_dist_m
+        self.icp_min_inlier_ratio = icp_min_inlier_ratio
+        self.icp_max_mean_residual_m = icp_max_mean_residual_m
+        self.icp_degeneracy_eigen_thresh = icp_degeneracy_eigen_thresh
+        self._icp_accepted_count = 0
+        self._icp_total_count = 0
         self.logger = logging.getLogger(__name__)
         self.stage_timer = StageTimer(
             verbose_logger=self.logger.info if verbose_timer else None,
@@ -759,6 +823,22 @@ class BuildMapNode(Node):
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
             T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
+            with self.stage_timer.timed("icp_refine"):
+                depth_prev = self.db.depths[self.last_keyframe_timestamp]
+                T_prev_curr_icp, icp_accepted, icp_info = refine_odometry_edge_with_icp(
+                    depth_prev, depth, self.K, T_prev_curr,
+                    self.icp_pixel_step, self.icp_depth_max_range_m, self.icp_max_iters,
+                    self.icp_max_corr_dist_m, self.icp_min_inlier_ratio,
+                    self.icp_max_mean_residual_m, self.icp_degeneracy_eigen_thresh,
+                )
+                self._icp_total_count += 1
+                if icp_accepted:
+                    self._icp_accepted_count += 1
+                    T_prev_curr = T_prev_curr_icp
+                else:
+                    self.get_logger().debug(
+                        f"ICP odometry-edge refinement rejected ({icp_info.get('reason')}), using VIO",
+                    )
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
@@ -903,6 +983,12 @@ class BuildMapNode(Node):
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
+        if self._icp_total_count > 0:
+            accept_pct = 100.0 * self._icp_accepted_count / self._icp_total_count
+            self.get_logger().info(
+                f"ICP odometry-edge refinement: accepted {self._icp_accepted_count}/"
+                f"{self._icp_total_count} edges ({accept_pct:.1f}%), rest fell back to VIO"
+            )
         self.stage_timer.log_summary(self.get_logger().info)
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
@@ -1037,6 +1123,13 @@ if __name__ == '__main__':
         parsed_args.map_save_path,
         verbose_timer=parsed_args.verbose_timer,
         global_frames_ratio=parsed_args.global_frames_ratio,
+        icp_pixel_step=parsed_args.icp_pixel_step,
+        icp_depth_max_range_m=parsed_args.icp_depth_max_range_m,
+        icp_max_iters=parsed_args.icp_max_iters,
+        icp_max_corr_dist_m=parsed_args.icp_max_corr_dist_m,
+        icp_min_inlier_ratio=parsed_args.icp_min_inlier_ratio,
+        icp_max_mean_residual_m=parsed_args.icp_max_mean_residual_m,
+        icp_degeneracy_eigen_thresh=parsed_args.icp_degeneracy_eigen_thresh,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)

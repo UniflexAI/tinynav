@@ -9,11 +9,12 @@ Usage:
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
 from tqdm import tqdm
+from tool.build_sparse_point_cloud import export_sparse_point_cloud
 from tool.video_db import VideoDB
 
 
@@ -23,6 +24,7 @@ def convert_nerf_format(
     intrinsics: np.ndarray,
     image_size: Tuple[int, int],
     t_rgb_to_infra1: np.ndarray,
+    ply_file_name: Optional[str] = None,
 ) -> None:
     camera_model = "PINHOLE"
     fl_x = float(intrinsics[0, 0])
@@ -58,6 +60,10 @@ def convert_nerf_format(
         "h": h,
         "frames": frames,
     }
+    if ply_file_name is not None:
+        # Picked up by nerfstudio's dataparser (load_3D_points=True) to seed
+        # splatfacto's gaussians from real geometry instead of random points.
+        data["ply_file_path"] = ply_file_name
 
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "transforms.json").open("w", encoding="utf-8") as f:
@@ -158,6 +164,33 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Do not export from rgb_images_db/video.mp4; reuse existing image_*.png files",
     )
+    parser.add_argument(
+        "--skip-point-cloud",
+        action="store_true",
+        help="Skip building sparse_pc.ply from depth for splatfacto init "
+             "(falls back to nerfstudio's random gaussian init)",
+    )
+    parser.add_argument(
+        "--point-cloud-max-points", type=int, default=500_000,
+        help="Cap on total points written to sparse_pc.ply (default: 500000)",
+    )
+    parser.add_argument(
+        "--point-cloud-frame-stride", type=int, default=10,
+        help="Use every Nth keyframe's depth for the point cloud (default: 10)",
+    )
+    parser.add_argument(
+        "--point-cloud-pixel-step", type=int, default=8,
+        help="Depth pixel grid stride per frame (default: 8)",
+    )
+    parser.add_argument(
+        "--point-cloud-max-depth", type=float, default=3.0,
+        help="Ignore depth beyond this range in meters (default: 3.0)",
+    )
+    parser.add_argument(
+        "--point-cloud-min-view-cos", type=float, default=0.2,
+        help="Reject surfels whose normal is more than ~acos(min_view_cos) "
+             "off the viewing ray (default: 0.2, ~78deg)",
+    )
     return parser.parse_args()
 
 
@@ -182,12 +215,27 @@ def main() -> None:
     else:
         image_size = export_rgb_images(map_dir, images_dir, timestamps)
 
+    ply_file_name = None
+    if not args.skip_point_cloud:
+        depth_intrinsics = np.load(map_dir / "intrinsics.npy", allow_pickle=True)
+        ply_file_name = export_sparse_point_cloud(
+            map_dir=map_dir,
+            poses=poses,
+            depth_intrinsics=depth_intrinsics,
+            max_points=args.point_cloud_max_points,
+            frame_stride=args.point_cloud_frame_stride,
+            pixel_step=args.point_cloud_pixel_step,
+            max_depth_m=args.point_cloud_max_depth,
+            min_view_cos=args.point_cloud_min_view_cos,
+        )
+
     convert_nerf_format(
         output_dir=map_dir,
         poses=poses,
         intrinsics=intrinsics,
         image_size=image_size,
         t_rgb_to_infra1=t_rgb_to_infra1,
+        ply_file_name=ply_file_name,
     )
     print(f"Wrote NeRF transforms to {map_dir / 'transforms.json'}")
 
