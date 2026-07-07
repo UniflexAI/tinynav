@@ -20,9 +20,12 @@ class RobotStatus(Enum):
 
 
 class Ros2UnitreeManagerNode(Node):
+    MAX_INIT_RETRIES = 20
+    RETRY_INTERVAL = 10.0
+
     def __init__(self, networkInterface: str = "enP8p1s0"):
         super().__init__('ros2_unitree_manager')
-        self.channel = ChannelFactoryInitialize(0, networkInterface)
+        self.channel = self._init_channel_with_retry(networkInterface)
         self.sport_client = SportClientB2()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
@@ -45,6 +48,20 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+
+    def _init_channel_with_retry(self, networkInterface: str, max_retries: int = None):
+        """Retry ChannelFactoryInitialize in case the network interface isn't ready yet."""
+        max_retries = max_retries or self.MAX_INIT_RETRIES
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"Initializing channel on '{networkInterface}' (attempt {attempt}/{max_retries})...")
+                return ChannelFactoryInitialize(0, networkInterface)
+            except Exception as e:
+                logger.warning(f"Channel init failed (attempt {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    logger.info(f"Retrying in {self.RETRY_INTERVAL:.0f}s...")
+                    time.sleep(self.RETRY_INTERVAL)
+        raise RuntimeError(f"Failed to initialize channel on '{networkInterface}' after {max_retries} attempts")
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
