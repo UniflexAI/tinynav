@@ -52,6 +52,23 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
+        # Heading-drift PI: cancel each device's constant open-loop yaw bias.
+        # The bias is stored per-metre-travelled (rad/m), not rad/s: the drift is a
+        # distance-driven asymmetry (e.g. a quadruped's gait bias), so its rad/s
+        # contribution scales with vx. Learning divides by vx and application multiplies
+        # by the current vx, so a bias learned on fast straight segments self-scales
+        # down on slow turns instead of over-rotating.
+        self.yaw_kp = 0.35                 # P damping gain (rad/s per rad)
+        self.yaw_bias_ki = 0.15            # I gain
+        self.yaw_bias_limit = 0.5          # clamp on the learned bias (rad/m)
+        self.yaw_bias_min_vx = 0.15        # only learn/apply the bias above this vx (m/s)
+        self.straight_ff_threshold = 0.05  # rad/s; |feedforward omega| below this == straight
+        self._yaw_bias_per_m = 0.0         # learned integral state (rad/m), relearned each run
+        # Low-pass the drift before P/I: intended_yaw comes from a sparse path and
+        # step-jumps when the nearest pose changes, which would otherwise spike the
+        # P term and corrupt the integral.
+        self.drift_filter_tau = 0.15       # s
+        self._drift_lp = None              # low-passed drift state (rad)
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
@@ -87,6 +104,31 @@ class CmdVelControlNode(Node):
     def pose_callback(self, msg):
         self.pose = msg
 
+    def _yaw_of(self, quat_xyzw):
+        fwd = R.from_quat(quat_xyzw).as_matrix() @ np.array([0.0, 0.0, 1.0])  # optical +z = forward
+        return float(np.arctan2(fwd[1], fwd[0]))
+
+    def _actual_yaw(self):
+        """World heading of the robot's measured forward axis (odometry)."""
+        if self.pose is None:
+            return None
+        o = self.pose.pose.pose.orientation
+        return self._yaw_of([o.x, o.y, o.z, o.w])
+
+    def _path_intended_yaw(self):
+        """World heading the plan intends here: forward axis of the published trajectory
+        pose nearest the robot. The reference for isolating open-loop drift from turning."""
+        if self.pose is None or self.path is None or len(self.path.poses) < 1:
+            return None
+        p = self.pose.pose.pose.position
+        best_i, best_d2 = 0, float('inf')
+        for i, ps in enumerate(self.path.poses):
+            d2 = (ps.pose.position.x - p.x) ** 2 + (ps.pose.position.y - p.y) ** 2
+            if d2 < best_d2:
+                best_d2, best_i = d2, i
+        o = self.path.poses[best_i].pose.orientation
+        return self._yaw_of([o.x, o.y, o.z, o.w])
+
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
@@ -109,7 +151,32 @@ class CmdVelControlNode(Node):
         stale_stop_s = max(self.path_stale_stop_s, self.path_period_ema * self.path_stale_stop_factor)
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
-        target_cmd.angular.z = self.latest_cmd.angular.z
+
+        # Yaw = planner feedforward omega minus the learned drift correction (P damping
+        # + per-device bias). Bias is learned only on straight, forward, fast-enough
+        # segments (windup guard) and integrated in rad/m by dividing the rad/s update
+        # by vx; applied everywhere by multiplying back by the current vx.
+        vyaw_ff = float(self.latest_cmd.angular.z)
+        vx_now = float(self.latest_cmd.linear.x)
+        bias_rate = self._yaw_bias_per_m * vx_now if vx_now > self.yaw_bias_min_vx else 0.0
+        intended_yaw, actual_yaw = self._path_intended_yaw(), self._actual_yaw()
+        if intended_yaw is not None and actual_yaw is not None:
+            drift = float(np.arctan2(np.sin(actual_yaw - intended_yaw),
+                                     np.cos(actual_yaw - intended_yaw)))
+            # Low-pass the raw drift before it feeds P/I (see drift_filter_tau).
+            if self._drift_lp is None:
+                self._drift_lp = drift
+            else:
+                a = dt / (self.drift_filter_tau + dt)
+                self._drift_lp += a * (drift - self._drift_lp)
+            if abs(vyaw_ff) < self.straight_ff_threshold and vx_now > self.yaw_bias_min_vx:
+                self._yaw_bias_per_m += self.yaw_bias_ki * self._drift_lp * dt / vx_now
+                self._yaw_bias_per_m = float(np.clip(self._yaw_bias_per_m,
+                                                     -self.yaw_bias_limit, self.yaw_bias_limit))
+            target_cmd.angular.z = vyaw_ff - (self.yaw_kp * self._drift_lp + bias_rate)
+        else:
+            self._drift_lp = None
+            target_cmd.angular.z = vyaw_ff - bias_rate
         if age > stale_stop_s:
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
