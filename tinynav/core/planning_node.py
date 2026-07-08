@@ -419,7 +419,7 @@ class PlanningNode(Node):
 
         abs_error = abs(heading_error)
         enter_threshold = np.deg2rad(120.0)
-        exit_threshold = np.deg2rad(60.0)
+        exit_threshold = np.deg2rad(100.0)
 
         if self.behind_target_mode:
             if abs_error < exit_threshold:
@@ -676,16 +676,6 @@ class PlanningNode(Node):
 
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
-            def select_reverse_trajectory():
-                reverse_costs = np.where(
-                    (params[:, 0] < 0.0) & np.isfinite(scores_array),
-                    scores_array,
-                    np.inf,
-                )
-                if not np.any(np.isfinite(reverse_costs)):
-                    return None
-                return np.array([int(np.argmin(reverse_costs))])
-
             if behind_target_mode and not should_reverse:
                 # In behind-target mode, do not let the normal cost planner compete.
                 # Publish a fixed safe in-place rotation trajectory until heading error exits the hysteresis band.
@@ -700,10 +690,9 @@ class PlanningNode(Node):
                 if np.any(np.isfinite(rotate_costs)):
                     top_indices = np.array([int(np.argmin(rotate_costs))])
                 else:
-                    top_indices = select_reverse_trajectory()
-                    if top_indices is None:
-                        self.get_logger().info('No safe behind-target rotate or reverse trajectory, stopping path.')
-                        return
+                    self.get_logger().debug('No safe behind-target rotate trajectory, falling back to cost planner.')
+                    top_k = 1
+                    top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores_array[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             else:
                 top_k = 1
                 top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores_array[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
