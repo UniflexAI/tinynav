@@ -128,7 +128,7 @@ def select_target_position_on_path(
     turn_angle_threshold_rad: float = np.deg2rad(70.0),
     reversal_angle_threshold_rad: float = np.deg2rad(120.0),
     turn_stop_margin: float = 0.15,
-    min_turn_distance: float = 0.3,
+    min_turn_distance: float = 0.5,
     turn_window_distance: float = 0.4,
 ) -> np.ndarray:
     """Pick a local-planner target on the global path without looking past sharp turns.
@@ -431,7 +431,7 @@ class MapNode(Node):
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
-        self.relocalization_threshold = 0.85
+        self.relocalization_threshold = 0.70
         self.relocalization_loop_top_k = 3
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
 
@@ -958,7 +958,7 @@ class MapNode(Node):
                     turn_angle_threshold_rad=np.deg2rad(70.0),
                     reversal_angle_threshold_rad=np.deg2rad(120.0),
                     turn_stop_margin=0.15,
-                    min_turn_distance=0.3,
+                    min_turn_distance=0.5,
                     turn_window_distance=0.4,
                 )
                 target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])

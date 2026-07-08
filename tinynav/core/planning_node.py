@@ -154,7 +154,7 @@ class ObstacleConfig:
     robot_z_bottom: float = -0.7
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.4
+    min_wall_span_m: float = 0.3
     dilation_cells: int = 0
 
 
@@ -569,7 +569,7 @@ class PlanningNode(Node):
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.993
+            self.occupancy_grid *= 0.994
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
