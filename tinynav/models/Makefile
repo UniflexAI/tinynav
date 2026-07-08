@@ -8,7 +8,8 @@
 
 ARCH      := $(shell uname -m)
 TRTEXEC   ?= trtexec
-SIGLIP_TEXT_SHAPES ?= 'input_ids':1x64,'attention_mask':1x64
+SIGLIP_IMAGE_SHAPES ?=
+SIGLIP_TEXT_SHAPES ?=
 
 DINO_ONNX        := dinov2_base_224x224_fp16.onnx
 SUPERPOINT_ONNX  := superpoint_fp16_dynamic.onnx
@@ -85,11 +86,11 @@ $(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
 
 $(SIGLIP_IMAGE_ENGINE): $(SIGLIP_IMAGE_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
-        --shapes='pixel_values':1x3x224x224 --fp16
+        $(if $(SIGLIP_IMAGE_SHAPES),--shapes=$(SIGLIP_IMAGE_SHAPES),) --fp16
 
 $(SIGLIP_TEXT_ENGINE): $(SIGLIP_TEXT_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
-        --shapes=$(SIGLIP_TEXT_SHAPES) --fp16
+        $(if $(SIGLIP_TEXT_SHAPES),--shapes=$(SIGLIP_TEXT_SHAPES),) --fp16
 
 
 clean: ## Remove generated TensorRT plans for this architecture

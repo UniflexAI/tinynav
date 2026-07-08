@@ -9,7 +9,8 @@ Expected files:
 - `siglip_vit_b_16_webli_text_fp16.onnx`
 - `siglip_vit_b_16_webli_tokenizer.json`
 
-Build TensorRT plans for the current machine:
+Build TensorRT plans for the current machine. The Immich ONNX files are static-shape models, so no
+shape override is needed:
 
 ```bash
 cd tinynav/models
@@ -21,12 +22,11 @@ Generated runtime files:
 - `siglip_vit_b_16_webli_image_fp16_$(uname -m).plan`
 - `siglip_vit_b_16_webli_text_fp16_$(uname -m).plan`
 
-If the exported text ONNX uses different input names or context length, override the text shape
-argument:
+If an exported ONNX is dynamic-shape, override the shape arguments:
 
 ```bash
-make siglip SIGLIP_TEXT_SHAPES="'input_ids':1x64"
+make siglip SIGLIP_IMAGE_SHAPES="'pixel_values':1x3x224x224" SIGLIP_TEXT_SHAPES="'input_ids':1x64"
 ```
 
-The image ONNX should accept `pixel_values` in `1x3x224x224` NCHW format. The wrapper applies
-SigLIP-style resize and normalization to `[-1, 1]`.
+The image ONNX should accept a `1x3x224x224` NCHW tensor. The wrapper applies SigLIP-style resize
+and normalization to `[-1, 1]`.
