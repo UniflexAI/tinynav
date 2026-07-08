@@ -641,10 +641,12 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
+            should_reverse = front_clearance <= enter_threshold
             target_heading_error = self._target_heading_error(T, self.target_pose)
             self._update_behind_target_mode(target_heading_error)
             behind_target_mode = self.behind_target_mode
             behind_turn_sign = self.behind_turn_sign
+            scores_array = np.asarray(scores, dtype=np.float64)
 
             # path
             path = Path()
@@ -654,40 +656,46 @@ class PlanningNode(Node):
             if self.target_pose is None:
                 return
 
-            if all(s == float('inf') for s in scores):
+            if np.all(np.isinf(scores_array)):
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 return
 
-            if behind_target_mode:
+            def cost_function(traj, param, score, target_pose):
+                # predefined backward trajectory penalty
+                is_backward_traj = param[0] < 0.0
+                reverse_gate_penalty = 0.0
+                if should_reverse and not is_backward_traj:
+                        reverse_gate_penalty = 1e9
+                elif not should_reverse and is_backward_traj:
+                        reverse_gate_penalty = 1e9
+
+                # regular trajectory penalty
+                traj_end = np.array(traj[-1,:3])
+                target_end = target_pose if target_pose is not None else traj_end
+                dist = np.linalg.norm(traj_end - target_end)
+
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+
+            if behind_target_mode and not should_reverse:
                 # In behind-target mode, do not let the normal cost planner compete.
-                # Publish a fixed in-place rotation trajectory until heading error exits the hysteresis band.
+                # Publish a fixed safe in-place rotation trajectory until heading error exits the hysteresis band.
                 fixed_turn_speed = 1.0
                 rotate_costs = np.where(
-                    (np.abs(params[:, 0]) < 1e-6) & (np.sign(params[:, 1]) == behind_turn_sign),
+                    (np.abs(params[:, 0]) < 1e-6)
+                    & (np.sign(params[:, 1]) == behind_turn_sign)
+                    & np.isfinite(scores_array),
                     np.abs(np.abs(params[:, 1]) - fixed_turn_speed),
                     np.inf,
                 )
-                top_indices = np.array([int(np.argmin(rotate_costs))])
+                if np.any(np.isfinite(rotate_costs)):
+                    top_indices = np.array([int(np.argmin(rotate_costs))])
+                else:
+                    self.get_logger().debug('No safe behind-target rotate trajectory, falling back to cost planner.')
+                    top_k = 1
+                    top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores_array[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             else:
-                def cost_function(traj, param, score, target_pose):
-                    # predefined backward trajectory penalty
-                    is_backward_traj = param[0] < 0.0
-                    should_reverse = front_clearance <= enter_threshold
-                    reverse_gate_penalty = 0.0
-                    if should_reverse and not is_backward_traj:
-                            reverse_gate_penalty = 1e9
-                    elif not should_reverse and is_backward_traj:
-                            reverse_gate_penalty = 1e9
-
-                    # regular trajectory penalty
-                    traj_end = np.array(traj[-1,:3])
-                    target_end = target_pose if target_pose is not None else traj_end
-                    dist = np.linalg.norm(traj_end - target_end)
-
-                    return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
-
                 top_k = 1
-                top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+                top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores_array[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
 
             self.last_param = params[top_indices[0]]
 
