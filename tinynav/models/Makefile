@@ -8,12 +8,15 @@
 
 ARCH      := $(shell uname -m)
 TRTEXEC   ?= trtexec
+SIGLIP_TEXT_SHAPES ?= 'input_ids':1x64,'attention_mask':1x64
 
 DINO_ONNX        := dinov2_base_224x224_fp16.onnx
 SUPERPOINT_ONNX  := superpoint_fp16_dynamic.onnx
 LIGHTGLUE_ONNX   := lightglue_fp16.onnx
 RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
 FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
+SIGLIP_IMAGE_ONNX := siglip_vit_b_16_webli_image_fp16.onnx
+SIGLIP_TEXT_ONNX  := siglip_vit_b_16_webli_text_fp16.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -25,10 +28,12 @@ LIGHTGLUE_ENGINE  := $(basename $(LIGHTGLUE_ONNX))_$(ARCH).plan
 SUPERPOINT_ENGINE := $(basename $(SUPERPOINT_ONNX))_$(ARCH).plan
 RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
 FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
+SIGLIP_IMAGE_ENGINE := $(basename $(SIGLIP_IMAGE_ONNX))_$(ARCH).plan
+SIGLIP_TEXT_ENGINE  := $(basename $(SIGLIP_TEXT_ONNX))_$(ARCH).plan
 
 ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE)
 
-.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo clean
+.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -41,6 +46,7 @@ superpoint: $(SUPERPOINT_ENGINE) ## Build SuperPoint engine
 lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
 retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
+siglip: $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) ## Build SigLIP image/text engines
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -76,6 +82,14 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
 #   --max_disp 192
 $(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ --builderOptimizationLevel=1
+
+$(SIGLIP_IMAGE_ENGINE): $(SIGLIP_IMAGE_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
+        --shapes='pixel_values':1x3x224x224 --fp16
+
+$(SIGLIP_TEXT_ENGINE): $(SIGLIP_TEXT_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
+        --shapes=$(SIGLIP_TEXT_SHAPES) --fp16
 
 
 clean: ## Remove generated TensorRT plans for this architecture

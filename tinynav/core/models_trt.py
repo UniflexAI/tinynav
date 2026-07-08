@@ -255,6 +255,110 @@ class Dinov2TRT(TRTBase):
         return results["last_hidden_state"][:, 0, :].squeeze(0)
 
 
+class SigLIPImageTRT(TRTBase):
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/siglip_vit_b_16_webli_image_fp16_{platform.machine()}.plan"):
+        super().__init__(engine_path)
+        if len(self.inputs) != 1:
+            raise RuntimeError(f"SigLIP image engine must have 1 input, got {len(self.inputs)}")
+        self.input_shape = self.inputs[0]["shape"]
+        self.output_name = self.outputs[0]["name"]
+        self.net_h = int(self.input_shape[2])
+        self.net_w = int(self.input_shape[3])
+
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        if image.ndim == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.ndim == 3 and image.shape[2] == 1:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        elif image.ndim == 3 and image.shape[2] >= 3:
+            image = cv2.cvtColor(image[:, :, :3], cv2.COLOR_BGR2RGB)
+        else:
+            raise ValueError(f"Unsupported image shape: {image.shape}")
+
+        image = cv2.resize(image, (self.net_w, self.net_h), interpolation=cv2.INTER_CUBIC)
+        image = einops.rearrange(image, "h w c -> 1 c h w").astype(np.float32) / 255.0
+        mean = np.array([0.5, 0.5, 0.5], dtype=np.float32).reshape(1, 3, 1, 1)
+        std = np.array([0.5, 0.5, 0.5], dtype=np.float32).reshape(1, 3, 1, 1)
+        return (image - mean) / std
+
+    async def infer(self, image: np.ndarray) -> np.ndarray:
+        image = self.preprocess_image(image)
+        np.copyto(self.inputs[0]["host"], image.astype(self.inputs[0]["host"].dtype, copy=False))
+        results = await self.run_graph()
+        return np.asarray(results[self.output_name], dtype=np.float32).reshape(-1)
+
+
+class SigLIPTextTRT(TRTBase):
+    def __init__(
+        self,
+        engine_path=f"/tinynav/tinynav/models/siglip_vit_b_16_webli_text_fp16_{platform.machine()}.plan",
+        tokenizer_path="/tinynav/tinynav/models/siglip_vit_b_16_webli_tokenizer.json",
+    ):
+        super().__init__(engine_path)
+        try:
+            from tokenizers import Tokenizer
+        except ImportError as exc:
+            raise ImportError("SigLIP text retrieval requires the tokenizers package") from exc
+
+        self.tokenizer = Tokenizer.from_file(tokenizer_path)
+        self.output_name = self.outputs[0]["name"]
+        self.input_by_name = {inp["name"]: inp for inp in self.inputs}
+        self.context_length = int(self.inputs[0]["shape"][-1])
+
+    def _tokenize(self, text: str) -> dict[str, np.ndarray]:
+        encoded = self.tokenizer.encode(text)
+        input_ids = encoded.ids[: self.context_length]
+        attention_mask = [1] * len(input_ids)
+        pad_len = self.context_length - len(input_ids)
+        if pad_len > 0:
+            pad_id = self.tokenizer.token_to_id("[PAD]")
+            if pad_id is None:
+                pad_id = 0
+            input_ids.extend([pad_id] * pad_len)
+            attention_mask.extend([0] * pad_len)
+        return {
+            "input_ids": np.asarray(input_ids, dtype=np.int64)[None, :],
+            "attention_mask": np.asarray(attention_mask, dtype=np.int64)[None, :],
+        }
+
+    async def infer(self, text: str) -> np.ndarray:
+        tokens = self._tokenize(text)
+        for inp in self.inputs:
+            if inp["name"] in tokens:
+                value = tokens[inp["name"]]
+            elif len(self.inputs) == 1:
+                value = tokens["input_ids"]
+            else:
+                raise RuntimeError(f"Unsupported SigLIP text engine input: {inp['name']}")
+            np.copyto(inp["host"], value.astype(inp["host"].dtype, copy=False))
+        results = await self.run_graph()
+        return np.asarray(results[self.output_name], dtype=np.float32).reshape(-1)
+
+
+class SigLIPTRT:
+    def __init__(
+        self,
+        image_engine_path=f"/tinynav/tinynav/models/siglip_vit_b_16_webli_image_fp16_{platform.machine()}.plan",
+        text_engine_path=f"/tinynav/tinynav/models/siglip_vit_b_16_webli_text_fp16_{platform.machine()}.plan",
+        tokenizer_path="/tinynav/tinynav/models/siglip_vit_b_16_webli_tokenizer.json",
+    ):
+        self.image_engine_path = image_engine_path
+        self.text_engine_path = text_engine_path
+        self.tokenizer_path = tokenizer_path
+        self.image_encoder = None
+        self.text_encoder = None
+
+    async def encode_image(self, image: np.ndarray) -> np.ndarray:
+        if self.image_encoder is None:
+            self.image_encoder = SigLIPImageTRT(self.image_engine_path)
+        return await self.image_encoder.infer(image)
+
+    async def encode_text(self, text: str) -> np.ndarray:
+        if self.text_encoder is None:
+            self.text_encoder = SigLIPTextTRT(self.text_engine_path, self.tokenizer_path)
+        return await self.text_encoder.infer(text)
+
+
 class FoundationStereoTRT(TRTBase):
     def __init__(
         self,

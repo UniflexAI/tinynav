@@ -34,8 +34,9 @@ from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
+from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
 
@@ -365,11 +366,14 @@ class TinyNavDB():
                 os.remove(f"{map_save_path}/depths.db")
             if os.path.exists(f"{map_save_path}/embeddings.db"):
                 os.remove(f"{map_save_path}/embeddings.db")
+            if os.path.exists(f"{map_save_path}/semantic_embeddings.db"):
+                os.remove(f"{map_save_path}/semantic_embeddings.db")
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
+        self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
 
-    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
             self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
@@ -378,6 +382,8 @@ class TinyNavDB():
             self.depths[key] = depth
         if embedding is not None:
             self.embeddings[key] = embedding
+        if semantic_embedding is not None:
+            self.semantic_embeddings[key] = semantic_embedding
         if features is not None:
             self.features[key] = features
 
@@ -398,9 +404,19 @@ class TinyNavDB():
     def get_embedding(self, key:int):
         return self.embeddings[key]
 
+    def set_semantic_embedding(self, key:int, embedding:np.ndarray):
+        self.semantic_embeddings[key] = embedding
+
+    def get_semantic_embedding(self, key:int):
+        return self.semantic_embeddings[key]
+
+    def has_semantic_embedding(self, key:int) -> bool:
+        return key in self.semantic_embeddings
+
     def close(self):
         self.features.close()
         self.embeddings.close()
+        self.semantic_embeddings.close()
         self.depths.close()
         self.infra1_video_db.close()
         self.rgb_video_db.close()
@@ -572,6 +588,7 @@ class BuildMapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
+        self.semantic_embedder = SigLIPTRT()
 
         self.bridge = CvBridge()
 
@@ -725,6 +742,9 @@ class BuildMapNode(Node):
             embedding = self.get_embeddings(infra1_image)
             embedding = embedding / np.linalg.norm(embedding)
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
+        with self.stage_timer.timed("get_semantic_embedding"):
+            semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
+            self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
         with self.stage_timer.timed("super_point_extractor"):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)

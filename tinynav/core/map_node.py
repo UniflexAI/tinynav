@@ -19,7 +19,7 @@ from codetiming import Timer
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
@@ -27,6 +27,7 @@ from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
+from tinynav.core.semantic_retrieval import RetrievalResult, load_semantic_embedding_matrix, rank_semantic_embeddings
 logger = logging.getLogger(__name__)
 
 
@@ -189,6 +190,7 @@ class MapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
+        self.semantic_embedder = SigLIPTRT()
         self.tinynav_db_path = tinynav_db_path
 
         self.bridge = CvBridge()
@@ -236,6 +238,8 @@ class MapNode(Node):
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
         self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
         self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
+        semantic_timestamps = list(self.map_poses.keys())
+        self.semantic_embeddings, self.semantic_embedding_timestamps = load_semantic_embedding_matrix(self.db, semantic_timestamps)
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
@@ -408,6 +412,32 @@ class MapNode(Node):
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
+
+    def retrieval(self, description: str, top_k: int = 5) -> list[RetrievalResult]:
+        if self.semantic_embeddings.shape[0] == 0:
+            self.get_logger().warning("No semantic embeddings loaded; run semantic embedding backfill or rebuild the map")
+            return []
+        text_embedding = asyncio.run(self.semantic_embedder.encode_text(description))
+        ranked = rank_semantic_embeddings(
+            text_embedding,
+            self.semantic_embeddings,
+            self.semantic_embedding_timestamps,
+            top_k=top_k,
+        )
+
+        results = []
+        for timestamp, score in ranked:
+            _depth, _embedding, _features, rgb_loader, infra1_loader = self.db.get_depth_embedding_features_images(timestamp)
+            results.append(
+                RetrievalResult(
+                    timestamp=timestamp,
+                    score=score,
+                    pose=self.map_poses.get(timestamp),
+                    rgb_image_loader=rgb_loader,
+                    infra1_image_loader=infra1_loader,
+                )
+            )
+        return results
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
