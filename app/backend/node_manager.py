@@ -1731,6 +1731,9 @@ class BackendNode(Ros2NodeManager):
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)
         else:
+            # New navigation session – allow map handoffs to trigger again.
+            with self._lock:
+                self._handled_map_handoffs.clear()
             pois_file = os.path.join(self.map_path, 'pois.json')
             if not os.path.exists(pois_file):
                 self.get_logger().warn('No pois.json found, cannot publish cmd_pois')
@@ -1771,6 +1774,9 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_nav_start(self, poi_id: str | None = None):
         if poi_id is not None:
+            # New navigation session – allow map handoffs to trigger again.
+            with self._lock:
+                self._handled_map_handoffs.clear()
             with self._lock:
                 self._active_nav_poi_ids = [int(poi_id)]
                 self._nav_progress = None
