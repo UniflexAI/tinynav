@@ -414,7 +414,11 @@ class BackendNode(Ros2NodeManager):
         if not isinstance(poi_list, list) or not all(isinstance(p, (int, str)) for p in poi_list):
             self.get_logger().error(f'Invalid map handoff poi_list: {poi_list!r}')
             return None
-        return {'target_map': target_map, 'poi_list': poi_list}
+        zupt = rule.get('zupt')
+        if zupt is not None and not isinstance(zupt, bool):
+            self.get_logger().warn(f'Invalid zupt value: {zupt!r}, ignoring')
+            zupt = None
+        return {'target_map': target_map, 'poi_list': poi_list, 'zupt': zupt}
 
     def _set_active_map_link(self, map_name: str):
         import shutil
@@ -485,6 +489,23 @@ class BackendNode(Ros2NodeManager):
                 self._global_path = []
                 self._nav_target_pose = None
                 self._nav_progress = None
+
+            # Apply ZUPT setting before relocalization if specified in nav_flow rule
+            zupt = rule['zupt']
+            if zupt is not None:
+                zupt_cmd = 'enable' if zupt else 'disable'
+                try:
+                    subprocess.run(
+                        ['sshpass', '-p', 'looper@0731', 'python3',
+                         '/tinynav/looper_cli/looper_cli.py',
+                         'zupt', zupt_cmd, '-y'],
+                        check=True, timeout=30,
+                    )
+                    self.get_logger().info(f'ZUPT {zupt_cmd}d before map handoff to {target_map}')
+                except Exception as e:
+                    self.get_logger().error(f'Failed to set ZUPT {zupt_cmd}: {e}')
+                # Give the device time to apply the ZUPT change before restarting nav nodes.
+                time.sleep(3)
 
             self.cmd_start_nav_nodes()
 
