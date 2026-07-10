@@ -12,6 +12,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import 'esdf_colormap_layer.dart';
 import 'local_voxel_painter.dart';
 import 'map_painter.dart';
 import 'planning_painter.dart';
@@ -538,12 +539,10 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                           children: [
                             const ColoredBox(color: Color(0xFF0F1621)),
                             if (widget.showEsdf && p?.esdfImage != null)
-                              Opacity(
-                                opacity: 0.85,
-                                child: Image.memory(
-                                  p!.esdfImage!,
-                                  fit: BoxFit.fill,
-                                  gaplessPlayback: true,
+                              Positioned.fill(
+                                child: EsdfColormapLayer(
+                                  bytes: p!.esdfImage!,
+                                  opacity: 0.85,
                                 ),
                               ),
                             if (widget.showObstacle && p?.obstacleImage != null)
