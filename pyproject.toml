@@ -51,6 +51,10 @@ lekiwi =[
 unitree = [
     "unitree-sdk2py @ git+https://github.com/junlinp/unitree_sdk2_python.git@800103eab7e045336b1c40186cda5023dbd05821",
 ]
+anyloc = [
+    "torch>=2.4,<2.9",
+    "torchvision>=0.19,<0.24",
+]
 3dgs = [
     "torch>=2.4,<2.11",
     "pillow>=10,<12",

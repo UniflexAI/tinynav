@@ -126,12 +126,31 @@ uv run python tool/benchmark/map_retrieval_eval.py \
   --map-a /tinynav/output/map_a \
   --map-b /tinynav/output/map_b \
   --tba-json /tinynav/output/tba.json \
+  --descriptor-backend stored \
   --topk 1,3,5,10 \
   --distance-thresholds 0.5,1.0,2.0,3.0,5.0 \
   --output-dir /tinynav/output/map_retrieval_eval
 ```
 
 If `--tba-json` is omitted, the identity transform is used. This is useful for smoke tests where map A and map B are generated from the same bag and are expected to share the same coordinate frame.
+
+The evaluator can also recompute descriptors from map images. For example, to evaluate the AnyLoc-style DINOv2 patch descriptor:
+
+```bash
+uv run python tool/benchmark/map_retrieval_eval.py \
+  --map-a /tinynav/output/map_a \
+  --map-b /tinynav/output/map_b \
+  --tba-json /tinynav/output/tba.json \
+  --descriptor-backend anyloc \
+  --embedding-cache-dir /tinynav/output/map_retrieval_eval_cache_anyloc \
+  --output-dir /tinynav/output/map_retrieval_eval_anyloc
+```
+
+`stored` uses each map's existing `embeddings.db`. `anyloc` reads each map's saved `infra1` keyframe images, recomputes AnyLoc-style descriptors, and caches the result as `.npz` files. Install the optional dependency group before using the AnyLoc backend:
+
+```bash
+uv sync --extra anyloc
+```
 
 ### Outputs
 

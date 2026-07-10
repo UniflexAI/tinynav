@@ -3993,6 +3993,10 @@ dependencies = [
     { name = "pymeshlab" },
     { name = "torch" },
 ]
+anyloc = [
+    { name = "torch" },
+    { name = "torchvision" },
+]
 lekiwi = [
     { name = "lerobot", extra = ["lekiwi"] },
 ]
@@ -4036,12 +4040,14 @@ requires-dist = [
     { name = "scipy" },
     { name = "tabulate" },
     { name = "torch", marker = "extra == '3dgs'", specifier = ">=2.4,<2.11" },
+    { name = "torch", marker = "extra == 'anyloc'", specifier = ">=2.4,<2.9" },
+    { name = "torchvision", marker = "extra == 'anyloc'", specifier = ">=0.19,<0.24" },
     { name = "tyro" },
     { name = "unitree-sdk2py", marker = "extra == 'unitree'", git = "https://github.com/junlinp/unitree_sdk2_python.git?rev=800103eab7e045336b1c40186cda5023dbd05821" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29.0" },
     { name = "viser" },
 ]
-provides-extras = ["lekiwi", "unitree", "3dgs"]
+provides-extras = ["lekiwi", "unitree", "anyloc", "3dgs"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "ruff", specifier = ">=0.12.3" }]

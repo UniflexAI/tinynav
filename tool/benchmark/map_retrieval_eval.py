@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -66,6 +68,94 @@ def _load_normalized_embeddings(map_path: Path, timestamps: list[int]) -> np.nda
     if not embeddings:
         raise RuntimeError(f"No embeddings found in {map_path}")
     return np.stack(embeddings, axis=0)
+
+
+def _cache_path_for_map(
+    cache_dir: Path,
+    map_path: Path,
+    timestamps: list[int],
+    backend: str,
+    model_name: str,
+    image_size: int,
+) -> Path:
+    resolved = str(map_path.resolve())
+    first_ts = timestamps[0] if timestamps else 0
+    last_ts = timestamps[-1] if timestamps else 0
+    key = f"{resolved}|{backend}|{model_name}|{image_size}|{len(timestamps)}|{first_ts}|{last_ts}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    safe_name = map_path.name.replace(os.sep, "_")
+    return cache_dir / f"{safe_name}_{backend}_{digest}.npz"
+
+
+def _normalize_embedding(embedding: np.ndarray, timestamp: int, map_path: Path) -> np.ndarray:
+    embedding = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    norm = float(np.linalg.norm(embedding))
+    if norm <= 1e-8:
+        raise ValueError(f"Embedding for timestamp {timestamp} in {map_path} has near-zero norm")
+    return embedding / norm
+
+
+def _load_anyloc_embeddings(
+    map_path: Path,
+    timestamps: list[int],
+    cache_dir: Path,
+    model_name: str,
+    image_size: int,
+    device: str,
+) -> np.ndarray:
+    from tinynav.core.anyloc_embedding import AnyLocEmbedding
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = _cache_path_for_map(cache_dir, map_path, timestamps, "anyloc", model_name, image_size)
+    if cache_path.exists():
+        cached = np.load(cache_path)
+        cached_timestamps = [int(x) for x in cached["timestamps_ns"].tolist()]
+        if cached_timestamps == timestamps:
+            print(f"Loaded AnyLoc embedding cache: {cache_path}")
+            return cached["embeddings"].astype(np.float32)
+        print(f"Ignoring stale AnyLoc embedding cache: {cache_path}")
+
+    model = AnyLocEmbedding(model_name=model_name or None, image_size=image_size, device=device or None)
+    db = TinyNavDB(str(map_path), is_scratch=False)
+    embeddings: list[np.ndarray] = []
+    try:
+        for index, timestamp in enumerate(timestamps, start=1):
+            _, _, _, _, infra1_loader = db.get_depth_embedding_features_images(timestamp)
+            image = infra1_loader() if infra1_loader is not None else None
+            if image is None:
+                raise RuntimeError(f"Missing infra1 image for timestamp {timestamp} in {map_path}")
+            embedding = asyncio.run(model.infer(image))
+            embeddings.append(_normalize_embedding(embedding, timestamp, map_path))
+            if index % 100 == 0:
+                print(f"AnyLoc re-embedded {index}/{len(timestamps)} for {map_path}")
+    finally:
+        db.close()
+
+    if not embeddings:
+        raise RuntimeError(f"No AnyLoc embeddings generated for {map_path}")
+    stacked = np.stack(embeddings, axis=0)
+    np.savez_compressed(cache_path, timestamps_ns=np.asarray(timestamps, dtype=np.int64), embeddings=stacked)
+    print(f"Saved AnyLoc embedding cache: {cache_path}")
+    return stacked
+
+
+def _load_embeddings(
+    map_path: Path,
+    timestamps: list[int],
+    args: argparse.Namespace,
+) -> np.ndarray:
+    if args.descriptor_backend == "stored":
+        return _load_normalized_embeddings(map_path, timestamps)
+    if args.descriptor_backend == "anyloc":
+        return _load_anyloc_embeddings(
+            map_path,
+            timestamps,
+            Path(args.embedding_cache_dir),
+            args.anyloc_model,
+            args.anyloc_image_size,
+            args.anyloc_device,
+        )
+    raise ValueError(f"Unsupported descriptor backend: {args.descriptor_backend}")
 
 
 def _pose_distance(pose_a: np.ndarray, pose_b: np.ndarray, mode: str) -> float:
@@ -200,8 +290,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     if args.every_n > 1:
         map_b_timestamps = map_b_timestamps[:: args.every_n]
 
-    map_a_embeddings = _load_normalized_embeddings(map_a, map_a_timestamps)
-    map_b_embeddings_all = _load_normalized_embeddings(map_b, map_b_timestamps)
+    map_a_embeddings = _load_embeddings(map_a, map_a_timestamps, args)
+    map_b_embeddings_all = _load_embeddings(map_b, map_b_timestamps, args)
     tba = _load_tba(Path(args.tba_json) if args.tba_json else None)
 
     topk_values = _parse_int_list(args.topk)
@@ -267,6 +357,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         "map_a": str(map_a),
         "map_b": str(map_b),
         "tba_json": str(args.tba_json) if args.tba_json else None,
+        "descriptor_backend": args.descriptor_backend,
+        "embedding_cache_dir": str(args.embedding_cache_dir),
         "distance_mode": args.distance_mode,
         "map_a_keyframes": len(map_a_timestamps),
         "map_b_queries": len(query_rows),
@@ -303,6 +395,23 @@ def main() -> None:
     parser.add_argument("--map-b", required=True, help="Query map directory")
     parser.add_argument("--tba-json", default="", help="JSON file containing a 4x4 Tba matrix. Defaults to identity.")
     parser.add_argument("--output-dir", default="/tinynav/output/map_retrieval_eval", help="Output directory")
+    parser.add_argument(
+        "--descriptor-backend",
+        choices=["stored", "anyloc"],
+        default="stored",
+        help=(
+            "Descriptor source. 'stored' uses embeddings.db from each map. "
+            "'anyloc' recomputes AnyLoc-style descriptors from infra1 images and caches them."
+        ),
+    )
+    parser.add_argument(
+        "--embedding-cache-dir",
+        default="/tinynav/output/map_retrieval_eval_cache",
+        help="Directory for recomputed descriptor caches",
+    )
+    parser.add_argument("--anyloc-model", default="", help="DINOv2 torch hub model name for AnyLoc backend")
+    parser.add_argument("--anyloc-image-size", type=int, default=224, help="Input image size for AnyLoc backend")
+    parser.add_argument("--anyloc-device", default="", help="Device for AnyLoc backend, for example cuda or cpu")
     parser.add_argument("--topk", default="1,3,5,10", help="Comma-separated topK values")
     parser.add_argument(
         "--distance-thresholds",
