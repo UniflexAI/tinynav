@@ -16,10 +16,14 @@ from tinynav.core.build_map_node import (
     ImageTransportsNode,
     TinyNavDB,
 )
+from tinynav.core.map_node_bow import _enhance_clahe_gamma
 
 
 class BuildMapNodeBow(BuildMapNode):
     """Build-map node variant that also writes a SuperPoint BoW retrieval index."""
+
+    def _enhance_image(self, image: np.ndarray) -> np.ndarray:
+        return _enhance_clahe_gamma(image)
 
     def save_mapping(self):
         was_completed = self._save_completed

@@ -5,12 +5,24 @@ import logging
 import os
 import sys
 
+import cv2
 import numpy as np
 import rclpy
 
 from tinynav.core.bow_retrieval import BowIndex, build_bow_index
 from tinynav.core.map_node import MapNode
 from tinynav.core.math_utils import rerank_by_pnp_inliers
+
+
+def _enhance_clahe_gamma(image: np.ndarray, clip_limit: float = 2.0, tile_size: int = 8, gamma: float = 1.5) -> np.ndarray:
+    """Apply CLAHE + gamma correction to a mono8 image."""
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_size, tile_size))
+    enhanced = clahe.apply(image)
+    # gamma correction
+    inv_gamma = 1.0 / gamma
+    lut = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)], dtype=np.uint8)
+    enhanced = cv2.LUT(enhanced, lut)
+    return enhanced
 
 
 class MapNodeBow(MapNode):
@@ -35,6 +47,9 @@ class MapNodeBow(MapNode):
             self.get_logger().info(f"BoW index not found at {self.bow_index_path}; building it from map features")
             build_bow_index(self.db, sorted(int(timestamp) for timestamp in self.map_poses.keys()), self.bow_index_path)
         self.bow_index = BowIndex(self.bow_index_path)
+
+    def _enhance_image(self, image: np.ndarray) -> np.ndarray:
+        return _enhance_clahe_gamma(image)
 
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:

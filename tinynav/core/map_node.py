@@ -601,6 +601,10 @@ class MapNode(Node):
                 self.first_done = True
 
 
+    def _enhance_image(self, image: np.ndarray) -> np.ndarray:
+        """Override in subclasses for image preprocessing (e.g. CLAHE, gamma)."""
+        return image
+
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
@@ -616,6 +620,7 @@ class MapNode(Node):
         depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
         odom, _ = msg2np(keyframe_odom_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
+        image = self._enhance_image(image)
         rgb_image_place_holder = einops.repeat(image, "h w -> h w c", c = 3)
 
         self.nav_temp_db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = image, rgb_image = rgb_image_place_holder)

@@ -699,6 +699,10 @@ class BuildMapNode(Node):
                 save_finished_msg.data = False
                 self.mapping_save_finished_pub.publish(save_finished_msg)
 
+    def _enhance_image(self, image: np.ndarray) -> np.ndarray:
+        """Override in subclasses for image preprocessing (e.g. CLAHE, gamma)."""
+        return image
+
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
         with self.stage_timer.timed("mapping_loop"):
             if self.K is None:
@@ -716,6 +720,7 @@ class BuildMapNode(Node):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
+            infra1_image = self._enhance_image(infra1_image)
             rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
         with self.stage_timer.timed("save_image_and_depth"):
