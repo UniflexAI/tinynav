@@ -1,0 +1,12 @@
+{
+  "tag_family": "DICT_APRILTAG_36h11",
+  "grid": "2x2",
+  "tag_ids": [
+    8,
+    9,
+    10,
+    11
+  ],
+  "size_m": 0.076,
+  "spacing_m": 0.019
+}
