@@ -213,8 +213,6 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_active_pub.publish(Bool(data=False))
 
-        self._nav_active_pub.publish(Bool(data=False))
-
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
@@ -842,18 +840,12 @@ class BackendNode(Ros2NodeManager):
             self._last_frame_time[topic] = 0.0
             self.preview_callbacks[topic] = []
 
-    def add_preview_callback(
-        self,
-        topic: str,
-        cb,
-        max_edge_px: int = _PREVIEW_MAX_EDGE_PX,
-        jpeg_quality: int = _PREVIEW_JPEG_QUALITY,
-    ) -> bool:
+    def add_preview_callback(self, topic: str, cb) -> bool:
         """Register a frame callback; creates the ROS subscription on the first caller."""
         if topic not in self.preview_callbacks:
             return False
         with self._lock:
-            self.preview_callbacks[topic].append((cb, max_edge_px, jpeg_quality))
+            self.preview_callbacks[topic].append(cb)
             first = len(self.preview_callbacks[topic]) == 1
         if first:
             self._create_image_sub(topic)
@@ -864,11 +856,10 @@ class BackendNode(Ros2NodeManager):
         if topic not in self.preview_callbacks:
             return
         with self._lock:
-            self.preview_callbacks[topic] = [
-                registration
-                for registration in self.preview_callbacks[topic]
-                if registration[0] is not cb
-            ]
+            try:
+                self.preview_callbacks[topic].remove(cb)
+            except ValueError:
+                pass
             empty = len(self.preview_callbacks[topic]) == 0
         if empty:
             self._destroy_image_sub(topic)
@@ -893,26 +884,6 @@ class BackendNode(Ros2NodeManager):
         sub = self._image_subs.pop(topic, None)
         if sub is not None:
             self.destroy_subscription(sub)
-
-    def _publish_preview_frame(self, topic: str, arr: np.ndarray):
-        with self._lock:
-            callbacks = list(self.preview_callbacks.get(topic, []))
-
-        encoded_frames: dict[tuple[int, int], bytes] = {}
-        for cb, max_edge_px, jpeg_quality in callbacks:
-            profile = (max_edge_px, jpeg_quality)
-            try:
-                frame = encoded_frames.get(profile)
-                if frame is None:
-                    frame = _encode_preview_jpeg(arr, max_edge_px, jpeg_quality)
-                    encoded_frames[profile] = frame
-                cb(frame)
-            except Exception:
-                pass
-
-        if encoded_frames:
-            with self._lock:
-                self._last_frame[topic] = next(iter(encoded_frames.values()))
 
     def _on_compressed_image(self, msg: CompressedImage, topic: str):
         now = time.time()
@@ -959,6 +930,96 @@ class BackendNode(Ros2NodeManager):
                 elif msg.encoding == 'rgb8':
                     arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
             frame = _encode_preview_jpeg(arr)
+        except Exception:
+            return
+
+        with self._lock:
+            self._last_frame[topic] = frame
+
+        for cb in self.preview_callbacks.get(topic, []):
+            try:
+                cb(frame)
+            except Exception:
+                pass
+
+    def get_vio_status(self) -> str:
+        with self._lock:
+            return self._vio_status
+
+    def get_planning_snapshot(self) -> dict:
+        with self._lock:
+            path_snapshot = list(self._global_path)
+            snapshot = {
+                'localized': self._localized,
+                'odom_pose': self._odom_pose,
+                'odom_pose_at_kf': self._odom_pose_at_kf,
+                'map_pose': self._map_pose,
+                'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,
+                'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
+                'trajectory': list(self._trajectory),
+                'global_path': None,  # filled after TF transform (odom frame)
+                'map_global_path': path_snapshot,
+                'grid_info': self._grid_info,
+                'nav_target_pose': self._nav_target_pose,
+                'footprint': list(self._footprint),
+                'voxel_points': list(self._voxel_points),
+            }
+        snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
+        return snapshot
+
+    def _start_unitree_if_configured(self):
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        self._unitree_proc = self._launch_proc(
+            'unitree',
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
+            env=_env,
+        )
+        self.get_logger().info('unitree_control started')
+
+    def get_sensor_mode(self) -> str:
+        return self._sensor_mode
+
+    def get_image_topics(self) -> list[str]:
+        if self._sensor_mode == 'looper':
+            return _IMAGE_TOPICS_LOOPER
+        return _IMAGE_TOPICS_REALSENSE
+
+    def get_preview_frame(self, topic: str) -> bytes:
+        with self._lock:
+            return self._last_frame.get(topic, b'')
+
+    # ------------------------------------------------------------------ #
+    # Command API (called from FastAPI handlers — thread-safe enough)     #
+    # ------------------------------------------------------------------ #
+
+    def set_active_bag(self, bag_name: str):
+        """Select a bag from rosbags/ by name for map building."""
+        path = os.path.join(self.tinynav_db_path, 'rosbags', bag_name)
+        if os.path.isdir(path):
+            with self._lock:
+                self._last_verified_bag = path
+
+    @property
+    def active_bag_path(self) -> str | None:
+        """Most recently verified bag folder, ready for map building."""
+        lvb = self._last_verified_bag
+        if lvb and os.path.isdir(lvb):
+            return lvb
+        return None
+
+    def get_status(self) -> dict:
+        with self._lock:
+            raw = self.state
+            pct = self.mapping_percent
+            battery = self._battery
+            nav_nodes = self._nav_nodes_running
+            nav_paused = self._nav_paused
+            nav_active = self._nav_active
+            loc_assist = self._loc_assist_enabled
+            vio_guard_enabled = self._sensor_mode == 'looper'
+            vio_status = self._vio_status if vio_guard_enabled else None
+            vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -977,6 +1038,137 @@ class BackendNode(Ros2NodeManager):
             'vioGuardEnabled': vio_guard_enabled,
             'vioStatus': vio_status,
             'vioGuardStopped': vio_guard_stopped,
+        }
+
+    @staticmethod
+    def _derive_map_status(raw: str, pct: float, files_exist: bool) -> str:
+        if raw == 'rosbag_build_map':
+            return 'building'
+        if raw.startswith('error:'):
+            return 'failed'
+        if files_exist and raw == 'idle':
+            return 'success'
+        return 'idle'
+
+    # ------------------------------------------------------------------ #
+    # Sensor proc helpers                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _kill_proc(self, proc: subprocess.Popen | None):
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), 15)
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    def _make_log(self, name: str):
+        """Open a timestamped log file under tinynav_db/logs/. Safe to close in parent
+        after Popen — the child process inherits its own fd copy at fork time."""
+        from datetime import datetime
+        logs_dir = os.path.join(self.tinynav_db_path, 'logs')
+        os.makedirs(logs_dir, exist_ok=True)
+        ts = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+        path = os.path.join(logs_dir, f'{ts}_{name}.txt')
+        return open(path, 'w')
+
+    def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
+                      cwd: str = '/tinynav') -> subprocess.Popen:
+        """Spawn a subprocess with standard logging and process-group setup."""
+        lf = self._make_log(name)
+        proc = subprocess.Popen(
+            cmd, preexec_fn=os.setsid, cwd=cwd,
+            env=env or os.environ.copy(),
+            stdout=lf, stderr=subprocess.STDOUT,
+        )
+        lf.close()
+        return proc
+
+    def _stop_sensor_procs(self):
+        for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_imu_propagation_proc', '_planning_proc'):
+            self._kill_proc(getattr(self, attr))
+            setattr(self, attr, None)
+
+    def _launch_sensor_procs(self, env: dict):
+        """Start sensor procs based on current _sensor_mode."""
+        if self._sensor_mode == 'looper':
+            self._looper_bridge_proc = self._launch_proc(
+                'looper_bridge',
+                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
+                env=env,
+            )
+            self._planning_proc = self._launch_proc(
+                'planning',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                env=env,
+            )
+        elif self._sensor_mode == 'realsense':
+            self._realsense_proc = self._launch_proc(
+                'realsense',
+                ['bash', _REALSENSE_SCRIPT],
+            )
+            self._perception_proc = self._launch_proc(
+                'perception',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                env=env,
+            )
+            self._imu_propagation_proc = self._launch_proc(
+                'perception',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/imu_propagator_node.py'],
+                env=env,
+            )
+            self._planning_proc = self._launch_proc(
+                'planning',
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                env=env,
+            )
+
+    def _restart_sensor_procs(self):
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        self._launch_sensor_procs(_env)
+        self.get_logger().info('Sensor procs restarted after map build')
+
+    # ------------------------------------------------------------------ #
+    # Nav nodes toggle                                                     #
+    # ------------------------------------------------------------------ #
+
+    def cmd_start_nav_nodes(self):
+        self._set_nav_active(False)
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        map_node_cmd = [
+            'uv', 'run', 'python', '/tinynav/tinynav/core/map_node_bow.py',
+            '--tinynav_map_path', self.map_path,
+        ]
+        if self._load_nav_flow_enable_first_done():
+            map_node_cmd.append('--enable_first_done')
+        self._map_node_proc = self._launch_proc(
+            'map_node',
+            map_node_cmd,
+            env=_env,
+        )
+        with self._lock:
+            loc_assist = self._loc_assist_enabled
+        if loc_assist:
+            # Don't start cmd_vel_control yet; start localization assist sweep
+            self._start_loc_assist(_env)
+        else:
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+                env=_env,
+            )
+        with self._lock:
+            self._nav_nodes_running = True
+        self.get_logger().info('Nav nodes started')
+
+    def cmd_stop_nav_nodes(self):
+        self._set_nav_active(False)
+        self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
         self._map_node_proc = None
@@ -993,6 +1185,622 @@ class BackendNode(Ros2NodeManager):
     def cmd_restart_nav_nodes(self):
         self._set_nav_active(False)
         self._stop_loc_assist()
+        self._kill_proc(self._map_node_proc)
+        self._kill_proc(self._planning_proc)
+        self._kill_proc(self._cmd_vel_proc)
+        self._map_node_proc = None
+        self._planning_proc = None
+        self._cmd_vel_proc = None
+
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+
+        self._planning_proc = self._launch_proc(
+            'planning',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            env=_env,
+        )
+        self._map_node_proc = self._launch_proc(
+            'map_node',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node_bow.py',
+             '--tinynav_map_path', self.map_path],
+            env=_env,
+        )
+        self._cmd_vel_proc = self._launch_proc(
+            'cmd_vel_control',
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            env=_env,
+        )
+        with self._lock:
+            self._nav_nodes_running = True
+            self._localized = False
+            self._map_pose = None
+            self._global_path = []
+            self._nav_target_pose = None
+        self.state = 'idle'
+        self._pub_state()
+        self.get_logger().info('Nav nodes restarted (emergency stop)')
+
+    # ------------------------------------------------------------------ #
+    # Localization assist: yaw sweep until localized                        #
+    # ------------------------------------------------------------------ #
+
+    def cmd_set_loc_assist(self, enabled: bool):
+        """Enable or disable the auto-localization assist toggle."""
+        with self._lock:
+            self._loc_assist_enabled = enabled
+        self.get_logger().info(f'Localization assist {"enabled" if enabled else "disabled"}')
+
+    def _start_loc_assist(self, env: dict):
+        """Start the yaw sweep thread (no cmd_vel_control process)."""
+        if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
+            self.get_logger().info('Localization assist sweep already running')
+            return
+        self._loc_assist_stop_event.clear()
+        self._loc_assist_thread = threading.Thread(
+            target=self._loc_assist_loop, daemon=True
+        )
+        self._loc_assist_thread.start()
+        self.get_logger().info('Localization assist sweep started')
+
+    def _stop_loc_assist(self):
+        """Stop the yaw sweep thread if running, publish zero cmd_vel."""
+        self._loc_assist_stop_event.set()
+        if self._loc_assist_thread is not None and self._loc_assist_thread is not threading.current_thread():
+            self._loc_assist_thread.join(timeout=6.0)
+            self._loc_assist_thread = None
+        # Ensure robot stops
+        self._publish_cmd_vel(0.0, 0.0)
+
+    def _publish_cmd_vel(self, linear_x: float, angular_z: float):
+        msg = Twist()
+        msg.linear.x = float(linear_x)
+        msg.angular.z = float(angular_z)
+        self._cmd_vel_pub.publish(msg)
+
+    def _loc_assist_loop(self):
+        """
+        Yaw sweep pattern:
+        - Start facing current direction, wait dwell_s
+        - Turn CW 20°, wait dwell_s
+        - Turn CCW 40° (net -20° from start), wait dwell_s
+        - Turn CW 60° (net +40° from start), wait dwell_s
+        - Turn CCW 80° (net -40° from start), wait dwell_s
+        - ... expanding sweep until localized
+
+        The turn amount is closed-loop against SLAM odometry yaw. While turning,
+        publish cmd_vel continuously so downstream controllers do not need to
+        latch a single Twist command.
+        """
+        dwell_s = 5.0
+        angular_speed = 0.4  # rad/s
+        cmd_rate_hz = 10.0
+        yaw_tolerance = math.radians(2.0)
+        step_deg = 20.0
+        step_rad = math.radians(step_deg)
+        stop = self._loc_assist_stop_event
+
+        # Dwell at initial position
+        if self._wait_or_localized(dwell_s, stop):
+            return
+
+        turn_index = 1  # 1, 2, 3, 4, ...
+        direction = 1   # +1 = CW, -1 = CCW
+
+        while not stop.is_set():
+            # Turn relative to the current odom yaw. Positive angular.z is CCW,
+            # so the previous CW command maps to a negative target delta.
+            angle = turn_index * step_rad
+            target_delta = -direction * angle
+            if self._turn_relative_by_odom(
+                target_delta=target_delta,
+                angular_speed=angular_speed,
+                cmd_rate_hz=cmd_rate_hz,
+                yaw_tolerance=yaw_tolerance,
+                stop=stop,
+            ):
+                return
+            # Dwell
+            if self._wait_or_localized(dwell_s, stop):
+                return
+            # Next sweep: increase index, flip direction
+            turn_index += 1
+            direction *= -1
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        """Wrap an angle to [-pi, pi]."""
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _latest_odom_yaw(self, max_age_s: float = 1.0) -> float | None:
+        with self._lock:
+            pose = self._odom_pose
+            received_at = self._odom_pose_received_at
+        if pose is None or received_at is None:
+            return None
+        if time.monotonic() - received_at > max_age_s:
+            return None
+        yaw = pose.get('yaw')
+        return float(yaw) if yaw is not None else None
+
+    def _turn_relative_by_odom(
+        self,
+        target_delta: float,
+        angular_speed: float,
+        cmd_rate_hz: float,
+        yaw_tolerance: float,
+        stop: threading.Event,
+    ) -> bool:
+        """
+        Turn until odometry yaw reaches target_delta relative to the turn start.
+        Returns True if the assist loop should stop (localized or stop event set).
+        """
+        interval = 1.0 / max(cmd_rate_hz, 1.0)
+        max_duration = abs(target_delta) / max(angular_speed, 1e-3) + 3.0
+
+        start_wait = time.monotonic()
+        start_yaw = self._latest_odom_yaw()
+        while start_yaw is None:
+            if self._should_stop_loc_assist(stop):
+                return True
+            # Do not blind-turn without fresh odometry.
+            self._publish_cmd_vel(0.0, 0.0)
+            if time.monotonic() - start_wait > 5.0:
+                self.get_logger().warn('Localization assist waiting for fresh odometry yaw')
+                start_wait = time.monotonic()
+            time.sleep(interval)
+            start_yaw = self._latest_odom_yaw()
+
+        angular_z = math.copysign(abs(angular_speed), target_delta)
+        start_time = time.monotonic()
+        previous_yaw = start_yaw
+        accumulated_delta = 0.0
+
+        while True:
+            if self._should_stop_loc_assist(stop):
+                return True
+
+            current_yaw = self._latest_odom_yaw()
+            if current_yaw is None:
+                # Odometry disappeared; stop rather than continuing open-loop.
+                self._publish_cmd_vel(0.0, 0.0)
+                time.sleep(interval)
+                continue
+
+            accumulated_delta += self._wrap_angle(current_yaw - previous_yaw)
+            previous_yaw = current_yaw
+            remaining = target_delta - accumulated_delta
+            if abs(remaining) <= yaw_tolerance:
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            # If we overshot, stop this segment instead of commanding a reverse
+            # correction sweep. The next sweep segment will continue the pattern.
+            if math.copysign(1.0, remaining) != math.copysign(1.0, target_delta):
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            if time.monotonic() - start_time > max_duration:
+                self.get_logger().warn(
+                    f'Localization assist turn timeout: target_delta={target_delta:.3f} '
+                    f'accumulated_delta={accumulated_delta:.3f} remaining={remaining:.3f}'
+                )
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            self._publish_cmd_vel(0.0, angular_z)
+            time.sleep(interval)
+
+    def _should_stop_loc_assist(self, stop: threading.Event) -> bool:
+        if stop.is_set():
+            self._publish_cmd_vel(0.0, 0.0)
+            return True
+        with self._lock:
+            localized = self._localized
+        if localized:
+            self._publish_cmd_vel(0.0, 0.0)
+            return True
+        return False
+
+    def _wait_or_localized(self, duration: float, stop: threading.Event) -> bool:
+        """
+        Wait for `duration` seconds, checking localization and stop event
+        every 0.1s. Returns True if should stop (localized or event set).
+        """
+        elapsed = 0.0
+        interval = 0.1
+        while elapsed < duration:
+            if self._should_stop_loc_assist(stop):
+                return True
+            time.sleep(interval)
+            elapsed += interval
+        return False
+
+    def _on_localization_achieved(self):
+        """
+        Called when localization succeeds for the first time.
+        Stops the assist sweep and launches cmd_vel_control.
+        """
+        with self._lock:
+            loc_assist = self._loc_assist_enabled
+            nav_running = self._nav_nodes_running
+            cmd_vel_proc = self._cmd_vel_proc
+            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
+                already_running = True
+            else:
+                already_running = False
+                if cmd_vel_proc is not None:
+                    self._cmd_vel_proc = None
+        if not nav_running:
+            self._resume_vio_pois_after_localized()
+            return
+        if already_running:
+            self._resume_vio_pois_after_localized()
+            return
+        if not loc_assist:
+            self._resume_vio_pois_after_localized()
+            return
+        # Stop the sweep
+        self._stop_loc_assist()
+        # Now start cmd_vel_control. Re-check under the lock because both
+        # /mapping/current_pose_in_map and /map/relocalization can report the
+        # first successful localization close together.
+        _env = os.environ.copy()
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        with self._lock:
+            cmd_vel_proc = self._cmd_vel_proc
+            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
+                return
+            self._cmd_vel_proc = self._launch_proc(
+                'cmd_vel_control',
+                ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+                env=_env,
+            )
+        self.get_logger().info('Localization achieved — cmd_vel_control started')
+        self._resume_vio_pois_after_localized()
+
+    def cmd_bag_start(self):
+        if self._sensor_mode == 'looper':
+            self._stop_sensor_procs()
+        self._stop_all()
+        self._start('realsense_bag_record')
+
+    def cmd_bag_stop(self):
+        if self.state == 'realsense_bag_record':
+            bag_path = self.bag_path
+            self._stop_all()
+            if self._sensor_mode == 'looper':
+                threading.Thread(
+                    target=lambda bp: (self._finalize_bag(bp), self._restart_sensor_procs()),
+                    args=(bag_path,), daemon=True,
+                ).start()
+            else:
+                threading.Thread(target=self._finalize_bag, args=(bag_path,), daemon=True).start()
+
+    # ── Debug recording (runs alongside navigation, independent state) ── #
+
+    _DEBUG_RECORD_TOPICS = [
+        '/camera/camera/imu',
+	'/camera/camera/infra2/image_rect_raw',
+	'/camera/camera/infra2/camera_info',
+        '/camera/camera/infra1/image_rect_raw',
+        '/camera/camera/depth/image_rect_raw',
+        '/camera/camera/infra1/camera_info',
+        '/insight/vio_100hz',
+        '/insight/vio_20hz',
+        '/tf_static',
+        '/slam/odometry_visual',
+        '/slam/depth',
+        '/mapping/global_plan',
+        '/control/target_pose',
+        '/planning/trajectory_path',
+        '/planning/occupied_voxels',
+        '/planning/footprint',
+    ]
+
+    def cmd_debug_record_start(self):
+        """Start a debug rosbag recording (independent of main state machine)."""
+        with self._lock:
+            if self._debug_record_proc is not None and self._debug_record_proc.poll() is None:
+                return  # already recording
+            from datetime import datetime
+            debug_bags_dir = os.path.join(self.tinynav_db_path, 'debug_bags')
+            os.makedirs(debug_bags_dir, exist_ok=True)
+            ts = datetime.now().strftime('debug_%Y_%m_%d_%H_%M_%S')
+            output_dir = os.path.join(debug_bags_dir, ts)
+            cmd = (
+                ['ros2', 'bag', 'record',
+                 '--output', output_dir,
+                 '--max-cache-size', '2147483648']
+                + self._DEBUG_RECORD_TOPICS
+            )
+            self._debug_record_proc = self._spawn(cmd)
+            self._debug_record_path = output_dir
+            self.get_logger().info(f'Debug recording started → {output_dir}')
+
+    def cmd_debug_record_stop(self):
+        """Stop the debug rosbag recording."""
+        with self._lock:
+            proc = self._debug_record_proc
+            self._debug_record_proc = None
+            path = self._debug_record_path
+            self._debug_record_path = None
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), 15)
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            self.get_logger().info(f'Debug recording stopped → {path}')
+
+    @property
+    def debug_recording(self) -> bool:
+        with self._lock:
+            return self._debug_record_proc is not None and self._debug_record_proc.poll() is None
+
+    @property
+    def debug_record_path(self) -> str | None:
+        with self._lock:
+            return self._debug_record_path
+
+
+    def _finalize_bag(self, bag_path: str):
+        import shutil
+        from datetime import datetime
+        time.sleep(1.5)  # wait for ros2 bag to flush
+        if not os.path.isdir(bag_path):
+            return
+        try:
+            result = subprocess.run(
+                ['ros2', 'bag', 'info', bag_path],
+                capture_output=True,
+                timeout=30,
+                env={**os.environ},
+            )
+            if result.returncode != 0:
+                return  # bag corrupted — leave in place
+            output = result.stdout.decode('utf-8', errors='replace')
+            match = re.search(r'Messages:\s+(\d+)', output)
+            if not match or int(match.group(1)) == 0:
+                return  # empty bag — leave in place
+        except Exception:
+            return
+        rosbags_dir = os.path.join(os.path.dirname(bag_path), 'rosbags')
+        os.makedirs(rosbags_dir, exist_ok=True)
+        ts = datetime.now().strftime('bag_%Y_%m_%d_%H_%M_%S')
+        dest = os.path.join(rosbags_dir, ts)
+        shutil.move(bag_path, dest)
+        with self._lock:
+            self._last_verified_bag = dest
+
+    def _start_rosbag_build_map(self):
+        """Override to use the last verified bag instead of the default bag_path."""
+        active = self.active_bag_path
+        if active is None:
+            self.get_logger().warn('No verified bag available for map building')
+            return
+        bag_file = os.path.join(active, 'bag_0.db3')
+        if not os.path.exists(bag_file):
+            self.get_logger().warn(f'bag_0.db3 not found in {active}')
+            return
+        # Remove existing map path so build_map_node creates a fresh real directory.
+        # If map_path is a symlink, shutil.move would rename the symlink (not the target),
+        # and build_map_node would write through the symlink into the old map directory.
+        import shutil as _shutil
+        if os.path.islink(self.map_path) or os.path.isfile(self.map_path):
+            os.remove(self.map_path)
+        elif os.path.isdir(self.map_path):
+            _shutil.rmtree(self.map_path)
+
+        _env = os.environ.copy()
+        if self._sensor_mode == 'looper':
+            _env['ROS_DOMAIN_ID'] = _MAP_BUILD_DOMAIN_LOOPER
+        _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        if self._sensor_mode == 'looper':
+            source_name = 'looper_bridge'
+            source_cmd = ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py']
+        else:
+            source_name = 'perception'
+            source_cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+
+        self.processes[source_name] = self._launch_proc(
+            source_name,
+            source_cmd,
+            env=_env,
+        )
+        self.processes['build_map'] = self._launch_proc_tee(
+            'build_map_node',
+            [
+                'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node_bow.py',
+                '--map_save_path', self.map_path,
+                '--bag_file', bag_file,
+            ],
+            env=_env,
+        )
+
+        threading.Thread(target=self._on_build_map_done, daemon=True).start()
+
+    def _launch_proc_tee(self, name: str, cmd: list[str], env: dict | None = None,
+                          cwd: str = '/tinynav') -> subprocess.Popen:
+        """Like _launch_proc, but also tees stdout to a pipe so the caller can
+        scan for MAPPING_PERCENT: lines while still logging everything to file."""
+        lf = self._make_log(name)
+        proc = subprocess.Popen(
+            cmd, preexec_fn=os.setsid, cwd=cwd,
+            env=env or os.environ.copy(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        threading.Thread(
+            target=self._tee_and_read_percent,
+            args=(proc, lf),
+            daemon=True,
+        ).start()
+        return proc
+
+    def _tee_and_read_percent(self, proc: subprocess.Popen, log_file):
+        """Read lines from proc.stdout, write to log_file, and extract
+        MAPPING_PERCENT:<float> values into self.mapping_percent."""
+        try:
+            for raw in proc.stdout:
+                line = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else raw
+                log_file.write(line)
+                log_file.flush()
+                if _MAPPING_PERCENT_PREFIX in line:
+                    try:
+                        pct = float(line.split(_MAPPING_PERCENT_PREFIX, 1)[1].strip())
+                        with self._lock:
+                            self.mapping_percent = pct
+                    except (ValueError, AttributeError):
+                        pass
+        finally:
+            log_file.close()
+
+    def _on_build_map_done(self):
+        """Wait for build_map to finish, then convert, archive, and restart."""
+        import shutil
+        from datetime import datetime
+        proc_build = self.processes.get('build_map')
+        if proc_build:
+            proc_build.wait()
+        subprocess.run([
+            'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
+            '--input_dir', self.map_path,
+            '--output_dir', self.map_path,
+        ])
+        # mv map → maps/map_YYYY_MM_DD_HH_MM_SS, symlink back
+        maps_dir = os.path.join(self.tinynav_db_path, 'maps')
+        os.makedirs(maps_dir, exist_ok=True)
+        ts = datetime.now().strftime('map_%Y_%m_%d_%H_%M_%S')
+        dest = os.path.join(maps_dir, ts)
+        shutil.move(self.map_path, dest)
+        os.symlink(dest, self.map_path)
+
+        # Auto-create a home POI at the SLAM origin (0,0,0) if none exist.
+        # map_node requires at least one POI as a global localization anchor.
+        pois_path = os.path.join(dest, 'pois.json')
+        if not os.path.exists(pois_path):
+            with open(pois_path, 'w') as _f:
+                json.dump(
+                    {'0': {'id': 0, 'name': 'home', 'position': [0.0, 0.0, 0.0]}},
+                    _f, indent=2,
+                )
+            self.get_logger().info('Auto-created home POI at (0,0,0)')
+
+        self._stop_all()
+        self.state = 'idle'
+        self._pub_state()
+        self._restart_sensor_procs()
+
+
+    def cmd_map_build(self):
+        self._stop_sensor_procs()
+        self._stop_all()
+        self._start('rosbag_build_map')
+
+    def _publish_cmd_pois(self, poi_id: int | None) -> bool:
+        """Publish the selected POI to map_node as JSON on /mapping/cmd_pois.
+        Sending an empty dict clears the current nav target. Returns whether a
+        non-empty navigation target was published."""
+        if poi_id is None:
+            self._cmd_pois_pub.publish(String(data='{}'))
+            return False
+        pois_file = os.path.join(self.map_path, 'pois.json')
+        if not os.path.exists(pois_file):
+            self.get_logger().warn('No pois.json found, cannot publish cmd_pois')
+            return False
+        with open(pois_file) as f:
+            pois = json.load(f)
+        key = str(poi_id)
+        if key not in pois:
+            self.get_logger().warn(f'POI {poi_id} not found in pois.json')
+            return False
+        # Re-index as "0" to match pub_pois.py convention expected by map_node
+        payload = {'0': pois[key]}
+        self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
+        return True
+
+    def cmd_manual_target_pose(self, x: float, y: float, z: float):
+        """Publish a manually selected local-planner target pose.
+
+        planning_node subscribes to /control/target_pose and only reads the
+        position vector, so Odometry is used here to match that existing API.
+        """
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'odom'
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        msg.pose.pose.position.z = float(z)
+        msg.pose.pose.orientation.w = 1.0
+        self._target_pose_pub.publish(msg)
+        with self._lock:
+            self._nav_target_pose = {'x': float(x), 'y': float(y)}
+
+    def cmd_send_pois(self, poi_ids: list[int | str]):
+        """Publish selected POIs to map_node and transition to navigation state.
+
+        Items may be integer POI IDs or POI names. The payload is re-indexed as
+        a dense queue while preserving each POI's original id/name metadata.
+        """
+        with self._lock:
+            self._active_nav_poi_ids = list(poi_ids)
+            self._nav_progress = None
+        if not poi_ids:
+            self._cmd_pois_pub.publish(String(data='{}'))
+            self._set_nav_active(False)
+        else:
+            # New navigation session – allow map handoffs to trigger again.
+            with self._lock:
+                self._handled_map_handoffs.clear()
+            pois_file = os.path.join(self.map_path, 'pois.json')
+            if not os.path.exists(pois_file):
+                self.get_logger().warn('No pois.json found, cannot publish cmd_pois')
+                return
+            with open(pois_file) as f:
+                all_pois = json.load(f)
+            pois_by_name = {
+                poi.get('name'): poi
+                for poi in all_pois.values()
+                if isinstance(poi, dict) and isinstance(poi.get('name'), str)
+            }
+            # Re-index as a dense queue ("0", "1", ...) so downstream
+            # consumers navigate in the same order the UI/nav_flow sent POIs,
+            # instead of falling back to the original ids / pois.json order.
+            payload = {}
+            for poi_ref in poi_ids:
+                poi = None
+                if isinstance(poi_ref, int):
+                    poi = all_pois.get(str(poi_ref))
+                elif isinstance(poi_ref, str):
+                    poi = pois_by_name.get(poi_ref)
+                    if poi is None and poi_ref.isdigit():
+                        poi = all_pois.get(poi_ref)
+                if poi is not None:
+                    payload[str(len(payload))] = poi
+                else:
+                    self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
+            self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
+            self._set_nav_active(bool(payload))
+        with self._lock:
+            nav_running = self._nav_nodes_running
+        if nav_running:
+            self.state = 'navigation'
+            self._pub_state()
+        else:
+            self._stop_all()
+            self._start('navigation')
+
+    def cmd_nav_start(self, poi_id: str | None = None):
+        if poi_id is not None:
+            # New navigation session – allow map handoffs to trigger again.
+            with self._lock:
+                self._handled_map_handoffs.clear()
+            with self._lock:
+                self._active_nav_poi_ids = [int(poi_id)]
+                self._nav_progress = None
             self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         else:
             self._set_nav_active(False)
