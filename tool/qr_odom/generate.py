@@ -44,9 +44,9 @@ def _page_for(grid: int) -> tuple[float, float]:
     return A4_MM if grid <= 2 else A3_MM
 
 
-def generate(grid: int, size_m: float, spacing_m: float) -> None:
+def generate(grid: int, size_m: float, spacing_m: float, id_offset: int = 0) -> None:
     n          = grid
-    tag_ids    = list(range(n * n))
+    tag_ids    = list(range(id_offset, id_offset + n * n))
     size_mm    = size_m    * 1000
     spacing_mm = spacing_m * 1000
     board_mm   = n * size_mm + (n - 1) * spacing_mm
@@ -90,9 +90,10 @@ def generate(grid: int, size_m: float, spacing_m: float) -> None:
     ay0   = img_y + margin_pt
     ax1   = ax0 + active_board_pt
 
-    _smm     = int(round(size_m * 1000))
-    out_pdf  = DB_DIR / f"tag_grid_{n}x{n}_s{_smm}mm.pdf"
-    out_json = DB_DIR / f"tag_grid_{n}x{n}_s{_smm}mm.json"
+    _smm    = int(round(size_m * 1000))
+    _suffix = f"_id{tag_ids[0]}-{tag_ids[-1]}" if id_offset else ""
+    out_pdf  = DB_DIR / f"tag_grid_{n}x{n}_s{_smm}mm{_suffix}.pdf"
+    out_json = DB_DIR / f"tag_grid_{n}x{n}_s{_smm}mm{_suffix}.json"
 
     c = canvas.Canvas(str(out_pdf), pagesize=(PW, PH))
 
@@ -142,7 +143,7 @@ def generate(grid: int, size_m: float, spacing_m: float) -> None:
         f"board: {board_mm:.0f} mm  |  per tag: {size_mm:.0f} mm  |  gap: {spacing_mm:.0f} mm")
     c.setFont("Helvetica", 8)
     c.drawCentredString(cx, dim_y - 11 * mm,
-        f"AprilTag 36h11  |  {n}×{n} grid  |  ids: 0 – {n*n - 1}")
+        f"AprilTag 36h11  |  {n}×{n} grid  |  ids: {tag_ids[0]} – {tag_ids[-1]}")
     c.setFillColorRGB(0.4, 0.4, 0.4)
     c.drawCentredString(cx, dim_y - 17 * mm,
         f"Print at 100% on {pw_mm:.0f}×{ph_mm:.0f} mm paper (no 'fit to page').  "
@@ -159,7 +160,7 @@ def generate(grid: int, size_m: float, spacing_m: float) -> None:
         "spacing_m":  spacing_m,
     }, indent=2))
 
-    print(f"Grid     : {n}×{n}  ({n*n} tags, ids 0–{n*n-1})")
+    print(f"Grid     : {n}×{n}  ({n*n} tags, ids {tag_ids[0]}–{tag_ids[-1]})")
     print(f"Tag size : {size_mm:.0f} mm  gap: {spacing_mm:.0f} mm  board: {board_mm:.0f}×{board_mm:.0f} mm")
     print(f"Paper    : {pw_mm:.0f}×{ph_mm:.0f} mm")
     print(f"PDF      : {out_pdf}")
@@ -179,10 +180,14 @@ def main():
                         help="Tag marker size in meters (default: 0.076)")
     parser.add_argument("--spacing", type=float, default=0.019,
                         help="Tag spacing in meters (default: 0.019)")
+    parser.add_argument("--id-offset", type=int, default=0,
+                        help="First tag id for this board (default: 0). Use "
+                             "non-overlapping offsets to generate multiple "
+                             "boards for different physical locations.")
     args = parser.parse_args()
 
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    generate(args.grid, args.size, args.spacing)
+    generate(args.grid, args.size, args.spacing, args.id_offset)
 
 
 if __name__ == "__main__":

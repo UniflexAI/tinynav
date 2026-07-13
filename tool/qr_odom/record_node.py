@@ -51,11 +51,11 @@ import rclpy
 from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_ros import Buffer, TransformListener
 
 from tinynav.core.math_utils import msg2np, tf2np
+from tool.qr_odom.pose_utils import mean_T, rotation_angle_deg
 from tool.qr_odom.robot_frame import T_CAMERA_ROBOT
 
 # ---------------------------------------------------------------------------
@@ -86,27 +86,6 @@ ROTATION_OUTLIER_DEG = 5.0  # warn if a sample's rotation strays this far from t
 
 # camera → robot frame transform lives in robot_frame.py, shared by every
 # qr_odom node.
-
-
-# ---------------------------------------------------------------------------
-# Rotation averaging (simple, no C++ dependency)
-# ---------------------------------------------------------------------------
-
-def _mean_T(samples: list[np.ndarray]) -> np.ndarray:
-    """Average a list of 4×4 SE3 matrices: mean position + mean rotation."""
-    p_mean = np.mean([T[:3, 3] for T in samples], axis=0)
-    rots   = Rotation.concatenate([Rotation.from_matrix(T[:3, :3]) for T in samples])
-    R_mean = rots.mean().as_matrix()
-    T_mean = np.eye(4)
-    T_mean[:3, :3] = R_mean
-    T_mean[:3,  3] = p_mean
-    return T_mean
-
-
-def _rotation_angle_deg(R_a: np.ndarray, R_b: np.ndarray) -> float:
-    """Angle (deg) of the relative rotation between two 3×3 rotation matrices."""
-    relative = Rotation.from_matrix(R_a.T @ R_b)
-    return float(np.degrees(relative.magnitude()))
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +193,8 @@ class RecordNode(Node):
         T_world_board = self._T_world_camera @ T_camera_board
 
         if self._samples:
-            R_mean = _mean_T(self._samples)[:3, :3]
-            angle_deg = _rotation_angle_deg(R_mean, T_world_board[:3, :3])
+            R_mean = mean_T(self._samples)[:3, :3]
+            angle_deg = rotation_angle_deg(R_mean, T_world_board[:3, :3])
             if angle_deg > ROTATION_OUTLIER_DEG:
                 self.get_logger().warn(
                     f"Rotation outlier: sample differs from running mean by "
@@ -238,7 +217,7 @@ class RecordNode(Node):
     def _finish(self) -> None:
         self.done = True
 
-        T_world_qrworld = _mean_T(self._samples)
+        T_world_qrworld = mean_T(self._samples)
         T_world_robot   = self._T_world_camera @ T_CAMERA_ROBOT
         T_qrworld_robot = np.linalg.inv(T_world_qrworld) @ T_world_robot
 
