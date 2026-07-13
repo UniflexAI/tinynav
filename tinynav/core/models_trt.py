@@ -4,12 +4,14 @@ import cv2
 from codetiming import Timer
 import platform
 import asyncio
+import tyro
 from tinynav.core.func import alru_cache_numpy
 
 from cuda import cudart
 import ctypes
 import einops
 import logging
+from pathlib import Path
 
 numpy_to_ctypes = {
     np.dtype(np.float32): ctypes.c_float,
@@ -200,6 +202,36 @@ class LightGlueTRT(TRTBase):
 
         return await self.run_graph()
 
+
+def save_matching_visualization(img0, img1, kpts0, kpts1, match_result, output_path="matching_vis.jpg"):
+    keypoints0 = kpts0[0]
+    keypoints1 = kpts1[0]
+    match_indices = match_result["match_indices"][0]
+    valid_mask = match_indices != -1
+    matched0 = keypoints0[valid_mask]
+    matched1 = keypoints1[match_indices[valid_mask]]
+
+    match_vis = cv2.drawMatches(
+        img0,
+        [cv2.KeyPoint(x=float(pt[0]), y=float(pt[1]), size=1) for pt in matched0],
+        img1,
+        [cv2.KeyPoint(x=float(pt[0]), y=float(pt[1]), size=1) for pt in matched1],
+        [cv2.DMatch(_imgIdx=0, _queryIdx=i, _trainIdx=i, _distance=0) for i in range(len(matched0))],
+        None,
+        matchColor=(0, 255, 0),
+        singlePointColor=(255, 0, 0),
+        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+        matchesThickness=1,
+    )
+    cv2.imwrite(output_path, match_vis)
+    print(f"Saved matching visualization to {output_path} (matches: {len(matched0)})")
+
+
+def tag_output_path(output_path: str, tag: str) -> str:
+    path = Path(output_path)
+    return str(path.with_name(f"{path.stem}_{tag}{path.suffix}"))
+
+
 class Dinov2TRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/dinov2_base_224x224_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
@@ -379,28 +411,46 @@ class RetinifyTRT(TRTBase):
 StereoEngineTRT = RetinifyTRT
 
 
-if __name__ == "__main__":
-    # Synthetic sanity test for both RealSense and Looper resolutions.
+def main(
+    left: str | None = None,
+    right: str | None = None,
+    output: str = "matching_vis.jpg",
+) -> None:
+    if (left is None) != (right is None):
+        raise ValueError("--left and --right must be provided together")
+
     dinov2 = Dinov2TRT()
     superpoint = SuperPointTRT()
     light_glue = LightGlueTRT()
     stereo_engine = StereoEngineTRT()
 
-    # Each entry: (name, width, height)
-    resolutions = [
-        ("realsense", 848, 480),
-        ("looper", 544, 640),
-    ]
+    image_pairs = []
+    if left is not None:
+        left_img = cv2.imread(left, cv2.IMREAD_GRAYSCALE)
+        right_img = cv2.imread(right, cv2.IMREAD_GRAYSCALE)
+        if left_img is None:
+            raise FileNotFoundError(f"failed to read left image: {left}")
+        if right_img is None:
+            raise FileNotFoundError(f"failed to read right image: {right}")
+        if left_img.shape != right_img.shape:
+            raise ValueError(f"left/right image shapes differ: {left_img.shape} vs {right_img.shape}")
+        image_pairs.append(("input", left_img, right_img))
+    else:
+        # Synthetic sanity test for both RealSense and Looper resolutions.
+        for tag, width, height in [
+            ("realsense", 848, 480),
+            ("looper", 544, 640),
+        ]:
+            left_img = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+            right_img = np.random.randint(0, 256, (height, width), dtype=np.uint8)
+            image_pairs.append((tag, left_img, right_img))
 
     match_threshold = np.array([0.1], dtype=np.float32)
-    threshold = np.array([0.015], dtype=np.float32)
-
-    for tag, width, height in resolutions:
+    save_tagged_outputs = len(image_pairs) > 1
+    for tag, dummy_left, dummy_right in image_pairs:
+        height, width = dummy_left.shape[:2]
         print(f"\n=== Testing stereo pipeline for {tag} resolution: {height}x{width} ===")
         image_shape = np.array([width, height], dtype=np.int64)
-
-        dummy_left = np.random.randint(0, 256, (height, width), dtype=np.uint8)
-        dummy_right = np.random.randint(0, 256, (height, width), dtype=np.uint8)
 
         with Timer(text=f"[dinov2:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
             _ = asyncio.run(dinov2.infer(dummy_left))
@@ -410,7 +460,7 @@ if __name__ == "__main__":
             right_extract_result = asyncio.run(superpoint.infer(dummy_right))
 
         with Timer(text=f"[lightglue:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
-            _ = asyncio.run(
+            matching_result = asyncio.run(
                 light_glue.infer(
                     left_extract_result["kpts"],
                     right_extract_result["kpts"],
@@ -423,6 +473,14 @@ if __name__ == "__main__":
                     match_threshold,
                 )
             )
+            save_matching_visualization(
+                dummy_left,
+                dummy_right,
+                left_extract_result["kpts"],
+                right_extract_result["kpts"],
+                matching_result,
+                tag_output_path(output, tag) if save_tagged_outputs else output,
+            )
 
         with Timer(text=f"[stereo:{tag}] Elapsed time: {{milliseconds:.0f}} ms"):
             baseline = np.array([[0.05]], dtype=np.float32)
@@ -430,3 +488,7 @@ if __name__ == "__main__":
             _disp, _depth = asyncio.run(
                 stereo_engine.infer(dummy_left, dummy_right, baseline, focal_length)
             )
+
+
+if __name__ == "__main__":
+    tyro.cli(main)

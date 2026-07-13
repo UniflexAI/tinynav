@@ -26,11 +26,11 @@ class Args:
     paths_json_name: str = "paths.json"
     """Editable path control-point file saved under tinynav_map_path."""
 
-    path_sdf_map_name: str = "sdf_map.npy"
-    """The active/new path map. Tinynav reads this file."""
+    sdf_map_name: str = "sdf_map.npy"
+    """Active SDF path-map file used by Tinynav; Replace Current SDF Map overwrites this file."""
 
     default_sdf_map_name: str = "sdf_map.default.npy"
-    """The default/original path map. Restore Default Map copies this over the active path map."""
+    """Backup of the original/default SDF path-map, used by Restore Default SDF Map."""
 
     path_radius_m: float = 0.2
     """SDF distance threshold used by map_node; voxels near edited paths become low-SDF corridor."""
@@ -152,7 +152,7 @@ class PathEditor:
         self.args = args
         self.map_dir = args.tinynav_map_path
         self.paths_json_path = self.map_dir / args.paths_json_name
-        self.path_sdf_map_path = self.map_dir / args.path_sdf_map_name
+        self.sdf_map_path = self.map_dir / args.sdf_map_name
         self.default_sdf_map_path = self.map_dir / args.default_sdf_map_name
 
         self.occupancy_grid = np.load(self.map_dir / "occupancy_grid.npy")
@@ -160,11 +160,11 @@ class PathEditor:
         self.origin = self.occupancy_meta[:3].astype(np.float32)
         self.resolution = float(self.occupancy_meta[3])
         self.shape = tuple(int(v) for v in self.occupancy_grid.shape)
-        self.path_sdf_map = self._load_sdf_file(self.path_sdf_map_path)
+        self.current_sdf_map = self._load_sdf_file(self.sdf_map_path)
         self.default_sdf_map = self._load_sdf_file(self.default_sdf_map_path)
         if self.default_sdf_map is None:
-            # First run on an old map: sdf_map.npy is still the default map.
-            self.default_sdf_map = self.path_sdf_map
+            # Before the first replacement there is no separate backup, so the active file is the default map.
+            self.default_sdf_map = self.current_sdf_map
 
         self.paths = _load_json(self.paths_json_path)
         self.path_id_counter = (max(self.paths.keys()) + 1) if self.paths else 0
@@ -193,14 +193,14 @@ class PathEditor:
     def _edited_sdf_map(self) -> np.ndarray:
         return build_sdf_from_paths(self.paths, self.origin, self.resolution, self.shape)
 
-    def _ensure_default_map(self) -> None:
+    def _ensure_default_backup(self) -> None:
         if self.default_sdf_map_path.exists():
             return
-        if self.path_sdf_map is None:
+        if self.current_sdf_map is None:
             return
-        shutil.copy2(self.path_sdf_map_path, self.default_sdf_map_path)
-        self.default_sdf_map = self.path_sdf_map.copy()
-        print(f"Created default map: {self.default_sdf_map_path}")
+        np.save(self.default_sdf_map_path, self.current_sdf_map)
+        self.default_sdf_map = self.current_sdf_map.copy()
+        print(f"Saved default SDF backup to {self.default_sdf_map_path}")
 
     def run(self) -> None:
         self._add_static_map_layers()
@@ -221,6 +221,13 @@ class PathEditor:
             points[:, 0] = float(self.origin[0]) + xy_indices[:, 0] * self.resolution
             points[:, 1] = float(self.origin[1]) + xy_indices[:, 1] * self.resolution
             points[:, 2] = z_plane
+            return points
+
+        def xyz_world(xyz_indices: np.ndarray) -> np.ndarray:
+            points = np.zeros((len(xyz_indices), 3), dtype=np.float32)
+            points[:, 0] = float(self.origin[0]) + xyz_indices[:, 0] * self.resolution
+            points[:, 1] = float(self.origin[1]) + xyz_indices[:, 1] * self.resolution
+            points[:, 2] = float(self.origin[2]) + xyz_indices[:, 2] * self.resolution
             return points
 
         free_indices = np.argwhere(x_y_plane == 1)
@@ -250,9 +257,45 @@ class PathEditor:
                 point_shape="rounded",
             )
 
+        # Full 3D occupancy voxels (true per-voxel height, not the flattened Z-max projection).
+        # Off by default: useful when placing waypoints at a specific height, but can be a lot of points.
+        max_3d_points = 300_000
+
+        def capped_indices(mask: np.ndarray) -> np.ndarray:
+            indices_all = np.argwhere(mask)
+            if len(indices_all) > max_3d_points:
+                stride = int(np.ceil(len(indices_all) / max_3d_points))
+                return indices_all[::stride]
+            return indices_all
+
+        free_3d_points = xyz_world(capped_indices(self.occupancy_grid == 1))
+        occupied_3d_points = xyz_world(capped_indices(self.occupancy_grid == 2))
+        free_3d_handle = None
+        occupied_3d_handle = None
+        if len(free_3d_points) > 0:
+            free_3d_handle = self.server.scene.add_point_cloud(
+                "/occupancy_3d/free",
+                points=free_3d_points,
+                colors=np.tile(np.array([[0.2, 0.4, 1.0]], dtype=np.float32), (len(free_3d_points), 1)),
+                point_size=self.resolution * 0.8,
+                point_shape="rounded",
+            )
+            free_3d_handle.visible = False
+        if len(occupied_3d_points) > 0:
+            occupied_3d_handle = self.server.scene.add_point_cloud(
+                "/occupancy_3d/occupied",
+                points=occupied_3d_points,
+                colors=np.tile(np.array([[0.6, 0.6, 0.6]], dtype=np.float32), (len(occupied_3d_points), 1)),
+                point_size=self.resolution * 0.8,
+                point_shape="rounded",
+            )
+            occupied_3d_handle.visible = False
+
         with self.server.gui.add_folder("Occupancy 2D Map"):
             show_free = self.server.gui.add_checkbox("Show Free", initial_value=True)
             show_occupied = self.server.gui.add_checkbox("Show Occupied", initial_value=True)
+            show_free_3d = self.server.gui.add_checkbox("Show 3D Free (true height)", initial_value=False)
+            show_occupied_3d = self.server.gui.add_checkbox("Show 3D Occupied (true height)", initial_value=False)
             point_size = self.server.gui.add_slider(
                 "Point Size", min=0.001, max=max(0.1, self.resolution), step=0.001, initial_value=self.resolution * 0.8
             )
@@ -267,12 +310,26 @@ class PathEditor:
                 if occupied_handle is not None:
                     occupied_handle.visible = show_occupied.value
 
+            @show_free_3d.on_update
+            def _(_) -> None:
+                if free_3d_handle is not None:
+                    free_3d_handle.visible = show_free_3d.value
+
+            @show_occupied_3d.on_update
+            def _(_) -> None:
+                if occupied_3d_handle is not None:
+                    occupied_3d_handle.visible = show_occupied_3d.value
+
             @point_size.on_update
             def _(_) -> None:
                 if free_handle is not None:
                     free_handle.point_size = point_size.value
                 if occupied_handle is not None:
                     occupied_handle.point_size = point_size.value
+                if free_3d_handle is not None:
+                    free_3d_handle.point_size = point_size.value
+                if occupied_3d_handle is not None:
+                    occupied_3d_handle.point_size = point_size.value
 
     def _add_optional_pointcloud(self) -> None:
         pointcloud_path = self.map_dir / "pointcloud.ply"
@@ -306,8 +363,8 @@ class PathEditor:
             add_waypoint = self.server.gui.add_button("Add Waypoint To Selected")
             delete_last_waypoint = self.server.gui.add_button("Delete Last Waypoint")
             delete_path = self.server.gui.add_button("Delete Selected Path", color=(255, 80, 80))
-            replace_sdf = self.server.gui.add_button("Build / Replace Path Map", color=(80, 200, 80))
-            restore_default_sdf = self.server.gui.add_button("Restore Default Map", color=(80, 120, 255))
+            replace_sdf = self.server.gui.add_button("Replace Current SDF Map", color=(80, 200, 80))
+            restore_default_sdf = self.server.gui.add_button("Restore Default SDF Map", color=(80, 120, 255))
 
             @selected.on_update
             def _(_) -> None:
@@ -369,23 +426,31 @@ class PathEditor:
 
             @replace_sdf.on_click
             def _(_) -> None:
-                # Keep exactly two SDF maps: default_sdf_map_path and path_sdf_map_path.
+                # Save a permanent default backup before the first replacement, then write a fully new path map.
                 _save_json(self.paths_json_path, self.paths)
-                self._ensure_default_map()
-                self.path_sdf_map = self._edited_sdf_map()
-                np.save(self.path_sdf_map_path, self.path_sdf_map)
+                self._ensure_default_backup()
+                if self.sdf_map_path.exists():
+                    backup_path = self.sdf_map_path.with_suffix(f".bak-{time.strftime('%Y%m%d-%H%M%S')}.npy")
+                    shutil.copy2(self.sdf_map_path, backup_path)
+                    print(f"Backed up active SDF map to {backup_path}")
+                self.current_sdf_map = self._edited_sdf_map()
+                np.save(self.sdf_map_path, self.current_sdf_map)
                 self._refresh_sdf_preview()
-                self._set_status(f"Built path map: {self.path_sdf_map_path.name}; saved {self.paths_json_path.name}")
+                self._set_status(f"Replaced active SDF map with edited path map; saved {self.paths_json_path.name}")
 
             @restore_default_sdf.on_click
             def _(_) -> None:
                 if self.default_sdf_map is None:
-                    self._set_status("No default map available to restore")
+                    self._set_status("No default SDF map available to restore")
                     return
-                np.save(self.path_sdf_map_path, self.default_sdf_map)
-                self.path_sdf_map = self.default_sdf_map.copy()
+                if self.sdf_map_path.exists():
+                    backup_path = self.sdf_map_path.with_suffix(f".bak-{time.strftime('%Y%m%d-%H%M%S')}.npy")
+                    shutil.copy2(self.sdf_map_path, backup_path)
+                    print(f"Backed up active SDF map to {backup_path}")
+                np.save(self.sdf_map_path, self.default_sdf_map)
+                self.current_sdf_map = self.default_sdf_map.copy()
                 self._refresh_sdf_preview()
-                self._set_status(f"Restored default map into {self.path_sdf_map_path.name}")
+                self._set_status("Restored default SDF map to active sdf_map.npy")
 
     def _default_new_point(self) -> np.ndarray:
         traversable = np.argwhere(self.occupancy_grid != 2)
@@ -460,9 +525,9 @@ class PathEditor:
         if self.sdf_preview_handle is not None:
             self.sdf_preview_handle.remove()
             self.sdf_preview_handle = None
-        preview_sdf = self.path_sdf_map
+        preview_sdf = self.current_sdf_map
         if preview_sdf is None:
-            print("No path map available for preview")
+            print("No active SDF map available for preview")
             return
         traversable_mask = self.occupancy_grid != 2
         mask = np.logical_and.reduce((traversable_mask, np.isfinite(preview_sdf), preview_sdf < self.args.path_radius_m))
@@ -484,7 +549,7 @@ class PathEditor:
             point_shape="rounded",
         )
         print(
-            f"Previewing {len(points)} low-SDF voxels from path map "
+            f"Previewing {len(points)} low-SDF voxels from active SDF map "
             f"(threshold={self.args.path_radius_m:.3f}m, total={len(indices_all)})"
         )
 

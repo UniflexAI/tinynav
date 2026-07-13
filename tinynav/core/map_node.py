@@ -424,6 +424,7 @@ class MapNode(Node):
         self.continuous_odom_recorder = OdomPoseRecorder(tinynav_db_path, "localization")
 
         self.odom = {}
+        self.latest_odom_pose = None
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
@@ -484,6 +485,7 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -598,12 +600,6 @@ class MapNode(Node):
                 self.compute_transform_from_map_to_odom()
                 self.first_done = True
 
-        with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.try_publish_nav_path(keyframe_image_timestamp_ns)
-            # timer or queue for publish the nav path
-            # and record the map pose
-            # compute the coordinate transform from the map pose to the keyframe pose
-            # publish the nav path from the map pose to the keyframe pose with the cost map
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -878,7 +874,8 @@ class MapNode(Node):
         publish_stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, publish_stamp, "world", "map"))
 
-        pose_in_map_position = pose_in_map[:3, 3]
+        poi = self.pois[self.poi_index]
+        pos = pose_in_map[:3, 3]
 
         while self.poi_index < len(self.pois):
             poi = self.pois[self.poi_index]
@@ -921,19 +918,19 @@ class MapNode(Node):
         if paths_in_map is not None:
             closest_position, remaining_length = self._path_progress(paths_in_map, pose_in_map_position[:3])
 
-            now = time.time()
-            if self._leg_initial_length is None:
-                self._leg_initial_length = remaining_length
-                self._leg_start_time = now
+        paths = self.cached_nav_path_in_map
+        self._publish_global_plan(paths)
+        closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
 
-            covered = self._leg_initial_length - remaining_length
-            elapsed = now - self._leg_start_time
-            if covered > 0.1 and elapsed > 1.0:
-                self._speed_estimate = covered / elapsed
+        remaining_length = sum(
+            np.linalg.norm(paths[i + 1] - paths[i])
+            for i in range(closest_idx, len(paths) - 1)
+        ) if closest_idx < len(paths) - 1 else 0.0
 
-            initial = self._leg_initial_length
-            percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
-            estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
+        now = time.time()
+        if self._leg_initial_length is None:
+            self._leg_initial_length = remaining_length
+            self._leg_start_time = now
 
             progress_msg = String()
             progress_msg.data = json.dumps(self._nav_progress_payload(

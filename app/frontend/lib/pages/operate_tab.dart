@@ -1541,9 +1541,14 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
   void _showFullscreen(BuildContext context) {
     final topic = ref.read(selectedPreviewTopicProvider);
     if (topic == null) return;
+    final quality = ref.read(previewQualityProvider);
     showDialog(
       context: context,
-      builder: (_) => _FullscreenPreview(topic: topic, fit: _previewFit),
+      builder: (_) => _FullscreenPreview(
+        topic: topic,
+        quality: quality,
+        fit: _previewFit,
+      ),
     );
   }
 
@@ -1551,6 +1556,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
   Widget build(BuildContext context) {
     final topicsAsync = ref.watch(imageTopicsProvider);
     final selectedTopic = ref.watch(selectedPreviewTopicProvider);
+    final previewQuality = ref.watch(previewQualityProvider);
     final topics = topicsAsync.valueOrNull ?? [];
     final baseUrl = ref.watch(baseUrlProvider);
     final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
@@ -1572,7 +1578,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
 
     if (selectedTopic != null) {
       ref.listen<AsyncValue<Uint8List>>(
-        previewStreamProvider(selectedTopic),
+        previewStreamProvider((topic: selectedTopic, quality: previewQuality)),
         (_, next) {
           if (next case AsyncData(:final value)) {
             if (mounted) setState(() => _latestFrame = value);
@@ -1636,82 +1642,13 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                 children: [
                   const Icon(Icons.videocam_outlined, color: Colors.white70, size: 14),
                   const SizedBox(width: 6),
-                  Tooltip(
-                    message: _previewCover ? 'Fill preview' : 'Show full preview',
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(14),
-                      onTap: () => setState(() => _previewCover = !_previewCover),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
-                        child: Icon(
-                          _previewCover ? Icons.crop_free_rounded : Icons.fit_screen_rounded,
-                          color: Colors.white70,
-                          size: 15,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  DropdownButton<String?>(
-                    value: selectedTopic,
-                    hint: const Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
-                    dropdownColor: Colors.black87,
-                    underline: const SizedBox(),
-                    isDense: true,
-                    items: [
-                      const DropdownMenuItem<String?>(
-                        value: null,
-                        child: Text('Off', style: TextStyle(color: Colors.white54, fontSize: 12)),
-                      ),
-                      ...topics.map((t) {
-                        const labels = {
-                          '/camera/camera/color/image_raw': 'color',
-                          '/camera/camera/infra1/image_rect_raw': 'left',
-                          '/camera/camera/infra2/image_rect_raw': 'right',
-                          '/slam/depth': 'depth',
-                        };
-                        final label = labels[t] ?? t.split('/').last;
-                        return DropdownMenuItem<String?>(
-                          value: t,
-                          child: Text(label),
-                        );
-                      }),
-                    ],
-                    onChanged: (v) {
-                      ref.read(selectedPreviewTopicProvider.notifier).state = v;
-                      if (v == null) setState(() => _latestFrame = null);
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (selectedTopic != null && _latestFrame != null)
-            Positioned(
-              bottom: 8, right: 8,
-              child: GestureDetector(
-                onTap: () => _showFullscreen(context),
-                child: Container(
-                  padding: const EdgeInsets.all(4),
-                  decoration: BoxDecoration(
-                    color: Colors.black54,
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: const Icon(Icons.fullscreen, color: Colors.white, size: 20),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FullscreenPreview extends ConsumerStatefulWidget {
-  final String topic;
+  final PreviewQuality quality;
   final BoxFit fit;
-  const _FullscreenPreview({required this.topic, required this.fit});
+  const _FullscreenPreview({
+    required this.topic,
+    required this.quality,
+    required this.fit,
+  });
 
   @override
   ConsumerState<_FullscreenPreview> createState() => _FullscreenPreviewState();
@@ -1723,7 +1660,7 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
   @override
   Widget build(BuildContext context) {
     ref.listen<AsyncValue<Uint8List>>(
-      previewStreamProvider(widget.topic),
+      previewStreamProvider((topic: widget.topic, quality: widget.quality)),
       (_, next) {
         if (next case AsyncData(:final value)) {
           if (mounted) setState(() => _frame = value);

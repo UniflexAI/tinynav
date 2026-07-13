@@ -306,6 +306,20 @@ def _plan_sdf_path_between_points(
     return world_path, f"SDF path OK: raw={len(raw_path)}, pruned={len(pruned_path)}, start_idx={start_idx}, goal_idx={goal_idx}"
 
 
+def _poi_path_role_label(poi_index: int, nav_state: dict | None) -> str:
+    if nav_state is None:
+        return "—"
+    is_start = nav_state.get("start_poi_id") == poi_index
+    is_goal = nav_state.get("goal_poi_id") == poi_index
+    if is_start and is_goal:
+        return "Start & End"
+    if is_start:
+        return "Start"
+    if is_goal:
+        return "End"
+    return "—"
+
+
 def create_poi_ui(
     server,
     poi_list_container,
@@ -317,6 +331,13 @@ def create_poi_ui(
 ):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
+            role_label = None
+            if nav_state is not None:
+                role_label = server.gui.add_text(
+                    "Path Role",
+                    initial_value=_poi_path_role_label(poi_index, nav_state),
+                )
+                nav_state.setdefault("poi_role_labels", {})[poi_index] = role_label
             gui_vector3 = server.gui.add_vector3(
                 "Position",
                 initial_value=poi_points[poi_index]['position'],
@@ -392,6 +413,7 @@ def create_poi_ui(
                 nav_state["start_poi_id"] = None
             if nav_state.get("goal_poi_id") == poi_index:
                 nav_state["goal_poi_id"] = None
+            nav_state.setdefault("poi_role_labels", {}).pop(poi_index, None)
         poi_container.remove()
         sphere_handle.remove()
         gizmo.remove()
@@ -505,9 +527,18 @@ def main(
         "start_marker": None,
         "goal_marker": None,
         "path_handle": None,
+        "poi_role_labels": {},
     }
 
+    def refresh_poi_role_labels() -> None:
+        for poi_id, label in list(nav_state.get("poi_role_labels", {}).items()):
+            if poi_id in poi_points:
+                label.value = _poi_path_role_label(poi_id, nav_state)
+            else:
+                nav_state["poi_role_labels"].pop(poi_id, None)
+
     def refresh_nav_markers() -> None:
+        refresh_poi_role_labels()
         for marker_key, poi_key, color, radius in [
             ("start_marker", "start_poi_id", (0, 255, 0), 0.25),
             ("goal_marker", "goal_poi_id", (255, 0, 0), 0.25),
@@ -722,12 +753,51 @@ def main(
                         point_size=resolution * 0.8,
                         point_shape="rounded",
                     )
-        
+
+        # Full 3D occupancy voxels (true per-voxel height, not the flattened Z-max projection).
+        # Off by default: useful when placing POIs/paths at a specific height, but can be a lot of points.
+        max_3d_points = 300_000
+
+        def _capped_indices(mask: np.ndarray) -> np.ndarray:
+            indices_all = np.argwhere(mask)
+            if len(indices_all) > max_3d_points:
+                stride = int(np.ceil(len(indices_all) / max_3d_points))
+                return indices_all[::stride]
+            return indices_all
+
+        occupied_3d_indices = _capped_indices(occupancy_grid == 2)
+        free_3d_indices = _capped_indices(occupancy_grid == 1)
+        occupied_3d_points = _xyz_to_world_points(occupied_3d_indices)
+        free_3d_points = _xyz_to_world_points(free_3d_indices)
+
+        occupied_3d_handle = None
+        free_3d_handle = None
+        if len(occupied_3d_points) > 0:
+            occupied_3d_handle = server.scene.add_point_cloud(
+                "/occupancy_3d/occupied",
+                points=occupied_3d_points,
+                colors=np.tile(np.array([[0.6, 0.6, 0.6]], dtype=np.float32), (len(occupied_3d_points), 1)),
+                point_size=resolution * 0.8,
+                point_shape="rounded",
+            )
+            occupied_3d_handle.visible = False
+        if len(free_3d_points) > 0:
+            free_3d_handle = server.scene.add_point_cloud(
+                "/occupancy_3d/free",
+                points=free_3d_points,
+                colors=np.tile(np.array([[0.2, 0.4, 1.0]], dtype=np.float32), (len(free_3d_points), 1)),
+                point_size=resolution * 0.8,
+                point_shape="rounded",
+            )
+            free_3d_handle.visible = False
+
         if (
             unknown_handle is not None
             or free_handle is not None
             or occupied_handle is not None
             or sdf_search_handle is not None
+            or occupied_3d_handle is not None
+            or free_3d_handle is not None
         ):
             # Default visibility for projected 2D occupancy.
             if unknown_handle is not None:
@@ -744,6 +814,8 @@ def main(
                 show_free = server.gui.add_checkbox("Show Free", initial_value=True)
                 show_occupied = server.gui.add_checkbox("Show Occupied", initial_value=True)
                 show_sdf_search_region = server.gui.add_checkbox("Show SDF<0.2m Region", initial_value=False)
+                show_occupied_3d = server.gui.add_checkbox("Show 3D Occupied (true height)", initial_value=False)
+                show_free_3d = server.gui.add_checkbox("Show 3D Free (true height)", initial_value=False)
                 point_size_slider = server.gui.add_slider(
                     "Point Size", min=0.001, max=point_size_max, step=0.001, initial_value=point_size_init
                 )
@@ -752,7 +824,7 @@ def main(
                 def _(_) -> None:
                     if free_handle is not None:
                         free_handle.visible = show_free.value
-                
+
                 @show_occupied.on_update
                 def _(_) -> None:
                     if occupied_handle is not None:
@@ -762,6 +834,16 @@ def main(
                 def _(_) -> None:
                     if sdf_search_handle is not None:
                         sdf_search_handle.visible = show_sdf_search_region.value
+
+                @show_occupied_3d.on_update
+                def _(_) -> None:
+                    if occupied_3d_handle is not None:
+                        occupied_3d_handle.visible = show_occupied_3d.value
+
+                @show_free_3d.on_update
+                def _(_) -> None:
+                    if free_3d_handle is not None:
+                        free_3d_handle.visible = show_free_3d.value
 
                 @point_size_slider.on_update
                 def _(_) -> None:
@@ -773,6 +855,10 @@ def main(
                         occupied_handle.point_size = point_size_slider.value
                     if sdf_search_handle is not None:
                         sdf_search_handle.point_size = point_size_slider.value
+                    if occupied_3d_handle is not None:
+                        occupied_3d_handle.point_size = point_size_slider.value
+                    if free_3d_handle is not None:
+                        free_3d_handle.point_size = point_size_slider.value
     else:
         print(f"Warning: Occupancy grid files not found in {tinynav_map_path}")
         if not occupancy_grid_path.exists():
