@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tool.benchmark.map_retrieval_self_consistency import (
+from tool.benchmark.map_retrieval_self_consistency_common import (
     _apply_se2,
     _load_descriptor_embeddings,
     _load_poses,
