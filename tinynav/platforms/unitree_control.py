@@ -8,10 +8,35 @@ from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
 from std_msgs.msg import Float32, String
 from enum import Enum
 import logging
+import os
 import time
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# ChannelFactoryInitialize raises "does not match an available interface" when
+# the robot NIC (enP8p1s0) isn't up yet at boot. Retry instead of crashing so
+# the node comes up as soon as the interface appears.
+_IFACE_ATTEMPTS = int(os.environ.get('UNITREE_IFACE_ATTEMPTS', '60'))
+_IFACE_RETRY_SEC = float(os.environ.get('UNITREE_IFACE_RETRY_SEC', '2.0'))
+
+
+def init_channel_with_retry(networkInterface: str):
+    """Initialize the Unitree DDS channel, retrying with a fixed delay until the
+    robot network interface is available. Raises once all attempts are used."""
+    last_err = None
+    for i in range(1, _IFACE_ATTEMPTS + 1):
+        try:
+            return ChannelFactoryInitialize(0, networkInterface)
+        except Exception as e:  # SDK raises bare Exception when iface not up yet
+            last_err = e
+            logger.warning(
+                "unitree channel init on %s failed (attempt %d/%d): %s; retry in %.0fs",
+                networkInterface, i, _IFACE_ATTEMPTS, e, _IFACE_RETRY_SEC)
+            time.sleep(_IFACE_RETRY_SEC)
+    raise RuntimeError(
+        f"unitree channel init on '{networkInterface}' failed after "
+        f"{_IFACE_ATTEMPTS} attempts") from last_err
 
 
 class RobotStatus(Enum):
@@ -22,7 +47,7 @@ class RobotStatus(Enum):
 class Ros2UnitreeManagerNode(Node):
     def __init__(self, networkInterface: str = "enP8p1s0"):
         super().__init__('ros2_unitree_manager')
-        self.channel = ChannelFactoryInitialize(0, networkInterface)
+        self.channel = init_channel_with_retry(networkInterface)
         self.sport_client = SportClientB2()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
