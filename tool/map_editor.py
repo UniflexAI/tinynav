@@ -397,6 +397,7 @@ def create_poi_ui(
     sphere_handle: viser.SceneHandle,
     nav_state: dict | None = None,
     refresh_nav_markers=None,
+    poi_handles_registry: dict | None = None,
 ):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
@@ -448,10 +449,14 @@ def create_poi_ui(
     color_b_slider.on_update(update_color)
 
     gizmo = server.scene.add_transform_controls(
-        f"/{poi_points[poi_index]['name']}_gizmo",
+        f"/poi/{poi_points[poi_index]['name']}_gizmo",
         position=poi_points[poi_index]['position'],
         wxyz=(1.0, 0.0, 0.0, 0.0),
     )
+
+    # Register handles for mode-based visibility toggling
+    if poi_handles_registry is not None:
+        poi_handles_registry[poi_index] = {"sphere": sphere_handle, "gizmo": gizmo}
 
     def on_gizmo_update(event):
         sphere_handle.position = event.target.position
@@ -486,6 +491,8 @@ def create_poi_ui(
         poi_container.remove()
         sphere_handle.remove()
         gizmo.remove()
+        if poi_handles_registry is not None:
+            poi_handles_registry.pop(poi_index, None)
         if refresh_nav_markers is not None:
             refresh_nav_markers()
 
@@ -663,6 +670,37 @@ def main(args: Args) -> None:
             )
 
     # ------------------------------------------------------------------
+    # Edit mode toggle (Both / POI / Path)
+    # ------------------------------------------------------------------
+    poi_handles_registry: dict[int, dict[str, viser.SceneHandle]] = {}
+    edit_mode = {"value": "Both"}  # mutable holder for closure access
+
+    def _apply_edit_mode() -> None:
+        show_poi = edit_mode["value"] in ("Both", "POI")
+        show_path = edit_mode["value"] in ("Both", "Path")
+        for h in poi_handles_registry.values():
+            if h.get("sphere") is not None:
+                h["sphere"].visible = show_poi
+            if h.get("gizmo") is not None:
+                h["gizmo"].visible = show_poi
+        for h in path_point_handles.values():
+            h.visible = show_path
+        for h in path_gizmo_handles.values():
+            h.visible = show_path
+        for h in path_line_handles.values():
+            h.visible = show_path
+
+    with server.gui.add_folder("Edit Mode") as _:
+        edit_mode_dropdown = server.gui.add_dropdown(
+            "Mode", options=["Both", "POI", "Path"], initial_value="Both"
+        )
+
+        @edit_mode_dropdown.on_update
+        def _(_) -> None:
+            edit_mode["value"] = edit_mode_dropdown.value
+            _apply_edit_mode()
+
+    # ------------------------------------------------------------------
     # Load POIs
     # ------------------------------------------------------------------
     if os.path.exists(f"{map_dir}/pois.json"):
@@ -691,12 +729,12 @@ def main(args: Args) -> None:
         poi_list_container = server.gui.add_folder("POI List")
         for poi_id, poi_point in poi_points.items():
             sphere_handle = server.scene.add_icosphere(
-                f"/{poi_point['name']}",
+                f"/poi/{poi_point['name']}",
                 radius=0.1,
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_point['position'],
             )
-            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, nav_state, refresh_nav_markers)
+            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, nav_state, refresh_nav_markers, poi_handles_registry)
 
         @add_poi_button.on_click
         def _(_) -> None:
@@ -716,12 +754,12 @@ def main(args: Args) -> None:
                 'position': poi_position,
             }
             sphere_handle = server.scene.add_icosphere(
-                f"/{poi_name}",
+                f"/poi/{poi_name}",
                 radius=0.1,
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_points[poi_id]['position'],
             )
-            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, nav_state, refresh_nav_markers)
+            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, nav_state, refresh_nav_markers, poi_handles_registry)
 
     # ------------------------------------------------------------------
     # Occupancy grid + SDF map
@@ -1016,7 +1054,7 @@ def main(args: Args) -> None:
             key = (pid, point_idx)
             point_name = f"/paths/{item['name']}/point_{point_idx}"
             path_point_handles[key] = server.scene.add_icosphere(
-                point_name, radius=max(0.05, resolution or 0.05), color=color, position=np.asarray(point, dtype=np.float32)
+                point_name, radius=max(0.03, (resolution or 0.05) * 0.6), color=color, position=np.asarray(point, dtype=np.float32)
             )
             gizmo = server.scene.add_transform_controls(
                 f"{point_name}_gizmo", position=np.asarray(point, dtype=np.float32), wxyz=(1.0, 0.0, 0.0, 0.0)
@@ -1167,6 +1205,7 @@ def main(args: Args) -> None:
     if occupancy_grid is not None:
         _refresh_all_paths()
         _refresh_sdf_preview()
+        _apply_edit_mode()
 
     # ------------------------------------------------------------------
     # SDF POI Path Test (from feat/editor-3d-occupancy-toggle)
