@@ -14,7 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Build a SuperPoint BoW retrieval index for an existing TinyNav map. "
-            "This preserves the existing DINO embeddings and only writes bow_index.npz."
+            "This writes bow_index.npz so the standard map_node.py can use BoW retrieval."
         )
     )
     parser.add_argument("--tinynav_map_path", required=True, help="Path to an existing TinyNav map directory")
@@ -79,7 +79,7 @@ def main() -> None:
         db.close()
 
     logging.info("Done. Wrote %s", output_path)
-    logging.info("Existing DINO embeddings are unchanged; this map can now be used by both map_node.py and map_node_bow.py.")
+    logging.info("BoW index is ready; this map can now be used by map_node.py.")
 
 
 if __name__ == "__main__":

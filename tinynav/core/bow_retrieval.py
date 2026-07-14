@@ -35,10 +35,11 @@ def valid_superpoint_descriptors(features: dict) -> np.ndarray:
 
 
 def _fit_vocab(descriptor_samples: np.ndarray, config: BowConfig) -> np.ndarray:
-    if len(descriptor_samples) < config.vocab_size:
+    vocab_size = min(config.vocab_size, len(descriptor_samples))
+    if vocab_size < 2:
         raise ValueError(
             f"not enough descriptors to train BoW vocabulary: "
-            f"{len(descriptor_samples)} < {config.vocab_size}"
+            f"{len(descriptor_samples)} < 2"
         )
     criteria = (
         cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
@@ -47,7 +48,7 @@ def _fit_vocab(descriptor_samples: np.ndarray, config: BowConfig) -> np.ndarray:
     )
     _compactness, _labels, centers = cv2.kmeans(
         descriptor_samples.astype(np.float32),
-        config.vocab_size,
+        vocab_size,
         None,
         criteria,
         3,
@@ -85,7 +86,7 @@ def build_bow_index(
     train_samples: list[np.ndarray] = []
 
     for timestamp in timestamps:
-        _depth, _embedding, features, _rgb_loader, _infra1_loader = db.get_depth_embedding_features_images(timestamp)
+        features = db.features[timestamp]
         descriptors = valid_superpoint_descriptors(features)
         map_descriptors.append(descriptors)
         if len(descriptors) > config.max_desc_per_image_for_train:
@@ -96,12 +97,13 @@ def build_bow_index(
 
     descriptor_samples = np.concatenate(train_samples, axis=0).astype(np.float32)
     centers = _fit_vocab(descriptor_samples, config)
+    vocab_size = len(centers)
 
     raw_hists = []
-    df = np.zeros(config.vocab_size, dtype=np.float32)
+    df = np.zeros(vocab_size, dtype=np.float32)
     for descriptors in map_descriptors:
         words = assign_words(descriptors, centers)
-        hist = np.bincount(words, minlength=config.vocab_size).astype(np.float32)
+        hist = np.bincount(words, minlength=vocab_size).astype(np.float32)
         raw_hists.append(hist)
         df += hist > 0
 
@@ -122,7 +124,7 @@ def build_bow_index(
         centers=centers,
         idf=idf,
         bow_vectors=np.stack(bow_vectors).astype(np.float32),
-        vocab_size=np.asarray([config.vocab_size], dtype=np.int64),
+        vocab_size=np.asarray([vocab_size], dtype=np.int64),
     )
 
 

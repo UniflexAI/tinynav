@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, np2tf, rerank_by_pnp_inliers
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -19,12 +19,13 @@ from codetiming import Timer
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
-from tinynav.core.build_map_node import find_loop, solve_pose_graph
+from tinynav.core.build_map_node import solve_pose_graph
+from tinynav.core.bow_retrieval import BowIndex, build_bow_index
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
@@ -188,7 +189,6 @@ class MapNode(Node):
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
-        self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path
 
         self.bridge = CvBridge()
@@ -223,10 +223,6 @@ class MapNode(Node):
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
 
-        self.loop_similarity_threshold = 0.90
-        self.loop_top_k = 1
-
-        self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
@@ -234,8 +230,11 @@ class MapNode(Node):
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
-        self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
-        self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
+        self.bow_index_path = f"{tinynav_map_path}/bow_index.npz"
+        if not os.path.exists(self.bow_index_path):
+            self.get_logger().info(f"BoW index not found at {self.bow_index_path}; building it from map features")
+            build_bow_index(self.db, sorted(int(timestamp) for timestamp in self.map_poses.keys()), self.bow_index_path)
+        self.bow_index = BowIndex(self.bow_index_path)
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
@@ -364,8 +363,6 @@ class MapNode(Node):
         rgb_image_place_holder = einops.repeat(image, "h w -> h w c", c = 3)
 
         self.nav_temp_db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = image, rgb_image = rgb_image_place_holder)
-        embedding = self.get_embeddings(image)
-        self.nav_temp_db.set_entry(keyframe_image_timestamp, embedding = embedding)
         features = asyncio.run(self.super_point_extractor.infer(image))
         self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
 
@@ -378,36 +375,11 @@ class MapNode(Node):
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
-            def find_loop_and_pose_graph(timestamp):
-                    target_embedding = self.nav_temp_db.get_embedding(timestamp)
-                    valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
-                    valid_embeddings = np.array([self.nav_temp_db.get_embedding(t) for t in valid_timestamp])
-
-                    idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
-                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
-                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        for idx, similarity in loop_list:
-                            prev_timestamp = idx_to_timestamp[idx]
-                            curr_timestamp = timestamp
-                            prev_depth, _, prev_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(prev_timestamp)
-                            curr_depth, _, curr_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(curr_timestamp)
-                            prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
-                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
-                            if success and len(inliers) >= 100:
-                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                                #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-            find_loop_and_pose_graph(keyframe_image_timestamp)
+            with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
-
-
-    def get_embeddings(self, image: np.ndarray) -> np.ndarray:
-        # shape: (1, 768)
-        return asyncio.run(self.dinov2_model.infer(image))
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
@@ -444,18 +416,14 @@ class MapNode(Node):
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
-        query_embedding = self.get_embeddings(keyframe)
-        query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
 
-        idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
-        max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
-        if len(idx_and_similarity_array) == 0:
-            print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
+        timestamp_and_score_array = self.bow_index.query(keyframe_features, self.relocalization_loop_top_k)
+        if len(timestamp_and_score_array) == 0:
+            print("not enough BoW candidates to relocalize")
             return False, np.eye(4), -np.inf
 
         pnp_candidates = []
-        for idx_in_map, similarity in idx_and_similarity_array:
-            timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
+        for timestamp_in_map, _bow_score in timestamp_and_score_array:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)

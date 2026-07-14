@@ -9,7 +9,6 @@ from math import inf
 from typing import Callable, Dict, Optional
 
 import cv2
-import einops
 import numpy as np
 import rclpy
 import tyro
@@ -33,8 +32,9 @@ from tf2_ros import TransformBroadcaster
 from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
-from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.math_utils import matrix_to_quat, msg2np, tf2np, depth_to_cloud
+from tinynav.core.models_trt import SuperPointTRT
+from tinynav.core.bow_retrieval import build_bow_index
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
@@ -175,17 +175,6 @@ def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, m
         for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
     optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
     return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
-
-def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarity_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
-    if len(embeddings) == 0:
-        return []
-    similarity_array = einops.einsum(target_embedding, embeddings, "d, n d -> n")
-    top_k_indices = np.argsort(similarity_array, axis = 0)
-    loop_list = []
-    for idx in top_k_indices:
-        if similarity_array[idx] > loop_similarity_threshold:
-            loop_list.append((idx, similarity_array[idx]))
-    return loop_list[-loop_top_k:]
 
 def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100, stage_timer: Optional[StageTimer] = None):
     """
@@ -393,7 +382,8 @@ class TinyNavDB():
                 return None
             return self.infra1_video_db.read(key_int)
 
-        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
+        embedding = self.embeddings[key] if key in self.embeddings else None
+        return self.depths[key], embedding, self.features[key], rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
         return self.embeddings[key]
@@ -570,8 +560,6 @@ class BuildMapNode(Node):
             verbose_logger=self.logger.info if verbose_timer else None,
         )
         self.super_point_extractor = SuperPointTRT()
-        self.light_glue_matcher = LightGlueTRT()
-        self.dinov2_model = Dinov2TRT()
 
         self.bridge = CvBridge()
 
@@ -611,9 +599,6 @@ class BuildMapNode(Node):
         self.db = TinyNavDB(map_save_path)
 
         self.marker_id = 0
-
-        self.loop_similarity_threshold = 0.90
-        self.loop_top_k = 1
 
         self.map_save_path = map_save_path
         self._save_completed = False
@@ -721,10 +706,6 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("save_image_and_depth"):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
-        with self.stage_timer.timed("get_embeddings"):
-            embedding = self.get_embeddings(infra1_image)
-            embedding = embedding / np.linalg.norm(embedding)
-            self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
         with self.stage_timer.timed("super_point_extractor"):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
@@ -738,7 +719,6 @@ class BuildMapNode(Node):
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
-            self.detect_loop_closure(keyframe_image_timestamp)
 
         self.maybe_run_global_refinement()
 
@@ -749,30 +729,6 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("pose_graph_trajectory_publish"):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_image_timestamp
-
-    def get_embeddings(self, image: np.ndarray) -> np.ndarray:
-        # shape: (1, 768)
-        return asyncio.run(self.dinov2_model.infer(image))
-
-    def detect_loop_closure(self, timestamp: int) -> None:
-        target_embedding = self.db.get_embedding(timestamp)
-        valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
-        valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
-        idx_to_timestamp = {i: t for i, t in enumerate(valid_timestamp)}
-
-        with self.stage_timer.timed("find_loop"):
-            loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
-        with self.stage_timer.timed("relative_pose_estimation"):
-            for idx, _similarity in loop_list:
-                prev_timestamp = idx_to_timestamp[idx]
-                curr_timestamp = timestamp
-                prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
-                curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
-                prev_matched_keypoints, curr_matched_keypoints, _matches = self.match_keypoints(prev_features, curr_features)
-                success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
-                if success and len(inliers) >= 100:
-                    self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                    print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
 
     def maybe_run_global_refinement(self) -> None:
         """Run pose-graph optimization and full TF publish when the map has grown enough.
@@ -792,18 +748,6 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("tf_publish"):
             self.publish_all_transforms()
         self._global_prev_num_frames = num_frames
-
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
-        match_indices = match_result["match_indices"][0]
-        valid_mask = match_indices != -1
-        keypoints0 = feats0["kpts"][0][valid_mask]
-        keypoints1 = feats1["kpts"][0][match_indices[valid_mask]]
-        matches = []
-        for i, index in enumerate(match_indices):
-            if index != -1:
-                matches.append([i, index])
-        return keypoints0, keypoints1, np.array(matches, dtype=np.int64)
 
     def pose_graph_trajectory_publish(self, timestamp):
         path_msg = Path()
@@ -876,6 +820,17 @@ class BuildMapNode(Node):
             np.save(f"{self.map_save_path}/occupancy_meta.npy", occupancy_meta)
             np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
             cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
+
+        with self.stage_timer.timed("build_bow_index"):
+            bow_db = TinyNavDB(self.map_save_path, is_scratch=False)
+            try:
+                build_bow_index(
+                    bow_db,
+                    sorted(int(timestamp) for timestamp in self.pose_graph_used_pose.keys()),
+                    f"{self.map_save_path}/bow_index.npz",
+                )
+            finally:
+                bow_db.close()
 
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
