@@ -100,6 +100,20 @@ This is a self-supervised consistency signal, not external GT accuracy. It is us
 ### Usage
 
 ```bash
+# One-shot wrapper: fit self-supervised T, then evaluate Top-K metrics.
+scripts/run_map_retrieval_self_consistency.sh \
+  /tinynav/tinynav_db/maps/map_gt \
+  /tinynav/tinynav_db/maps/map_day \
+  stored \
+  /tinynav/output/self_consistency_stored
+
+scripts/run_map_retrieval_self_consistency.sh \
+  /tinynav/tinynav_db/maps/map_gt \
+  /tinynav/tinynav_db/maps/map_day \
+  superpoint-bow \
+  /tinynav/output/self_consistency_sp_bow \
+  --bow-vocab-size 512
+
 # Stored TinyNav embeddings, currently DINOv2 global embedding.
 python3 tool/benchmark/map_retrieval_self_consistency.py \
   --map-a /tinynav/tinynav_db/maps/map_gt \
@@ -116,11 +130,32 @@ python3 tool/benchmark/map_retrieval_self_consistency.py \
   --output-dir /tinynav/output/self_consistency_sp_bow
 ```
 
+The same flow can also be run in two explicit stages:
+
+```bash
+python3 tool/benchmark/map_retrieval_fit_self_t.py \
+  --map-a /tinynav/tinynav_db/maps/map_gt \
+  --map-b /tinynav/tinynav_db/maps/map_day \
+  --descriptor-backend stored \
+  --output-dir /tinynav/output/self_consistency_stored/fit
+
+python3 tool/benchmark/map_retrieval_eval_self_t.py \
+  --map-a /tinynav/tinynav_db/maps/map_gt \
+  --map-b /tinynav/tinynav_db/maps/map_day \
+  --transform-json /tinynav/output/self_consistency_stored/fit/self_transform.json \
+  --retrieval-json /tinynav/output/self_consistency_stored/fit/per_query_results.jsonl \
+  --output-dir /tinynav/output/self_consistency_stored/eval
+```
+
 ### Outputs
 
-- `summary.json`: fitted self-consistency transform, residuals, inlier ratios, and metrics.
-- `metrics.csv`: recall / precision / IoU for each Top-K and distance threshold.
-- `per_query_results.jsonl`: per-query retrieval candidates and Top1 residuals under the fitted transform.
+- `fit/self_transform.json`: fitted self-consistency transform and Top1 residual summary.
+- `fit/per_query_results.jsonl`: per-query retrieval candidates from the selected backend.
+- `eval/summary.json`: residuals, inlier ratios, and Top-K metrics under the fitted transform.
+- `eval/metrics.csv`: recall / precision / IoU for each Top-K and distance threshold.
+- `eval/per_query_results.jsonl`: per-query retrieval candidates and Top1 residuals under the fitted transform.
+
+For compatibility, `map_retrieval_self_consistency.py` still runs the fit and eval steps in one Python process and writes the original flat output layout.
 
 Recommended primary score:
 
