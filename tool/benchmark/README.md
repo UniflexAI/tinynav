@@ -91,6 +91,46 @@ The benchmark generates:
 - **Visualization Data**: Trajectory plots and error distributions (if applicable)
 
 
+## Benchmark Pipeline 3: Cross-Map Self-Consistency Evaluation
+
+`map_retrieval_self_consistency.py` evaluates cross-map retrieval without an external transform. Map B keyframes query Map A. The evaluator takes each query's Top1 retrieval result and fits an SE(2) transform from Map B into Map A with RANSAC. Metrics then measure how consistently Top-K retrieval candidates agree with that fitted transform.
+
+This is a self-supervised consistency signal, not external GT accuracy. It is useful for quickly comparing retrieval backends when no QR/manual alignment is available.
+
+### Usage
+
+```bash
+# Stored TinyNav embeddings, currently DINOv2 global embedding.
+python3 tool/benchmark/map_retrieval_self_consistency.py \
+  --map-a /tinynav/tinynav_db/maps/map_gt \
+  --map-b /tinynav/tinynav_db/maps/map_day \
+  --descriptor-backend stored \
+  --output-dir /tinynav/output/self_consistency_stored
+
+# SuperPoint BoW + TF-IDF. The vocabulary is trained from Map A SuperPoint descriptors.
+python3 tool/benchmark/map_retrieval_self_consistency.py \
+  --map-a /tinynav/tinynav_db/maps/map_gt \
+  --map-b /tinynav/tinynav_db/maps/map_day \
+  --descriptor-backend superpoint-bow \
+  --bow-vocab-size 512 \
+  --output-dir /tinynav/output/self_consistency_sp_bow
+```
+
+### Outputs
+
+- `summary.json`: fitted self-consistency transform, residuals, inlier ratios, and metrics.
+- `metrics.csv`: recall / precision / IoU for each Top-K and distance threshold.
+- `per_query_results.jsonl`: per-query retrieval candidates and Top1 residuals under the fitted transform.
+
+Recommended primary score:
+
+```text
+self_consistency_score = top1_inlier_ratio["0.5m"]
+```
+
+IoU is reported as an auxiliary signal for Top-K candidate set quality.
+
+
 ## Future Benchmark Pipelines
 
 Additional benchmark pipelines will be added to evaluate:
