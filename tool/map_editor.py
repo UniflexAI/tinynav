@@ -3,6 +3,7 @@ import sys
 sys.path.append("/tinynav/tinynav/core")
 import json
 import math
+import os
 import shutil
 import time
 from dataclasses import dataclass
