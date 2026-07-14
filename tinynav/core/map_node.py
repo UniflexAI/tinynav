@@ -27,179 +27,8 @@ from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
+from tinynav.core.superpoint_bow import SUPERPOINT_BOW_INDEX_FILENAME, SuperPointBoWRetriever
 logger = logging.getLogger(__name__)
-
-
-class SuperPointBoWRetriever:
-    """Build a lightweight SuperPoint Bag-of-Words retrieval index for map keyframes."""
-
-    def __init__(
-        self,
-        vocab_size: int = 512,
-        sample_limit: int = 120000,
-        kmeans_iterations: int = 30,
-    ):
-        self.vocab_size = vocab_size
-        self.sample_limit = sample_limit
-        self.kmeans_iterations = kmeans_iterations
-        self.vocab: np.ndarray | None = None
-        self.histograms: np.ndarray | None = None
-        self.idf: np.ndarray | None = None
-        self.timestamps: list[int] = []
-
-    @staticmethod
-    def descriptors_from_features(features: dict) -> np.ndarray:
-        descriptors = np.asarray(features["descps"])
-        mask = np.asarray(features.get("mask", []))
-
-        descriptors = np.squeeze(descriptors)
-        if descriptors.ndim != 2:
-            return np.empty((0, 0), dtype=np.float32)
-
-        # SuperPoint descriptors are usually either [N, D] or [D, N].
-        # The descriptor dimension is larger than the keypoint count only in very small frames,
-        # so prefer the axis matching the mask/keypoint count when available.
-        valid_count = None
-        if mask.size > 0:
-            valid = np.squeeze(mask).astype(bool)
-            valid_count = int(valid.shape[0])
-        else:
-            valid = None
-
-        if valid_count is not None:
-            if descriptors.shape[0] == valid_count:
-                desc = descriptors
-            elif descriptors.shape[1] == valid_count:
-                desc = descriptors.T
-            else:
-                desc = descriptors if descriptors.shape[0] >= descriptors.shape[1] else descriptors.T
-        else:
-            desc = descriptors if descriptors.shape[0] >= descriptors.shape[1] else descriptors.T
-
-        if valid is not None and len(valid) == len(desc):
-            desc = desc[valid]
-
-        desc = np.asarray(desc, dtype=np.float32)
-        if desc.size == 0:
-            return desc.reshape(0, 0)
-        norms = np.linalg.norm(desc, axis=1, keepdims=True)
-        return desc / np.maximum(norms, 1e-6)
-
-    def build(self, timestamp_to_features: list[tuple[int, dict]]) -> None:
-        feature_by_timestamp = dict(timestamp_to_features)
-        self.build_from_feature_loader(
-            list(feature_by_timestamp.keys()),
-            lambda timestamp: feature_by_timestamp[timestamp],
-        )
-
-    def build_from_feature_loader(self, timestamps: list[int], feature_loader) -> None:
-        self.timestamps = []
-        sampled_descriptors = []
-        rng = np.random.default_rng(0)
-
-        for timestamp in timestamps:
-            features = feature_loader(timestamp)
-            descriptors = self.descriptors_from_features(features)
-            if descriptors.size == 0:
-                continue
-            self.timestamps.append(timestamp)
-            if len(descriptors) > 0:
-                remaining = self.sample_limit - sum(len(x) for x in sampled_descriptors)
-                if remaining > 0:
-                    take = min(len(descriptors), max(1, remaining // max(1, len(timestamps))))
-                    if take < len(descriptors):
-                        sample_indices = rng.choice(len(descriptors), size=take, replace=False)
-                        sampled_descriptors.append(descriptors[sample_indices])
-                    else:
-                        sampled_descriptors.append(descriptors)
-
-        if len(sampled_descriptors) == 0:
-            raise RuntimeError("No SuperPoint descriptors found for BoW relocalization")
-
-        samples = np.concatenate(sampled_descriptors, axis=0).astype(np.float32)
-        if len(samples) > self.sample_limit:
-            sample_indices = rng.choice(len(samples), size=self.sample_limit, replace=False)
-            samples = samples[sample_indices]
-
-        vocab_size = min(self.vocab_size, len(samples))
-        if vocab_size < 2:
-            raise RuntimeError(f"Not enough SuperPoint descriptors for BoW relocalization: {len(samples)}")
-
-        criteria = (
-            cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
-            self.kmeans_iterations,
-            1e-3,
-        )
-        _, _, centers = cv2.kmeans(
-            samples,
-            vocab_size,
-            None,
-            criteria,
-            1,
-            cv2.KMEANS_PP_CENTERS,
-        )
-        self.vocab = np.asarray(centers, dtype=np.float32)
-
-        histograms = []
-        kept_timestamps = []
-        for timestamp in self.timestamps:
-            descriptors = self.descriptors_from_features(feature_loader(timestamp))
-            if descriptors.size == 0:
-                continue
-            kept_timestamps.append(timestamp)
-            histograms.append(self._histogram(descriptors))
-
-        self.timestamps = kept_timestamps
-        self.histograms = np.stack(histograms)
-
-        # Down-weight visual words that appear in almost every keyframe.
-        document_frequency = np.sum(self.histograms > 0, axis=0)
-        self.idf = np.log((1.0 + len(self.histograms)) / (1.0 + document_frequency)) + 1.0
-        self.histograms = self.histograms * self.idf[None, :]
-        self.histograms = self._l2_normalize(self.histograms)
-
-    def _assign_words(self, descriptors: np.ndarray) -> np.ndarray:
-        if self.vocab is None:
-            raise RuntimeError("SuperPoint BoW retriever has not been built")
-        words = []
-        chunk_size = 2048
-        for start in range(0, len(descriptors), chunk_size):
-            chunk = descriptors[start:start + chunk_size]
-            distances = (
-                np.sum(chunk * chunk, axis=1, keepdims=True)
-                - 2.0 * chunk @ self.vocab.T
-                + np.sum(self.vocab * self.vocab, axis=1)[None, :]
-            )
-            words.append(np.argmin(distances, axis=1))
-        return np.concatenate(words, axis=0) if words else np.empty((0,), dtype=np.int64)
-
-    def _histogram(self, descriptors: np.ndarray) -> np.ndarray:
-        if self.vocab is None or descriptors.size == 0:
-            return np.zeros((0,), dtype=np.float32)
-        words = self._assign_words(descriptors)
-        hist = np.bincount(words, minlength=len(self.vocab)).astype(np.float32)
-        if hist.sum() > 0:
-            hist /= hist.sum()
-        return hist
-
-    @staticmethod
-    def _l2_normalize(x: np.ndarray) -> np.ndarray:
-        return x / np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-6)
-
-    def query(self, features: dict, top_k: int) -> list[tuple[int, float]]:
-        if self.histograms is None or self.vocab is None:
-            return []
-        descriptors = self.descriptors_from_features(features)
-        if descriptors.size == 0:
-            return []
-        query_hist = self._histogram(descriptors)
-        if self.idf is not None:
-            query_hist = query_hist * self.idf
-        query_hist = self._l2_normalize(query_hist[None, :])[0]
-        scores = self.histograms @ query_hist
-        top_indices = np.argsort(scores)[-top_k:][::-1]
-        return [(int(idx), float(scores[idx])) for idx in top_indices]
-
 
 
 def draw_image_match_origin(prev_image: np.ndarray, curr_image: np.ndarray, prev_keypoints: np.ndarray, curr_keypoints: np.ndarray, matches: np.ndarray):
@@ -606,8 +435,6 @@ class MapNode(Node):
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 50
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
-        self.relocalization_bow_vocab_size = 512
-        self.relocalization_bow_sample_limit = 120000
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -616,20 +443,36 @@ class MapNode(Node):
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
         self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
         self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
-        self.relocalization_bow = SuperPointBoWRetriever(
-            vocab_size=self.relocalization_bow_vocab_size,
-            sample_limit=self.relocalization_bow_sample_limit,
-        )
-        with Timer(name="build_relocalization_bow", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.relocalization_bow.build_from_feature_loader(
-                list(self.map_poses.keys()),
-                lambda timestamp: self.db.features[timestamp],
+        self.relocalization_bow: SuperPointBoWRetriever | None = None
+        bow_index_path = os.path.join(tinynav_map_path, SUPERPOINT_BOW_INDEX_FILENAME)
+        if os.path.exists(bow_index_path):
+            try:
+                self.relocalization_bow = SuperPointBoWRetriever.load(bow_index_path)
+                missing_timestamps = [
+                    timestamp
+                    for timestamp in self.relocalization_bow.timestamps
+                    if timestamp not in self.map_poses
+                ]
+                if missing_timestamps:
+                    raise RuntimeError(
+                        f"BoW index contains {len(missing_timestamps)} timestamps not present in poses.npy"
+                    )
+                self.get_logger().info(
+                    f"Using SuperPoint BoW relocalization index: "
+                    f"{len(self.relocalization_bow.timestamps)} keyframes, "
+                    f"{len(self.relocalization_bow.vocab) if self.relocalization_bow.vocab is not None else 0} words"
+                )
+            except Exception as exc:
+                self.relocalization_bow = None
+                self.get_logger().warning(
+                    f"Failed to load SuperPoint BoW index from {bow_index_path}: {exc}. "
+                    "Falling back to DINO relocalization retrieval."
+                )
+        else:
+            self.get_logger().info(
+                f"No {SUPERPOINT_BOW_INDEX_FILENAME} found in map. "
+                "Using DINO relocalization retrieval."
             )
-        self.get_logger().info(
-            f"Built SuperPoint BoW relocalization index: "
-            f"{len(self.relocalization_bow.timestamps)} keyframes, "
-            f"{len(self.relocalization_bow.vocab) if self.relocalization_bow.vocab is not None else 0} words"
-        )
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
@@ -892,14 +735,37 @@ class MapNode(Node):
         if K is None:
             return False, np.eye(4), -np.inf
 
-        idx_and_score_array = self.relocalization_bow.query(keyframe_features, self.relocalization_loop_top_k)
-        if len(idx_and_score_array) == 0:
-            print("not enough SuperPoint BoW candidates to relocalize")
-            return False, np.eye(4), -np.inf
+        if self.relocalization_bow is not None:
+            candidate_timestamps = [
+                self.relocalization_bow.timestamps[idx_in_map]
+                for idx_in_map, _bow_score in self.relocalization_bow.query(
+                    keyframe_features,
+                    self.relocalization_loop_top_k,
+                )
+            ]
+            if len(candidate_timestamps) == 0:
+                print("not enough SuperPoint BoW candidates to relocalize")
+                return False, np.eye(4), -np.inf
+        else:
+            query_embedding = self.get_embeddings(keyframe)
+            query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
+            idx_and_similarity_array = find_loop(
+                query_embedding_normed,
+                self.map_embeddings,
+                self.relocalization_threshold,
+                self.relocalization_loop_top_k,
+            )
+            max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
+            if len(idx_and_similarity_array) == 0:
+                print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
+                return False, np.eye(4), -np.inf
+            candidate_timestamps = [
+                self.map_embeddings_idx_to_timestamp[idx_in_map]
+                for idx_in_map, _similarity in idx_and_similarity_array
+            ]
 
         pnp_candidates = []
-        for idx_in_map, _bow_score in idx_and_score_array:
-            timestamp_in_map = self.relocalization_bow.timestamps[idx_in_map]
+        for timestamp_in_map in candidate_timestamps:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
 
             # Odom position prior filter: skip candidates too far from predicted position
