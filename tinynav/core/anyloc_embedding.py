@@ -59,6 +59,15 @@ class AnyLocEmbedding:
         return rgb
 
     async def infer(self, image: np.ndarray) -> np.ndarray:
+        tokens = await self.infer_patch_tokens(image)
+        mean_desc = tokens.mean(axis=0, keepdims=True)
+        max_desc = tokens.max(axis=0, keepdims=True)
+        desc = np.concatenate([mean_desc, max_desc], axis=-1)
+        norm = np.linalg.norm(desc, axis=-1, keepdims=True)
+        desc = desc / np.maximum(norm, 1e-8)
+        return desc.squeeze(0).astype(np.float32)
+
+    async def infer_patch_tokens(self, image: np.ndarray) -> np.ndarray:
         rgb = self._to_rgb(image)
         tensor = self.torch.from_numpy(rgb).to(self.device)
         tensor = tensor.permute(2, 0, 1).float().div(255.0)
@@ -70,9 +79,5 @@ class AnyLocEmbedding:
             features = self.model.forward_features(tensor)
             tokens = features["x_norm_patchtokens"]  # patch tokens, [1, N, C]
             tokens = self.torch.nn.functional.normalize(tokens, dim=-1)
-            mean_desc = tokens.mean(dim=1)
-            max_desc = tokens.max(dim=1).values
-            desc = self.torch.cat([mean_desc, max_desc], dim=-1)
-            desc = self.torch.nn.functional.normalize(desc, dim=-1)
 
-        return desc.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        return tokens.squeeze(0).detach().cpu().numpy().astype(np.float32)

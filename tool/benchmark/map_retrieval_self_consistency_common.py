@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import csv
+import hashlib
 import json
 import math
 import time
@@ -107,6 +109,7 @@ def _minibatch_kmeans(
     rng: np.random.Generator,
     iterations: int,
     batch_size: int,
+    log_prefix: str = "k-means",
 ) -> np.ndarray:
     if len(sample) < vocab_size:
         raise ValueError(f"Need at least {vocab_size} descriptors, got {len(sample)}")
@@ -120,7 +123,7 @@ def _minibatch_kmeans(
             eta = 1.0 / counts[label]
             centers[label] = (1.0 - eta) * centers[label] + eta * vector
         if (iteration + 1) % 10 == 0:
-            print(f"BoW k-means iteration {iteration + 1}/{iterations}", flush=True)
+            print(f"{log_prefix} iteration {iteration + 1}/{iterations}", flush=True)
     norms = np.linalg.norm(centers, axis=1, keepdims=True)
     return (centers / np.maximum(norms, 1e-8)).astype(np.float32)
 
@@ -170,10 +173,138 @@ def _load_superpoint_bow_embeddings(
         rng,
         args.bow_kmeans_iterations,
         args.bow_kmeans_batch_size,
+        "BoW k-means",
     )
     map_a_hist = _bow_histograms(map_a_desc, centers)
     map_b_hist = _bow_histograms(map_b_desc, centers)
     return _tfidf_normalize(map_a_hist, map_b_hist)
+
+
+def _cache_path_for_map(
+    cache_dir: Path,
+    map_path: Path,
+    timestamps: list[int],
+    backend: str,
+    model_name: str,
+    image_size: int,
+) -> Path:
+    resolved = str(map_path.resolve())
+    first_ts = timestamps[0] if timestamps else 0
+    last_ts = timestamps[-1] if timestamps else 0
+    key = f"{resolved}|{backend}|{model_name}|{image_size}|{len(timestamps)}|{first_ts}|{last_ts}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    safe_name = map_path.name.replace("/", "_")
+    return cache_dir / f"{safe_name}_{backend}_{digest}.npz"
+
+
+def _load_anyloc_patch_tokens(
+    map_path: Path,
+    timestamps: list[int],
+    cache_dir: Path,
+    model_name: str,
+    image_size: int,
+    device: str,
+) -> list[np.ndarray]:
+    from tinynav.core.anyloc_embedding import AnyLocEmbedding
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = _cache_path_for_map(cache_dir, map_path, timestamps, "anyloc_patch_tokens", model_name, image_size)
+    if cache_path.exists():
+        cached = np.load(cache_path)
+        cached_timestamps = [int(x) for x in cached["timestamps_ns"].tolist()]
+        if cached_timestamps == timestamps:
+            print(f"Loaded AnyLoc patch-token cache: {cache_path}", flush=True)
+            tokens = cached["tokens"].astype(np.float32)
+            return [tokens[index] for index in range(tokens.shape[0])]
+        print(f"Ignoring stale AnyLoc patch-token cache: {cache_path}", flush=True)
+
+    model = AnyLocEmbedding(model_name=model_name or None, image_size=image_size, device=device or None)
+    db = TinyNavDB(str(map_path), is_scratch=False)
+    rows: list[np.ndarray] = []
+    try:
+        for index, timestamp in enumerate(timestamps, start=1):
+            _, _, _, _, infra1_loader = db.get_depth_embedding_features_images(timestamp)
+            image = infra1_loader() if infra1_loader is not None else None
+            if image is None:
+                raise RuntimeError(f"Missing infra1 image for timestamp {timestamp} in {map_path}")
+            tokens = asyncio.run(model.infer_patch_tokens(image))
+            rows.append(tokens.astype(np.float32, copy=False))
+            if index % 100 == 0:
+                print(f"AnyLoc patch tokens {index}/{len(timestamps)} for {map_path}", flush=True)
+    finally:
+        db.close()
+
+    if not rows:
+        raise RuntimeError(f"No AnyLoc patch tokens generated for {map_path}")
+    stacked = np.stack(rows, axis=0).astype(np.float16)
+    np.savez_compressed(cache_path, timestamps_ns=np.asarray(timestamps, dtype=np.int64), tokens=stacked)
+    print(f"Saved AnyLoc patch-token cache: {cache_path}", flush=True)
+    return rows
+
+
+def _vlad_descriptors(tokens_per_image: list[np.ndarray], centers: np.ndarray) -> np.ndarray:
+    tree = cKDTree(centers)
+    descriptors = np.zeros((len(tokens_per_image), centers.shape[0] * centers.shape[1]), dtype=np.float32)
+    for image_index, tokens in enumerate(tokens_per_image, start=1):
+        if len(tokens) == 0:
+            continue
+        labels = tree.query(tokens, k=1, workers=-1)[1]
+        residuals = np.zeros_like(centers, dtype=np.float32)
+        for cluster_index in range(centers.shape[0]):
+            cluster_tokens = tokens[labels == cluster_index]
+            if len(cluster_tokens):
+                residuals[cluster_index] = np.sum(cluster_tokens - centers[cluster_index], axis=0)
+        # Intra-normalization followed by final L2 normalization.
+        residuals /= np.maximum(np.linalg.norm(residuals, axis=1, keepdims=True), 1e-8)
+        descriptor = residuals.reshape(-1)
+        descriptor /= max(float(np.linalg.norm(descriptor)), 1e-8)
+        descriptors[image_index - 1] = descriptor
+        if image_index % 300 == 0:
+            print(f"AnyLoc VLAD encoded {image_index}/{len(tokens_per_image)}", flush=True)
+    return descriptors
+
+
+def _load_anyloc_vlad_embeddings(
+    map_a: Path,
+    map_b: Path,
+    map_a_timestamps: list[int],
+    map_b_timestamps: list[int],
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(args.seed)
+    cache_dir = Path(args.embedding_cache_dir)
+    map_a_tokens = _load_anyloc_patch_tokens(
+        map_a,
+        map_a_timestamps,
+        cache_dir,
+        args.anyloc_model,
+        args.anyloc_image_size,
+        args.anyloc_device,
+    )
+    map_b_tokens = _load_anyloc_patch_tokens(
+        map_b,
+        map_b_timestamps,
+        cache_dir,
+        args.anyloc_model,
+        args.anyloc_image_size,
+        args.anyloc_device,
+    )
+    sample = _sample_descriptors(map_a_tokens, args.vlad_sample_limit, rng)
+    print(
+        f"Training AnyLoc VLAD vocabulary: sample={sample.shape}, vocab_size={args.vlad_vocab_size}",
+        flush=True,
+    )
+    centers = _minibatch_kmeans(
+        sample,
+        args.vlad_vocab_size,
+        rng,
+        args.vlad_kmeans_iterations,
+        args.vlad_kmeans_batch_size,
+        "AnyLoc VLAD k-means",
+    )
+    map_a_vlad = _vlad_descriptors(map_a_tokens, centers)
+    map_b_vlad = _vlad_descriptors(map_b_tokens, centers)
+    return map_a_vlad, map_b_vlad
 
 
 def _load_descriptor_embeddings(
@@ -190,6 +321,8 @@ def _load_descriptor_embeddings(
         )
     if args.descriptor_backend == "superpoint-bow":
         return _load_superpoint_bow_embeddings(map_a, map_b, map_a_timestamps, map_b_timestamps, args)
+    if args.descriptor_backend == "anyloc-vlad":
+        return _load_anyloc_vlad_embeddings(map_a, map_b, map_a_timestamps, map_b_timestamps, args)
     raise ValueError(f"Unsupported descriptor backend: {args.descriptor_backend}")
 
 

@@ -105,6 +105,16 @@ def run_fit(args: argparse.Namespace) -> dict:
             "sample_limit": args.bow_sample_limit,
             "kmeans_iterations": args.bow_kmeans_iterations,
         }
+    if args.descriptor_backend == "anyloc-vlad":
+        summary["anyloc_vlad"] = {
+            "model": args.anyloc_model,
+            "image_size": args.anyloc_image_size,
+            "device": args.anyloc_device,
+            "vocab_size": args.vlad_vocab_size,
+            "sample_limit": args.vlad_sample_limit,
+            "kmeans_iterations": args.vlad_kmeans_iterations,
+            "embedding_cache_dir": args.embedding_cache_dir,
+        }
 
     _write_jsonl(output_dir / "per_query_results.jsonl", query_rows)
     with (output_dir / "self_transform.json").open("w", encoding="utf-8") as f:
@@ -120,9 +130,12 @@ def main() -> None:
     parser.add_argument("--map-b", required=True, help="Query/eval map directory")
     parser.add_argument(
         "--descriptor-backend",
-        choices=["stored", "superpoint-bow"],
+        choices=["stored", "superpoint-bow", "anyloc-vlad"],
         default="stored",
-        help="'stored' uses embeddings.db, 'superpoint-bow' builds a map-A SuperPoint BoW vocabulary.",
+        help=(
+            "'stored' uses embeddings.db, 'superpoint-bow' builds a map-A SuperPoint BoW vocabulary, "
+            "'anyloc-vlad' builds a map-A DINOv2 patch-token VLAD vocabulary."
+        ),
     )
     parser.add_argument("--output-dir", default="/tinynav/output/map_retrieval_self_consistency_fit")
     parser.add_argument("--topk", default="1,3,5,10")
@@ -136,6 +149,14 @@ def main() -> None:
     parser.add_argument("--bow-sample-limit", type=int, default=120_000)
     parser.add_argument("--bow-kmeans-iterations", type=int, default=80)
     parser.add_argument("--bow-kmeans-batch-size", type=int, default=4096)
+    parser.add_argument("--embedding-cache-dir", default="/tinynav/tinynav_temp/map_retrieval_descriptor_cache")
+    parser.add_argument("--anyloc-model", default="", help="DINOv2 torch hub model name for AnyLoc VLAD")
+    parser.add_argument("--anyloc-image-size", type=int, default=224)
+    parser.add_argument("--anyloc-device", default="", help="Device for AnyLoc VLAD, for example cuda or cpu")
+    parser.add_argument("--vlad-vocab-size", type=int, default=32)
+    parser.add_argument("--vlad-sample-limit", type=int, default=120_000)
+    parser.add_argument("--vlad-kmeans-iterations", type=int, default=80)
+    parser.add_argument("--vlad-kmeans-batch-size", type=int, default=4096)
     args = parser.parse_args()
 
     summary = run_fit(args)

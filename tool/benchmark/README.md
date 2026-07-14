@@ -116,6 +116,16 @@ scripts/run_map_retrieval_self_consistency.sh \
   superpoint-bow \
   /tinynav/output/self_consistency_sp_bow \
   --bow-vocab-size 512
+
+# Full AnyLoc-style VLAD. DINOv2 patch tokens from Map A are clustered into
+# a map-specific VLAD vocabulary, then both maps are encoded with that vocabulary.
+scripts/run_map_retrieval_self_consistency.sh \
+  /tinynav/tinynav_db/maps/map_gt \
+  /tinynav/tinynav_db/maps/map_day \
+  anyloc-vlad \
+  /tinynav/output/self_consistency_anyloc_vlad \
+  --vlad-vocab-size 32 \
+  --anyloc-device cuda
 ```
 
 ### Python tools
@@ -123,7 +133,7 @@ scripts/run_map_retrieval_self_consistency.sh \
 The script is intentionally thin. The actual work is split into two Python tools:
 
 1. `tool/benchmark/map_retrieval_fit_self_t.py`
-   - runs retrieval with `stored` or `superpoint-bow`
+   - runs retrieval with `stored`, `superpoint-bow`, or `anyloc-vlad`
    - fits the self-supervised SE(2) transform
    - writes `self_transform.json` and `per_query_results.jsonl`
 
@@ -133,6 +143,12 @@ The script is intentionally thin. The actual work is split into two Python tools
    - writes `summary.json`, `metrics.csv`, and annotated `per_query_results.jsonl`
 
 These Python tools can be called directly for debugging or pipeline integration, but `scripts/run_map_retrieval_self_consistency.sh` is the only shell script entrypoint.
+
+Descriptor backends:
+
+- `stored`: uses each map's existing `embeddings.db`, currently DINOv2 global embedding.
+- `superpoint-bow`: trains a SuperPoint visual-word vocabulary from Map A descriptors and uses TF-IDF histograms.
+- `anyloc-vlad`: extracts DINOv2 patch tokens, trains a Map-A VLAD vocabulary with k-means, and encodes both maps with VLAD residual aggregation.
 
 ### Outputs
 

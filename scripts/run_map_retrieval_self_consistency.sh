@@ -2,11 +2,12 @@
 set -euo pipefail
 
 if [[ $# -lt 4 ]]; then
-  echo "Usage: $0 <map_a> <map_b> <stored|superpoint-bow> <output_dir> [extra fit args...]"
+  echo "Usage: $0 <map_a> <map_b> <stored|superpoint-bow|anyloc-vlad> <output_dir> [extra fit args...]"
   echo
   echo "Example:"
   echo "  $0 /tinynav/tinynav_db/maps/map_gt /tinynav/tinynav_db/maps/map_day stored /tinynav/output/self_consistency_stored"
   echo "  $0 /tinynav/tinynav_db/maps/map_gt /tinynav/tinynav_db/maps/map_day superpoint-bow /tinynav/output/self_consistency_bow --bow-vocab-size 512"
+  echo "  $0 /tinynav/tinynav_db/maps/map_gt /tinynav/tinynav_db/maps/map_day anyloc-vlad /tinynav/output/self_consistency_anyloc_vlad --vlad-vocab-size 32 --anyloc-device cuda"
   exit 1
 fi
 
