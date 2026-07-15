@@ -1,16 +1,4 @@
-from dataclasses import dataclass
-from typing import Callable
-
 import numpy as np
-
-
-@dataclass(frozen=True)
-class RetrievalResult:
-    timestamp: int
-    score: float
-    pose: np.ndarray | None = None
-    rgb_image_loader: Callable[[], np.ndarray | None] | None = None
-    infra1_image_loader: Callable[[], np.ndarray | None] | None = None
 
 
 def normalize_embedding(embedding: np.ndarray) -> np.ndarray:
