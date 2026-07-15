@@ -16,6 +16,7 @@ from rosidl_runtime_py.utilities import get_message
 
 from tinynav.core.build_map_node import TinyNavDB, find_loop
 from tinynav.core.models_trt import Dinov2TRT, LightGlueTRT, SuperPointTRT
+from tinynav.core.vlad import compute_vlad, compute_vlad_batch, find_loop_vlad, train_vocabulary
 
 
 def load_map_timestamps_and_db(map_path: str) -> tuple[list[int], TinyNavDB]:
@@ -189,19 +190,58 @@ def main():
     parser.add_argument("--map_embedding_cache", default="", help="optional .npz cache for reembedded map embeddings")
     parser.add_argument("--pnp_min_matches", type=int, default=50)
     parser.add_argument("--pnp_min_inliers", type=int, default=50)
+    parser.add_argument("--use_vlad", action="store_true", default=False, help="use DINOv2 patch VLAD retrieval instead of CLS-token")
+    parser.add_argument("--vlad_vocab_size", type=int, default=32, help="VLAD vocabulary size (K)")
+    parser.add_argument("--vlad_iterations", type=int, default=200, help="VLAD k-means iterations")
     args = parser.parse_args()
 
     embed_model = Dinov2TRT(engine_path=args.dino_engine_path) if args.dino_engine_path else Dinov2TRT()
-    if args.reembed_map:
-        map_ts, map_embs, map_db = build_reembedded_map_embeddings(
-            args.map_path,
-            embed_model=embed_model,
-            cache_path=args.map_embedding_cache,
-        )
-    else:
-        if args.dino_engine_path:
-            print("[warn] --dino_engine_path is set without --reembed_map; query/map embeddings may be inconsistent.")
-        map_ts, map_embs, map_db = build_map_embeddings(args.map_path)
+
+    # VLAD mode: load or build VLAD vocabulary + descriptors.
+    vlad_centres = None
+    map_vlads = None
+    if args.use_vlad:
+        vlad_vocab_path = os.path.join(args.map_path, "vlad_vocab.npy")
+        vlad_desc_path = os.path.join(args.map_path, "vlad_descriptors.npy")
+        if os.path.exists(vlad_vocab_path) and os.path.exists(vlad_desc_path):
+            vlad_centres = np.load(vlad_vocab_path)
+            map_vlads = np.load(vlad_desc_path)
+            print(f"VLAD loaded: vocab={vlad_centres.shape}, descriptors={map_vlads.shape}")
+        else:
+            print("VLAD files not found, building from map...")
+            map_ts, map_db = load_map_timestamps_and_db(args.map_path)
+            patch_tokens_list = []
+            for i, ts in enumerate(map_ts):
+                _, _, _, _, infra1_loader = map_db.get_depth_embedding_features_images(ts)
+                image = infra1_loader() if infra1_loader is not None else None
+                if image is None:
+                    patch_tokens_list.append(np.zeros((0, 768), dtype=np.float32))
+                    continue
+                tokens = asyncio.run(embed_model.infer_patch_tokens(image))
+                patch_tokens_list.append(tokens)
+                if (i + 1) % 50 == 0:
+                    print(f"VLAD patch tokens {i + 1}/{len(map_ts)}")
+            valid = [t for t in patch_tokens_list if t.shape[0] > 0]
+            all_tokens = np.concatenate(valid, axis=0)
+            vlad_centres = train_vocabulary(all_tokens, vocab_size=args.vlad_vocab_size, iterations=args.vlad_iterations)
+            map_vlads = compute_vlad_batch(patch_tokens_list, vlad_centres)
+            np.save(vlad_vocab_path, vlad_centres)
+            np.save(vlad_desc_path, map_vlads)
+            print(f"VLAD built and saved: vocab={vlad_centres.shape}, descriptors={map_vlads.shape}")
+
+    if not args.use_vlad:
+        if args.reembed_map:
+            map_ts, map_embs, map_db = build_reembedded_map_embeddings(
+                args.map_path,
+                embed_model=embed_model,
+                cache_path=args.map_embedding_cache,
+            )
+        else:
+            if args.dino_engine_path:
+                print("[warn] --dino_engine_path is set without --reembed_map; query/map embeddings may be inconsistent.")
+            map_ts, map_embs, map_db = build_map_embeddings(args.map_path)
+    elif map_db is None:
+        map_ts, _, map_db = load_map_timestamps_and_db(args.map_path)
     map_poses = np.load(os.path.join(args.map_path, "poses.npy"), allow_pickle=True).item()
     map_K = np.load(os.path.join(args.map_path, "intrinsics.npy"))
     superpoint = SuperPointTRT()
@@ -225,15 +265,20 @@ def main():
             if args.max_frames > 0 and saved >= args.max_frames:
                 break
 
-            q = asyncio.run(embed_model.infer(infra1)).astype(np.float32)
-            qn = np.linalg.norm(q)
-            if qn <= 1e-8:
-                continue
-            q = q / qn
+            if args.use_vlad:
+                query_patch_tokens = asyncio.run(embed_model.infer_patch_tokens(infra1))
+                q_vlad = compute_vlad(query_patch_tokens, vlad_centres)
+                hits = find_loop_vlad(q_vlad, map_vlads, args.threshold, args.topk)
+                hits = [(int(i), float(s)) for i, s in hits]
+            else:
+                q = asyncio.run(embed_model.infer(infra1)).astype(np.float32)
+                qn = np.linalg.norm(q)
+                if qn <= 1e-8:
+                    continue
+                q = q / qn
+                hits = find_loop(q, map_embs, args.threshold, args.topk)
+                hits = [(int(i), float(s)) for i, s in hits]
             image_shape = np.array([infra1.shape[1], infra1.shape[0]], dtype=np.int64)
-
-            hits = find_loop(q, map_embs, args.threshold, args.topk)
-            hits = [(int(i), float(s)) for i, s in hits]
             retrieved = []
             pnp_success = False
             inlier_count = 0
