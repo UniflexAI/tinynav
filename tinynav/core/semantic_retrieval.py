@@ -1,10 +1,7 @@
-import logging
 from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -30,16 +27,11 @@ def rank_semantic_embeddings(
     timestamps: list[int],
     top_k: int = 5,
 ) -> list[tuple[int, float]]:
-    if top_k <= 0 or len(timestamps) == 0:
-        return []
+    assert top_k > 0
     query_embedding = normalize_embedding(query_embedding)
     embeddings = np.asarray(embeddings, dtype=np.float32)
-    if embeddings.ndim != 2:
-        raise ValueError(f"embeddings must be rank-2, got shape {embeddings.shape}")
-    if embeddings.shape[0] != len(timestamps):
-        raise ValueError(f"embedding count {embeddings.shape[0]} != timestamp count {len(timestamps)}")
-    if embeddings.shape[1] != query_embedding.shape[0]:
-        raise ValueError(f"embedding dim {embeddings.shape[1]} != query dim {query_embedding.shape[0]}")
+    assert embeddings.ndim == 2
+    assert embeddings.shape == (len(timestamps), query_embedding.shape[0])
 
     scores = embeddings @ query_embedding
     top_indices = np.argsort(scores)[-top_k:][::-1]
@@ -47,15 +39,11 @@ def rank_semantic_embeddings(
 
 
 def load_semantic_embedding_matrix(db, timestamps: list[int]) -> tuple[np.ndarray, list[int]]:
-    valid_timestamps = []
     embeddings = []
     for timestamp in timestamps:
-        if not db.has_semantic_embedding(timestamp):
-            logger.warning("Missing semantic embedding for timestamp %s; skipping retrieval entry", timestamp)
-            continue
+        assert db.has_semantic_embedding(timestamp)
         embeddings.append(normalize_embedding(db.get_semantic_embedding(timestamp)))
-        valid_timestamps.append(timestamp)
 
     if len(embeddings) == 0:
         return np.empty((0, 0), dtype=np.float32), []
-    return np.stack(embeddings).astype(np.float32), valid_timestamps
+    return np.stack(embeddings).astype(np.float32), timestamps

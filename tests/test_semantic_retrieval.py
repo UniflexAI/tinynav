@@ -37,9 +37,9 @@ def test_rank_semantic_embeddings_checks_dimensions():
             np.ones((2, 3), dtype=np.float32),
             [1, 2],
         )
-    except ValueError:
+    except AssertionError:
         return
-    raise AssertionError("expected ValueError")
+    raise AssertionError("expected AssertionError")
 
 
 if __name__ == "__main__":
