@@ -34,8 +34,10 @@ from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
+from tinynav.core.semantic_retrieval import normalize_embedding
+from tinynav.core.vlad import train_vocabulary, compute_vlad, compute_vlad_batch
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
 
@@ -365,11 +367,14 @@ class TinyNavDB():
                 os.remove(f"{map_save_path}/depths.db")
             if os.path.exists(f"{map_save_path}/embeddings.db"):
                 os.remove(f"{map_save_path}/embeddings.db")
+            if os.path.exists(f"{map_save_path}/semantic_embeddings.db"):
+                os.remove(f"{map_save_path}/semantic_embeddings.db")
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
+        self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
 
-    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
             self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
@@ -378,6 +383,8 @@ class TinyNavDB():
             self.depths[key] = depth
         if embedding is not None:
             self.embeddings[key] = embedding
+        if semantic_embedding is not None:
+            self.semantic_embeddings[key] = semantic_embedding
         if features is not None:
             self.features[key] = features
 
@@ -398,9 +405,19 @@ class TinyNavDB():
     def get_embedding(self, key:int):
         return self.embeddings[key]
 
+    def set_semantic_embedding(self, key:int, embedding:np.ndarray):
+        self.semantic_embeddings[key] = embedding
+
+    def get_semantic_embedding(self, key:int):
+        return self.semantic_embeddings[key]
+
+    def has_semantic_embedding(self, key:int) -> bool:
+        return key in self.semantic_embeddings
+
     def close(self):
         self.features.close()
         self.embeddings.close()
+        self.semantic_embeddings.close()
         self.depths.close()
         self.infra1_video_db.close()
         self.rgb_video_db.close()
@@ -572,6 +589,7 @@ class BuildMapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
+        self.semantic_embedder = SigLIPTRT()
 
         self.bridge = CvBridge()
 
@@ -614,6 +632,13 @@ class BuildMapNode(Node):
 
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
+
+        # VLAD configuration
+        self.vlad_vocab_size = 32
+        self.vlad_iterations = 200
+        self.vlad_batch_size = 1024
+        self.vlad_seed = 42
+        self._patch_tokens_cache: dict[int, np.ndarray] = {}  # timestamp -> (N_patch, C)
 
         self.map_save_path = map_save_path
         self._save_completed = False
@@ -722,9 +747,12 @@ class BuildMapNode(Node):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
         with self.stage_timer.timed("get_embeddings"):
-            embedding = self.get_embeddings(infra1_image)
+            embedding = self.get_embeddings(infra1_image, timestamp=keyframe_image_timestamp)
             embedding = embedding / np.linalg.norm(embedding)
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
+        with self.stage_timer.timed("get_semantic_embedding"):
+            semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
+            self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
         with self.stage_timer.timed("super_point_extractor"):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
@@ -750,8 +778,20 @@ class BuildMapNode(Node):
             self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_image_timestamp
 
-    def get_embeddings(self, image: np.ndarray) -> np.ndarray:
-        # shape: (1, 768)
+    def get_embeddings(self, image: np.ndarray, timestamp: int | None = None) -> np.ndarray:
+        """Extract DINOv2 embedding for loop closure.
+
+        If *timestamp* is provided, patch tokens are also cached for later VLAD
+        vocabulary training during ``save_mapping``.
+        """
+        if timestamp is not None:
+            patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(image))
+            self._patch_tokens_cache[timestamp] = patch_tokens
+            # Return L2-normalised CLS-equivalent: mean-pool patch tokens as fallback.
+            # This keeps ``find_loop`` working during online mapping.
+            cls_proxy = patch_tokens.mean(axis=0)
+            cls_proxy = cls_proxy / np.maximum(np.linalg.norm(cls_proxy), 1e-8)
+            return cls_proxy
         return asyncio.run(self.dinov2_model.infer(image))
 
     def detect_loop_closure(self, timestamp: int) -> None:
@@ -877,9 +917,53 @@ class BuildMapNode(Node):
             np.save(f"{self.map_save_path}/sdf_map.npy", sdf_map)
             cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
 
+        # Train VLAD vocabulary and compute descriptors for all keyframes.
+        self._save_vlad()
+
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
         self.stage_timer.log_summary(self.get_logger().info)
+
+    def _save_vlad(self):
+        """Train VLAD vocabulary from cached patch tokens and save descriptors."""
+        if not self._patch_tokens_cache:
+            self.get_logger().info("No patch tokens cached, skipping VLAD")
+            return
+
+        with self.stage_timer.timed("vlad_train"):
+            timestamps = sorted(self._patch_tokens_cache.keys())
+            all_tokens = np.concatenate(
+                [self._patch_tokens_cache[ts] for ts in timestamps], axis=0
+            )
+            self.get_logger().info(
+                f"Training VLAD vocabulary: {all_tokens.shape[0]} tokens, "
+                f"K={self.vlad_vocab_size}"
+            )
+            centres = train_vocabulary(
+                all_tokens,
+                vocab_size=self.vlad_vocab_size,
+                iterations=self.vlad_iterations,
+                batch_size=self.vlad_batch_size,
+                seed=self.vlad_seed,
+            )
+
+        with self.stage_timer.timed("vlad_encode"):
+            tokens_list = [self._patch_tokens_cache[ts] for ts in timestamps]
+            vlad_descriptors = compute_vlad_batch(tokens_list, centres)
+
+        # Save vocabulary, descriptors, and timestamp index.
+        np.save(f"{self.map_save_path}/vlad_vocab.npy", centres)
+        np.save(f"{self.map_save_path}/vlad_descriptors.npy", vlad_descriptors)
+        np.save(
+            f"{self.map_save_path}/vlad_timestamps.npy",
+            np.array(timestamps, dtype=np.int64),
+        )
+        self.get_logger().info(
+            f"VLAD saved: vocab={centres.shape}, descriptors={vlad_descriptors.shape}, "
+            f"keyframes={len(timestamps)}"
+        )
+        # Free memory.
+        self._patch_tokens_cache.clear()
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
         marker_array = MarkerArray()
