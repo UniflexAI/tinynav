@@ -452,7 +452,7 @@ class MapNode(Node):
                   f"descriptors={self.map_vlad_descriptors.shape}, "
                   f"keyframes={len(self.vlad_timestamps)}")
         else:
-            print("VLAD files not found, falling back to CLS-token retrieval")
+            print("VLAD files not found")
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -487,10 +487,16 @@ class MapNode(Node):
                     "Falling back to DINO relocalization retrieval."
                 )
         else:
-            self.get_logger().info(
-                f"No {SUPERPOINT_BOW_INDEX_FILENAME} found in map. "
-                "Using DINO relocalization retrieval."
-            )
+            if self.vlad_centres is not None and self.map_vlad_descriptors is not None and self.vlad_timestamps is not None:
+                self.get_logger().info(
+                    f"No {SUPERPOINT_BOW_INDEX_FILENAME} found in map. "
+                    "Using VLAD relocalization retrieval."
+                )
+            else:
+                self.get_logger().info(
+                    f"No {SUPERPOINT_BOW_INDEX_FILENAME} found in map. "
+                    "Using DINO relocalization retrieval."
+                )
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
@@ -769,7 +775,7 @@ class MapNode(Node):
             idx_and_similarity_array = find_loop_vlad(
                 query_vlad,
                 self.map_vlad_descriptors,
-                self.relocalization_threshold,
+                -1.0,
                 self.relocalization_loop_top_k,
             )
             max_similarity = max((s for _, s in idx_and_similarity_array), default=0.0)
