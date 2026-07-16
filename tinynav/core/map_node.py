@@ -512,6 +512,10 @@ class MapNode(Node):
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
         self.nav_refresh_timer = self.create_timer(0.5, self.nav_refresh_timer_callback)
+        self.initial_relocalization_observations = []
+        self.initial_relocalization_confirm_required = 3
+        self.initial_relocalization_translation_tolerance = 0.5
+        self.initial_relocalization_yaw_tolerance = np.deg2rad(10.0)
 
         self.pois = {}
         self.poi_meta = {}
@@ -648,10 +652,11 @@ class MapNode(Node):
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         if not (self.enable_first_done and self.first_done):
-            success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+            success, pose_in_world, pose_cov_weight = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
             if success:
-                self.compute_transform_from_map_to_odom()
-                self.first_done = True
+                self.handle_relocalization_observation(keyframe_image_timestamp_ns, pose_in_world, pose_cov_weight)
+                if self.T_from_map_to_odom is not None:
+                    self.first_done = True
 
         with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             self.try_publish_nav_path(keyframe_image_timestamp_ns)
@@ -888,7 +893,7 @@ class MapNode(Node):
         return point_in_world, inliers
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
+    def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray, float]:
         features = asyncio.run(self.super_point_extractor.infer(image))
         timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
         current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
@@ -896,14 +901,78 @@ class MapNode(Node):
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
-            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
-            self.relocalization_poses[timestamp_ns] = pose_in_world
-            self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
-            return True, pose_in_world
+            return True, pose_in_world, pose_cov_weight
         else:
             self.failed_relocalizations.append(timestamp)
-            return False, np.eye(4)
+            return False, np.eye(4), -np.inf
+
+    def handle_relocalization_observation(self, timestamp_ns: int, pose_in_world: np.ndarray, pose_cov_weight: float):
+        if timestamp_ns not in self.pose_graph_used_pose:
+            self.get_logger().warning(
+                f"Relocalization timestamp {timestamp_ns} not found in odom pose graph; skipping observation"
+            )
+            return
+
+        if self.T_from_map_to_odom is None:
+            self.try_confirm_initial_relocalization(timestamp_ns, pose_in_world, pose_cov_weight)
+            return
+
+        self.relocalization_poses[timestamp_ns] = pose_in_world
+        self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
+        self.compute_transform_from_map_to_odom()
+
+    def try_confirm_initial_relocalization(self, timestamp_ns: int, pose_in_world: np.ndarray, pose_cov_weight: float):
+        camera_in_map_world = pose_in_world
+        camera_in_odom_world = self.pose_graph_used_pose[timestamp_ns]
+        observation_T_from_map_to_odom = camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
+
+        if len(self.initial_relocalization_observations) > 0:
+            reference_T = self.initial_relocalization_observations[0][3]
+            translation_error, yaw_error = self.transform_xy_yaw_error(
+                observation_T_from_map_to_odom,
+                reference_T,
+            )
+            if (
+                translation_error > self.initial_relocalization_translation_tolerance
+                or yaw_error > self.initial_relocalization_yaw_tolerance
+            ):
+                self.get_logger().info(
+                    "Initial relocalization candidate changed; reset confirmation "
+                    f"(translation_error={translation_error:.3f}m, "
+                    f"yaw_error={np.rad2deg(yaw_error):.1f}deg)"
+                )
+                self.initial_relocalization_observations = []
+
+        self.initial_relocalization_observations.append(
+            (timestamp_ns, pose_in_world, pose_cov_weight, observation_T_from_map_to_odom)
+        )
+        self.get_logger().info(
+            "Initial relocalization confirmation "
+            f"{len(self.initial_relocalization_observations)}/"
+            f"{self.initial_relocalization_confirm_required}"
+        )
+
+        if len(self.initial_relocalization_observations) < self.initial_relocalization_confirm_required:
+            return
+
+        for observation_timestamp, observation_pose, observation_weight, _ in self.initial_relocalization_observations:
+            self.relocalization_poses[observation_timestamp] = observation_pose
+            self.relocalization_pose_weights[observation_timestamp] = observation_weight
+
+        self.compute_transform_from_map_to_odom()
+        self.get_logger().info(
+            "Initial relocalization confirmed; map->odom transform is now active"
+        )
+        self.initial_relocalization_observations = []
+
+    @staticmethod
+    def transform_xy_yaw_error(T_a: np.ndarray, T_b: np.ndarray) -> tuple[float, float]:
+        translation_error = float(np.linalg.norm(T_a[:2, 3] - T_b[:2, 3]))
+        yaw_a = np.arctan2(T_a[1, 0], T_a[0, 0])
+        yaw_b = np.arctan2(T_b[1, 0], T_b[0, 0])
+        yaw_error = float(np.abs(np.arctan2(np.sin(yaw_a - yaw_b), np.cos(yaw_a - yaw_b))))
+        return translation_error, yaw_error
 
     def save_relocalization_poses(self):
         if self._save_completed:
