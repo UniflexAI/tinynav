@@ -232,3 +232,44 @@ final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
     rethrow;
   }
 });
+
+/// Top-level folders in tinynav_db (for USB copy feature).
+final tinynavDbFoldersProvider = FutureProvider.autoDispose<List<FileEntry>>((ref) async {
+  final dio = ref.watch(dioProvider);
+  if (ref.watch(baseUrlProvider) == null) return [];
+  try {
+    final resp = await dio.get('/files/tinynav-db');
+    return (resp.data['folders'] as List)
+        .map((j) => FileEntry.fromJson(j as Map<String, dynamic>))
+        .toList();
+  } catch (_) {
+    return [];
+  }
+});
+
+/// USB copy status state.
+class UsbCopyStatus {
+  final String status;  // idle | running | done | error
+  final String message;
+  final String detail;
+  UsbCopyStatus({required this.status, required this.message, this.detail = ''});
+  factory UsbCopyStatus.fromJson(Map<String, dynamic> j) => UsbCopyStatus(
+        status: j['status'] as String? ?? 'idle',
+        message: j['message'] as String? ?? '',
+        detail: j['detail'] as String? ?? '',
+      );
+}
+
+/// Polls USB copy status.
+final usbCopyStatusProvider = FutureProvider.autoDispose<UsbCopyStatus>((ref) async {
+  final dio = ref.watch(dioProvider);
+  if (ref.watch(baseUrlProvider) == null) {
+    return UsbCopyStatus(status: 'idle', message: '');
+  }
+  try {
+    final resp = await dio.get('/files/copy-to-usb/status');
+    return UsbCopyStatus.fromJson(resp.data as Map<String, dynamic>);
+  } catch (_) {
+    return UsbCopyStatus(status: 'idle', message: '');
+  }
+});

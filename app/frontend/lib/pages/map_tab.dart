@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -55,6 +56,9 @@ class MapTab extends ConsumerWidget {
               ),
             ),
           ),
+          const SizedBox(height: 20),
+          // ── USB copy ─────────────────────────────────────────────────
+          const _UsbCopyCard(),
           const SizedBox(height: 24),
         ],
       ),
@@ -659,4 +663,230 @@ void _snack(BuildContext context, String message) {
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(content: Text(message), backgroundColor: Colors.red),
   );
+}
+
+// ── USB copy card ────────────────────────────────────────────────────────────
+
+class _UsbCopyCard extends ConsumerStatefulWidget {
+  const _UsbCopyCard();
+
+  @override
+  ConsumerState<_UsbCopyCard> createState() => _UsbCopyCardState();
+}
+
+class _UsbCopyCardState extends ConsumerState<_UsbCopyCard> {
+  Timer? _pollTimer;
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    ref.invalidate(usbCopyStatusProvider);
+    _pollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      ref.invalidate(usbCopyStatusProvider);
+    });
+  }
+
+  void _stopPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
+  Future<void> _openFolderPicker() async {
+    final dio = ref.read(dioProvider);
+    final folders = <FileEntry>[];
+    try {
+      final resp = await dio.get('/files/tinynav-db');
+      folders = (resp.data['folders'] as List)
+          .map((j) => FileEntry.fromJson(j as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      if (mounted) _snack(context, 'Failed to load folders: $e');
+      return;
+    }
+
+    if (!mounted) return;
+
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (context) => _FolderPickerDialog(folders: folders),
+    );
+
+    if (selected == null || !mounted) return;
+
+    // Confirm
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Copy to USB'),
+        content: Text('Copy "$selected" to USB drive?\nUSB will be unmounted after copy.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            icon: const Icon(Icons.usb, size: 16),
+            label: const Text('Copy'),
+            onPressed: () => Navigator.pop(context, true),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    // Start copy
+    try {
+      await dio.post('/files/copy-to-usb', data: {'folder': selected});
+      _startPolling();
+    } on DioException catch (e) {
+      if (mounted) _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final statusAsync = ref.watch(usbCopyStatusProvider);
+    final status = statusAsync.valueOrNull;
+    final isRunning = status?.status == 'running';
+
+    // Stop polling when done or error
+    if (status != null && status.status != 'running' && _pollTimer != null) {
+      _stopPolling();
+    }
+
+    return _SectionCard(
+      icon: Icons.usb_rounded,
+      iconColor: const Color(0xFF00897B),
+      title: 'USB Export',
+      badge: status?.status == 'done'
+          ? 'Done'
+          : isRunning
+              ? 'Copying'
+              : status?.status == 'error'
+                  ? 'Error'
+                  : null,
+      badgeColor: status?.status == 'done'
+          ? Colors.green
+          : status?.status == 'error'
+              ? Colors.red
+              : const Color(0xFF00897B),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (status != null && status.message.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Icon(
+                    status.status == 'done'
+                        ? Icons.check_circle_outline
+                        : status.status == 'error'
+                            ? Icons.error_outline
+                            : Icons.hourglass_top,
+                    size: 14,
+                    color: status.status == 'done'
+                        ? Colors.green
+                        : status.status == 'error'
+                            ? Colors.red
+                            : const Color(0xFF00897B),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      status.message,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: status.status == 'error' ? Colors.red : Colors.grey.shade700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (isRunning)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: LinearProgressIndicator(),
+            ),
+          if (status?.status == 'done')
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                'USB unmounted. Safe to remove.',
+                style: TextStyle(fontSize: 12, color: Colors.green.shade700),
+              ),
+            ),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: isRunning ? null : _openFolderPicker,
+              icon: Icon(isRunning ? Icons.hourglass_top : Icons.usb),
+              label: Text(isRunning ? 'Copying...' : 'Copy to USB'),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF00897B),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FolderPickerDialog extends StatelessWidget {
+  final List<FileEntry> folders;
+  const _FolderPickerDialog({required this.folders});
+
+  String _fmtSize(int bytes) {
+    if (bytes >= 1e9) return '${(bytes / 1e9).toStringAsFixed(1)} GB';
+    if (bytes >= 1e6) return '${(bytes / 1e6).toStringAsFixed(0)} MB';
+    if (bytes >= 1e3) return '${(bytes / 1e3).toStringAsFixed(0)} KB';
+    return '$bytes B';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Select folder to copy'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: folders.isEmpty
+            ? const Padding(
+                padding: EdgeInsets.symmetric(vertical: 20),
+                child: Center(child: Text('No folders found')),
+              )
+            : ListView.builder(
+                shrinkWrap: true,
+                itemCount: folders.length,
+                itemBuilder: (context, i) {
+                  final f = folders[i];
+                  final dt = DateTime.fromMillisecondsSinceEpoch((f.mtime * 1000).toInt());
+                  final dateStr =
+                      '${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+                      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+                  return ListTile(
+                    leading: const Icon(Icons.folder_rounded, color: Color(0xFFFFB300)),
+                    title: Text(f.name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                    subtitle: Text('${_fmtSize(f.size)}  $dateStr',
+                        style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+                    onTap: () => Navigator.pop(context, f.name),
+                  );
+                },
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
 }
