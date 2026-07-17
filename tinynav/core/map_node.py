@@ -234,7 +234,26 @@ class MapNode(Node):
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
-        self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
+        relocalization_mask_path = os.path.join(tinynav_map_path, "relocalization_mask.json")
+        excluded_timestamps = set()
+        if os.path.exists(relocalization_mask_path):
+            with open(relocalization_mask_path, "r") as f:
+                relocalization_mask = json.load(f)
+            excluded_timestamps = {
+                int(timestamp)
+                for timestamp in relocalization_mask.get("excluded_timestamps", [])
+            }
+            self.get_logger().info(
+                f"Loaded relocalization mask: excluded {len(excluded_timestamps)} keyframes"
+            )
+        relocalization_timestamps = [
+            timestamp
+            for timestamp in self.map_poses.keys()
+            if int(timestamp) not in excluded_timestamps
+        ]
+        if len(relocalization_timestamps) == 0:
+            raise RuntimeError("Relocalization mask excludes all keyframes")
+        self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(relocalization_timestamps)}
         self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
