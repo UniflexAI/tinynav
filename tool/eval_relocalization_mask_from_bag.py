@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -134,6 +135,65 @@ def keypoint_with_depth_to_3d(
     return points_world, valid
 
 
+def write_review_sample(
+    session_dir: str,
+    sample_index: int,
+    query_timestamp: int,
+    query_image: np.ndarray,
+    retrieved: list[dict],
+    map_db: TinyNavDB,
+    meta: dict,
+) -> None:
+    sample_name = f"sample_{sample_index:06d}_{query_timestamp}"
+    sample_dir = os.path.join(session_dir, sample_name)
+    os.makedirs(sample_dir, exist_ok=True)
+
+    cv2.imwrite(os.path.join(sample_dir, "query.png"), query_image)
+    retrieved_timestamps = []
+    similarities = []
+    for rank, item in enumerate(retrieved):
+        map_timestamp = int(item["timestamp_ns"])
+        _, _, _, _, infra1_loader = map_db.get_depth_embedding_features_images(map_timestamp)
+        ref_image = infra1_loader() if infra1_loader is not None else None
+        if ref_image is not None:
+            cv2.imwrite(os.path.join(sample_dir, f"retrieved_{rank:03d}.png"), ref_image)
+        retrieved_timestamps.append(map_timestamp)
+        similarities.append(float(item["similarity"]))
+
+    sample_meta = {
+        "query_timestamp_ns": int(query_timestamp),
+        "retrieved_timestamps_ns": retrieved_timestamps,
+        "similarities": similarities,
+        "selected_idx": -1,
+        "pnp_success": bool(meta["pnp_success"]),
+        "inlier_count": int(meta["inlier_count"]),
+        "inlier_ratio": float(meta["inlier_ratio"]),
+        "relocalization_success": bool(meta["relocalization_success"]),
+        "retrieved_excluded_count": int(meta["retrieved_excluded_count"]),
+        "false_case": False,
+        "false_case_reason": "offline_relocalization_mask_eval",
+        "review_label": "unreviewed",
+        "review_note": "",
+    }
+    sample_json_path = os.path.join(sample_dir, "sample.json")
+    with open(sample_json_path, "w", encoding="utf-8") as f:
+        json.dump(sample_meta, f, ensure_ascii=True, indent=2)
+        f.write("\n")
+
+    with open(os.path.join(session_dir, "index.jsonl"), "a", encoding="utf-8") as f:
+        f.write(
+            json.dumps(
+                {
+                    "sample_id": sample_name,
+                    "query_timestamp_ns": int(query_timestamp),
+                    "sample_json": sample_json_path,
+                },
+                ensure_ascii=True,
+            )
+            + "\n"
+        )
+
+
 def run(args: argparse.Namespace) -> dict:
     map_timestamps, map_embeddings, db, excluded_timestamps = load_map_embeddings(args.map_path, args.use_mask)
     map_poses = np.load(os.path.join(args.map_path, "poses.npy"), allow_pickle=True).item()
@@ -144,6 +204,14 @@ def run(args: argparse.Namespace) -> dict:
     lightglue = LightGlueTRT()
 
     os.makedirs(os.path.dirname(args.out_jsonl) or ".", exist_ok=True)
+    session_dir = ""
+    if args.review_root:
+        session_dir = os.path.join(args.review_root, datetime.now().strftime("session_%Y%m%d_%H%M%S"))
+        os.makedirs(session_dir, exist_ok=True)
+        index_path = os.path.join(session_dir, "index.jsonl")
+        if os.path.exists(index_path):
+            os.remove(index_path)
+
     query_count = 0
     saved_count = 0
     retrieval_hit_excluded_count = 0
@@ -220,6 +288,16 @@ def run(args: argparse.Namespace) -> dict:
                 "relocalization_success": relocalization_success,
             }
             f.write(json.dumps(row, ensure_ascii=True) + "\n")
+            if session_dir:
+                write_review_sample(
+                    session_dir=session_dir,
+                    sample_index=saved_count,
+                    query_timestamp=query_timestamp,
+                    query_image=image,
+                    retrieved=retrieved,
+                    map_db=db,
+                    meta=row,
+                )
             saved_count += 1
             if saved_count % 20 == 0:
                 print(f"processed={saved_count}")
@@ -236,6 +314,7 @@ def run(args: argparse.Namespace) -> dict:
         "pnp_success_count": pnp_success_count,
         "relocalization_success_count": relocalization_success_count,
         "top1_unique_count": len(set(top1_timestamps)),
+        "review_session_dir": session_dir,
     }
     summary["pnp_success_rate"] = pnp_success_count / max(1, saved_count)
     summary["relocalization_success_rate"] = relocalization_success_count / max(1, saved_count)
@@ -264,6 +343,7 @@ def main() -> None:
     parser.add_argument("--pnp-min-inliers", type=int, default=50)
     parser.add_argument("--out-jsonl", default="/tinynav/tinynav_temp/relocalization_mask_eval.jsonl")
     parser.add_argument("--summary-json", default="")
+    parser.add_argument("--review-root", default="")
     args = parser.parse_args()
     summary = run(args)
     print(json.dumps(summary, indent=2))
