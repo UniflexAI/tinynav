@@ -99,7 +99,98 @@ class DeviceTab extends ConsumerWidget {
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          // ── Maintenance ────────────────────────────────────────────────
+          _SectionCard(
+            icon: Icons.build_rounded,
+            title: 'Maintenance',
+            children: const [
+              _RestartRosButton(),
+            ],
+          ),
         ],
+      ),
+    );
+  }
+}
+
+// ── Restart ROS runner (soft restart) ──────────────────────────────────────────
+
+class _RestartRosButton extends ConsumerStatefulWidget {
+  const _RestartRosButton();
+
+  @override
+  ConsumerState<_RestartRosButton> createState() => _RestartRosButtonState();
+}
+
+class _RestartRosButtonState extends ConsumerState<_RestartRosButton> {
+  bool _busy = false;
+
+  Future<void> _restart() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF111A24),
+        title: const Text('Restart ROS runner?',
+            style: TextStyle(color: Color(0xFFE8F2FF))),
+        content: const Text(
+          'This recycles navigation, perception and sensor nodes. '
+          'The robot will briefly stop responding. The app stays connected.',
+          style: TextStyle(color: Color(0xFF9EC7E8)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Restart', style: TextStyle(color: Color(0xFFFF9F0A))),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _busy = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(dioProvider).post('/device/restart');
+      // Re-fetch status once the node is back up.
+      ref.invalidate(deviceStatusProvider);
+      ref.invalidate(sensorModeProvider);
+      messenger.showSnackBar(
+        const SnackBar(content: Text('ROS runner restarted')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Restart failed: $e'), backgroundColor: Colors.red),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: _busy ? null : _restart,
+        style: OutlinedButton.styleFrom(
+          foregroundColor: const Color(0xFFFF9F0A),
+          side: const BorderSide(color: Color(0xFF5A4326)),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+        ),
+        icon: _busy
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Color(0xFFFF9F0A)),
+              )
+            : const Icon(Icons.restart_alt_rounded, size: 18),
+        label: Text(_busy ? 'Restarting…' : 'Restart ROS runner'),
       ),
     );
   }

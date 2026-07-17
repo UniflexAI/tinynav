@@ -1,11 +1,23 @@
 import socket
 
 import psutil
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from ..state import audio_state, runner
 
 router = APIRouter(tags=['device'])
+
+
+@router.post('/restart')
+def restart_ros():
+    """Soft-restart the ROS runner (recycle the rclpy node and its child
+    processes). The HTTP server and WebSockets stay up. Sync def → FastAPI runs
+    it in a threadpool, so the blocking tear-down/bring-up won't stall the loop."""
+    try:
+        runner.restart()
+    except Exception as e:  # noqa: BLE001 — surface any restart failure to the UI
+        raise HTTPException(status_code=500, detail=f'ROS restart failed: {e}')
+    return {'ok': True}
 
 
 @router.get('/info')

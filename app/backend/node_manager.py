@@ -584,7 +584,7 @@ class BackendNode(Ros2NodeManager):
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._unitree_proc = self._launch_proc(
             'unitree',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
+            ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
             env=_env,
         )
         self.get_logger().info('unitree_control started')
@@ -703,12 +703,12 @@ class BackendNode(Ros2NodeManager):
         if self._sensor_mode == 'looper':
             self._looper_bridge_proc = self._launch_proc(
                 'looper_bridge',
-                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
+                ['uv', 'run', '--no-sync', 'python', '/tinynav/tool/looper_bridge_node.py'],
                 env=env,
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/planning_node.py'],
                 env=env,
             )
         elif self._sensor_mode == 'realsense':
@@ -718,12 +718,12 @@ class BackendNode(Ros2NodeManager):
             )
             self._perception_proc = self._launch_proc(
                 'perception',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
+                ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/perception_node.py'],
                 env=env,
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/planning_node.py'],
                 env=env,
             )
 
@@ -744,14 +744,14 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc = self._launch_proc(
             'map_node',
             [
-                'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+                'uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/map_node.py',
                 '--tinynav_map_path', self.map_path,
             ],
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
             env=_env,
         )
         with self._lock:
@@ -787,18 +787,18 @@ class BackendNode(Ros2NodeManager):
 
         self._planning_proc = self._launch_proc(
             'planning',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/planning_node.py'],
             env=_env,
         )
         self._map_node_proc = self._launch_proc(
             'map_node',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+            ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/map_node.py',
              '--tinynav_map_path', self.map_path],
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
             env=_env,
         )
         with self._lock:
@@ -884,10 +884,10 @@ class BackendNode(Ros2NodeManager):
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         if self._sensor_mode == 'looper':
             source_name = 'looper_bridge'
-            source_cmd = ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py']
+            source_cmd = ['uv', 'run', '--no-sync', 'python', '/tinynav/tool/looper_bridge_node.py']
         else:
             source_name = 'perception'
-            source_cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+            source_cmd = ['uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/perception_node.py']
 
         self.processes[source_name] = self._launch_proc(
             source_name,
@@ -897,7 +897,7 @@ class BackendNode(Ros2NodeManager):
         self.processes['build_map'] = self._launch_proc_tee(
             'build_map_node',
             [
-                'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
+                'uv', 'run', '--no-sync', 'python', '/tinynav/tinynav/core/build_map_node.py',
                 '--map_save_path', self.map_path,
                 '--bag_file', bag_file,
             ],
@@ -949,7 +949,7 @@ class BackendNode(Ros2NodeManager):
         if proc_build:
             proc_build.wait()
         subprocess.run([
-            'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
+            'uv', 'run', '--no-sync', 'python', '/tinynav/tool/convert_to_colmap_format.py',
             '--input_dir', self.map_path,
             '--output_dir', self.map_path,
         ])
@@ -1111,12 +1111,28 @@ class NodeRunner:
         self.node: BackendNode | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
+        self._restart_lock = threading.Lock()
 
     def start(self):
+        self._ready.clear()
         self._thread = threading.Thread(target=self._run, daemon=True, name='rclpy-spin')
         self._thread.start()
         if not self._ready.wait(timeout=15.0):
             raise RuntimeError('rclpy node did not start in time')
+
+    def restart(self):
+        """Tear down the ROS node and its child processes, then bring a fresh one
+        back up. HTTP/WS stay alive; only the rclpy layer is recycled. Serialized
+        so concurrent restart requests can't race two rclpy contexts."""
+        with self._restart_lock:
+            self.stop()
+            # Wait for the old spin thread to run its finally (rclpy.shutdown)
+            # before start() calls rclpy.init() again — otherwise init can throw.
+            old = self._thread
+            if old and old.is_alive():
+                old.join(timeout=15.0)
+            self.node = None
+            self.start()
 
     def _run(self):
         rclpy.init()
@@ -1152,3 +1168,9 @@ class NodeRunner:
                             proc.kill()
                         except Exception:
                             pass
+        # Wake the spin thread so _run's finally can complete (and rclpy shuts
+        # down) — otherwise a subsequent rclpy.init() on restart may fail.
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -28,15 +29,78 @@ final dioProvider = Provider<Dio>((ref) {
   ));
 });
 
+/// Opens a WebSocket to the URI returned by [uriBuilder] and yields decoded [T]
+/// messages, transparently reconnecting with exponential backoff whenever the
+/// socket closes or errors. The returned stream stays open across reconnects, so
+/// consumers keep their last value instead of flipping to loading/error on a
+/// transient drop. The backoff resets to [initialDelay] after any good frame.
+Stream<T> _reconnectingWsStream<T>(
+  Ref ref,
+  Uri Function() uriBuilder,
+  T Function(dynamic data) decode, {
+  Duration initialDelay = const Duration(seconds: 1),
+  Duration maxDelay = const Duration(seconds: 15),
+}) {
+  final controller = StreamController<T>();
+  WebSocketChannel? channel;
+  StreamSubscription<dynamic>? sub;
+  Timer? retryTimer;
+  var delay = initialDelay;
+  var disposed = false;
+
+  late void Function() connect;
+
+  void scheduleReconnect() {
+    sub?.cancel();
+    sub = null;
+    channel?.sink.close();
+    channel = null;
+    if (disposed) return;
+    retryTimer?.cancel();
+    retryTimer = Timer(delay, connect);
+    final next = delay * 2;
+    delay = next > maxDelay ? maxDelay : next;
+  }
+
+  connect = () {
+    if (disposed) return;
+    final ch = WebSocketChannel.connect(uriBuilder());
+    channel = ch;
+    sub = ch.stream.listen(
+      (data) {
+        delay = initialDelay; // reset backoff after a good frame
+        try {
+          controller.add(decode(data));
+        } catch (_) {
+          // ignore malformed frame
+        }
+      },
+      onError: (_) => scheduleReconnect(),
+      onDone: scheduleReconnect,
+      cancelOnError: true,
+    );
+  };
+
+  ref.onDispose(() {
+    disposed = true;
+    retryTimer?.cancel();
+    sub?.cancel();
+    channel?.sink.close();
+    controller.close();
+  });
+
+  connect();
+  return controller.stream;
+}
+
 /// Streams DeviceStatus from WS /ws/status (~1 s interval pushed by backend).
 final deviceStatusProvider = StreamProvider<DeviceStatus>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/status'));
-  ref.onDispose(() => channel.sink.close());
-
-  return channel.stream.map(
+  return _reconnectingWsStream(
+    ref,
+    () => Uri.parse('ws://$ip:8000/ws/status'),
     (data) => DeviceStatus.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
   );
 });
@@ -46,10 +110,9 @@ final navProgressStreamProvider = StreamProvider<NavProgress>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/nav-progress'));
-  ref.onDispose(() => channel.sink.close());
-
-  return channel.stream.map(
+  return _reconnectingWsStream(
+    ref,
+    () => Uri.parse('ws://$ip:8000/ws/nav-progress'),
     (data) => NavProgress.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
   );
 });
@@ -59,10 +122,9 @@ final poseStreamProvider = StreamProvider<Pose>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/pose'));
-  ref.onDispose(() => channel.sink.close());
-
-  return channel.stream.map(
+  return _reconnectingWsStream(
+    ref,
+    () => Uri.parse('ws://$ip:8000/ws/pose'),
     (data) => Pose.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
   );
 });
@@ -150,10 +212,7 @@ final previewStreamProvider =
         'quality': request.quality.queryValue,
       },
     );
-    final channel = WebSocketChannel.connect(uri);
-    ref.onDispose(() => channel.sink.close());
-
-    return channel.stream.map((data) {
+    return _reconnectingWsStream(ref, () => uri, (data) {
       if (data is Uint8List) return data;
       if (data is List<int>) return Uint8List.fromList(data);
       return Uint8List(0);
@@ -166,10 +225,9 @@ final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
 
-  final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/planning'));
-  ref.onDispose(() => channel.sink.close());
-
-  return channel.stream.map(
+  return _reconnectingWsStream(
+    ref,
+    () => Uri.parse('ws://$ip:8000/ws/planning'),
     (data) => PlanningState.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
   );
 });
