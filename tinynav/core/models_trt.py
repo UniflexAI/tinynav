@@ -261,6 +261,18 @@ class Dinov2TRT(TRTBase):
         results = await self.run_graph()
         return results["last_hidden_state"][:, 0, :].squeeze(0)
 
+    async def infer_global_and_patch_tokens(self, image):
+        """Return the CLS descriptor and L2-normalized patch tokens in one run."""
+        image = self.preprocess_image(image)
+        np.copyto(self.inputs[0]["host"], image)
+        results = await self.run_graph()
+        hidden_state = results["last_hidden_state"].squeeze(0)
+        global_embedding = hidden_state[0]
+        tokens = hidden_state[1:]
+        norms = np.linalg.norm(tokens, axis=1, keepdims=True)
+        tokens = tokens / np.maximum(norms, 1e-8)
+        return global_embedding, tokens.astype(np.float32)
+
     async def infer_patch_tokens(self, image):
         """Return L2-normalized DINOv2 patch tokens, excluding the CLS token."""
         image = self.preprocess_image(image)
