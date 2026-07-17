@@ -233,6 +233,13 @@ def tag_output_path(output_path: str, tag: str) -> str:
 
 
 class Dinov2TRT(TRTBase):
+    """DINOv2 TensorRT wrapper.
+
+    The model output ``last_hidden_state`` has shape ``[1, 1 + N, C]``:
+    the first token is the global CLS descriptor and the remaining tokens are
+    patch descriptors.
+    """
+
     def __init__(self, engine_path=f"/tinynav/tinynav/models/dinov2_base_224x224_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
 
@@ -253,6 +260,16 @@ class Dinov2TRT(TRTBase):
         np.copyto(self.inputs[0]["host"], image)
         results = await self.run_graph()
         return results["last_hidden_state"][:, 0, :].squeeze(0)
+
+    async def infer_patch_tokens(self, image):
+        """Return L2-normalized DINOv2 patch tokens, excluding the CLS token."""
+        image = self.preprocess_image(image)
+        np.copyto(self.inputs[0]["host"], image)
+        results = await self.run_graph()
+        tokens = results["last_hidden_state"][:, 1:, :].squeeze(0)
+        norms = np.linalg.norm(tokens, axis=1, keepdims=True)
+        tokens = tokens / np.maximum(norms, 1e-8)
+        return tokens.astype(np.float32)
 
 
 class SigLIPImageTRT(TRTBase):
