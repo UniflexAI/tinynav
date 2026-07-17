@@ -233,13 +233,6 @@ def tag_output_path(output_path: str, tag: str) -> str:
 
 
 class Dinov2TRT(TRTBase):
-    """DINOv2 TensorRT wrapper.
-
-    The model output ``last_hidden_state`` has shape ``[1, 1 + N, C]``:
-    the first token is the global CLS descriptor and the remaining tokens are
-    patch descriptors.
-    """
-
     def __init__(self, engine_path=f"/tinynav/tinynav/models/dinov2_base_224x224_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)
 
