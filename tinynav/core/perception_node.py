@@ -197,8 +197,18 @@ class PerceptionNode(Node):
             gravity_cam /= np.linalg.norm(gravity_cam)
             gravity_world = np.array([0.0, 0.0, 1.0])
 
+            R_gravity_align = rot_from_two_vector(gravity_cam, gravity_world)
+            initial_yaw = np.arctan2(R_gravity_align[1, 0], R_gravity_align[0, 0]) + np.pi / 2
+            cos_yaw, sin_yaw = np.cos(-initial_yaw), np.sin(-initial_yaw)
+            R_zero_yaw = np.array([
+                [cos_yaw, -sin_yaw, 0.0],
+                [sin_yaw, cos_yaw, 0.0],
+                [0.0, 0.0, 1.0],
+            ])
+
             self.T_body_last = np.eye(4)
-            self.T_body_last[:3, :3] = rot_from_two_vector(gravity_cam, gravity_world)
+            self.T_body_last[:3, :3] = R_zero_yaw @ R_gravity_align
+            self.get_logger().info(f"Initial yaw removed: {np.degrees(initial_yaw):.2f} deg")
             self.get_logger().info("Initial pose set from accelerometer data.")
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
         elif len(self.accel_readings) < 10:
