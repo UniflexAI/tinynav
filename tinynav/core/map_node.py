@@ -25,7 +25,7 @@ import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
-from tinynav.core.vlad import compute_vlad, find_loop_vlad
+from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
@@ -469,7 +469,10 @@ class MapNode(Node):
             return False, np.eye(4), -np.inf
 
         query_vlad = self.get_vlad_descriptor(keyframe)
-        idx_and_similarity_array = find_loop_vlad(
+        assert query_vlad.ndim == 1
+        assert self.map_vlad_descriptors.ndim == 2
+        assert self.map_vlad_descriptors.shape[1] == query_vlad.shape[0]
+        idx_and_similarity_array = find_loop(
             query_vlad,
             self.map_vlad_descriptors,
             -1.0,

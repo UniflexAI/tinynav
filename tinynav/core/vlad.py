@@ -8,7 +8,7 @@ Pipeline:
   2. Train a K-means vocabulary on all patch tokens from the map.
   3. For each image, compute a VLAD descriptor by assigning patches to clusters
      and aggregating residuals.
-  4. Cosine similarity between VLAD descriptors → top-k retrieval.
+  4. Use the shared descriptor retrieval helper to rank top-k candidates.
 
 All routines are pure numpy / scipy so they run on both x64 and Jetson aarch64.
 """
@@ -129,31 +129,3 @@ def compute_vlad_batch(
         if (i + 1) % 100 == 0:
             logger.info(f"VLAD encoded {i + 1}/{len(patch_tokens_list)}")
     return descriptors
-
-
-def find_loop_vlad(
-    query_vlad: np.ndarray,
-    map_vlads: np.ndarray,
-    similarity_threshold: float,
-    top_k: int,
-) -> list[tuple[int, float]]:
-    """Find top-k loop closure candidates using VLAD cosine similarity.
-
-    Args:
-        query_vlad: (D,) L2-normalised VLAD descriptor.
-        map_vlads: (N, D) L2-normalised VLAD descriptors.
-        similarity_threshold: minimum cosine similarity.
-        top_k: maximum number of candidates.
-
-    Returns:
-        List of (index, similarity) tuples, sorted ascending (best last).
-    """
-    if len(map_vlads) == 0:
-        return []
-    similarity_array = map_vlads @ query_vlad  # both are L2-normalised → dot = cosine
-    top_k_indices = np.argsort(similarity_array, axis=0)
-    loop_list = []
-    for idx in top_k_indices:
-        if similarity_array[idx] > similarity_threshold:
-            loop_list.append((int(idx), float(similarity_array[idx])))
-    return loop_list[-top_k:]
