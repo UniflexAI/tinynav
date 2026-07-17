@@ -234,21 +234,19 @@ class MapNode(Node):
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
-        missing_vlad_timestamps = [
-            timestamp
-            for timestamp in self.map_poses.keys()
-            if not self.db.has_vlad_descriptor(timestamp)
-        ]
-        if not self.db.has_vlad_centres() or missing_vlad_timestamps:
+        self.vlad_timestamps = list(self.map_poses.keys())
+        try:
+            self.vlad_centres = self.db.metadata["vlad_centres"]
+            self.map_vlad_descriptors = np.stack([
+                self.db.vlad_descriptors[timestamp]
+                for timestamp in self.vlad_timestamps
+            ])
+        except KeyError as exc:
             raise RuntimeError(
                 "This map does not contain a complete DINOv2 patch VLAD "
                 "relocalization index. Rebuild the map with this branch before "
-                f"running map_node. map_path={tinynav_map_path}, "
-                f"missing_vlad_descriptors={len(missing_vlad_timestamps)}"
-            )
-        self.vlad_centres = self.db.get_vlad_centres()
-        self.vlad_timestamps = list(self.map_poses.keys())
-        self.map_vlad_descriptors = np.stack([self.db.get_vlad_descriptor(timestamp) for timestamp in self.vlad_timestamps])
+                f"running map_node. map_path={tinynav_map_path}, missing_key={exc}"
+            ) from exc
         self.get_logger().info(
             "Using DINOv2 patch VLAD relocalization index: "
             f"vocab={self.vlad_centres.shape}, "
@@ -469,9 +467,6 @@ class MapNode(Node):
             return False, np.eye(4), -np.inf
 
         query_vlad = self.get_vlad_descriptor(keyframe)
-        assert query_vlad.ndim == 1
-        assert self.map_vlad_descriptors.ndim == 2
-        assert self.map_vlad_descriptors.shape[1] == query_vlad.shape[0]
         idx_and_similarity_array = find_loop(
             query_vlad,
             self.map_vlad_descriptors,
