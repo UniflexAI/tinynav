@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..state import runner
+from ..state import audio_state, runner
 
 router = APIRouter(tags=['nav'])
 
@@ -112,3 +112,16 @@ def nav_nodes_disable():
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_stop_nav_nodes()
     return {'ok': True}
+
+
+@router.post('/audio/enable')
+def nav_audio_enable():
+    """Force nav-audio playback on, independently of navigation."""
+    audio_state.forced = True
+    return {'ok': True, 'navAudioForced': True}
+
+
+@router.post('/audio/disable')
+def nav_audio_disable():
+    audio_state.forced = False
+    return {'ok': True, 'navAudioForced': False}

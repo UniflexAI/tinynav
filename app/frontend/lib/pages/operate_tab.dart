@@ -32,6 +32,9 @@ class OperateTab extends ConsumerStatefulWidget {
 
 class _OperateTabState extends ConsumerState<OperateTab> {
   WebSocketChannel? _teleopChannel;
+  StreamSubscription<dynamic>? _teleopSub;
+  Timer? _teleopReconnectTimer;
+  bool _disposed = false;
   double _linearX = 0, _linearY = 0, _angularZ = 0;
   DateTime _lastTeleopSend = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _teleopTimer;
@@ -53,13 +56,34 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   }
 
   void _connectTeleop() {
+    if (_disposed) return;
     final ip = ref.read(deviceIpProvider);
     if (ip == null) return;
     try {
-      _teleopChannel = WebSocketChannel.connect(
+      final ch = WebSocketChannel.connect(
         Uri.parse('ws://$ip:8000/ws/teleop'),
       );
-    } catch (_) {}
+      _teleopChannel = ch;
+      // A send-only socket, but listen so we notice drops and reconnect.
+      _teleopSub = ch.stream.listen(
+        (_) {},
+        onError: (_) => _scheduleTeleopReconnect(),
+        onDone: _scheduleTeleopReconnect,
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _scheduleTeleopReconnect();
+    }
+  }
+
+  void _scheduleTeleopReconnect() {
+    _teleopSub?.cancel();
+    _teleopSub = null;
+    _teleopChannel?.sink.close();
+    _teleopChannel = null;
+    if (_disposed) return;
+    _teleopReconnectTimer?.cancel();
+    _teleopReconnectTimer = Timer(const Duration(seconds: 2), _connectTeleop);
   }
 
   void _sendVelocity({bool force = false}) {
@@ -104,7 +128,10 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
   @override
   void dispose() {
+    _disposed = true;
     _teleopTimer?.cancel();
+    _teleopReconnectTimer?.cancel();
+    _teleopSub?.cancel();
     _teleopChannel?.sink.close();
     super.dispose();
   }
@@ -246,6 +273,11 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                 ),
               ),
               Positioned(
+                bottom: 52,
+                right: 10,
+                child: _NavAudioButton(statusAsync: ref.watch(deviceStatusProvider)),
+              ),
+              Positioned(
                 bottom: 10,
                 right: 10,
                 child: _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
@@ -293,14 +325,10 @@ class _GlobalMapView extends StatelessWidget {
         Center(
           child: AspectRatio(
             aspectRatio: mapInfo.width / mapInfo.height,
-            child: InteractiveViewer(
-              minScale: 0.5,
-              maxScale: 8.0,
-              boundaryMargin: const EdgeInsets.all(double.infinity),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Image.network(
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.network(
                     '$baseUrl${mapInfo.imageUrl}',
                     fit: BoxFit.fill,
                     gaplessPlayback: true,
@@ -317,7 +345,6 @@ class _GlobalMapView extends StatelessWidget {
                       ),
                     ),
                 ],
-              ),
             ),
           ),
         ),
@@ -531,9 +558,10 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                     ? _Local3dPlanningView(planning: p)
                     : InteractiveViewer(
                         transformationController: _txCtrl,
-                        minScale: 0.5,
-                        maxScale: 8.0,
-                        boundaryMargin: const EdgeInsets.all(double.infinity),
+                        panEnabled: false,
+                        scaleEnabled: false,
+                        minScale: 1.0,
+                        maxScale: 1.0,
                         child: Stack(
                           fit: StackFit.expand,
                           children: [
@@ -715,7 +743,8 @@ class _Local3dPlanningViewState extends State<_Local3dPlanningView> {
       }
 
       _scale = (_startScale * details.scale).clamp(_minScale, _maxScale).toDouble();
-      _pan = _startPan + details.focalPoint - _startFocalPoint;
+      // Pan (drag-to-translate) intentionally disabled; rotate (ctrl+drag above,
+      // two-finger below) and zoom (pinch / scroll) stay active.
       if (details.pointerCount >= 2) {
         _viewYaw = _startYaw + details.rotation;
       }
@@ -1356,6 +1385,9 @@ class _PoiTile extends StatelessWidget {
 
 // ── Nav nodes toggle button ───────────────────────────────────────────────────
 
+/// Shared width so the stacked Nav / Audio toggle buttons line up.
+const double _kNavButtonWidth = 100;
+
 class _NavNodesButton extends ConsumerStatefulWidget {
   final AsyncValue<DeviceStatus> statusAsync;
   const _NavNodesButton({required this.statusAsync});
@@ -1390,7 +1422,9 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
     final status = widget.statusAsync.valueOrNull;
     final running = status?.navNodesRunning ?? false;
 
-    return FilledButton.icon(
+    return SizedBox(
+      width: _kNavButtonWidth,
+      child: FilledButton.icon(
       onPressed: _loading ? null : () => _toggle(running),
       style: FilledButton.styleFrom(
         backgroundColor: running
@@ -1410,6 +1444,67 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
               size: 16,
             ),
       label: Text(running ? 'Nav ON' : 'Nav'),
+      ),
+    );
+  }
+}
+
+// ── Nav audio toggle button (color-only on/off state) ─────────────────────────
+
+class _NavAudioButton extends ConsumerStatefulWidget {
+  final AsyncValue<DeviceStatus> statusAsync;
+  const _NavAudioButton({required this.statusAsync});
+
+  @override
+  ConsumerState<_NavAudioButton> createState() => _NavAudioButtonState();
+}
+
+class _NavAudioButtonState extends ConsumerState<_NavAudioButton> {
+  bool _loading = false;
+
+  Future<void> _toggle(bool forced) async {
+    setState(() => _loading = true);
+    try {
+      await ref.read(dioProvider).post(
+        forced ? '/nav/audio/disable' : '/nav/audio/enable',
+      );
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.statusAsync.valueOrNull;
+    final forced = status?.navAudioForced ?? false;
+
+    return SizedBox(
+      width: _kNavButtonWidth,
+      child: FilledButton.icon(
+        onPressed: _loading ? null : () => _toggle(forced),
+        style: FilledButton.styleFrom(
+          backgroundColor: forced
+              ? const Color(0xFF3B82F6).withOpacity(0.9)
+              : Colors.black87,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        ),
+        icon: _loading
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              )
+            : const Icon(Icons.volume_up_rounded, size: 16),
+        label: const Text('Audio'),
+      ),
     );
   }
 }

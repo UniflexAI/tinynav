@@ -3,7 +3,7 @@ import socket
 import psutil
 from fastapi import APIRouter
 
-from ..state import runner
+from ..state import audio_state, runner
 
 router = APIRouter(tags=['device'])
 
@@ -21,12 +21,18 @@ def device_info():
 def device_status():
     node = runner.node
     if node is None:
-        return {'online': False, 'battery': None, **_empty_status()}
+        return {
+            'online': False,
+            'battery': None,
+            'navAudioForced': audio_state.forced,
+            **_empty_status(),
+        }
     status = node.get_status()
     return {
         'online': True,
         'battery': None,   # no battery topic yet
         **status,
+        'navAudioForced': audio_state.forced,
     }
 
 

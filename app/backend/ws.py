@@ -16,7 +16,7 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 
-from .state import runner
+from .state import audio_state, runner
 
 router = APIRouter(tags=['ws'])
 
@@ -42,9 +42,16 @@ async def ws_status(ws: WebSocket):
         while True:
             node = runner.node
             if node is not None:
-                payload = json.dumps({'online': True, **node.get_status()})
+                payload = json.dumps({
+                    'online': True,
+                    **node.get_status(),
+                    'navAudioForced': audio_state.forced,
+                })
             else:
-                payload = json.dumps({'online': False})
+                payload = json.dumps({
+                    'online': False,
+                    'navAudioForced': audio_state.forced,
+                })
             await ws.send_text(payload)
             await asyncio.sleep(1.0)
     except WebSocketDisconnect:
