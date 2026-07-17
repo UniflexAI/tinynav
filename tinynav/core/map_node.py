@@ -234,6 +234,18 @@ class MapNode(Node):
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
+        missing_vlad_timestamps = [
+            timestamp
+            for timestamp in self.map_poses.keys()
+            if not self.db.has_vlad_descriptor(timestamp)
+        ]
+        if not self.db.has_vlad_centres() or missing_vlad_timestamps:
+            raise RuntimeError(
+                "This map does not contain a complete DINOv2 patch VLAD "
+                "relocalization index. Rebuild the map with this branch before "
+                f"running map_node. map_path={tinynav_map_path}, "
+                f"missing_vlad_descriptors={len(missing_vlad_timestamps)}"
+            )
         self.vlad_centres = self.db.get_vlad_centres()
         self.vlad_timestamps = list(self.map_poses.keys())
         self.map_vlad_descriptors = np.stack([self.db.get_vlad_descriptor(timestamp) for timestamp in self.vlad_timestamps])

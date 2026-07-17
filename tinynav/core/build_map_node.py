@@ -425,8 +425,14 @@ class TinyNavDB():
     def set_vlad_centres(self, centres: np.ndarray):
         self.metadata["vlad_centres"] = centres
 
+    def has_vlad_centres(self) -> bool:
+        return "vlad_centres" in self.metadata
+
     def get_vlad_centres(self) -> np.ndarray:
         return self.metadata["vlad_centres"]
+
+    def has_vlad_descriptor(self, key:int) -> bool:
+        return key in self.vlad_descriptors
 
     def get_vlad_descriptor(self, key:int) -> np.ndarray:
         return self.vlad_descriptors[key]
