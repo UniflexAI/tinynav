@@ -273,6 +273,11 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                 ),
               ),
               Positioned(
+                bottom: 94,
+                right: 10,
+                child: _NavLoopButton(statusAsync: ref.watch(deviceStatusProvider)),
+              ),
+              Positioned(
                 bottom: 52,
                 right: 10,
                 child: _NavAudioButton(statusAsync: ref.watch(deviceStatusProvider)),
@@ -1444,6 +1449,66 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
               size: 16,
             ),
       label: Text(running ? 'Nav ON' : 'Nav'),
+      ),
+    );
+  }
+}
+
+// ── Nav loop toggle button (re-issue POIs after nav finishes) ─────────────────
+
+class _NavLoopButton extends ConsumerStatefulWidget {
+  final AsyncValue<DeviceStatus> statusAsync;
+  const _NavLoopButton({required this.statusAsync});
+
+  @override
+  ConsumerState<_NavLoopButton> createState() => _NavLoopButtonState();
+}
+
+class _NavLoopButtonState extends ConsumerState<_NavLoopButton> {
+  bool _loading = false;
+
+  Future<void> _toggle(bool enabled) async {
+    setState(() => _loading = true);
+    try {
+      await ref.read(dioProvider).post(
+        enabled ? '/nav/loop/disable' : '/nav/loop/enable',
+      );
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.statusAsync.valueOrNull;
+    final enabled = status?.navLoopEnabled ?? false;
+
+    return SizedBox(
+      width: _kNavButtonWidth,
+      child: FilledButton.icon(
+        onPressed: _loading ? null : () => _toggle(enabled),
+        style: FilledButton.styleFrom(
+          backgroundColor: enabled
+              ? const Color(0xFFF59E0B).withOpacity(0.9)
+              : Colors.black87,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        ),
+        icon: _loading
+            ? const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              )
+            : const Icon(Icons.loop_rounded, size: 16),
+        label: Text(enabled ? 'Loop ON' : 'Loop'),
       ),
     );
   }

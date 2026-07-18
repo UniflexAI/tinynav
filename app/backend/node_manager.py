@@ -162,6 +162,10 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
         self._nav_paused = False
         self._nav_active = False
+        # Loop mode: when enabled, the last-sent POIs are re-issued after
+        # navigation finishes so the route repeats instead of going idle.
+        self._nav_loop = False
+        self._last_poi_ids: list[int] = []
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -215,8 +219,23 @@ class BackendNode(Ros2NodeManager):
             self._nav_active = bool(active)
         self._nav_active_pub.publish(Bool(data=bool(active)))
 
+    def cmd_set_nav_loop(self, enabled: bool):
+        """Enable/disable loop mode. When enabled, the last-sent POIs are
+        re-issued after navigation finishes so the route repeats."""
+        with self._lock:
+            self._nav_loop = bool(enabled)
+        self._pub_state()
+
     def _on_nav_done(self, msg: Bool):
         if msg.data and self.state == 'navigation':
+            with self._lock:
+                loop = self._nav_loop
+                poi_ids = list(self._last_poi_ids)
+            if loop and poi_ids:
+                # Loop mode: re-issue the same POIs instead of going idle.
+                self.get_logger().info(f'Nav loop: re-issuing {len(poi_ids)} POIs')
+                self.cmd_send_pois(poi_ids)
+                return
             self._set_nav_active(False)
             self.state = 'idle'
             self._pub_state()
@@ -631,6 +650,7 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             nav_active = self._nav_active
+            nav_loop = self._nav_loop
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -644,6 +664,7 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
+            'navLoopEnabled': nav_loop,
         }
 
     @staticmethod
@@ -1024,6 +1045,8 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""
+        with self._lock:
+            self._last_poi_ids = [int(p) for p in poi_ids]
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)

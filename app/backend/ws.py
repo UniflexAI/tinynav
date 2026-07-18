@@ -51,6 +51,7 @@ async def ws_status(ws: WebSocket):
                 payload = json.dumps({
                     'online': False,
                     'navAudioForced': audio_state.forced,
+                    'navLoopEnabled': False,
                 })
             await ws.send_text(payload)
             await asyncio.sleep(1.0)

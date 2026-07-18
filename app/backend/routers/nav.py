@@ -125,3 +125,18 @@ def nav_audio_enable():
 def nav_audio_disable():
     audio_state.forced = False
     return {'ok': True, 'navAudioForced': False}
+
+
+@router.post('/loop/enable')
+def nav_loop_enable():
+    """Enable loop mode: re-issue the last-sent POIs after nav finishes."""
+    node = _require_node()
+    node.cmd_set_nav_loop(True)
+    return {'ok': True, 'navLoopEnabled': True}
+
+
+@router.post('/loop/disable')
+def nav_loop_disable():
+    node = _require_node()
+    node.cmd_set_nav_loop(False)
+    return {'ok': True, 'navLoopEnabled': False}

@@ -82,4 +82,5 @@ def _empty_status():
         'mappingPercent': 0.0,
         'navStatus': 'idle',
         'rawState': 'unknown',
+        'navLoopEnabled': False,
     }
