@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,16 @@ def _save_mask(mask_path: Path, mask: dict[str, Any]) -> None:
     with mask_path.open("w") as f:
         json.dump(mask, f, indent=2)
         f.write("\n")
+
+
+def _ensure_port_available(host: str, port: int) -> None:
+    bind_host = "" if host in ("0.0.0.0", "::") else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((bind_host, port))
+        except OSError as exc:
+            raise RuntimeError(f"Port {port} is already in use. Please stop the old editor or choose another port.") from exc
 
 
 def _line_segments_from_points(points: list[np.ndarray], close: bool) -> np.ndarray:
@@ -162,6 +173,7 @@ class RelocalizationMaskEditor:
         self.status = None
 
     def run(self) -> None:
+        _ensure_port_available(self.args.host, self.args.port)
         self._add_static_map_layers()
         self._add_keyframe_layers()
         self._add_ui()
