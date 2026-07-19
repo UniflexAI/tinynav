@@ -158,6 +158,7 @@ class RelocalizationMaskEditor:
         self.box_center = np.mean(self.positions, axis=0).astype(np.float32) if len(self.positions) > 0 else np.zeros(3)
         self.box_size = np.maximum(extent * 0.25, np.array([1.0, 1.0, 0.5], dtype=np.float32)).astype(np.float32)
 
+        _ensure_port_available(args.host, args.port)
         self.server = viser.ViserServer(host=args.host, port=args.port)
         self.server.scene.world_axes.visible = True
         self.server.scene.set_up_direction("+z")
@@ -173,7 +174,6 @@ class RelocalizationMaskEditor:
         self.status = None
 
     def run(self) -> None:
-        _ensure_port_available(self.args.host, self.args.port)
         self._add_static_map_layers()
         self._add_keyframe_layers()
         self._add_ui()
