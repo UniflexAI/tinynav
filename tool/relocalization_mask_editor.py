@@ -71,15 +71,6 @@ def _ensure_port_available(host: str, port: int) -> None:
             raise RuntimeError(f"Port {port} is already in use. Please stop the old editor or choose another port.") from exc
 
 
-def _line_segments_from_points(points: list[np.ndarray], close: bool) -> np.ndarray:
-    if len(points) < 2:
-        return np.empty((0, 2, 3), dtype=np.float32)
-    pts = np.asarray(points, dtype=np.float32)
-    if close and len(points) >= 3:
-        pts = np.vstack([pts, pts[:1]])
-    return np.stack([pts[:-1], pts[1:]], axis=1)
-
-
 def _box_line_segments(center: np.ndarray, size: np.ndarray) -> np.ndarray:
     half = size.astype(np.float32) * 0.5
     c = center.astype(np.float32)
@@ -121,43 +112,28 @@ def _points_in_box(points: np.ndarray, center: np.ndarray, size: np.ndarray) -> 
     return np.all((points >= center - half) & (points <= center + half), axis=1)
 
 
-def _points_in_polygon(points_xy: np.ndarray, polygon_xy: np.ndarray) -> np.ndarray:
-    if len(polygon_xy) < 3:
-        return np.zeros(len(points_xy), dtype=bool)
-
-    x = points_xy[:, 0]
-    y = points_xy[:, 1]
-    poly_x = polygon_xy[:, 0]
-    poly_y = polygon_xy[:, 1]
-    inside = np.zeros(len(points_xy), dtype=bool)
-
-    j = len(polygon_xy) - 1
-    for i in range(len(polygon_xy)):
-        intersects = ((poly_y[i] > y) != (poly_y[j] > y)) & (
-            x < (poly_x[j] - poly_x[i]) * (y - poly_y[i]) / (poly_y[j] - poly_y[i] + 1e-12) + poly_x[i]
-        )
-        inside ^= intersects
-        j = i
-    return inside
-
-
 class RelocalizationMaskEditor:
     def __init__(self, args: Args):
         self.args = args
         self.map_dir = args.tinynav_map_path
         self.mask_path = self.map_dir / args.output_name
         self.timestamps, self.positions = _load_poses(self.map_dir)
-        self.xy = self.positions[:, :2]
         self.z_plane = float(np.median(self.positions[:, 2])) if len(self.positions) > 0 else 0.0
 
         self.mask = _load_mask(self.mask_path)
-        self.excluded = {int(t) for t in self.mask.get("excluded_timestamps", [])}
         self.current_selection: set[int] = set()
-        self.selection_mode: str | None = None
-        self.polygon_points: list[np.ndarray] = []
         extent = np.ptp(self.positions, axis=0) if len(self.positions) > 0 else np.ones(3, dtype=np.float32)
-        self.box_center = np.mean(self.positions, axis=0).astype(np.float32) if len(self.positions) > 0 else np.zeros(3)
-        self.box_size = np.maximum(extent * 0.25, np.array([1.0, 1.0, 0.5], dtype=np.float32)).astype(np.float32)
+        self.default_box_center = (
+            np.mean(self.positions, axis=0).astype(np.float32) if len(self.positions) > 0 else np.zeros(3)
+        )
+        self.default_box_size = np.maximum(extent * 0.25, np.array([1.0, 1.0, 0.5], dtype=np.float32)).astype(
+            np.float32
+        )
+        self.boxes = self._load_boxes_from_mask()
+        if not self.boxes:
+            self.boxes.append({"center": self.default_box_center.copy(), "size": self.default_box_size.copy()})
+        self.selected_box_idx = 0
+        self.excluded = self._compute_excluded_from_boxes()
 
         _ensure_port_available(args.host, args.port)
         self.server = viser.ViserServer(host=args.host, port=args.port)
@@ -167,11 +143,12 @@ class RelocalizationMaskEditor:
         self.available_handle: viser.SceneHandle | None = None
         self.excluded_handle: viser.SceneHandle | None = None
         self.selected_handle: viser.SceneHandle | None = None
-        self.polygon_line_handle: viser.SceneHandle | None = None
-        self.polygon_point_handles: list[viser.SceneHandle] = []
-        self.polygon_gizmo_handles: list[viser.TransformControlsHandle] = []
-        self.box_line_handle: viser.SceneHandle | None = None
-        self.box_gizmo_handle: viser.TransformControlsHandle | None = None
+        self.box_line_handles: list[viser.SceneHandle] = []
+        self.box_gizmo_handles: list[viser.TransformControlsHandle] = []
+        self.selected_box_number = None
+        self.box_size_x_slider = None
+        self.box_size_y_slider = None
+        self.box_size_z_slider = None
         self.status = None
 
     def run(self) -> None:
@@ -308,62 +285,73 @@ class RelocalizationMaskEditor:
         size_slider_max = np.maximum(np.ptp(self.positions, axis=0) + 5.0, np.array([1.0, 1.0, 1.0]))
         with self.server.gui.add_folder("Relocalization Mask Editor"):
             self.status = self.server.gui.add_text("Status", initial_value="Ready")
-            apply_box = self.server.gui.add_button("Apply 3D Box To Mask", color=(255, 170, 60))
-            box_size_x = self.server.gui.add_slider(
-                "Box Size X", min=0.1, max=float(size_slider_max[0]), step=0.1, initial_value=float(self.box_size[0])
+            self.selected_box_number = self.server.gui.add_number(
+                "Selected Box ID", initial_value=self.selected_box_idx, step=1
             )
-            box_size_y = self.server.gui.add_slider(
-                "Box Size Y", min=0.1, max=float(size_slider_max[1]), step=0.1, initial_value=float(self.box_size[1])
+            add_box = self.server.gui.add_button("Add Box")
+            delete_box = self.server.gui.add_button("Delete Selected Box", color=(255, 80, 80))
+            self.box_size_x_slider = self.server.gui.add_slider(
+                "Box Size X",
+                min=0.1,
+                max=float(size_slider_max[0]),
+                step=0.1,
+                initial_value=float(self.boxes[self.selected_box_idx]["size"][0]),
             )
-            box_size_z = self.server.gui.add_slider(
-                "Box Size Z", min=0.1, max=float(size_slider_max[2]), step=0.1, initial_value=float(self.box_size[2])
+            self.box_size_y_slider = self.server.gui.add_slider(
+                "Box Size Y",
+                min=0.1,
+                max=float(size_slider_max[1]),
+                step=0.1,
+                initial_value=float(self.boxes[self.selected_box_idx]["size"][1]),
             )
-            add_vertex = self.server.gui.add_button("Add Polygon Vertex")
-            apply_polygon = self.server.gui.add_button("Apply Polygon To Mask", color=(255, 170, 60))
-            clear_polygon = self.server.gui.add_button("Clear Polygon")
+            self.box_size_z_slider = self.server.gui.add_slider(
+                "Box Size Z",
+                min=0.1,
+                max=float(size_slider_max[2]),
+                step=0.1,
+                initial_value=float(self.boxes[self.selected_box_idx]["size"][2]),
+            )
             reset_mask = self.server.gui.add_button("Reset Mask", color=(255, 80, 80))
             save_mask = self.server.gui.add_button("Save Mask", color=(80, 200, 80))
 
-            @apply_box.on_click
+            @self.selected_box_number.on_update
             def _(_) -> None:
-                self._apply_box_to_mask()
+                self.selected_box_idx = int(np.clip(int(self.selected_box_number.value), 0, len(self.boxes) - 1))
+                self.selected_box_number.value = self.selected_box_idx
+                self._sync_size_sliders()
+                self._refresh_all()
 
-            @box_size_x.on_update
+            @add_box.on_click
             def _(_) -> None:
-                self.box_size[0] = float(box_size_x.value)
-                self._refresh_box_handles()
-                self._refresh_box_selection_preview()
+                self._add_box()
 
-            @box_size_y.on_update
+            @delete_box.on_click
             def _(_) -> None:
-                self.box_size[1] = float(box_size_y.value)
-                self._refresh_box_handles()
-                self._refresh_box_selection_preview()
+                self._delete_selected_box()
 
-            @box_size_z.on_update
+            @self.box_size_x_slider.on_update
             def _(_) -> None:
-                self.box_size[2] = float(box_size_z.value)
-                self._refresh_box_handles()
-                self._refresh_box_selection_preview()
+                self._selected_box()["size"][0] = float(self.box_size_x_slider.value)
+                self._refresh_after_box_change()
 
-            @add_vertex.on_click
+            @self.box_size_y_slider.on_update
             def _(_) -> None:
-                self._add_polygon_vertex()
+                self._selected_box()["size"][1] = float(self.box_size_y_slider.value)
+                self._refresh_after_box_change()
 
-            @apply_polygon.on_click
+            @self.box_size_z_slider.on_update
             def _(_) -> None:
-                self._apply_polygon_to_mask()
-
-            @clear_polygon.on_click
-            def _(_) -> None:
-                self._clear_polygon()
+                self._selected_box()["size"][2] = float(self.box_size_z_slider.value)
+                self._refresh_after_box_change()
 
             @reset_mask.on_click
             def _(_) -> None:
-                self.excluded = set()
-                self.current_selection = set()
-                self.selection_mode = None
-                self.mask = {"version": 2, "excluded_timestamps": [], "zones": []}
+                self.boxes = [{"center": self.default_box_center.copy(), "size": self.default_box_size.copy()}]
+                self.selected_box_idx = 0
+                if self.selected_box_number is not None:
+                    self.selected_box_number.value = 0
+                self._sync_size_sliders()
+                self.excluded = self._compute_excluded_from_boxes()
                 self._set_status("Reset mask in memory. Click Save Mask to write file.")
                 self._refresh_all()
 
@@ -371,76 +359,33 @@ class RelocalizationMaskEditor:
             def _(_) -> None:
                 self._save()
 
-    def _default_new_vertex(self) -> np.ndarray:
-        if self.polygon_points:
-            return self.polygon_points[-1] + np.array([0.5, 0.0, 0.0], dtype=np.float32)
-        center = np.mean(self.positions, axis=0).astype(np.float32)
-        center[2] = self.z_plane + 0.05
-        return center
-
-    def _add_polygon_vertex(self) -> None:
-        self.selection_mode = "polygon"
-        self.polygon_points.append(self._default_new_vertex())
-        self._refresh_polygon_handles()
-        self._refresh_selection_preview()
-        self._set_status(f"Polygon vertices: {len(self.polygon_points)}")
-
-    def _clear_polygon(self) -> None:
-        self.polygon_points.clear()
-        self.current_selection = set()
-        self.selection_mode = None
-        self._refresh_polygon_handles()
-        self._refresh_all()
-        self._set_status("Cleared polygon")
-
-    def _apply_polygon_to_mask(self) -> None:
-        self.selection_mode = "polygon"
-        if len(self.polygon_points) < 3:
-            self._set_status("Need at least 3 polygon vertices")
-            return
-
-        self._refresh_selection_preview()
-        self.excluded |= self.current_selection
-        polygon_xy = np.asarray(self.polygon_points, dtype=np.float32)[:, :2]
-        self.mask.setdefault("zones", []).append(
-            {
-                "name": f"zone_{len(self.mask.get('zones', []))}",
-                "type": "polygon_xy",
-                "polygon_xy": [[float(x), float(y)] for x, y in polygon_xy],
-                "excluded_timestamps": sorted(self.current_selection),
-            }
-        )
-        self._set_status(f"Applied polygon: excluded {len(self.current_selection)} keyframes")
-        self._refresh_all()
-
-    def _apply_box_to_mask(self) -> None:
-        self._refresh_box_selection_preview()
-        self.excluded |= self.current_selection
-        box_min = self.box_center - self.box_size * 0.5
-        box_max = self.box_center + self.box_size * 0.5
-        self.mask.setdefault("zones", []).append(
-            {
-                "name": f"zone_{len(self.mask.get('zones', []))}",
-                "type": "box_xyz",
-                "center_xyz": [float(v) for v in self.box_center],
-                "size_xyz": [float(v) for v in self.box_size],
-                "min_xyz": [float(v) for v in box_min],
-                "max_xyz": [float(v) for v in box_max],
-                "excluded_timestamps": sorted(self.current_selection),
-            }
-        )
-        self._set_status(f"Applied 3D box: excluded {len(self.current_selection)} keyframes")
-        self._refresh_all()
-
     def _save(self) -> None:
-        self.mask["version"] = 2
-        self.mask["excluded_timestamps"] = sorted(self.excluded)
+        self.excluded = self._compute_excluded_from_boxes()
+        self.mask = {"version": 2, "excluded_timestamps": sorted(self.excluded), "zones": []}
+        for idx, box in enumerate(self.boxes):
+            center = box["center"]
+            size = box["size"]
+            box_min = center - size * 0.5
+            box_max = center + size * 0.5
+            inside = _points_in_box(self.positions, center, size)
+            excluded_timestamps = {self.timestamps[i] for i, flag in enumerate(inside) if flag}
+            self.mask["zones"].append(
+                {
+                    "name": f"box_{idx}",
+                    "type": "box_xyz",
+                    "center_xyz": [float(v) for v in center],
+                    "size_xyz": [float(v) for v in size],
+                    "min_xyz": [float(v) for v in box_min],
+                    "max_xyz": [float(v) for v in box_max],
+                    "excluded_timestamps": sorted(excluded_timestamps),
+                }
+            )
         _save_mask(self.mask_path, self.mask)
         self._set_status(f"Saved {len(self.excluded)} excluded keyframes to {self.mask_path}")
 
     def _refresh_all(self) -> None:
+        self.excluded = self._compute_excluded_from_boxes()
         self._refresh_keyframe_points()
-        self._refresh_polygon_handles()
         self._refresh_box_handles()
         self._refresh_selection_preview()
 
@@ -477,37 +422,8 @@ class RelocalizationMaskEditor:
             self.selected_handle.remove()
             self.selected_handle = None
 
-        if self.selection_mode == "box":
-            self._refresh_box_selection_preview()
-            return
-
-        if len(self.polygon_points) < 3:
-            self.current_selection = set()
-            self._update_status_counts()
-            return
-
-        polygon_xy = np.asarray(self.polygon_points, dtype=np.float32)[:, :2]
-        inside = _points_in_polygon(self.xy, polygon_xy)
-        self.current_selection = {self.timestamps[i] for i, flag in enumerate(inside) if flag}
-        selected_indices = [i for i, t in enumerate(self.timestamps) if t in self.current_selection]
-        if selected_indices:
-            points = self.positions[selected_indices]
-            self.selected_handle = self.server.scene.add_point_cloud(
-                "/keyframes/current_selection",
-                points=points,
-                colors=np.tile(np.array([[255, 180, 0]], dtype=np.uint8), (len(points), 1)),
-                point_size=self.args.point_size * 2.2,
-                point_shape="rounded",
-            )
-        self._update_status_counts()
-
-    def _refresh_box_selection_preview(self) -> None:
-        self.selection_mode = "box"
-        if self.selected_handle is not None:
-            self.selected_handle.remove()
-            self.selected_handle = None
-
-        inside = _points_in_box(self.positions, self.box_center, self.box_size)
+        box = self._selected_box()
+        inside = _points_in_box(self.positions, box["center"], box["size"])
         self.current_selection = {self.timestamps[i] for i, flag in enumerate(inside) if flag}
         selected_indices = [i for i, t in enumerate(self.timestamps) if t in self.current_selection]
         if selected_indices:
@@ -522,102 +438,104 @@ class RelocalizationMaskEditor:
         self._update_status_counts()
 
     def _refresh_box_handles(self) -> None:
-        if self.box_line_handle is not None:
-            self.box_line_handle.remove()
-            self.box_line_handle = None
-        if self.box_gizmo_handle is not None:
-            self.box_gizmo_handle.remove()
-            self.box_gizmo_handle = None
-
-        segments = _box_line_segments(self.box_center, self.box_size)
-        colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
-        colors[:, :, :] = np.array([0.0, 1.0, 0.5], dtype=np.float32)
-        self.box_line_handle = self.server.scene.add_line_segments(
-            "/mask_box/line", points=segments, colors=colors, line_width=4.0
-        )
-        self.box_gizmo_handle = self.server.scene.add_transform_controls(
-            "/mask_box/center_gizmo",
-            position=self.box_center,
-            wxyz=(1.0, 0.0, 0.0, 0.0),
-        )
-
-        @self.box_gizmo_handle.on_update
-        def _(event) -> None:
-            self.box_center = np.asarray(event.target.position, dtype=np.float32)
-            self._refresh_box_line()
-            self._refresh_box_selection_preview()
-
-    def _refresh_box_line(self) -> None:
-        if self.box_line_handle is not None:
-            self.box_line_handle.remove()
-            self.box_line_handle = None
-        segments = _box_line_segments(self.box_center, self.box_size)
-        colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
-        colors[:, :, :] = np.array([0.0, 1.0, 0.5], dtype=np.float32)
-        self.box_line_handle = self.server.scene.add_line_segments(
-            "/mask_box/line", points=segments, colors=colors, line_width=4.0
-        )
-
-    def _refresh_polygon_handles(self) -> None:
-        if self.polygon_line_handle is not None:
-            self.polygon_line_handle.remove()
-            self.polygon_line_handle = None
-        for handle in self.polygon_point_handles:
+        for handle in self.box_line_handles:
             handle.remove()
-        for handle in self.polygon_gizmo_handles:
+        for handle in self.box_gizmo_handles:
             handle.remove()
-        self.polygon_point_handles.clear()
-        self.polygon_gizmo_handles.clear()
+        self.box_line_handles.clear()
+        self.box_gizmo_handles.clear()
 
-        segments = _line_segments_from_points(self.polygon_points, close=True)
-        if len(segments) > 0:
+        for idx, box in enumerate(self.boxes):
+            segments = _box_line_segments(box["center"], box["size"])
             colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
-            colors[:, :, :] = np.array([1.0, 0.6, 0.0], dtype=np.float32)
-            self.polygon_line_handle = self.server.scene.add_line_segments(
-                "/mask_polygon/line", points=segments, colors=colors, line_width=4.0
-            )
-
-        for idx, point in enumerate(self.polygon_points):
-            point_handle = self.server.scene.add_icosphere(
-                f"/mask_polygon/point_{idx}",
-                radius=self.args.point_size * 1.8,
-                color=(255, 170, 0),
-                position=point,
+            color = np.array([0.0, 1.0, 0.5], dtype=np.float32)
+            if idx == self.selected_box_idx:
+                color = np.array([1.0, 0.85, 0.0], dtype=np.float32)
+            colors[:, :, :] = color
+            line_handle = self.server.scene.add_line_segments(
+                f"/mask_boxes/box_{idx}/line", points=segments, colors=colors, line_width=4.0
             )
             gizmo = self.server.scene.add_transform_controls(
-                f"/mask_polygon/point_{idx}_gizmo",
-                position=point,
+                f"/mask_boxes/box_{idx}/center_gizmo",
+                position=box["center"],
                 wxyz=(1.0, 0.0, 0.0, 0.0),
             )
-            self.polygon_point_handles.append(point_handle)
-            self.polygon_gizmo_handles.append(gizmo)
+            self.box_line_handles.append(line_handle)
+            self.box_gizmo_handles.append(gizmo)
 
             @gizmo.on_update
-            def _(event, point_idx=idx, handle=point_handle) -> None:
-                new_pos = np.asarray(event.target.position, dtype=np.float32)
-                new_pos[2] = self.z_plane + 0.05
-                self.polygon_points[point_idx] = new_pos
-                handle.position = new_pos
-                self._refresh_polygon_line()
-                self._refresh_selection_preview()
+            def _(event, box_idx=idx) -> None:
+                self.boxes[box_idx]["center"] = np.asarray(event.target.position, dtype=np.float32)
+                self.selected_box_idx = box_idx
+                if self.selected_box_number is not None:
+                    self.selected_box_number.value = box_idx
+                self._sync_size_sliders()
+                self._refresh_after_box_change()
 
-    def _refresh_polygon_line(self) -> None:
-        if self.polygon_line_handle is not None:
-            self.polygon_line_handle.remove()
-            self.polygon_line_handle = None
-        segments = _line_segments_from_points(self.polygon_points, close=True)
-        if len(segments) == 0:
+    def _refresh_after_box_change(self) -> None:
+        self.excluded = self._compute_excluded_from_boxes()
+        self._refresh_keyframe_points()
+        self._refresh_box_handles()
+        self._refresh_selection_preview()
+
+    def _selected_box(self) -> dict[str, np.ndarray]:
+        self.selected_box_idx = int(np.clip(self.selected_box_idx, 0, len(self.boxes) - 1))
+        return self.boxes[self.selected_box_idx]
+
+    def _sync_size_sliders(self) -> None:
+        if self.box_size_x_slider is None or self.box_size_y_slider is None or self.box_size_z_slider is None:
             return
-        colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
-        colors[:, :, :] = np.array([1.0, 0.6, 0.0], dtype=np.float32)
-        self.polygon_line_handle = self.server.scene.add_line_segments(
-            "/mask_polygon/line", points=segments, colors=colors, line_width=4.0
-        )
+        size = self._selected_box()["size"]
+        self.box_size_x_slider.value = float(size[0])
+        self.box_size_y_slider.value = float(size[1])
+        self.box_size_z_slider.value = float(size[2])
+
+    def _add_box(self) -> None:
+        new_center = self._selected_box()["center"].copy() + np.array([0.5, 0.0, 0.0], dtype=np.float32)
+        self.boxes.append({"center": new_center, "size": self._selected_box()["size"].copy()})
+        self.selected_box_idx = len(self.boxes) - 1
+        if self.selected_box_number is not None:
+            self.selected_box_number.value = self.selected_box_idx
+        self._sync_size_sliders()
+        self._refresh_all()
+        self._set_status(f"Added box {self.selected_box_idx}")
+
+    def _delete_selected_box(self) -> None:
+        if len(self.boxes) <= 1:
+            self._set_status("Keep at least one box. Use Reset Mask to clear and restore default box.")
+            return
+        deleted_idx = self.selected_box_idx
+        self.boxes.pop(deleted_idx)
+        self.selected_box_idx = min(deleted_idx, len(self.boxes) - 1)
+        if self.selected_box_number is not None:
+            self.selected_box_number.value = self.selected_box_idx
+        self._sync_size_sliders()
+        self._refresh_all()
+        self._set_status(f"Deleted box {deleted_idx}")
+
+    def _compute_excluded_from_boxes(self) -> set[int]:
+        excluded: set[int] = set()
+        for box in self.boxes:
+            inside = _points_in_box(self.positions, box["center"], box["size"])
+            excluded |= {self.timestamps[i] for i, flag in enumerate(inside) if flag}
+        return excluded
+
+    def _load_boxes_from_mask(self) -> list[dict[str, np.ndarray]]:
+        boxes = []
+        for zone in self.mask.get("zones", []):
+            if zone.get("type") != "box_xyz":
+                continue
+            center = np.asarray(zone.get("center_xyz", []), dtype=np.float32)
+            size = np.asarray(zone.get("size_xyz", []), dtype=np.float32)
+            if center.shape == (3,) and size.shape == (3,):
+                boxes.append({"center": center, "size": np.maximum(size, 0.1).astype(np.float32)})
+        return boxes
 
     def _update_status_counts(self) -> None:
         self._set_status(
             f"keyframes={len(self.timestamps)} | excluded={len(self.excluded)} | "
-            f"selected={len(self.current_selection)} | mask={self.mask_path}"
+            f"selected={len(self.current_selection)} | boxes={len(self.boxes)} | "
+            f"active_box={self.selected_box_idx} | mask={self.mask_path}"
         )
 
     def _set_status(self, value: str) -> None:
