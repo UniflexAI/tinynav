@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -630,4 +631,8 @@ def main(args: Args) -> None:
 
 
 if __name__ == "__main__":
-    main(tyro.cli(Args))
+    try:
+        main(tyro.cli(Args))
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
