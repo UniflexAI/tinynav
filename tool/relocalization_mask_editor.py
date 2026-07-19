@@ -144,7 +144,9 @@ class RelocalizationMaskEditor:
         self.excluded_handle: viser.SceneHandle | None = None
         self.selected_handle: viser.SceneHandle | None = None
         self.box_line_handles: list[viser.SceneHandle] = []
+        self.box_corner_handles: list[viser.SceneHandle] = []
         self.box_gizmo_handles: list[viser.TransformControlsHandle] = []
+        self.syncing_ui = False
         self.selected_box_number = None
         self.box_size_x_slider = None
         self.box_size_y_slider = None
@@ -316,6 +318,8 @@ class RelocalizationMaskEditor:
 
             @self.selected_box_number.on_update
             def _(_) -> None:
+                if self.syncing_ui:
+                    return
                 self.selected_box_idx = int(np.clip(int(self.selected_box_number.value), 0, len(self.boxes) - 1))
                 self.selected_box_number.value = self.selected_box_idx
                 self._sync_size_sliders()
@@ -331,16 +335,22 @@ class RelocalizationMaskEditor:
 
             @self.box_size_x_slider.on_update
             def _(_) -> None:
+                if self.syncing_ui:
+                    return
                 self._selected_box()["size"][0] = float(self.box_size_x_slider.value)
                 self._refresh_after_box_change()
 
             @self.box_size_y_slider.on_update
             def _(_) -> None:
+                if self.syncing_ui:
+                    return
                 self._selected_box()["size"][1] = float(self.box_size_y_slider.value)
                 self._refresh_after_box_change()
 
             @self.box_size_z_slider.on_update
             def _(_) -> None:
+                if self.syncing_ui:
+                    return
                 self._selected_box()["size"][2] = float(self.box_size_z_slider.value)
                 self._refresh_after_box_change()
 
@@ -440,9 +450,12 @@ class RelocalizationMaskEditor:
     def _refresh_box_handles(self) -> None:
         for handle in self.box_line_handles:
             handle.remove()
+        for handle in self.box_corner_handles:
+            handle.remove()
         for handle in self.box_gizmo_handles:
             handle.remove()
         self.box_line_handles.clear()
+        self.box_corner_handles.clear()
         self.box_gizmo_handles.clear()
 
         for idx, box in enumerate(self.boxes):
@@ -455,12 +468,21 @@ class RelocalizationMaskEditor:
             line_handle = self.server.scene.add_line_segments(
                 f"/mask_boxes/box_{idx}/line", points=segments, colors=colors, line_width=4.0
             )
+            corners = np.unique(segments.reshape(-1, 3), axis=0)
+            corner_handle = self.server.scene.add_point_cloud(
+                f"/mask_boxes/box_{idx}/corners",
+                points=corners,
+                colors=np.tile((color * 255).astype(np.uint8), (len(corners), 1)),
+                point_size=self.args.point_size * 2.0,
+                point_shape="rounded",
+            )
             gizmo = self.server.scene.add_transform_controls(
                 f"/mask_boxes/box_{idx}/center_gizmo",
                 position=box["center"],
                 wxyz=(1.0, 0.0, 0.0, 0.0),
             )
             self.box_line_handles.append(line_handle)
+            self.box_corner_handles.append(corner_handle)
             self.box_gizmo_handles.append(gizmo)
 
             @gizmo.on_update
@@ -468,15 +490,39 @@ class RelocalizationMaskEditor:
                 self.boxes[box_idx]["center"] = np.asarray(event.target.position, dtype=np.float32)
                 self.selected_box_idx = box_idx
                 if self.selected_box_number is not None:
+                    self.syncing_ui = True
                     self.selected_box_number.value = box_idx
+                    self.syncing_ui = False
                 self._sync_size_sliders()
                 self._refresh_after_box_change()
 
     def _refresh_after_box_change(self) -> None:
         self.excluded = self._compute_excluded_from_boxes()
         self._refresh_keyframe_points()
-        self._refresh_box_handles()
+        self._refresh_box_line(self.selected_box_idx)
         self._refresh_selection_preview()
+
+    def _refresh_box_line(self, box_idx: int) -> None:
+        if box_idx < 0 or box_idx >= len(self.boxes) or box_idx >= len(self.box_line_handles):
+            return
+        self.box_line_handles[box_idx].remove()
+        self.box_corner_handles[box_idx].remove()
+        box = self.boxes[box_idx]
+        segments = _box_line_segments(box["center"], box["size"])
+        colors = np.zeros((len(segments), 2, 3), dtype=np.float32)
+        color = np.array([1.0, 0.85, 0.0], dtype=np.float32)
+        colors[:, :, :] = color
+        self.box_line_handles[box_idx] = self.server.scene.add_line_segments(
+            f"/mask_boxes/box_{box_idx}/line", points=segments, colors=colors, line_width=4.0
+        )
+        corners = np.unique(segments.reshape(-1, 3), axis=0)
+        self.box_corner_handles[box_idx] = self.server.scene.add_point_cloud(
+            f"/mask_boxes/box_{box_idx}/corners",
+            points=corners,
+            colors=np.tile((color * 255).astype(np.uint8), (len(corners), 1)),
+            point_size=self.args.point_size * 2.0,
+            point_shape="rounded",
+        )
 
     def _selected_box(self) -> dict[str, np.ndarray]:
         self.selected_box_idx = int(np.clip(self.selected_box_idx, 0, len(self.boxes) - 1))
@@ -486,9 +532,11 @@ class RelocalizationMaskEditor:
         if self.box_size_x_slider is None or self.box_size_y_slider is None or self.box_size_z_slider is None:
             return
         size = self._selected_box()["size"]
+        self.syncing_ui = True
         self.box_size_x_slider.value = float(size[0])
         self.box_size_y_slider.value = float(size[1])
         self.box_size_z_slider.value = float(size[2])
+        self.syncing_ui = False
 
     def _add_box(self) -> None:
         new_center = self._selected_box()["center"].copy() + np.array([0.5, 0.0, 0.0], dtype=np.float32)
