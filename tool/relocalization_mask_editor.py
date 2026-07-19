@@ -320,8 +320,8 @@ class RelocalizationMaskEditor:
             def _(_) -> None:
                 if self.syncing_ui:
                     return
-                self.selected_box_idx = int(np.clip(int(self.selected_box_number.value), 0, len(self.boxes) - 1))
-                self.selected_box_number.value = self.selected_box_idx
+                selected_idx = int(np.clip(int(self.selected_box_number.value), 0, len(self.boxes) - 1))
+                self._set_selected_box_idx(selected_idx)
                 self._sync_size_sliders()
                 self._refresh_all()
 
@@ -357,9 +357,7 @@ class RelocalizationMaskEditor:
             @reset_mask.on_click
             def _(_) -> None:
                 self.boxes = [{"center": self.default_box_center.copy(), "size": self.default_box_size.copy()}]
-                self.selected_box_idx = 0
-                if self.selected_box_number is not None:
-                    self.selected_box_number.value = 0
+                self._set_selected_box_idx(0)
                 self._sync_size_sliders()
                 self.excluded = self._compute_excluded_from_boxes()
                 self._set_status("Reset mask in memory. Click Save Mask to write file.")
@@ -488,11 +486,7 @@ class RelocalizationMaskEditor:
             @gizmo.on_update
             def _(event, box_idx=idx) -> None:
                 self.boxes[box_idx]["center"] = np.asarray(event.target.position, dtype=np.float32)
-                self.selected_box_idx = box_idx
-                if self.selected_box_number is not None:
-                    self.syncing_ui = True
-                    self.selected_box_number.value = box_idx
-                    self.syncing_ui = False
+                self._set_selected_box_idx(box_idx)
                 self._sync_size_sliders()
                 self._refresh_after_box_change()
 
@@ -528,6 +522,13 @@ class RelocalizationMaskEditor:
         self.selected_box_idx = int(np.clip(self.selected_box_idx, 0, len(self.boxes) - 1))
         return self.boxes[self.selected_box_idx]
 
+    def _set_selected_box_idx(self, box_idx: int) -> None:
+        self.selected_box_idx = int(np.clip(box_idx, 0, len(self.boxes) - 1))
+        if self.selected_box_number is not None:
+            self.syncing_ui = True
+            self.selected_box_number.value = self.selected_box_idx
+            self.syncing_ui = False
+
     def _sync_size_sliders(self) -> None:
         if self.box_size_x_slider is None or self.box_size_y_slider is None or self.box_size_z_slider is None:
             return
@@ -539,11 +540,11 @@ class RelocalizationMaskEditor:
         self.syncing_ui = False
 
     def _add_box(self) -> None:
-        new_center = self._selected_box()["center"].copy() + np.array([0.5, 0.0, 0.0], dtype=np.float32)
-        self.boxes.append({"center": new_center, "size": self._selected_box()["size"].copy()})
-        self.selected_box_idx = len(self.boxes) - 1
-        if self.selected_box_number is not None:
-            self.selected_box_number.value = self.selected_box_idx
+        selected_box = self._selected_box()
+        offset_x = max(float(selected_box["size"][0]) * 1.1, 1.0)
+        new_center = selected_box["center"].copy() + np.array([offset_x, 0.0, 0.0], dtype=np.float32)
+        self.boxes.append({"center": new_center, "size": selected_box["size"].copy()})
+        self._set_selected_box_idx(len(self.boxes) - 1)
         self._sync_size_sliders()
         self._refresh_all()
         self._set_status(f"Added box {self.selected_box_idx}")
@@ -554,9 +555,7 @@ class RelocalizationMaskEditor:
             return
         deleted_idx = self.selected_box_idx
         self.boxes.pop(deleted_idx)
-        self.selected_box_idx = min(deleted_idx, len(self.boxes) - 1)
-        if self.selected_box_number is not None:
-            self.selected_box_number.value = self.selected_box_idx
+        self._set_selected_box_idx(min(deleted_idx, len(self.boxes) - 1))
         self._sync_size_sliders()
         self._refresh_all()
         self._set_status(f"Deleted box {deleted_idx}")
