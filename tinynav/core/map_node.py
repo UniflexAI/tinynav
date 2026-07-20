@@ -511,9 +511,9 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
-        self.nav_refresh_timer = self.create_timer(0.5, self.nav_refresh_timer_callback)
+        self.nav_refresh_timer = self.create_timer(2.0, self.nav_refresh_timer_callback)
         self.initial_relocalization_observations = []
-        self.initial_relocalization_confirm_required = 3
+        self.initial_relocalization_confirm_required = 1
         self.initial_relocalization_translation_tolerance = 0.5
         self.initial_relocalization_yaw_tolerance = np.deg2rad(10.0)
 
@@ -529,7 +529,7 @@ class MapNode(Node):
         self._cached_global_path_T: np.ndarray | None = None
         self._replan_tf_translation_threshold = 0.3
         self._replan_tf_yaw_threshold = np.deg2rad(10.0)
-        self._replan_path_deviation_threshold = 0.8
+        self._replan_path_deviation_threshold = 0.3
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -657,13 +657,6 @@ class MapNode(Node):
                 self.handle_relocalization_observation(keyframe_image_timestamp_ns, pose_in_world, pose_cov_weight)
                 if self.T_from_map_to_odom is not None:
                     self.first_done = True
-
-        with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.try_publish_nav_path(keyframe_image_timestamp_ns)
-            # timer or queue for publish the nav path
-            # and record the map pose
-            # compute the coordinate transform from the map pose to the keyframe pose
-            # publish the nav path from the map pose to the keyframe pose with the cost map
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -1169,8 +1162,42 @@ class MapNode(Node):
             self.get_logger().debug("No path found in map")
 
     def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
+        need_replan = False
+        replan_reason = None
+
+        if self._cached_global_path is None:
+            need_replan = True
+            replan_reason = "no cached global path"
+        elif self._cached_global_path_poi_index != self.poi_index:
+            need_replan = True
+            replan_reason = "POI changed"
+        else:
+            _, _, path_deviation = self._closest_point_on_path(
+                self._cached_global_path,
+                pose_in_map[:3, 3],
+            )
+            if path_deviation > self._replan_path_deviation_threshold:
+                need_replan = True
+                replan_reason = (
+                    f"path deviation {path_deviation:.2f}m > "
+                    f"{self._replan_path_deviation_threshold:.2f}m"
+                )
+
+        if not need_replan:
+            return self._cached_global_path
+
+        self.get_logger().info(f"Replanning global path: {replan_reason}")
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            return self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+            new_path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+
+        if new_path is None:
+            self.get_logger().warning("Global path replan failed")
+            return self._cached_global_path
+
+        self._cached_global_path = new_path
+        self._cached_global_path_poi_index = self.poi_index
+        self._cached_global_path_T = self.T_from_map_to_odom.copy() if self.T_from_map_to_odom is not None else None
+        return self._cached_global_path
 
     def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
         if len(path) == 1:
