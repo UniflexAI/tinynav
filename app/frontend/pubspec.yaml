@@ -26,6 +26,9 @@ flutter:
   assets:
     - assets/images/
 
+  shaders:
+    - shaders/esdf_colormap.frag
+
   fonts:
     - family: RobotoLocal
       fonts:
