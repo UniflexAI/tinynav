@@ -512,6 +512,7 @@ class MapNode(Node):
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
         self.nav_refresh_timer = None
+        self.target_pose_timer = self.create_timer(1.0, self.target_pose_timer_callback)
 
         self.pois = {}
         self.poi_meta = {}
@@ -520,6 +521,7 @@ class MapNode(Node):
         self._leg_initial_length: float | None = None
         self._leg_start_time: float | None = None
         self._speed_estimate: float | None = None
+        self._current_nav_path_in_map: np.ndarray | None = None
         self._cached_global_path: np.ndarray | None = None
         self._cached_global_path_poi_index: int | None = None
         self._cached_global_path_T: np.ndarray | None = None
@@ -588,6 +590,7 @@ class MapNode(Node):
             self.poi_meta = {}
 
     def _clear_global_path_cache(self):
+        self._current_nav_path_in_map = None
         self._cached_global_path = None
         self._cached_global_path_poi_index = None
         self._cached_global_path_T = None
@@ -629,6 +632,17 @@ class MapNode(Node):
             timestamp=None,
             pose_in_origin_odom=self.latest_odom_pose,
             stamp_msg=self.latest_odom_stamp_msg,
+        )
+
+    def target_pose_timer_callback(self):
+        if self.latest_odom_pose is None or self._current_nav_path_in_map is None:
+            return
+        if self.T_from_map_to_odom is None:
+            return
+        self._publish_target_pose_from_path(
+            self._current_nav_path_in_map,
+            self.latest_odom_pose,
+            self.latest_odom_stamp_msg,
         )
 
     def localization_stop_callback(self, msg: Bool):
@@ -1039,6 +1053,7 @@ class MapNode(Node):
         paths_in_map = self._get_or_replan_global_path(pose_in_map, nav_goal)
 
         if paths_in_map is not None:
+            self._current_nav_path_in_map = paths_in_map
             closest_position, remaining_length = self._path_progress(paths_in_map, pose_in_map_position[:3])
 
             now = time.time()
@@ -1107,6 +1122,7 @@ class MapNode(Node):
                 self.global_plan_pub.publish(path_msg)
                 self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
+            self._current_nav_path_in_map = None
             self.get_logger().debug("No path found in map")
 
     def _get_current_nav_goal_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
@@ -1217,6 +1233,34 @@ class MapNode(Node):
         for i in range(closest_index + 1, len(path) - 1):
             remaining += np.linalg.norm(path[i + 1] - path[i])
         return closest_position, remaining
+
+    def _publish_target_pose_from_path(self, paths_in_map: np.ndarray, pose_in_origin_odom: np.ndarray, stamp_msg=None):
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
+        pose_in_map_position = pose_in_map[:3, 3]
+        with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            max_speed = 0.5
+            lookahead_distance = max_speed * 4
+            target_position = select_target_position_on_path(
+                paths_in_map,
+                pose_in_map_position[:3],
+                lookahead_distance=lookahead_distance,
+                turn_angle_threshold_rad=np.deg2rad(70.0),
+                reversal_angle_threshold_rad=np.deg2rad(120.0),
+                turn_stop_margin=0.15,
+                min_turn_distance=0.5,
+                turn_window_distance=0.4,
+            )
+            target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
+            T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
+            target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+            dummy_pose = np.eye(4)
+            dummy_pose[:3, 3] = target_position_in_odom
+            self.target_pose_pub.publish(np2msg(
+                dummy_pose,
+                stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg(),
+                "world",
+                "camera",
+            ))
 
     def _point_ahead_on_path(self, path: np.ndarray, start_position: np.ndarray, distance_ahead: float) -> np.ndarray:
         closest_index, current, _ = self._closest_point_on_path(path, start_position)
