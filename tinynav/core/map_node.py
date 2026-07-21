@@ -204,6 +204,12 @@ class MapNode(Node):
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
+        # Fires True once, the moment T_from_map_to_odom locks (a consistent
+        # relocalization burst — see try_lock_transform_from_map_to_odom). Unlike
+        # /map/relocalization (per-reloc, well before the lock), this marks the
+        # instant nav can actually plan a path. Consumers should gate "localized"
+        # on this, not on the first reloc.
+        self.localized_pub = self.create_publisher(Bool, '/map/localized', 10)
 
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
@@ -614,6 +620,7 @@ class MapNode(Node):
 
         # Consistent burst -> lock to the most recent observation and freeze.
         self.T_from_map_to_odom = observation_T_from_map_to_odom
+        self.localized_pub.publish(Bool(data=True))
         self.get_logger().info(
             f"[reloc-lock] locked T_from_map_to_odom (spread={spread:.2f}m over "
             f"{self.reloc_lock_window} obs)")
