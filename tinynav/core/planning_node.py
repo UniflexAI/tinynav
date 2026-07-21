@@ -346,6 +346,26 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def trajectory_cost(traj, param, score, target_pose, last_param,
+                    front_clearance, enter_threshold=0.30):
+    """Selection cost for one trajectory."""
+    # predefined backward trajectory penalty
+    is_backward_traj = param[0] < 0.0
+    should_reverse = front_clearance <= enter_threshold
+    reverse_gate_penalty = 0.0
+    if should_reverse and not is_backward_traj:
+        reverse_gate_penalty = 1e9
+    elif not should_reverse and is_backward_traj:
+        reverse_gate_penalty = 1e9
+
+    # regular trajectory penalty
+    traj_end = np.array(traj[-1, :3])
+    target_end = target_pose if target_pose is not None else traj_end
+    dist = np.linalg.norm(traj_end - target_end)
+
+    return score * 100000 + 100 * dist + 10 * abs(last_param[0] - param[0]) + 10 * abs(last_param[1] - param[1]) + reverse_gate_penalty
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -607,27 +627,8 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            enter_threshold = 0.30
-
-            def cost_function(traj, param, score, target_pose):
-                # predefined backward trajectory penalty
-                is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= enter_threshold
-                reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
-                elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
-
-                # regular trajectory penalty
-                traj_end = np.array(traj[-1,:3])
-                target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
-
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
-
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, self.last_param, front_clearance) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path
