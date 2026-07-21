@@ -511,11 +511,7 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
-        self.nav_refresh_timer = self.create_timer(2.0, self.nav_refresh_timer_callback)
-        self.initial_relocalization_observations = []
-        self.initial_relocalization_confirm_required = 1
-        self.initial_relocalization_translation_tolerance = 0.5
-        self.initial_relocalization_yaw_tolerance = np.deg2rad(10.0)
+        self.nav_refresh_timer = None
 
         self.pois = {}
         self.poi_meta = {}
@@ -529,7 +525,13 @@ class MapNode(Node):
         self._cached_global_path_T: np.ndarray | None = None
         self._replan_tf_translation_threshold = 0.3
         self._replan_tf_yaw_threshold = np.deg2rad(10.0)
-        self._replan_path_deviation_threshold = 0.3
+        self._replan_path_deviation_threshold = 0.8
+        self._nav_subgoals_in_map: list[np.ndarray] = []
+        self._nav_subgoals_poi_index: int | None = None
+        self._nav_subgoal_index = 0
+        self._nav_subgoal_segment_length_m = 20.0
+        self._nav_subgoal_arrival_xy_threshold = 1.0
+        self._nav_subgoal_arrival_z_threshold = 2.0
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -589,6 +591,9 @@ class MapNode(Node):
         self._cached_global_path = None
         self._cached_global_path_poi_index = None
         self._cached_global_path_T = None
+        self._nav_subgoals_in_map = []
+        self._nav_subgoals_poi_index = None
+        self._nav_subgoal_index = 0
 
     def _nav_progress_payload(self, *, percent: float, path_remaining_m: float,
                               path_total_m: float, estimated_remaining_s: float) -> dict:
@@ -652,11 +657,17 @@ class MapNode(Node):
 
         keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         if not (self.enable_first_done and self.first_done):
-            success, pose_in_world, pose_cov_weight = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+            success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
             if success:
-                self.handle_relocalization_observation(keyframe_image_timestamp_ns, pose_in_world, pose_cov_weight)
-                if self.T_from_map_to_odom is not None:
-                    self.first_done = True
+                self.compute_transform_from_map_to_odom()
+                self.first_done = True
+
+        with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            self.try_publish_nav_path(keyframe_image_timestamp_ns)
+            # timer or queue for publish the nav path
+            # and record the map pose
+            # compute the coordinate transform from the map pose to the keyframe pose
+            # publish the nav path from the map pose to the keyframe pose with the cost map
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -886,7 +897,7 @@ class MapNode(Node):
         return point_in_world, inliers
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray, float]:
+    def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
         timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
         current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
@@ -894,78 +905,14 @@ class MapNode(Node):
         if res:
             # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
+            timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
-            return True, pose_in_world, pose_cov_weight
+            self.relocalization_poses[timestamp_ns] = pose_in_world
+            self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
+            return True, pose_in_world
         else:
             self.failed_relocalizations.append(timestamp)
-            return False, np.eye(4), -np.inf
-
-    def handle_relocalization_observation(self, timestamp_ns: int, pose_in_world: np.ndarray, pose_cov_weight: float):
-        if timestamp_ns not in self.pose_graph_used_pose:
-            self.get_logger().warning(
-                f"Relocalization timestamp {timestamp_ns} not found in odom pose graph; skipping observation"
-            )
-            return
-
-        if self.T_from_map_to_odom is None:
-            self.try_confirm_initial_relocalization(timestamp_ns, pose_in_world, pose_cov_weight)
-            return
-
-        self.relocalization_poses[timestamp_ns] = pose_in_world
-        self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
-        self.compute_transform_from_map_to_odom()
-
-    def try_confirm_initial_relocalization(self, timestamp_ns: int, pose_in_world: np.ndarray, pose_cov_weight: float):
-        camera_in_map_world = pose_in_world
-        camera_in_odom_world = self.pose_graph_used_pose[timestamp_ns]
-        observation_T_from_map_to_odom = camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
-
-        if len(self.initial_relocalization_observations) > 0:
-            reference_T = self.initial_relocalization_observations[0][3]
-            translation_error, yaw_error = self.transform_xy_yaw_error(
-                observation_T_from_map_to_odom,
-                reference_T,
-            )
-            if (
-                translation_error > self.initial_relocalization_translation_tolerance
-                or yaw_error > self.initial_relocalization_yaw_tolerance
-            ):
-                self.get_logger().info(
-                    "Initial relocalization candidate changed; reset confirmation "
-                    f"(translation_error={translation_error:.3f}m, "
-                    f"yaw_error={np.rad2deg(yaw_error):.1f}deg)"
-                )
-                self.initial_relocalization_observations = []
-
-        self.initial_relocalization_observations.append(
-            (timestamp_ns, pose_in_world, pose_cov_weight, observation_T_from_map_to_odom)
-        )
-        self.get_logger().info(
-            "Initial relocalization confirmation "
-            f"{len(self.initial_relocalization_observations)}/"
-            f"{self.initial_relocalization_confirm_required}"
-        )
-
-        if len(self.initial_relocalization_observations) < self.initial_relocalization_confirm_required:
-            return
-
-        for observation_timestamp, observation_pose, observation_weight, _ in self.initial_relocalization_observations:
-            self.relocalization_poses[observation_timestamp] = observation_pose
-            self.relocalization_pose_weights[observation_timestamp] = observation_weight
-
-        self.compute_transform_from_map_to_odom()
-        self.get_logger().info(
-            "Initial relocalization confirmed; map->odom transform is now active"
-        )
-        self.initial_relocalization_observations = []
-
-    @staticmethod
-    def transform_xy_yaw_error(T_a: np.ndarray, T_b: np.ndarray) -> tuple[float, float]:
-        translation_error = float(np.linalg.norm(T_a[:2, 3] - T_b[:2, 3]))
-        yaw_a = np.arctan2(T_a[1, 0], T_a[0, 0])
-        yaw_b = np.arctan2(T_b[1, 0], T_b[0, 0])
-        yaw_error = float(np.abs(np.arctan2(np.sin(yaw_a - yaw_b), np.cos(yaw_a - yaw_b))))
-        return translation_error, yaw_error
+            return False, np.eye(4)
 
     def save_relocalization_poses(self):
         if self._save_completed:
@@ -1088,7 +1035,8 @@ class MapNode(Node):
             return
 
         target_poi = self.pois[self.poi_index]
-        paths_in_map = self._get_or_replan_global_path(pose_in_map, target_poi)
+        nav_goal = self._get_current_nav_goal_in_map(pose_in_map, target_poi)
+        paths_in_map = self._get_or_replan_global_path(pose_in_map, nav_goal)
 
         if paths_in_map is not None:
             closest_position, remaining_length = self._path_progress(paths_in_map, pose_in_map_position[:3])
@@ -1161,43 +1109,86 @@ class MapNode(Node):
         else:
             self.get_logger().debug("No path found in map")
 
-    def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
-        need_replan = False
-        replan_reason = None
+    def _get_current_nav_goal_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
+        if self._nav_subgoals_poi_index != self.poi_index or not self._nav_subgoals_in_map:
+            self._build_nav_subgoals_in_map(pose_in_map, target_poi)
 
-        if self._cached_global_path is None:
-            need_replan = True
-            replan_reason = "no cached global path"
-        elif self._cached_global_path_poi_index != self.poi_index:
-            need_replan = True
-            replan_reason = "POI changed"
-        else:
-            _, _, path_deviation = self._closest_point_on_path(
-                self._cached_global_path,
-                pose_in_map[:3, 3],
+        if not self._nav_subgoals_in_map:
+            return target_poi
+
+        pose_position = pose_in_map[:3, 3]
+        while self._nav_subgoal_index < len(self._nav_subgoals_in_map) - 1:
+            subgoal = self._nav_subgoals_in_map[self._nav_subgoal_index]
+            diff_xy = np.linalg.norm(subgoal[:2] - pose_position[:2])
+            diff_z = np.linalg.norm(subgoal[2] - pose_position[2])
+            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or diff_z >= self._nav_subgoal_arrival_z_threshold:
+                break
+            self._nav_subgoal_index += 1
+            self._cached_global_path = None
+            self._cached_global_path_poi_index = None
+            self._cached_global_path_T = None
+            self._leg_initial_length = None
+            self._leg_start_time = None
+            self._speed_estimate = None
+            self.get_logger().info(
+                f"Advanced nav subgoal: {self._nav_subgoal_index + 1}/{len(self._nav_subgoals_in_map)}"
             )
-            if path_deviation > self._replan_path_deviation_threshold:
-                need_replan = True
-                replan_reason = (
-                    f"path deviation {path_deviation:.2f}m > "
-                    f"{self._replan_path_deviation_threshold:.2f}m"
-                )
 
-        if not need_replan:
-            return self._cached_global_path
+        return self._nav_subgoals_in_map[self._nav_subgoal_index]
 
-        self.get_logger().info(f"Replanning global path: {replan_reason}")
+    def _build_nav_subgoals_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> None:
+        self._nav_subgoals_in_map = []
+        self._nav_subgoals_poi_index = self.poi_index
+        self._nav_subgoal_index = 0
+
+        with Timer(name = "generate nav subgoals", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            full_path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+
+        if full_path is None or len(full_path) == 0:
+            self.get_logger().warning("Failed to generate full path for nav subgoals; falling back to POI")
+            self._nav_subgoals_in_map = [np.array(target_poi, dtype=np.float64)]
+            return
+
+        self._nav_subgoals_in_map = self._split_path_into_subgoals(
+            full_path,
+            self._nav_subgoal_segment_length_m,
+            target_poi,
+        )
+        self.get_logger().info(
+            f"Generated {len(self._nav_subgoals_in_map)} nav subgoals for POI {self.poi_index}"
+        )
+
+    def _split_path_into_subgoals(self, path: np.ndarray, segment_length_m: float, target_poi: np.ndarray) -> list[np.ndarray]:
+        if len(path) == 0:
+            return [np.array(target_poi, dtype=np.float64)]
+
+        subgoals: list[np.ndarray] = []
+        next_distance = float(segment_length_m)
+        traveled = 0.0
+
+        for i in range(len(path) - 1):
+            start = path[i]
+            end = path[i + 1]
+            segment = end - start
+            segment_length = float(np.linalg.norm(segment))
+            if segment_length <= 1e-9:
+                continue
+
+            while traveled + segment_length >= next_distance:
+                ratio = (next_distance - traveled) / segment_length
+                subgoals.append(np.array(start + ratio * segment, dtype=np.float64))
+                next_distance += float(segment_length_m)
+
+            traveled += segment_length
+
+        if not subgoals or np.linalg.norm(subgoals[-1] - target_poi) > 1e-6:
+            subgoals.append(np.array(target_poi, dtype=np.float64))
+
+        return subgoals
+
+    def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            new_path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
-
-        if new_path is None:
-            self.get_logger().warning("Global path replan failed")
-            return self._cached_global_path
-
-        self._cached_global_path = new_path
-        self._cached_global_path_poi_index = self.poi_index
-        self._cached_global_path_T = self.T_from_map_to_odom.copy() if self.T_from_map_to_odom is not None else None
-        return self._cached_global_path
+            return self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
 
     def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
         if len(path) == 1:
@@ -1240,9 +1231,6 @@ class MapNode(Node):
         return path[-1]
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
-        dummy_poi_pose = np.eye(4)
-        dummy_poi_pose[:3, 3] = target_poi
-        self.poi_pub.publish(np2msg(dummy_poi_pose, self.get_clock().now().to_msg(), "world", "map"))
         occupancy_map_origin = self.occupancy_map_meta[:3]
         resolution = self.occupancy_map_meta[3]
         start_idx = np.array([
