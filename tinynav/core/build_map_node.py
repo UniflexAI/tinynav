@@ -589,7 +589,19 @@ class BuildMapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
-        self.semantic_embedder = SigLIPTRT()
+        self.semantic_embedder = None
+        try:
+            semantic_embedder = SigLIPTRT()
+            if os.path.exists(semantic_embedder.image_engine_path):
+                self.semantic_embedder = semantic_embedder
+            else:
+                self.get_logger().warning(
+                    f"SigLIP semantic embedding disabled: missing {semantic_embedder.image_engine_path}"
+                )
+        except Exception as exc:
+            self.get_logger().warning(
+                f"SigLIP semantic embedding disabled: {exc}"
+            )
 
         self.bridge = CvBridge()
 
@@ -750,9 +762,10 @@ class BuildMapNode(Node):
             embedding = self.get_embeddings(infra1_image, timestamp=keyframe_image_timestamp)
             embedding = embedding / np.linalg.norm(embedding)
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
-        with self.stage_timer.timed("get_semantic_embedding"):
-            semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
-            self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
+        if self.semantic_embedder is not None:
+            with self.stage_timer.timed("get_semantic_embedding"):
+                semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
+                self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
         with self.stage_timer.timed("super_point_extractor"):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
