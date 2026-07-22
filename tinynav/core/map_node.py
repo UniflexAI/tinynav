@@ -1107,48 +1107,23 @@ class MapNode(Node):
             ))
             self.nav_progress_pub.publish(progress_msg)
 
-            # Publish the local-planner target. Keep the normal lookahead on straight
-            # paths, but do not place the target beyond the first sharp turn. On stairs /
-            # landings, looking past the corner pulls the local planner into cutting the
-            # turn before the railing is visible.
-            with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                max_speed = 0.5
-                lookahead_distance = max_speed * self.target_pose_dist_factor
-                target_position = select_target_position_on_path(
-                    paths_in_map,
-                    pose_in_map_position[:3],
-                    lookahead_distance=lookahead_distance,
-                    turn_angle_threshold_rad=np.deg2rad(70.0),
-                    reversal_angle_threshold_rad=np.deg2rad(120.0),
-                    turn_stop_margin=0.15,
-                    min_turn_distance=0.5,
-                    turn_window_distance=0.4,
-                )
-                target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
-                T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
-                target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
-                dummy_pose = np.eye(4)
-                dummy_pose[:3, 3] = target_position_in_odom
-                #logging.info(f"target_position_in_odom: {target_position_in_odom}")
-                print(f"target_position_in_odom: {target_position_in_odom}")
-
-                self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-                path_msg = Path()
-                path_msg.header.stamp = self.get_clock().now().to_msg()
-                path_msg.header.frame_id = "map"
-                for x, y, z in paths_in_map:
-                    pose = PoseStamped()
-                    pose.header = path_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = 0.0
-                    pose.pose.orientation.y = 0.0
-                    pose.pose.orientation.z = 0.0
-                    pose.pose.orientation.w = 1.0
-                    path_msg.poses.append(pose)
-                self.global_plan_pub.publish(path_msg)
-                self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+            T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
+            path_msg = Path()
+            path_msg.header.stamp = self.get_clock().now().to_msg()
+            path_msg.header.frame_id = "map"
+            for x, y, z in paths_in_map:
+                pose = PoseStamped()
+                pose.header = path_msg.header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = z
+                pose.pose.orientation.x = 0.0
+                pose.pose.orientation.y = 0.0
+                pose.pose.orientation.z = 0.0
+                pose.pose.orientation.w = 1.0
+                path_msg.poses.append(pose)
+            self.global_plan_pub.publish(path_msg)
+            self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
             self._current_nav_path_in_map = None
             self.get_logger().debug("No path found in map")
