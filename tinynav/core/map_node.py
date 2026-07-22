@@ -428,6 +428,7 @@ class MapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
+        self.enable_runtime_pose_graph = False
 
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
@@ -736,8 +737,9 @@ class MapNode(Node):
                                 #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-            find_loop_and_pose_graph(keyframe_image_timestamp)
-            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+            if self.enable_runtime_pose_graph:
+                find_loop_and_pose_graph(keyframe_image_timestamp)
+                self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
