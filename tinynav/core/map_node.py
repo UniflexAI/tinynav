@@ -1300,11 +1300,9 @@ class MapNode(Node):
         lookahead_distance: float,
     ) -> np.ndarray:
         if self.select_target_position_on_path_on:
-            closest_idx, closest_position, _ = self._closest_point_on_path(paths_in_map, pose_in_map_position)
-            path_from_closest = np.vstack([closest_position, paths_in_map[closest_idx + 1:]])
             return select_target_position_on_path(
-                path_from_closest,
-                closest_position,
+                paths_in_map,
+                pose_in_map_position,
                 lookahead_distance=lookahead_distance,
                 turn_angle_threshold_rad=np.deg2rad(70.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
