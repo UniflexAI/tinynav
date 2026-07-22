@@ -1342,10 +1342,16 @@ class MapNode(Node):
         pose_in_map_position: np.ndarray,
         lookahead_distance: float,
     ) -> np.ndarray:
+        if len(paths_in_map) == 0:
+            return pose_in_map_position
+        closest_idx, closest_position, _ = self._closest_point_on_path(paths_in_map, pose_in_map_position)
         if self.select_target_position_on_path_on:
+            remaining_path = paths_in_map[closest_idx + 1 :]
+            if len(remaining_path) == 0:
+                return closest_position
             return select_target_position_on_path(
-                paths_in_map,
-                pose_in_map_position,
+                remaining_path,
+                closest_position,
                 lookahead_distance=lookahead_distance,
                 turn_angle_threshold_rad=np.deg2rad(70.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
@@ -1354,9 +1360,6 @@ class MapNode(Node):
                 turn_window_distance=0.4,
             )
 
-        if len(paths_in_map) == 0:
-            return pose_in_map_position
-        closest_idx, closest_position, _ = self._closest_point_on_path(paths_in_map, pose_in_map_position)
         target_position = paths_in_map[-1]
         start_point = closest_position
         accumulated_distance = 0.0
