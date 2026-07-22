@@ -60,6 +60,7 @@ class CmdVelControlNode(Node):
         self.prev_cmd = Twist()
         self.last_cmd_pub_time = time.monotonic()
         self.last_path_update_time = None
+        self._last_cmd_debug_log_time = 0.0
         self._paused = False
         self._nav_active = False
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -113,9 +114,13 @@ class CmdVelControlNode(Node):
         if age > stale_stop_s:
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
+            stale_state = "stop"
         elif age > stale_slow_s:
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
+            stale_state = "slow"
+        else:
+            stale_state = "fresh"
 
         out = Twist()
         out.linear.y = 0.0
@@ -125,8 +130,11 @@ class CmdVelControlNode(Node):
         if target_cmd.linear.x < 0.0:
             out.linear.x = target_cmd.linear.x
             out.angular.z = 0.0
+            prev_vx = self.prev_cmd.linear.x
+            prev_wz = self.prev_cmd.angular.z
             self.cmd_pub.publish(out)
             self.prev_cmd = out
+            self._log_cmd_debug(now, age, stale_state, target_cmd, out, prev_vx, prev_wz, reverse_passthrough=True)
             return
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
@@ -152,8 +160,29 @@ class CmdVelControlNode(Node):
             else:
                 out.angular.z = 0.0
 
+        prev_vx = self.prev_cmd.linear.x
+        prev_wz = self.prev_cmd.angular.z
         self.cmd_pub.publish(out)
         self.prev_cmd = out
+        self._log_cmd_debug(now, age, stale_state, target_cmd, out, prev_vx, prev_wz, reverse_passthrough=False)
+
+    def _log_cmd_debug(self, now, age, stale_state, target_cmd, out, prev_vx, prev_wz, reverse_passthrough):
+        if (
+            now - self._last_cmd_debug_log_time < 0.5
+            and stale_state == "fresh"
+            and not reverse_passthrough
+        ):
+            return
+        self._last_cmd_debug_log_time = now
+        self.logger.info(
+            "cmd_vel_debug "
+            f"age={age:.2f} stale_state={stale_state} "
+            f"path_dt_ema={self.path_period_ema:.2f} "
+            f"target_vx={target_cmd.linear.x:.2f} target_wz={target_cmd.angular.z:.2f} "
+            f"out_vx={out.linear.x:.2f} out_wz={out.angular.z:.2f} "
+            f"prev_vx={prev_vx:.2f} prev_wz={prev_wz:.2f} "
+            f"reverse_passthrough={reverse_passthrough}"
+        )
         
     def path_callback(self, msg):
         if not self._nav_active:
@@ -226,9 +255,12 @@ class CmdVelControlNode(Node):
         self.latest_cmd.linear.y = float(vy)
         self.latest_cmd.angular.z = float(vyaw)
         age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
-        self.logger.debug(
-            f"cmd vx={self.latest_cmd.linear.x:.3f} vyaw={self.latest_cmd.angular.z:.3f} "
-            f"path_age={age:.2f}s path_dt_ema={self.path_period_ema:.2f}s lookahead={step_idx}"
+        self.logger.info(
+            "cmd_path_debug "
+            f"raw_vx={raw_vx:.2f} heading_err={heading_err:.2f} "
+            f"backward_segment={is_backward_segment} "
+            f"cmd_vx={self.latest_cmd.linear.x:.2f} cmd_wz={self.latest_cmd.angular.z:.2f} "
+            f"path_age={age:.2f} path_dt_ema={self.path_period_ema:.2f} lookahead={step_idx}"
         )
 
     def destroy_node(self):
