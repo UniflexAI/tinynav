@@ -226,7 +226,11 @@ class MapNode(Node):
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
-        self.relocalization_threshold = 0.85
+        # Calibrated against map_day_20260716: 40 geometrically-verified same-session loop
+        # closures scored 0.459-0.795 in VLAD-cosine space, while ~250 cross-session/different-
+        # location queries topped out at 0.444 -- 0.85 (tuned for the old CLS-embedding scheme)
+        # rejected almost every real match once retrieval switched to color VLAD.
+        self.relocalization_threshold = 0.5
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
