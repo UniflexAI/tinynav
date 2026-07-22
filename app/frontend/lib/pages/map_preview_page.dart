@@ -15,6 +15,66 @@ class MapPreviewPage extends ConsumerStatefulWidget {
 
 class _MapPreviewPageState extends ConsumerState<MapPreviewPage> {
   bool _setting = false;
+  bool _editorRunning = false;
+  bool _editorBusy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshEditorStatus());
+  }
+
+  String _editorUrl() {
+    final baseUrl = ref.read(baseUrlProvider) ?? '';
+    final uri = Uri.tryParse(baseUrl);
+    if (uri == null || uri.host.isEmpty) return 'http://<robot-ip>:8080';
+    return uri.replace(port: 8080, path: '', query: '', fragment: '').toString();
+  }
+
+  Future<void> _refreshEditorStatus() async {
+    try {
+      final resp = await ref.read(dioProvider).get('/map/preview/${widget.mapName}/editor');
+      if (!mounted) return;
+      setState(() => _editorRunning = resp.data['running'] == true);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleEditor() async {
+    setState(() => _editorBusy = true);
+    try {
+      if (_editorRunning) {
+        await ref.read(dioProvider).post('/map/preview/${widget.mapName}/editor/stop');
+        if (mounted) {
+          setState(() => _editorRunning = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Map editor closed')),
+          );
+        }
+      } else {
+        await ref.read(dioProvider).post('/map/preview/${widget.mapName}/editor/start');
+        if (mounted) {
+          setState(() => _editorRunning = true);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Map editor is running at ${_editorUrl()}'),
+              backgroundColor: const Color(0xFF45C95A),
+            ),
+          );
+        }
+      }
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _editorBusy = false);
+    }
+  }
 
   Future<void> _setAsNavMap() async {
     setState(() => _setting = true);
@@ -59,6 +119,32 @@ class _MapPreviewPageState extends ConsumerState<MapPreviewPage> {
           overflow: TextOverflow.ellipsis,
         ),
         actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: OutlinedButton.icon(
+              onPressed: _editorBusy ? null : _toggleEditor,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.white,
+                side: BorderSide(
+                  color: _editorRunning ? const Color(0xFFFFD54F) : Colors.white54,
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              icon: _editorBusy
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    )
+                  : Icon(_editorRunning ? Icons.close_rounded : Icons.edit_location_alt_rounded, size: 16),
+              label: Text(
+                _editorRunning ? 'Close Editor' : 'Editor',
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: FilledButton.icon(
