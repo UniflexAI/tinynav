@@ -722,8 +722,15 @@ class MapNode(Node):
         depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
         assert keyframe_image_timestamp == keyframe_odom_timestamp
         assert keyframe_image_timestamp == depth_timestamp
-        depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
         odom, _ = msg2np(keyframe_odom_msg)
+
+        if not self.enable_runtime_pose_graph:
+            self.odom[keyframe_odom_timestamp] = odom
+            self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+            self.last_keyframe_timestamp = keyframe_odom_timestamp
+            return
+
+        depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
         rgb_image_place_holder = einops.repeat(image, "h w -> h w c", c = 3)
 
@@ -763,9 +770,8 @@ class MapNode(Node):
                                 #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
                     with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                         self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-            if self.enable_runtime_pose_graph:
-                find_loop_and_pose_graph(keyframe_image_timestamp)
-                self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+            find_loop_and_pose_graph(keyframe_image_timestamp)
+            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
