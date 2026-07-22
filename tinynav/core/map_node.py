@@ -536,7 +536,7 @@ class MapNode(Node):
         self._nav_subgoals_poi_index: int | None = None
         self._nav_subgoal_index = 0
         self._nav_subgoal_segment_length_m = 20.0
-        self._nav_subgoal_arrival_xy_threshold = 1.0
+        self._nav_subgoal_arrival_xy_threshold = 3.0
         self._nav_subgoal_arrival_z_threshold = 2.0
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
