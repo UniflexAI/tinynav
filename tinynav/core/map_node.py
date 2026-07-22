@@ -437,6 +437,7 @@ class MapNode(Node):
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 50
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
+        self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
         self.vlad_centres = None
@@ -548,6 +549,31 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+
+    def _load_target_pose_dist_factor(self, tinynav_map_path: str) -> float:
+        default_factor = 4.0
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_factor
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using target_pose_dist_factor={default_factor}")
+            return default_factor
+        if not isinstance(config, dict):
+            return default_factor
+        value = config.get("target_pose_dist_factor", default_factor)
+        try:
+            factor = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid target_pose_dist_factor={value!r}; using {default_factor}")
+            return default_factor
+        if factor <= 0:
+            self.get_logger().warning(f"Invalid target_pose_dist_factor={value!r}; using {default_factor}")
+            return default_factor
+        self.get_logger().info(f"Using target_pose_dist_factor={factor}")
+        return factor
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -1087,7 +1113,7 @@ class MapNode(Node):
             # turn before the railing is visible.
             with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
                 max_speed = 0.5
-                lookahead_distance = max_speed * 4
+                lookahead_distance = max_speed * self.target_pose_dist_factor
                 target_position = select_target_position_on_path(
                     paths_in_map,
                     pose_in_map_position[:3],
@@ -1241,7 +1267,7 @@ class MapNode(Node):
         pose_in_map_position = pose_in_map[:3, 3]
         with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             max_speed = 0.5
-            lookahead_distance = max_speed * 4
+            lookahead_distance = max_speed * self.target_pose_dist_factor
             target_position = select_target_position_on_path(
                 paths_in_map,
                 pose_in_map_position[:3],
