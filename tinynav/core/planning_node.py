@@ -238,7 +238,7 @@ def generate_predefined_trajectory_vocabularies(
 
     # Recovery reverse trajectories.
     # Keep the speed conservative here; speed tuning is handled separately.
-    reverse_speed = 0.2
+    reverse_speed = 0.3
     for omega_y in [0.0, -0.5, 0.5]:
         p = init_p.copy()
         q = quat_to_matrix(init_q)

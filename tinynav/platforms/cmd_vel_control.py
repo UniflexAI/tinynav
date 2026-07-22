@@ -51,7 +51,7 @@ class CmdVelControlNode(Node):
         self.min_effective_linear_speed = 0.1
         self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
-        self.fixed_reverse_speed = 0.2
+        self.fixed_reverse_speed = 0.3
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
