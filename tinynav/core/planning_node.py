@@ -1,5 +1,7 @@
 import rclpy
+import json
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
@@ -12,7 +14,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -382,6 +384,17 @@ class PlanningNode(Node):
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ObstacleConfig()
+        planning_config_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.planning_config_sub = self.create_subscription(
+            String,
+            "/planning/config",
+            self.planning_config_callback,
+            planning_config_qos,
+        )
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
@@ -391,6 +404,25 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
+
+    def planning_config_callback(self, msg: String):
+        try:
+            config = json.loads(msg.data)
+        except json.JSONDecodeError as exc:
+            self.get_logger().warning(f"Failed to parse /planning/config: {exc}")
+            return
+        if not isinstance(config, dict) or "dilation_cells" not in config:
+            return
+        try:
+            dilation_cells = int(config["dilation_cells"])
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning dilation_cells: {config.get('dilation_cells')!r}")
+            return
+        dilation_cells = max(0, min(20, dilation_cells))
+        old = self.obstacle_config.dilation_cells
+        self.obstacle_config.dilation_cells = dilation_cells
+        if old != dilation_cells:
+            self.get_logger().info(f"Updated planning dilation_cells: {old} -> {dilation_cells}")
 
     def poi_change_callback(self, msg):
         self.target_pose = None

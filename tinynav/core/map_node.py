@@ -2,6 +2,7 @@ import rclpy
 import os
 import time
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Bool, String
@@ -439,6 +440,7 @@ class MapNode(Node):
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
+        self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
         self.vlad_centres = None
@@ -547,10 +549,17 @@ class MapNode(Node):
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        planning_config_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.planning_config_pub = self.create_publisher(String, "/planning/config", planning_config_qos)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
+        self._publish_planning_config()
 
     def _load_target_pose_dist_factor(self, tinynav_map_path: str) -> float:
         default_factor = 4.0
@@ -602,6 +611,40 @@ class MapNode(Node):
             return default_value
         self.get_logger().info(f"Using select_target_position_on_path_on={enabled}")
         return enabled
+
+    def _load_planning_dilation_cells(self, tinynav_map_path: str) -> int:
+        default_value = 0
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using planning.dilation_cells={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict):
+            return default_value
+        value = planning_config.get("dilation_cells", default_value)
+        try:
+            dilation_cells = int(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning.dilation_cells={value!r}; using {default_value}")
+            return default_value
+        dilation_cells = max(0, min(20, dilation_cells))
+        self.get_logger().info(f"Using planning.dilation_cells={dilation_cells}")
+        return dilation_cells
+
+    def _publish_planning_config(self):
+        msg = String()
+        msg.data = json.dumps({
+            "dilation_cells": self.planning_dilation_cells,
+        })
+        self.planning_config_pub.publish(msg)
+        self.get_logger().info(f"Published /planning/config: {msg.data}")
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
