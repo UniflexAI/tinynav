@@ -399,6 +399,7 @@ class PlanningNode(Node):
         self.current_pose = None  # Store the latest pose from odometry
 
         self.smoothed_velocity = 0.0
+        self._last_avoidance_debug_log_time = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -644,11 +645,13 @@ class PlanningNode(Node):
         with Timer(name='cc', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
+            should_reverse = front_clearance <= enter_threshold
+            valid_traj_count = int(np.sum(np.isfinite(scores)))
+            all_collision = valid_traj_count == 0
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= enter_threshold
                 reverse_gate_penalty = 0.0
                 if should_reverse and not is_backward_traj:
                         reverse_gate_penalty = 1e9
@@ -663,8 +666,37 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
-            self.last_param = params[top_indices[0]]
+            costs = np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))])
+            top_indices = np.argsort(costs, kind='stable')[:top_k]
+            selected_index = int(top_indices[0])
+            selected_param = params[selected_index]
+            selected_score = float(scores[selected_index])
+            selected_cost = float(costs[selected_index])
+            selected_is_reverse = bool(selected_param[0] < 0.0)
+            target_dist = float("nan")
+            if self.target_pose is not None:
+                target_dist = float(np.linalg.norm(trajectories[selected_index][-1, :3] - self.target_pose))
+            now_debug = time.monotonic()
+            should_log_debug = (
+                now_debug - self._last_avoidance_debug_log_time > 0.5
+                or all_collision
+                or should_reverse
+                or selected_is_reverse
+            )
+            if should_log_debug:
+                self._last_avoidance_debug_log_time = now_debug
+                self.get_logger().info(
+                    "planning_avoidance_debug "
+                    f"front_clearance={front_clearance:.2f} enter_threshold={enter_threshold:.2f} "
+                    f"should_reverse={should_reverse} all_collision={all_collision} "
+                    f"valid_traj_count={valid_traj_count}/{len(trajectories)} "
+                    f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
+                    f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} "
+                    f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
+                    f"target_dist={target_dist:.2f} last_vx={self.last_param[0]:.2f} "
+                    f"last_omega={self.last_param[1]:.2f} dilation_cells={self.obstacle_config.dilation_cells}"
+                )
+            self.last_param = selected_param
 
             # path
             path = Path()
@@ -674,7 +706,7 @@ class PlanningNode(Node):
             if self.target_pose is None:
                 return
 
-            if all(s == float('inf') for s in scores):
+            if all_collision:
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 return
 
