@@ -438,6 +438,7 @@ class MapNode(Node):
         self.relocalization_min_inlier_count = 50
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
+        self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
         self.vlad_centres = None
@@ -526,10 +527,11 @@ class MapNode(Node):
         self._current_nav_path_in_map: np.ndarray | None = None
         self._cached_global_path: np.ndarray | None = None
         self._cached_global_path_poi_index: int | None = None
+        self._cached_global_path_goal: np.ndarray | None = None
         self._cached_global_path_T: np.ndarray | None = None
         self._replan_tf_translation_threshold = 0.3
         self._replan_tf_yaw_threshold = np.deg2rad(10.0)
-        self._replan_path_deviation_threshold = 0.8
+        self._replan_path_deviation_threshold = 0.3
         self._nav_subgoals_in_map: list[np.ndarray] = []
         self._nav_subgoals_poi_index: int | None = None
         self._nav_subgoal_index = 0
@@ -574,6 +576,32 @@ class MapNode(Node):
             return default_factor
         self.get_logger().info(f"Using target_pose_dist_factor={factor}")
         return factor
+
+    def _load_select_target_position_on_path_on(self, tinynav_map_path: str) -> bool:
+        default_value = False
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using select_target_position_on_path_on={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        value = config.get("select_target_position_on_path_on", default_value)
+        if isinstance(value, bool):
+            enabled = value
+        elif isinstance(value, str):
+            enabled = value.strip().lower() in {"1", "true", "yes", "on"}
+        elif isinstance(value, (int, float)):
+            enabled = bool(value)
+        else:
+            self.get_logger().warning(f"Invalid select_target_position_on_path_on={value!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using select_target_position_on_path_on={enabled}")
+        return enabled
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -620,6 +648,7 @@ class MapNode(Node):
         self._current_nav_path_in_map = None
         self._cached_global_path = None
         self._cached_global_path_poi_index = None
+        self._cached_global_path_goal = None
         self._cached_global_path_T = None
         self._nav_subgoals_in_map = []
         self._nav_subgoals_poi_index = None
@@ -662,9 +691,16 @@ class MapNode(Node):
         )
 
     def target_pose_timer_callback(self):
-        if self.latest_odom_pose is None or self._current_nav_path_in_map is None:
+        if self.latest_odom_pose is None:
             return
         if self.T_from_map_to_odom is None:
+            return
+        self.try_publish_nav_path(
+            timestamp=None,
+            pose_in_origin_odom=self.latest_odom_pose,
+            stamp_msg=self.latest_odom_stamp_msg,
+        )
+        if self._current_nav_path_in_map is None:
             return
         self._publish_target_pose_from_path(
             self._current_nav_path_in_map,
@@ -696,19 +732,11 @@ class MapNode(Node):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        keyframe_image_timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         if not (self.enable_first_done and self.first_done):
             success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
             if success:
                 self.compute_transform_from_map_to_odom()
                 self.first_done = True
-
-        with Timer(name = "nav path", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            self.try_publish_nav_path(keyframe_image_timestamp_ns)
-            # timer or queue for publish the nav path
-            # and record the map pose
-            # compute the coordinate transform from the map pose to the keyframe pose
-            # publish the nav path from the map pose to the keyframe pose with the cost map
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -1149,8 +1177,10 @@ class MapNode(Node):
             if diff_xy >= self._nav_subgoal_arrival_xy_threshold or diff_z >= self._nav_subgoal_arrival_z_threshold:
                 break
             self._nav_subgoal_index += 1
+            self._current_nav_path_in_map = None
             self._cached_global_path = None
             self._cached_global_path_poi_index = None
+            self._cached_global_path_goal = None
             self._cached_global_path_T = None
             self._leg_initial_length = None
             self._leg_start_time = None
@@ -1212,8 +1242,28 @@ class MapNode(Node):
         return subgoals
 
     def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
+        pose_position = pose_in_map[:3, 3]
+        if (
+            self._cached_global_path is not None
+            and self._cached_global_path_poi_index == self.poi_index
+            and self._cached_global_path_goal is not None
+            and np.linalg.norm(self._cached_global_path_goal - target_poi) < 1e-6
+        ):
+            _, _, deviation = self._closest_point_on_path(self._cached_global_path, pose_position)
+            if deviation <= self._replan_path_deviation_threshold:
+                return self._cached_global_path
+            self.get_logger().info(
+                f"Replanning global path: deviation {deviation:.2f}m > "
+                f"{self._replan_path_deviation_threshold:.2f}m"
+            )
+
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            return self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+            path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+        if path is not None:
+            self._cached_global_path = path
+            self._cached_global_path_poi_index = self.poi_index
+            self._cached_global_path_goal = np.array(target_poi, dtype=np.float64)
+        return path
 
     def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
         if len(path) == 1:
@@ -1243,21 +1293,48 @@ class MapNode(Node):
             remaining += np.linalg.norm(path[i + 1] - path[i])
         return closest_position, remaining
 
-    def _publish_target_pose_from_path(self, paths_in_map: np.ndarray, pose_in_origin_odom: np.ndarray, stamp_msg=None):
-        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
-        pose_in_map_position = pose_in_map[:3, 3]
-        with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            max_speed = 0.5
-            lookahead_distance = max_speed * self.target_pose_dist_factor
-            target_position = select_target_position_on_path(
+    def _select_target_position_in_map(
+        self,
+        paths_in_map: np.ndarray,
+        pose_in_map_position: np.ndarray,
+        lookahead_distance: float,
+    ) -> np.ndarray:
+        if self.select_target_position_on_path_on:
+            return select_target_position_on_path(
                 paths_in_map,
-                pose_in_map_position[:3],
+                pose_in_map_position,
                 lookahead_distance=lookahead_distance,
                 turn_angle_threshold_rad=np.deg2rad(70.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
                 turn_stop_margin=0.15,
                 min_turn_distance=0.5,
                 turn_window_distance=0.4,
+            )
+
+        if len(paths_in_map) == 0:
+            return pose_in_map_position
+        closest_idx, closest_position, _ = self._closest_point_on_path(paths_in_map, pose_in_map_position)
+        target_position = paths_in_map[-1]
+        start_point = closest_position
+        accumulated_distance = 0.0
+        for i in range(closest_idx, len(paths_in_map) - 1):
+            accumulated_distance += np.linalg.norm(paths_in_map[i][:2] - start_point[:2])
+            if accumulated_distance > lookahead_distance:
+                target_position = paths_in_map[i]
+                break
+            start_point = paths_in_map[i]
+        return target_position
+
+    def _publish_target_pose_from_path(self, paths_in_map: np.ndarray, pose_in_origin_odom: np.ndarray, stamp_msg=None):
+        pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
+        pose_in_map_position = pose_in_map[:3, 3]
+        with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+            max_speed = 0.5
+            lookahead_distance = max_speed * self.target_pose_dist_factor
+            target_position = self._select_target_position_in_map(
+                paths_in_map,
+                pose_in_map_position[:3],
+                lookahead_distance,
             )
             target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
             T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
