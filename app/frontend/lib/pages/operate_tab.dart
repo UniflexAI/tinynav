@@ -164,6 +164,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         baseUrl: baseUrl,
                         planning: planning,
                         pois: activeNavPois,
+                        starredPoi: isNavigating && activeNavPois.isNotEmpty ? activeNavPois.last : null,
                         activeMap: status?.activeMap,
                       )
                     : _LocalPlanningView(
@@ -293,6 +294,7 @@ class _GlobalMapView extends StatelessWidget {
   final String baseUrl;
   final PlanningState? planning;
   final List<Poi> pois;
+  final Poi? starredPoi;
   final String? activeMap;
 
   const _GlobalMapView({
@@ -300,6 +302,7 @@ class _GlobalMapView extends StatelessWidget {
     required this.baseUrl,
     this.planning,
     this.pois = const [],
+    this.starredPoi,
     this.activeMap,
   });
 
@@ -333,6 +336,7 @@ class _GlobalMapView extends StatelessWidget {
                         mapInfo: mapInfo,
                         pose: p.mapPose,
                         pois: pois,
+                        starredPoi: starredPoi,
                         globalPath: p.mapGlobalPath,
                         showGlobalPath: true,
                       ),
