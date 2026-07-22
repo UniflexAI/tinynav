@@ -531,7 +531,7 @@ class MapNode(Node):
         self._cached_global_path_T: np.ndarray | None = None
         self._replan_tf_translation_threshold = 0.3
         self._replan_tf_yaw_threshold = np.deg2rad(10.0)
-        self._replan_path_deviation_threshold = 0.3
+        self._replan_path_deviation_threshold = 0.5
         self._nav_subgoals_in_map: list[np.ndarray] = []
         self._nav_subgoals_poi_index: int | None = None
         self._nav_subgoal_index = 0
