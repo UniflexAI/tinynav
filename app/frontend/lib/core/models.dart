@@ -44,6 +44,7 @@ class DeviceStatus {
   final double mappingPercent;
   final String navStatus;
   final String rawState;
+  final String? activeMap;
   final bool navNodesRunning;
   final bool navPaused;
   final bool debugRecording;
@@ -58,6 +59,7 @@ class DeviceStatus {
     required this.mappingPercent,
     required this.navStatus,
     required this.rawState,
+    this.activeMap,
     required this.navNodesRunning,
     required this.navPaused,
     required this.debugRecording,
@@ -73,6 +75,7 @@ class DeviceStatus {
         mappingPercent: (json['mappingPercent'] as num?)?.toDouble() ?? 0.0,
         navStatus: json['navStatus'] as String? ?? 'idle',
         rawState: json['rawState'] as String? ?? 'unknown',
+        activeMap: json['activeMap'] as String?,
         navNodesRunning: json['navNodesRunning'] as bool? ?? false,
         navPaused: json['navPaused'] as bool? ?? false,
         debugRecording: json['debugRecording'] as bool? ?? false,
@@ -100,6 +103,7 @@ class Pose {
 
 class MapInfo {
   final String imageUrl;
+  final String? activeMap;
   final double originX;
   final double originY;
   final double resolution;
@@ -108,6 +112,7 @@ class MapInfo {
 
   const MapInfo({
     required this.imageUrl,
+    this.activeMap,
     required this.originX,
     required this.originY,
     required this.resolution,
@@ -117,6 +122,7 @@ class MapInfo {
 
   factory MapInfo.fromJson(Map<String, dynamic> json) => MapInfo(
         imageUrl: json['imageUrl'] as String,
+        activeMap: json['activeMap'] as String?,
         originX: (json['origin_x'] as num).toDouble(),
         originY: (json['origin_y'] as num).toDouble(),
         resolution: (json['resolution'] as num).toDouble(),

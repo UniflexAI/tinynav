@@ -49,12 +49,17 @@ def map_current():
     grid_file = os.path.join(node.map_path, 'occupancy_grid.npy')
     if not os.path.exists(grid_file):
         raise HTTPException(404, 'No map available')
+    active_map = node._active_map_name() if hasattr(node, '_active_map_name') else None
     try:
         _, meta = render_map(node.map_path)
     except Exception as e:
         raise HTTPException(500, str(e))
+    image_url = '/map/image'
+    if active_map:
+        image_url = f'/map/image?map={active_map}'
     return {
-        'imageUrl': '/map/image',
+        'imageUrl': image_url,
+        'activeMap': active_map,
         **meta,
     }
 

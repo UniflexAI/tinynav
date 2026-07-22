@@ -20,6 +20,13 @@ const double _maxLinear = 0.5;   // m/s
 const double _maxAngular = 1.0;  // rad/s
 const Duration _teleopSendInterval = Duration(milliseconds: 100); // 10 Hz
 
+String _mapImageUrl(String baseUrl, MapInfo mapInfo, String? activeMap) {
+  final cacheKey = activeMap ?? mapInfo.activeMap ?? '';
+  if (cacheKey.isEmpty) return '$baseUrl${mapInfo.imageUrl}';
+  final separator = mapInfo.imageUrl.contains('?') ? '&' : '?';
+  return '$baseUrl${mapInfo.imageUrl}${separator}activeMap=${Uri.encodeComponent(cacheKey)}';
+}
+
 // ── Main widget ───────────────────────────────────────────────────────────────
 
 class OperateTab extends ConsumerStatefulWidget {
@@ -117,10 +124,17 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final activeNavPois = ref.watch(activeNavPoisProvider);
     final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
     final baseUrl = ref.watch(baseUrlProvider);
+    final status = ref.watch(deviceStatusProvider).valueOrNull;
 
     ref.listen<AsyncValue<DeviceStatus>>(deviceStatusProvider, (prev, next) {
       final prevState = prev?.valueOrNull?.rawState;
       final nextState = next.valueOrNull?.rawState;
+      final prevMap = prev?.valueOrNull?.activeMap;
+      final nextMap = next.valueOrNull?.activeMap;
+      if (prevMap != nextMap) {
+        ref.invalidate(mapInfoProvider);
+        ref.invalidate(poisProvider);
+      }
       if (prevState == 'navigation' && nextState != 'navigation') {
         ref.read(activeNavPoisProvider.notifier).state = const [];
         setState(() => _navArrived = true);
@@ -130,7 +144,6 @@ class _OperateTabState extends ConsumerState<OperateTab> {
       }
     });
 
-    final status = ref.watch(deviceStatusProvider).valueOrNull;
     final isNavigating = status?.rawState == 'navigation';
     final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
 
@@ -151,6 +164,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         baseUrl: baseUrl,
                         planning: planning,
                         pois: activeNavPois,
+                        activeMap: status?.activeMap,
                       )
                     : _LocalPlanningView(
                         planning: planning,
@@ -279,17 +293,20 @@ class _GlobalMapView extends StatelessWidget {
   final String baseUrl;
   final PlanningState? planning;
   final List<Poi> pois;
+  final String? activeMap;
 
   const _GlobalMapView({
     required this.mapInfo,
     required this.baseUrl,
     this.planning,
     this.pois = const [],
+    this.activeMap,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = planning;
+    final imageUrl = _mapImageUrl(baseUrl, mapInfo, activeMap);
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -305,7 +322,7 @@ class _GlobalMapView extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   Image.network(
-                    '$baseUrl${mapInfo.imageUrl}',
+                    imageUrl,
                     fit: BoxFit.fill,
                     gaplessPlayback: true,
                     errorBuilder: (_, __, ___) => const ColoredBox(color: Color(0xFF1A1A2E)),
@@ -1555,6 +1572,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     final baseUrl = ref.watch(baseUrlProvider);
     final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
     final planning = ref.watch(planningStreamProvider).valueOrNull;
+    final activeMap = ref.watch(deviceStatusProvider).valueOrNull?.activeMap;
 
     // Auto-select color topic on first load
     ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
@@ -1614,6 +1632,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                 mapInfo: mapInfo,
                 planning: planning,
                 baseUrl: baseUrl,
+                activeMap: activeMap,
               ),
             ),
           // ── VIO Status ─────────────────────────────────────────────
@@ -1758,16 +1777,19 @@ class _MapPip extends StatelessWidget {
   final MapInfo mapInfo;
   final PlanningState planning;
   final String baseUrl;
+  final String? activeMap;
 
   const _MapPip({
     required this.mapInfo,
     required this.planning,
     required this.baseUrl,
+    this.activeMap,
   });
 
   @override
   Widget build(BuildContext context) {
     const pipSize = 120.0;
+    final imageUrl = _mapImageUrl(baseUrl, mapInfo, activeMap);
     return Container(
       width: pipSize,
       height: pipSize,
@@ -1782,7 +1804,7 @@ class _MapPip extends StatelessWidget {
           fit: StackFit.expand,
           children: [
             Image.network(
-              '$baseUrl${mapInfo.imageUrl}',
+              imageUrl,
               fit: BoxFit.fill,
               gaplessPlayback: true,
               errorBuilder: (_, __, ___) => const SizedBox(),

@@ -1020,6 +1020,7 @@ class BackendNode(Ros2NodeManager):
             vio_guard_enabled = self._sensor_mode == 'looper'
             vio_status = self._vio_status if vio_guard_enabled else None
             vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
+            active_map = self._active_map_name()
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -1033,6 +1034,7 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
+            'activeMap': active_map,
             'debugRecording': self.debug_recording,
             'locAssistEnabled': loc_assist,
             'vioGuardEnabled': vio_guard_enabled,
