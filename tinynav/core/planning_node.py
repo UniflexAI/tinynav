@@ -238,21 +238,24 @@ def generate_predefined_trajectory_vocabularies(
     trajectories = []
     params = []
 
-    # constant reverse trajectory
-    # vx = -0.2 m/s, omega = 0
+    # Recovery reverse trajectories.
+    # Keep the speed conservative here; speed tuning is handled separately.
     reverse_speed = 0.2
-    p = init_p.copy()
-    q = quat_to_matrix(init_q)
-    traj = np.empty((num_steps, 7), dtype=np.float64)
-    for i in range(num_steps):
-        v_world = q @ np.array([0.0, 0.0, -reverse_speed])
-        p += v_world * dt
-        traj[i, :3] = p
-        traj[i, 3:] = matrix_to_quat(q)
-    for i in range(num_steps):
-        traj[i, 2] = traj[0, 2]
-    trajectories.append(traj)
-    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
+    for omega_y in [0.0, -0.5, 0.5]:
+        p = init_p.copy()
+        q = quat_to_matrix(init_q)
+        traj = np.empty((num_steps, 7), dtype=np.float64)
+        for i in range(num_steps):
+            dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+            q = q @ dq
+            v_world = q @ np.array([0.0, 0.0, -reverse_speed])
+            p += v_world * dt
+            traj[i, :3] = p
+            traj[i, 3:] = matrix_to_quat(q)
+        for i in range(num_steps):
+            traj[i, 2] = traj[0, 2]
+        trajectories.append(traj)
+        params.append(np.array([-reverse_speed, omega_y], dtype=np.float64))
 
     return np.asarray(trajectories), np.asarray(params)
 
@@ -648,6 +651,37 @@ class PlanningNode(Node):
             should_reverse = front_clearance <= enter_threshold
             valid_traj_count = int(np.sum(np.isfinite(scores)))
             all_collision = valid_traj_count == 0
+            recovery_indices = np.flatnonzero(params[:, 0] < 0.0)
+
+            def choose_recovery_index():
+                if len(recovery_indices) == 0:
+                    return 0, "none"
+                recovery_scores = scores[recovery_indices]
+                finite_mask = np.isfinite(recovery_scores)
+                if np.any(finite_mask):
+                    finite_indices = recovery_indices[finite_mask]
+                    finite_scores = recovery_scores[finite_mask]
+                    return int(finite_indices[int(np.argmin(finite_scores))]), "finite"
+
+                ignore_steps = min(3, trajectories.shape[1] - 1)
+                delayed_scores, _ = score_trajectories_by_ESDF(
+                    trajectories[recovery_indices, ignore_steps:, :],
+                    ESDF_map,
+                    self.origin,
+                    self.resolution,
+                    self.robot.safety_radius,
+                    front_len,
+                    rear_len,
+                    half_w,
+                )
+                delayed_finite_mask = np.isfinite(delayed_scores)
+                if np.any(delayed_finite_mask):
+                    finite_indices = recovery_indices[delayed_finite_mask]
+                    finite_scores = delayed_scores[delayed_finite_mask]
+                    return int(finite_indices[int(np.argmin(finite_scores))]), f"delayed_{ignore_steps}"
+
+                straight_reverse = recovery_indices[int(np.argmin(np.abs(params[recovery_indices, 1])))]
+                return int(straight_reverse), "fallback_straight"
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
@@ -666,8 +700,15 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
-            costs = np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))])
-            top_indices = np.argsort(costs, kind='stable')[:top_k]
+            recovery_reason = "normal"
+            if all_collision:
+                selected_index, recovery_reason = choose_recovery_index()
+                top_indices = np.array([selected_index], dtype=np.int64)
+                costs = np.full(len(trajectories), float("inf"), dtype=np.float64)
+                costs[selected_index] = 0.0
+            else:
+                costs = np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))])
+                top_indices = np.argsort(costs, kind='stable')[:top_k]
             selected_index = int(top_indices[0])
             selected_param = params[selected_index]
             selected_score = float(scores[selected_index])
@@ -690,6 +731,7 @@ class PlanningNode(Node):
                     f"front_clearance={front_clearance:.2f} enter_threshold={enter_threshold:.2f} "
                     f"should_reverse={should_reverse} all_collision={all_collision} "
                     f"valid_traj_count={valid_traj_count}/{len(trajectories)} "
+                    f"recovery_reason={recovery_reason} "
                     f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
                     f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} "
                     f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
@@ -707,8 +749,11 @@ class PlanningNode(Node):
                 return
 
             if all_collision:
-                self.get_logger().info('All trajectories in collision, stopping path.')
-                return
+                self.get_logger().warning(
+                    "All trajectories in collision; publishing recovery path "
+                    f"idx={selected_index} vx={selected_param[0]:.2f} "
+                    f"omega={selected_param[1]:.2f} reason={recovery_reason}"
+                )
 
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
