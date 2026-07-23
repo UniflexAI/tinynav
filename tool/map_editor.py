@@ -717,13 +717,15 @@ def main(args: Args) -> None:
     # ------------------------------------------------------------------
     if os.path.exists(f"{map_dir}/pois.json"):
         with open(f"{map_dir}/pois.json", "r") as f:
-            poi_points = json.load(f)
+            poi_points = json.load(f) or {}
+            if not isinstance(poi_points, dict):
+                poi_points = {}
             poi_points = {int(k): v for k, v in poi_points.items()}
             for k, v in poi_points.items():
                 v.setdefault('id', k)
                 v.setdefault('name', f"POI_{k}")
                 v['position'] = np.array(v['position'])
-            poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
+            poi_id_counter = max(poi_points.keys(), default=-1) + 1
 
     # ------------------------------------------------------------------
     # POI management UI
