@@ -142,3 +142,7 @@ log/
 # Output result
 tinynav_db/
 tinynav_temp/
+
+# NTRIP credentials — never commit real ones (see rtk/.ntrip.env.example)
+.ntrip.env
+rtk/.ntrip.env
