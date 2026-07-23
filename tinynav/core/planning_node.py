@@ -15,7 +15,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header, String
+from std_msgs.msg import Float32, Header, String
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -367,6 +367,7 @@ class PlanningNode(Node):
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
+        self.front_clearance_pub = self.create_publisher(Float32, '/planning/front_clearance', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
@@ -649,6 +650,7 @@ class PlanningNode(Node):
 
         with Timer(name='cc', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
+            self.front_clearance_pub.publish(Float32(data=float(front_clearance)))
             enter_threshold = 0.30
             should_reverse = front_clearance <= enter_threshold
             valid_traj_count = int(np.sum(np.isfinite(scores)))

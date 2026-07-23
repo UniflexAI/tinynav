@@ -61,6 +61,13 @@ _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50')
 _MAP_HANDOFF_LOCALIZATION_TIMEOUT_S = float(
     os.environ.get('TINYNAV_MAP_HANDOFF_LOCALIZATION_TIMEOUT_S', '0')
 )
+_RTK_YAW_INIT_SPEED_MPS = float(os.environ.get('TINYNAV_RTK_YAW_INIT_SPEED_MPS', '0.3'))
+_RTK_YAW_INIT_DURATION_S = float(os.environ.get('TINYNAV_RTK_YAW_INIT_DURATION_S', '5.0'))
+_RTK_YAW_INIT_RATE_HZ = float(os.environ.get('TINYNAV_RTK_YAW_INIT_RATE_HZ', '10.0'))
+_RTK_YAW_INIT_CLEARANCE_M = float(os.environ.get('TINYNAV_RTK_YAW_INIT_CLEARANCE_M', '1.8'))
+_RTK_YAW_INIT_CLEARANCE_MAX_AGE_S = float(
+    os.environ.get('TINYNAV_RTK_YAW_INIT_CLEARANCE_MAX_AGE_S', '1.0')
+)
 _VIO_STATUS_NORMAL = {'TRACKING', 'TRACKING_STATIC'}
 
 
@@ -177,6 +184,11 @@ class BackendNode(Ros2NodeManager):
         self._rtk_bridge_status: dict | None = None
         self._rtk_map_status: dict | None = None
         self._rtk_log_state: dict[str, tuple[tuple, float]] = {}
+        self._front_clearance_m: float | None = None
+        self._front_clearance_received_at: float | None = None
+        self._rtk_yaw_init_thread: threading.Thread | None = None
+        self._rtk_yaw_init_stop_event = threading.Event()
+        self._rtk_yaw_init_active: bool = False
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -221,6 +233,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub.publish(Bool(data=False))
 
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
+        self.create_subscription(Float32, '/planning/front_clearance', self._on_front_clearance, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
         self.create_subscription(String, '/rtk/status', self._on_rtk_bridge_status, 10)
@@ -235,6 +248,11 @@ class BackendNode(Ros2NodeManager):
     def _on_battery(self, msg: Float32):
         with self._lock:
             self._battery = float(msg.data)
+
+    def _on_front_clearance(self, msg: Float32):
+        with self._lock:
+            self._front_clearance_m = float(msg.data)
+            self._front_clearance_received_at = time.monotonic()
 
     def _decode_json_status(self, raw: str, topic: str) -> dict | None:
         try:
@@ -303,6 +321,145 @@ class BackendNode(Ros2NodeManager):
             f"map={data.get('map')} "
             f"navsat_status={data.get('navsat_status')}",
         )
+        self._maybe_start_rtk_yaw_init(data)
+
+    def _latest_front_clearance(self) -> float | None:
+        with self._lock:
+            clearance = self._front_clearance_m
+            received_at = self._front_clearance_received_at
+        if clearance is None or received_at is None:
+            return None
+        if time.monotonic() - received_at > _RTK_YAW_INIT_CLEARANCE_MAX_AGE_S:
+            return None
+        return clearance
+
+    def _front_is_clear_for_rtk_yaw_init(self) -> bool:
+        clearance = self._latest_front_clearance()
+        if clearance is None:
+            self._log_rtk_status(
+                'yaw_init_clearance',
+                ('missing',),
+                'RTK yaw-init waiting: no fresh /planning/front_clearance',
+            )
+            return False
+        if clearance < _RTK_YAW_INIT_CLEARANCE_M:
+            self._log_rtk_status(
+                'yaw_init_clearance',
+                ('blocked', round(clearance, 1)),
+                f'RTK yaw-init blocked: front_clearance={clearance:.2f}m '
+                f'< required={_RTK_YAW_INIT_CLEARANCE_M:.2f}m',
+            )
+            return False
+        return True
+
+    def _rtk_map_needs_yaw_init(self) -> bool:
+        with self._lock:
+            status = dict(self._rtk_map_status) if self._rtk_map_status else None
+        if not status:
+            return False
+        return bool(status.get('need_forward_init')) or status.get('state') == 'NEED_YAW_INIT'
+
+    def _maybe_start_rtk_yaw_init(self, status: dict):
+        needs_yaw_init = bool(status.get('need_forward_init')) or status.get('state') == 'NEED_YAW_INIT'
+        if not needs_yaw_init:
+            self._rtk_yaw_init_stop_event.set()
+            return
+        if self._load_nav_flow_rtk_mode() != 'replace':
+            return
+        with self._lock:
+            already_running = (
+                self._rtk_yaw_init_thread is not None
+                and self._rtk_yaw_init_thread.is_alive()
+            )
+            nav_ready = self._nav_nodes_running and self._nav_active
+        if already_running or not nav_ready:
+            return
+        if not self._front_is_clear_for_rtk_yaw_init():
+            return
+
+        self._rtk_yaw_init_stop_event.clear()
+        self._rtk_yaw_init_thread = threading.Thread(
+            target=self._rtk_yaw_init_loop,
+            daemon=True,
+        )
+        self._rtk_yaw_init_thread.start()
+
+    def _stop_rtk_yaw_init(self):
+        self._rtk_yaw_init_stop_event.set()
+        if (
+            self._rtk_yaw_init_thread is not None
+            and self._rtk_yaw_init_thread is not threading.current_thread()
+        ):
+            self._rtk_yaw_init_thread.join(timeout=2.0)
+            self._rtk_yaw_init_thread = None
+        self._publish_cmd_vel(0.0, 0.0)
+
+    def _rtk_yaw_init_should_stop(self, stop: threading.Event) -> bool:
+        if stop.is_set():
+            return True
+        if not self._rtk_map_needs_yaw_init():
+            self.get_logger().info('RTK yaw-init complete: RTK no longer requests heading init')
+            return True
+        with self._lock:
+            nav_ready = self._nav_nodes_running and self._nav_active
+        if not nav_ready:
+            self.get_logger().info('RTK yaw-init stopped: navigation is no longer active')
+            return True
+        return not self._front_is_clear_for_rtk_yaw_init()
+
+    def _rtk_yaw_init_loop(self):
+        interval = 1.0 / max(_RTK_YAW_INIT_RATE_HZ, 1.0)
+        deadline = time.monotonic() + max(_RTK_YAW_INIT_DURATION_S, 0.0)
+        stop = self._rtk_yaw_init_stop_event
+        with self._lock:
+            was_paused = self._nav_paused
+            cmd_vel_proc = self._cmd_vel_proc
+            self._cmd_vel_proc = None
+            self._rtk_yaw_init_active = True
+            self._nav_paused = True
+        self._pause_pub.publish(Bool(data=True))
+        had_cmd_vel_proc = cmd_vel_proc is not None and cmd_vel_proc.poll() is None
+        if had_cmd_vel_proc:
+            self._kill_proc(cmd_vel_proc)
+            self.get_logger().info('RTK yaw-init stopped cmd_vel_control for direct /cmd_vel ownership')
+        self.get_logger().info(
+            f'RTK yaw-init started: linear.x={_RTK_YAW_INIT_SPEED_MPS:.2f}m/s '
+            f'duration={_RTK_YAW_INIT_DURATION_S:.1f}s '
+            f'required_clearance={_RTK_YAW_INIT_CLEARANCE_M:.2f}m'
+        )
+        try:
+            while time.monotonic() < deadline:
+                if self._rtk_yaw_init_should_stop(stop):
+                    break
+                self._publish_cmd_vel(_RTK_YAW_INIT_SPEED_MPS, 0.0)
+                time.sleep(interval)
+        finally:
+            self._publish_cmd_vel(0.0, 0.0)
+            with self._lock:
+                self._rtk_yaw_init_active = False
+                restore_resume = not was_paused and self._nav_nodes_running and self._nav_active
+                restart_cmd_vel = (
+                    had_cmd_vel_proc
+                    and self._nav_nodes_running
+                    and self._nav_active
+                    and not self._loc_assist_enabled
+                    and self._cmd_vel_proc is None
+                )
+                if restore_resume:
+                    self._nav_paused = False
+                self._rtk_yaw_init_thread = None
+            if restore_resume:
+                self._pause_pub.publish(Bool(data=False))
+            if restart_cmd_vel:
+                env = os.environ.copy()
+                env['PYTHONPATH'] = _VENV_SITE + ':' + env.get('PYTHONPATH', '')
+                self._cmd_vel_proc = self._launch_proc(
+                    'cmd_vel_control',
+                    ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+                    env=env,
+                )
+                self.get_logger().info('RTK yaw-init restarted cmd_vel_control')
+            self.get_logger().info('RTK yaw-init stopped')
 
     def _set_nav_active(self, active: bool):
         with self._lock:
@@ -1304,6 +1461,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_stop_nav_nodes(self):
         self._set_nav_active(False)
+        self._stop_rtk_yaw_init()
         self._current_map_pub.publish(String(data=''))
         self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
@@ -1322,6 +1480,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_restart_nav_nodes(self):
         self._set_nav_active(False)
+        self._stop_rtk_yaw_init()
         self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
@@ -1969,6 +2128,7 @@ class BackendNode(Ros2NodeManager):
     def cmd_nav_cancel(self):
         if self.state != 'navigation':
             return
+        self._stop_rtk_yaw_init()
         with self._lock:
             self._active_nav_poi_ids = []
             self._active_nav_pois = []
