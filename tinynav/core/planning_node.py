@@ -643,6 +643,7 @@ class PlanningNode(Node):
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
             scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
+            scores = np.asarray(scores, dtype=np.float64)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
@@ -675,6 +676,7 @@ class PlanningNode(Node):
                     rear_len,
                     half_w,
                 )
+                delayed_scores = np.asarray(delayed_scores, dtype=np.float64)
                 delayed_finite_mask = np.isfinite(delayed_scores)
                 if np.any(delayed_finite_mask):
                     finite_indices = recovery_indices[delayed_finite_mask]
