@@ -210,6 +210,8 @@ class PlanningState {
   final List<TrajPoint> trajectory;
   final List<TrajPoint> globalPath;
   final List<TrajPoint> mapGlobalPath;
+  final List<TrajPoint> finalGlobalPath;
+  final List<TrajPoint> mapFinalGlobalPath;
   final GridInfo? gridInfo;
   final TrajPoint? navTargetPose;
   final List<Poi> activeNavPois;
@@ -226,6 +228,8 @@ class PlanningState {
     required this.trajectory,
     required this.globalPath,
     this.mapGlobalPath = const [],
+    this.finalGlobalPath = const [],
+    this.mapFinalGlobalPath = const [],
     this.gridInfo,
     this.navTargetPose,
     this.activeNavPois = const [],
@@ -260,6 +264,8 @@ class PlanningState {
       trajectory: parsePath('trajectory'),
       globalPath: parsePath('global_path'),
       mapGlobalPath: parsePath('map_global_path'),
+      finalGlobalPath: parsePath('final_global_path'),
+      mapFinalGlobalPath: parsePath('map_final_global_path'),
       gridInfo: j['grid_info'] != null
           ? GridInfo.fromJson(j['grid_info'] as Map<String, dynamic>)
           : null,

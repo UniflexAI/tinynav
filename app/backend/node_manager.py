@@ -111,6 +111,7 @@ class BackendNode(Ros2NodeManager):
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
         self._global_path: list = []
+        self._final_global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
         self._voxel_points: list = []
         self._grid_info: dict | None = None
@@ -147,6 +148,7 @@ class BackendNode(Ros2NodeManager):
         )
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
+        self.create_subscription(Path, '/mapping/final_global_plan', self._on_final_global_plan, 1)
         self.create_subscription(
             Odometry, '/control/target_pose', self._on_nav_target_pose, 1
         )
@@ -490,6 +492,7 @@ class BackendNode(Ros2NodeManager):
                 self._localized = False
                 self._map_pose = None
                 self._global_path = []
+                self._final_global_path = []
                 self._nav_target_pose = None
                 self._nav_progress = None
 
@@ -631,6 +634,14 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._global_path = pts
+
+    def _on_final_global_plan(self, msg: Path):
+        pts = [
+            {'x': p.pose.position.x, 'y': p.pose.position.y}
+            for p in msg.poses
+        ]
+        with self._lock:
+            self._final_global_path = pts
 
     def _on_footprint(self, msg: PointCloud):
         """Store footprint corner points from PointCloud.
@@ -952,6 +963,7 @@ class BackendNode(Ros2NodeManager):
     def get_planning_snapshot(self) -> dict:
         with self._lock:
             path_snapshot = list(self._global_path)
+            final_path_snapshot = list(self._final_global_path)
             snapshot = {
                 'localized': self._localized,
                 'odom_pose': self._odom_pose,
@@ -962,6 +974,8 @@ class BackendNode(Ros2NodeManager):
                 'trajectory': list(self._trajectory),
                 'global_path': None,  # filled after TF transform (odom frame)
                 'map_global_path': path_snapshot,
+                'final_global_path': None,  # filled after TF transform (odom frame)
+                'map_final_global_path': final_path_snapshot,
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
                 'active_nav_pois': list(self._active_nav_pois),
@@ -969,6 +983,7 @@ class BackendNode(Ros2NodeManager):
                 'voxel_points': list(self._voxel_points),
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
+        snapshot['final_global_path'] = self._transform_path_via_tf(final_path_snapshot)
         return snapshot
 
     def _start_unitree_if_configured(self):
@@ -1184,6 +1199,7 @@ class BackendNode(Ros2NodeManager):
             self._localized = False
             self._map_pose = None
             self._global_path = []
+            self._final_global_path = []
             self._nav_target_pose = None
             self._nav_paused = False
         self.get_logger().info('Nav nodes stopped')
@@ -1222,6 +1238,7 @@ class BackendNode(Ros2NodeManager):
             self._localized = False
             self._map_pose = None
             self._global_path = []
+            self._final_global_path = []
             self._nav_target_pose = None
         self.state = 'idle'
         self._pub_state()

@@ -548,6 +548,7 @@ class MapNode(Node):
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
+        self.final_global_plan_pub = self.create_publisher(Path, '/mapping/final_global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         planning_config_qos = QoSProfile(
             depth=1,
@@ -696,6 +697,25 @@ class MapNode(Node):
         self._nav_subgoals_in_map = []
         self._nav_subgoals_poi_index = None
         self._nav_subgoal_index = 0
+        self._publish_path_in_map(self.global_plan_pub, [])
+        self._publish_path_in_map(self.final_global_plan_pub, [])
+
+    def _publish_path_in_map(self, publisher, path_in_map) -> None:
+        path_msg = Path()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = "map"
+        for x, y, z in path_in_map:
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            pose.pose.position.x = float(x)
+            pose.pose.position.y = float(y)
+            pose.pose.position.z = float(z)
+            pose.pose.orientation.x = 0.0
+            pose.pose.orientation.y = 0.0
+            pose.pose.orientation.z = 0.0
+            pose.pose.orientation.w = 1.0
+            path_msg.poses.append(pose)
+        publisher.publish(path_msg)
 
     def _nav_progress_payload(self, *, percent: float, path_remaining_m: float,
                               path_total_m: float, estimated_remaining_s: float) -> dict:
@@ -1185,21 +1205,7 @@ class MapNode(Node):
             self.nav_progress_pub.publish(progress_msg)
 
             T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
-            path_msg = Path()
-            path_msg.header.stamp = self.get_clock().now().to_msg()
-            path_msg.header.frame_id = "map"
-            for x, y, z in paths_in_map:
-                pose = PoseStamped()
-                pose.header = path_msg.header
-                pose.pose.position.x = x
-                pose.pose.position.y = y
-                pose.pose.position.z = z
-                pose.pose.orientation.x = 0.0
-                pose.pose.orientation.y = 0.0
-                pose.pose.orientation.z = 0.0
-                pose.pose.orientation.w = 1.0
-                path_msg.poses.append(pose)
-            self.global_plan_pub.publish(path_msg)
+            self._publish_path_in_map(self.global_plan_pub, paths_in_map)
             self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
             self._current_nav_path_in_map = None
@@ -1245,7 +1251,10 @@ class MapNode(Node):
         if full_path is None or len(full_path) == 0:
             self.get_logger().warning("Failed to generate full path for nav subgoals; falling back to POI")
             self._nav_subgoals_in_map = [np.array(target_poi, dtype=np.float64)]
+            self._publish_path_in_map(self.final_global_plan_pub, [])
             return
+
+        self._publish_path_in_map(self.final_global_plan_pub, full_path)
 
         self._nav_subgoals_in_map = self._split_path_into_subgoals(
             full_path,

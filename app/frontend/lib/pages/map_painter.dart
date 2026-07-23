@@ -12,6 +12,7 @@ class MapOverlayPainter extends CustomPainter {
   final List<Poi> pois;
   final Poi? starredPoi;
   final List<TrajPoint> globalPath;
+  final List<TrajPoint> finalGlobalPath;
   final bool showGlobalPath;
 
   const MapOverlayPainter({
@@ -20,6 +21,7 @@ class MapOverlayPainter extends CustomPainter {
     this.pois = const [],
     this.starredPoi,
     this.globalPath = const [],
+    this.finalGlobalPath = const [],
     this.showGlobalPath = true,
   });
 
@@ -41,7 +43,24 @@ class MapOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    if (showGlobalPath) _drawGlobalPath(canvas, size);
+    if (showGlobalPath) {
+      _drawPath(
+        canvas,
+        size,
+        finalGlobalPath,
+        const Color(0xFFFF5252),
+        strokeWidth: 3.4,
+        goalRadius: 8,
+      );
+      _drawPath(
+        canvas,
+        size,
+        globalPath,
+        const Color(0xFF69F0AE),
+        strokeWidth: 3.0,
+        goalRadius: 7,
+      );
+    }
     _drawPois(canvas, size);
     _drawStarredPoi(canvas, size);
     _drawPose(canvas, size);
@@ -151,21 +170,28 @@ class MapOverlayPainter extends CustomPainter {
         Paint()..color = Colors.black45..style = PaintingStyle.stroke..strokeWidth = 1.0);
   }
 
-  /// Draw the global path from map_node (already in map frame).
+  /// Draw a path from map_node (already in map frame).
   /// The last point is the nav target — drawn as a distinct marker.
-  void _drawGlobalPath(Canvas canvas, Size size) {
-    if (globalPath.length < 2) return;
+  void _drawPath(
+    Canvas canvas,
+    Size size,
+    List<TrajPoint> points,
+    Color color, {
+    required double strokeWidth,
+    required double goalRadius,
+  }) {
+    if (points.length < 2) return;
 
     final linePaint = Paint()
-      ..color = const Color(0xFF69F0AE).withOpacity(0.9)
-      ..strokeWidth = 3.0
+      ..color = color.withOpacity(0.9)
+      ..strokeWidth = strokeWidth
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
 
     final path = Path();
     bool first = true;
-    for (final pt in globalPath) {
+    for (final pt in points) {
       final c = _imageToCanvas(_worldToImage(pt.x, pt.y), size);
       if (first) {
         path.moveTo(c.dx, c.dy);
@@ -177,10 +203,10 @@ class MapOverlayPainter extends CustomPainter {
     canvas.drawPath(path, linePaint);
 
     // Target marker at path end.
-    final goal = globalPath.last;
+    final goal = points.last;
     final gc = _imageToCanvas(_worldToImage(goal.x, goal.y), size);
-    canvas.drawCircle(gc, 8, Paint()..color = const Color(0xFF69F0AE));
-    canvas.drawCircle(gc, 8,
+    canvas.drawCircle(gc, goalRadius, Paint()..color = color);
+    canvas.drawCircle(gc, goalRadius,
         Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 2.0);
     // Inner dot.
     canvas.drawCircle(gc, 3, Paint()..color = Colors.white);
@@ -192,5 +218,6 @@ class MapOverlayPainter extends CustomPainter {
       old.pois != pois ||
       old.starredPoi != starredPoi ||
       old.globalPath != globalPath ||
+      old.finalGlobalPath != finalGlobalPath ||
       old.showGlobalPath != showGlobalPath;
 }
