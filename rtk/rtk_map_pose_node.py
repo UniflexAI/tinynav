@@ -153,18 +153,25 @@ class RtkMapPoseNode(Node):
             f"origin=({self.enu.lat:.7f},{self.enu.lon:.7f})")
         return True
 
+    def _clear_active_map(self, reason):
+        had_map = self.enu is not None or self.loaded_path is not None
+        self.loaded_path = None
+        self.meta = self.enu = self.yaw = self.scale = self.t2 = None
+        self._reset_heading()
+        if had_map:
+            self.get_logger().info(f"cleared active RTK map: {reason}")
+
     def on_map(self, msg: String):
         map_dir = (msg.data or "").strip()
         if not map_dir:
+            self._clear_active_map("empty map topic")
             return
         path = os.path.join(map_dir, self.align_filename)
         if path == self.loaded_path:
             return                       # already active, nothing to do
         if not os.path.isfile(path):
             # Map switched to one without a calibration -> stop publishing.
-            self.loaded_path = None
-            self.meta = self.enu = self.yaw = self.scale = self.t2 = None
-            self._reset_heading()
+            self._clear_active_map(f"missing {self.align_filename} in {map_dir!r}")
             self.get_logger().warning(
                 f"map {map_dir!r} has no {self.align_filename} "
                 "(not RTK-calibrated); /rtk/map_pose paused")

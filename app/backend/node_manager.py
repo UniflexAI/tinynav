@@ -171,8 +171,12 @@ class BackendNode(Ros2NodeManager):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._pause_pub = self.create_publisher(Bool, '/nav/paused', _latched_qos)
         self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
+        self._current_map_pub = self.create_publisher(String, '/map/current_map', _latched_qos)
         self._nav_paused = False
         self._nav_active = False
+        self._rtk_bridge_status: dict | None = None
+        self._rtk_map_status: dict | None = None
+        self._rtk_log_state: dict[str, tuple[tuple, float]] = {}
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -219,6 +223,8 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(Float32, '/battery', self._on_battery, 10)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
+        self.create_subscription(String, '/rtk/status', self._on_rtk_bridge_status, 10)
+        self.create_subscription(String, '/rtk/init_status', self._on_rtk_map_status, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -229,6 +235,74 @@ class BackendNode(Ros2NodeManager):
     def _on_battery(self, msg: Float32):
         with self._lock:
             self._battery = float(msg.data)
+
+    def _decode_json_status(self, raw: str, topic: str) -> dict | None:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self.get_logger().warn(f'Invalid {topic} JSON: {exc}')
+            return None
+        if not isinstance(data, dict):
+            self.get_logger().warn(f'Invalid {topic} payload: {data!r}')
+            return None
+        return data
+
+    def _log_rtk_status(self, key: str, signature: tuple, message: str):
+        now = time.time()
+        last_signature, last_time = self._rtk_log_state.get(key, (None, 0.0))
+        if signature != last_signature or now - last_time >= 10.0:
+            self.get_logger().info(message)
+            self._rtk_log_state[key] = (signature, now)
+
+    def _on_rtk_bridge_status(self, msg: String):
+        data = self._decode_json_status(msg.data, '/rtk/status')
+        if data is None:
+            return
+        with self._lock:
+            self._rtk_bridge_status = data
+        signature = (
+            data.get('accepted'),
+            data.get('navsat_status'),
+            data.get('navsat_status_name'),
+            data.get('rtk_position_type'),
+            data.get('rtk_calculate_status_name'),
+        )
+        self._log_rtk_status(
+            'bridge',
+            signature,
+            'RTK bridge: '
+            f"accepted={data.get('accepted')} "
+            f"navsat_status={data.get('navsat_status')} "
+            f"navsat_status_name={data.get('navsat_status_name')} "
+            f"position_type={data.get('rtk_position_type')} "
+            f"calculate_status={data.get('rtk_calculate_status_name')}",
+        )
+
+    def _on_rtk_map_status(self, msg: String):
+        data = self._decode_json_status(msg.data, '/rtk/init_status')
+        if data is None:
+            return
+        with self._lock:
+            self._rtk_map_status = data
+        signature = (
+            data.get('state'),
+            data.get('have_map'),
+            data.get('fix_ok'),
+            data.get('yaw_ready'),
+            data.get('map'),
+            data.get('navsat_status'),
+        )
+        self._log_rtk_status(
+            'map',
+            signature,
+            'RTK map: '
+            f"state={data.get('state')} "
+            f"have_map={data.get('have_map')} "
+            f"fix_ok={data.get('fix_ok')} "
+            f"yaw_ready={data.get('yaw_ready')} "
+            f"map={data.get('map')} "
+            f"navsat_status={data.get('navsat_status')}",
+        )
 
     def _set_nav_active(self, active: bool):
         with self._lock:
@@ -369,6 +443,46 @@ class BackendNode(Ros2NodeManager):
             return bool(value)
         self.get_logger().warn(f'Invalid nav_flow enable_first_done value: {value!r}')
         return False
+
+    def _load_nav_flow_rtk_mode(self) -> str:
+        config_path = os.path.join(self.map_path, 'nav_flow.json')
+        if not os.path.exists(config_path):
+            return 'off'
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read nav_flow.json: {e}')
+            return 'off'
+        if not isinstance(config, dict):
+            return 'off'
+        rtk_config = config.get('rtk', {})
+        if isinstance(rtk_config, bool):
+            return 'replace' if rtk_config else 'off'
+        if isinstance(rtk_config, str):
+            mode = rtk_config.strip().lower()
+        elif isinstance(rtk_config, dict):
+            mode = str(rtk_config.get('mode', 'off')).strip().lower()
+        else:
+            self.get_logger().warn(f'Invalid nav_flow rtk config: {rtk_config!r}; using off')
+            return 'off'
+        if mode in {'replace', 'on', 'true', '1', 'yes'}:
+            return 'replace'
+        if mode in {'off', 'false', '0', 'no', ''}:
+            return 'off'
+        self.get_logger().warn(f'Invalid nav_flow rtk.mode={mode!r}; using off')
+        return 'off'
+
+    def _publish_current_map_for_rtk(self):
+        mode = self._load_nav_flow_rtk_mode()
+        msg = String()
+        if mode == 'replace':
+            msg.data = self.map_path
+            self.get_logger().info(f'RTK enabled for current map: publishing /map/current_map={msg.data}')
+        else:
+            msg.data = ''
+            self.get_logger().info('RTK disabled for current map: clearing /map/current_map')
+        self._current_map_pub.publish(msg)
 
     def _load_map_handoff_rule(
         self,
@@ -1167,6 +1281,7 @@ class BackendNode(Ros2NodeManager):
         ]
         if self._load_nav_flow_enable_first_done():
             map_node_cmd.append('--enable_first_done')
+        self._publish_current_map_for_rtk()
         self._map_node_proc = self._launch_proc(
             'map_node',
             map_node_cmd,
@@ -1189,6 +1304,7 @@ class BackendNode(Ros2NodeManager):
 
     def cmd_stop_nav_nodes(self):
         self._set_nav_active(False)
+        self._current_map_pub.publish(String(data=''))
         self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
@@ -1222,6 +1338,7 @@ class BackendNode(Ros2NodeManager):
             ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
             env=_env,
         )
+        self._publish_current_map_for_rtk()
         self._map_node_proc = self._launch_proc(
             'map_node',
             ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
