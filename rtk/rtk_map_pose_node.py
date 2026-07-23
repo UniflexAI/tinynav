@@ -175,17 +175,34 @@ class RtkMapPoseNode(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def _update_heading(self, x, y):
-        """Course-over-ground: map-frame yaw = direction from the most recent
-        past point at least heading_min_dist behind, to the current point."""
+        """Map-frame yaw from a least-squares line fit over the last
+        heading_min_dist_m of the map-frame track (course-over-ground). A line
+        fit over all points in the window is far less sensitive to per-fix noise
+        than a single two-point chord, so a shorter window still gives a stable
+        yaw. Sign is resolved by net travel so the heading points forward."""
         self.track.append((x, y))
+        # Window = newest back to the first point >= heading_min_dist away.
         min_d2 = self.heading_min_dist ** 2
-        for i in range(len(self.track) - 2, -1, -1):
+        start = None
+        for i in range(len(self.track) - 1, -1, -1):
             px, py = self.track[i]
-            dx, dy = x - px, y - py
-            if dx * dx + dy * dy >= min_d2:
-                self.yaw_est = math.atan2(dy, dx)
-                self.last_fit_wall = self._now_s()
-                return
+            if (x - px) ** 2 + (y - py) ** 2 >= min_d2:
+                start = i
+                break
+        if start is None:
+            return                                   # < heading_min_dist so far
+        window = list(self.track)[start:]            # oldest -> newest, spans ~1 m
+        if len(window) < 2:
+            return
+        P = np.asarray(window, dtype=float)
+        net = P[-1] - P[0]                           # net travel (sign reference)
+        c = P - P.mean(axis=0)
+        _, vecs = np.linalg.eigh(c.T @ c)            # ascending eigenvalues
+        axis = vecs[:, -1]                           # principal (line) direction
+        if float(axis @ net) < 0.0:                  # orient along travel
+            axis = -axis
+        self.yaw_est = math.atan2(float(axis[1]), float(axis[0]))
+        self.last_fit_wall = self._now_s()
 
     def on_fix(self, msg: NavSatFix):
         # Record quality/time first (drives the handshake status even at low fix).
