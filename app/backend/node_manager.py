@@ -419,16 +419,15 @@ class BackendNode(Ros2NodeManager):
         deadline = time.monotonic() + max(_RTK_YAW_INIT_DURATION_S, 0.0)
         stop = self._rtk_yaw_init_stop_event
         with self._lock:
-            was_paused = self._nav_paused
             cmd_vel_proc = self._cmd_vel_proc
             self._cmd_vel_proc = None
             self._rtk_yaw_init_active = True
-            self._nav_paused = True
-        self._pause_pub.publish(Bool(data=True))
         had_cmd_vel_proc = cmd_vel_proc is not None and cmd_vel_proc.poll() is None
         if had_cmd_vel_proc:
             self._kill_proc(cmd_vel_proc)
             self.get_logger().info('RTK yaw-init stopped cmd_vel_control for direct /cmd_vel ownership')
+        self._action_pub.publish(String(data='play stand'))
+        self.get_logger().info('RTK yaw-init sent balance stand command')
         self.get_logger().info(
             f'RTK yaw-init started: linear.x={_RTK_YAW_INIT_SPEED_MPS:.2f}m/s '
             f'duration={_RTK_YAW_INIT_DURATION_S:.1f}s '
@@ -444,18 +443,13 @@ class BackendNode(Ros2NodeManager):
             self._publish_cmd_vel(0.0, 0.0)
             with self._lock:
                 self._rtk_yaw_init_active = False
-                restore_resume = not was_paused and self._nav_nodes_running and self._nav_active
                 restart_cmd_vel = (
                     had_cmd_vel_proc
                     and self._nav_nodes_running
                     and not self._loc_assist_enabled
                     and self._cmd_vel_proc is None
                 )
-                if restore_resume:
-                    self._nav_paused = False
                 self._rtk_yaw_init_thread = None
-            if restore_resume:
-                self._pause_pub.publish(Bool(data=False))
             if restart_cmd_vel:
                 env = os.environ.copy()
                 env['PYTHONPATH'] = _VENV_SITE + ':' + env.get('PYTHONPATH', '')
