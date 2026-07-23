@@ -35,6 +35,7 @@ Usage (bench, fixed json, no topic):
   uv run python /tinynav/rtk/rtk_map_pose_node.py --ros-args \
       -p align_json:=<tinynav_map_path>/rtk_align.json
 """
+import json
 import math
 import os
 import sys
@@ -75,6 +76,11 @@ class RtkMapPoseNode(Node):
         self.declare_parameter("heading_min_dist_m", 1.0)
         self.declare_parameter("yaw_std_deg", 5.0)
         self.declare_parameter("heading_stale_s", 3.0)
+        # Handshake status topic (std_msgs/String JSON), published continuously so
+        # the navigation node knows when to drive the ~1 m yaw-init forward motion.
+        self.declare_parameter("status_topic", "/rtk/init_status")
+        self.declare_parameter("status_rate_hz", 2.0)
+        self.declare_parameter("fix_timeout_s", 2.0)
 
         self.align_filename = self.get_parameter("align_filename").value
         self.min_status = int(self.get_parameter("min_status").value)
@@ -91,11 +97,19 @@ class RtkMapPoseNode(Node):
         self.track = deque(maxlen=400)   # recent map-frame (x, y) at q4/5
         self.yaw_est = None              # last fitted map-frame heading (rad)
         self.last_fit_wall = None        # wall time (s) of the last heading fit
+        # Latest-fix bookkeeping for the handshake status.
+        self.last_status = -1            # last NavSatStatus.status seen
+        self.last_fix_wall = None        # wall time (s) of the last fix
+        self.fix_timeout_s = float(self.get_parameter("fix_timeout_s").value)
 
         self.pub = self.create_publisher(
             Odometry, self.get_parameter("output_topic").value, 10)
+        self.status_pub = self.create_publisher(
+            String, self.get_parameter("status_topic").value, 10)
         self.create_subscription(
             NavSatFix, self.get_parameter("fix_topic").value, self.on_fix, 20)
+        rate = float(self.get_parameter("status_rate_hz").value)
+        self.create_timer(1.0 / rate if rate > 0 else 1.0, self._publish_status)
 
         bench_json = self.get_parameter("align_json").value
         if bench_json:
@@ -174,6 +188,9 @@ class RtkMapPoseNode(Node):
                 return
 
     def on_fix(self, msg: NavSatFix):
+        # Record quality/time first (drives the handshake status even at low fix).
+        self.last_status = int(msg.status.status)
+        self.last_fix_wall = self._now_s()
         if self.enu is None:                 # gated: no active map yet
             return
         if msg.status.status < self.min_status:   # q4/5 only
@@ -214,6 +231,42 @@ class RtkMapPoseNode(Node):
         cov[35] = yaw_var          # yaw from motion fit
         od.pose.covariance = cov
         self.pub.publish(od)
+
+    def _publish_status(self):
+        """Continuously publish the init handshake state for the nav node.
+
+        States:
+          NO_MAP        - no active map / no rtk_align.json -> nothing to do
+          WAIT_FIX      - map ready, waiting for RTK FIXED/FLOAT (q4/5)
+          NEED_YAW_INIT - map + q4/5 but no heading yet -> DRIVE FORWARD ~1 m
+          ACTIVE        - heading acquired; /rtk/map_pose is publishing
+        The nav node should drive the robot slowly forward (with its own obstacle
+        avoidance) while need_forward_init is true, and stop once ACTIVE.
+        """
+        have_map = self.enu is not None
+        fix_recent = (self.last_fix_wall is not None
+                      and self._now_s() - self.last_fix_wall < self.fix_timeout_s)
+        fix_ok = fix_recent and self.last_status >= self.min_status  # q4/5
+        yaw_ready = self.yaw_est is not None
+        if not have_map:
+            state = "NO_MAP"
+        elif not fix_ok:
+            state = "WAIT_FIX"
+        elif not yaw_ready:
+            state = "NEED_YAW_INIT"
+        else:
+            state = "ACTIVE"
+        payload = {
+            "state": state,
+            "need_forward_init": state == "NEED_YAW_INIT",
+            "have_map": have_map,
+            "map": (self.meta or {}).get("map") if have_map else None,
+            "fix_ok": bool(fix_ok),
+            "navsat_status": self.last_status,   # 2 == GBAS_FIX (RTK q4/5)
+            "yaw_ready": yaw_ready,
+            "yaw_deg": None if not yaw_ready else round(math.degrees(self.yaw_est), 1),
+        }
+        self.status_pub.publish(String(data=json.dumps(payload, separators=(",", ":"))))
 
 
 def main():
