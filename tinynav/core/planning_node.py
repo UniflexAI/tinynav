@@ -732,6 +732,13 @@ class PlanningNode(Node):
             if self.target_pose is None:
                 return
 
+            # World heading (rad) of a trajectory pose, body +Z-forward convention
+            # (same as score_trajectories_by_ESDF and the published Path). Used both
+            # by the turn-to-goal escape below and the velocity feedforward.
+            def _world_heading(pose7):
+                qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
+                return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
+
             if all(s == float('inf') for s in scores):
                 # Diagnose WHERE it collides: is the robot's own footprint cell already
                 # an obstacle (phantom ground/self), or is it genuinely walled in?
@@ -785,6 +792,34 @@ class PlanningNode(Node):
             top_indices = [min(feasible, key=preference_cost)]
             self.last_param = params[top_indices[0]]
 
+            # --- Escape the "goal behind me" freeze ---
+            # preference_cost only rewards a smaller trajectory-END distance to the
+            # goal. When the goal is behind/beside the robot, every forward trajectory
+            # ends FARTHER and an in-place rotation leaves the end distance unchanged,
+            # so the greedy minimum is to sit still (sel vx≈0) and the robot never
+            # turns to face a goal behind it. Detect that stall and, when we are not
+            # effectively on the goal yet, re-pick the feasible trajectory whose END
+            # heading best points AT the goal — the robot rotates to face it, and once
+            # the goal is ahead the normal cost drives forward next cycle. The >0.5m
+            # gate matches map_node's arrival radius (control-center referenced): if
+            # we're inside it, arrival fires instead, so don't spin.
+            if abs(float(params[top_indices[0]][0])) < 1e-2:
+                rob_xy = np.asarray(init_p)[:2]
+                goal_xy = np.asarray(target)[:2]
+                dist_goal = float(np.linalg.norm(goal_xy - rob_xy))
+                _wrap = lambda a: (a + np.pi) % (2 * np.pi) - np.pi
+                bearing = np.arctan2(goal_xy[1] - rob_xy[1], goal_xy[0] - rob_xy[0])
+                cur_err = abs(_wrap(bearing - _world_heading(trajectories[top_indices[0]][0])))
+                if dist_goal > 0.5 and cur_err > np.radians(60.0):
+                    _head_err = lambda i: abs(_wrap(bearing - _world_heading(trajectories[i][-1])))
+                    turn_i = min(feasible, key=_head_err)
+                    if _head_err(turn_i) < cur_err - np.radians(5.0):
+                        top_indices = [turn_i]
+                        self.last_param = params[turn_i]
+                        self.get_logger().info(
+                            f'turn-to-goal: goal {np.degrees(cur_err):.0f}deg off heading '
+                            f'dist={dist_goal:.2f}m -> rotating to face it')
+
             # Confirm what actually got selected: if vx≈0 while feasible forward
             # trajectories exist, the robot is "stuck by cost", not by collision.
             n_fwd_feasible = sum(1 for i in feasible if params[i][0] > 1e-3)
@@ -808,10 +843,6 @@ class PlanningNode(Node):
             sel_traj = trajectories[top_indices[0]]
             sel_vx = float(params[top_indices[0]][0])
             traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
-
-            def _world_heading(pose7):
-                qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
-                return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
 
             dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
             sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / traj_dt)
