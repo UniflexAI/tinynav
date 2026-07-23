@@ -833,6 +833,13 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
+            self._nav_paused = False
+        # Republish resume on the LATCHED /nav/paused so the freshly spawned
+        # cmd_vel_control (TRANSIENT_LOCAL subscriber) doesn't inherit a stale
+        # 'paused' latched before this restart and silently freeze — a POI sent
+        # after relocalize would otherwise be swallowed. Mirrors cmd_stop_nav_nodes
+        # resetting _nav_paused; here we must also re-latch, not just reset the flag.
+        self._pause_pub.publish(Bool(data=False))
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
