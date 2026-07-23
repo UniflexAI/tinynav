@@ -1,14 +1,15 @@
 #!/bin/bash
-# Autostart + self-heal wrapper for rtk_bridge_node.
+# Self-heal launcher for rtk_bridge_node (NTRIP + /fix,/rtk/odom,/rtk/status).
 #
 # Runs the RTK bridge in a restart loop so a crash / USB replug / receiver
 # hiccup auto-recovers (the container has RestartPolicy=no and this is just a
-# process). Intended to be launched detached inside a tmux session so you can
-# attach to see logs, e.g. from systemd:
+# process).
 #
-#   docker exec tinynav-dev tmux new-session -d -s rtk \
-#       /tinynav/service/start_rtk_bridge.sh
-#   # then: docker exec -it tinynav-dev tmux attach -t rtk
+# Autostart on the robot: the host systemd unit tinynav_start.service already
+# brings up the container + web app on boot; add one line so RTK comes up the
+# same way (see rtk/README.md):
+#   ExecStart=-/usr/bin/docker exec -itd tinynav-dev /tinynav/scripts/run_rtk.sh
+# Manual run (with logs): docker exec -it tinynav-dev /tinynav/scripts/run_rtk.sh
 #
 # NTRIP credentials are read from an env file kept OUT of git
 # (see rtk/.ntrip.env.example). Override paths via env vars if needed.

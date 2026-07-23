@@ -16,21 +16,25 @@ In the container the repo root is mounted at `/tinynav`, so this module lives at
 | `rtk_align_calibrate.py` | **Calibration** (one-off per map). Pairs `/map/relocalization` with RTK `/fix` and fits a planar Sim3 (map↔ENU) → writes `rtk_align.json` into the map dir. |
 | `rtk_map_pose_node.py` | **Runtime.** Turns live `/fix` into `/rtk/map_pose` (position + heading in the map) and drives the init handshake `/rtk/init_status`. |
 | `rtk_geo.py` | Shared geodesy + planar-Sim3 math (numpy only). |
-| `service/start_rtk_bridge.sh` | Self-heal launcher for the bridge. |
-| `service/rtk-bridge.service` | systemd unit to autostart the bridge on the host. |
+| `scripts/run_rtk.sh` | Self-heal launcher for the bridge (repo-root `scripts/`, alongside `run_navigation.sh`). |
 | `.ntrip.env.example` | NTRIP credential template (copy to `.ntrip.env`, git-ignored). |
 
 ## Autostart
 
-The bridge (and thus NTRIP) autostarts via the host systemd unit
-`service/rtk-bridge.service`, which runs `service/start_rtk_bridge.sh` inside the
-`tinynav` container (same idea as the web app launcher). Install once:
+The robot already autostarts on boot via the host systemd unit
+`tinynav_start.service` (in `/etc/systemd/system/` on the dog — a host file, not
+in this repo): it restarts the `tinynav-dev` container and `docker exec`s the
+web-app launcher. The RTK bridge reuses **the same** unit — add one line after
+the app's `ExecStart` (the `-` prefix makes an RTK failure not block the app):
 
-```bash
-sudo cp /tinynav/service/rtk-bridge.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now rtk-bridge
-journalctl -u rtk-bridge -f
+```ini
+ExecStart=-/usr/bin/docker exec -itd tinynav-dev /tinynav/scripts/run_rtk.sh
 ```
+
+then `sudo systemctl daemon-reload` on the host. Because the unit lives on the
+host it survives container restart/rebuild; `run_rtk.sh` ships in this repo (git),
+so it survives too. Manual run with logs:
+`docker exec -it tinynav-dev /tinynav/scripts/run_rtk.sh`.
 
 NTRIP credentials live in `/tinynav/rtk/.ntrip.env` (copy from `.ntrip.env.example`).
 
