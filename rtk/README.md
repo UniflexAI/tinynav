@@ -15,7 +15,6 @@ In the container the repo root is mounted at `/tinynav`, so this module lives at
 | `rtk_align_calibrate.py` | **Calibration.** Runs alongside `map_node`; pairs `/map/relocalization` with RTK `/fix` and fits a planar Sim3 (map↔ENU), writing `rtk_align.json`. |
 | `rtk_map_pose_node.py` | **Runtime.** Loads a map's `rtk_align.json` and turns live `/fix` into the robot's position in that map, published as `/rtk/map_pose`. |
 | `rtk_geo.py` | Shared geodesy + planar-Sim3 math (numpy only). |
-| `rtk_fusion_node.py` | (Existing) fusion node. |
 | `service/start_rtk_bridge.sh` | Autostart + self-heal wrapper for the bridge. |
 | `.ntrip.env.example` | NTRIP credential template (copy to `.ntrip.env`, git-ignored). |
 
@@ -57,16 +56,24 @@ not part of the RTK module.** That publisher must:
 Until that topic exists, use the bench bypass `-p align_json:=<path>` to load a
 fixed `rtk_align.json` directly.
 
-## Heading (planned)
+## Heading (motion-fit)
 
-`/rtk/map_pose` currently carries position only. Single-antenna RTK has no
-heading, and at night visual relocalization can fail, so map-frame yaw is
-recovered from **motion**: with RTK at FIXED/FLOAT, the course-over-ground of the
-RTK trajectory (through the same Sim3) gives the heading in the map frame after
-the robot travels ~1 m. This node stays **passive** — it never commands motion;
-the navigation/control layer (which owns obstacle avoidance) drives, and this
-node only observes the resulting motion to fit yaw, refining it continuously
-while the robot moves.
+Single-antenna RTK has no heading, and at night visual relocalization can fail,
+so map-frame yaw is recovered from **motion**: at RTK FIXED/FLOAT, the
+course-over-ground of the map-frame track (RTK positions through the inverse
+Sim3) over the last `heading_min_dist_m` (default 1 m) gives the heading in the
+map frame. No IMU/VIO is used.
+
+- `/rtk/map_pose` publishes position **and** heading together, only at q4/5, and
+  only after the first fit (≈1 m of travel). Before that it stays silent.
+- Yaw covariance is `(yaw_std_deg)^2` right after a fit and inflates once the fit
+  is older than `heading_stale_s` — because with no inertial source a stationary
+  or in-place-rotating robot cannot be told apart, so a held yaw is flagged
+  uncertain. It re-tightens as soon as the robot moves forward again.
+- This node stays **passive** — it never commands motion. The navigation/control
+  layer (which owns obstacle avoidance) drives; this node only observes the
+  resulting motion and refines yaw continuously.
+- On a map change (`map_topic`) the heading state resets and re-bootstraps.
 
 ## Quick start
 
@@ -87,9 +94,9 @@ uv run python /tinynav/rtk/rtk_align_calibrate.py --ros-args \
 # 4. Runtime position-in-map (topic-gated on the current map)
 uv run python /tinynav/rtk/rtk_map_pose_node.py --ros-args \
     -p map_topic:=/map/current_map
-# -> /rtk/map_pose (nav_msgs/Odometry, map frame). Publishes at any real fix
-#    (min_status default STATUS_FIX); covariance reflects RTK quality (tight at
-#    FIXED/FLOAT ~0.25, loose at DGNSS ~25) so the consumer can weight it.
-#    Position only for now; orientation is identity + unknown covariance until a
-#    heading is wired in (from VIO / motion-fit — see below).
+# -> /rtk/map_pose (nav_msgs/Odometry, map frame). Publishes ONLY at RTK
+#    FIXED/FLOAT (q4/5); position covariance ~0.25. Orientation is the
+#    motion-fit heading (see below): pose is published once the robot has moved
+#    ~1 m, position + heading together, yaw covariance ~(5 deg)^2 while fresh and
+#    inflated once the fit goes stale.
 ```
