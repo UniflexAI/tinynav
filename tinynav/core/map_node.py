@@ -32,6 +32,8 @@ from tinynav.core.build_map_node import OdomPoseRecorder
 from tinynav.core.superpoint_bow import SUPERPOINT_BOW_INDEX_FILENAME, SuperPointBoWRetriever
 logger = logging.getLogger(__name__)
 
+_RTK_MAP_POSE_MAX_AGE_S = float(os.environ.get("TINYNAV_RTK_MAP_POSE_MAX_AGE_S", "1.0"))
+
 
 def draw_image_match_origin(prev_image: np.ndarray, curr_image: np.ndarray, prev_keypoints: np.ndarray, curr_keypoints: np.ndarray, matches: np.ndarray):
     cv_matches = [cv2.DMatch(_queryIdx=matches[index, 0].item(), _trainIdx=matches[index, 1].item(), _imgIdx=0, _distance=0) for index in range(matches.shape[0])]
@@ -406,6 +408,8 @@ class MapNode(Node):
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
+        self.rtk_map_pose_sub = self.create_subscription(Odometry, '/rtk/map_pose', self.rtk_map_pose_callback, 20)
+        self.rtk_init_status_sub = self.create_subscription(String, '/rtk/init_status', self.rtk_init_status_callback, 10)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
 
         # pubs
@@ -441,6 +445,7 @@ class MapNode(Node):
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
         self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
+        self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
         self.vlad_centres = None
@@ -516,6 +521,13 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
+        self.latest_rtk_map_pose = None
+        self.latest_rtk_map_pose_stamp_msg = None
+        self.latest_rtk_map_pose_received_at = None
+        self.latest_rtk_state = None
+        self.latest_rtk_transform_received_at = None
+        self._last_rtk_relocalization_pub_at = 0.0
+        self._last_rtk_log_at = 0.0
         self.nav_refresh_timer = None
         self.target_pose_timer = self.create_timer(1.0, self.target_pose_timer_callback)
 
@@ -639,6 +651,33 @@ class MapNode(Node):
         self.get_logger().info(f"Using planning.dilation_cells={dilation_cells}")
         return dilation_cells
 
+    def _load_rtk_mode(self, tinynav_map_path: str) -> str:
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return "off"
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using rtk.mode=off")
+            return "off"
+        if not isinstance(config, dict):
+            return "off"
+        rtk_config = config.get("rtk", {})
+        if isinstance(rtk_config, bool):
+            mode = "replace" if rtk_config else "off"
+        elif isinstance(rtk_config, str):
+            mode = rtk_config.strip().lower()
+        elif isinstance(rtk_config, dict):
+            mode = str(rtk_config.get("mode", "off")).strip().lower()
+        else:
+            self.get_logger().warning(f"Invalid nav_flow rtk config: {rtk_config!r}; using off")
+            return "off"
+        if mode in {"replace", "on", "true", "1", "yes"}:
+            self.get_logger().info("Using RTK map pose replacement")
+            return "replace"
+        return "off"
+
     def _publish_planning_config(self):
         msg = String()
         msg.data = json.dumps({
@@ -744,6 +783,69 @@ class MapNode(Node):
         self.latest_odom_pose, _ = msg2np(odom_msg)
         self.latest_odom_stamp_msg = odom_msg.header.stamp
 
+    def rtk_init_status_callback(self, msg: String):
+        if self.rtk_mode != "replace":
+            return
+        try:
+            status = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if isinstance(status, dict):
+            self.latest_rtk_state = status.get("state")
+
+    def rtk_map_pose_callback(self, msg: Odometry):
+        if self.rtk_mode != "replace":
+            return
+        self.latest_rtk_map_pose, _ = msg2np(msg)
+        self.latest_rtk_map_pose_stamp_msg = msg.header.stamp
+        self.latest_rtk_map_pose_received_at = time.monotonic()
+        self._update_transform_from_rtk_map_pose()
+
+    def _has_fresh_rtk_map_pose(self) -> bool:
+        if self.rtk_mode != "replace":
+            return False
+        if self.latest_rtk_map_pose is None or self.latest_rtk_map_pose_received_at is None:
+            return False
+        if time.monotonic() - self.latest_rtk_map_pose_received_at > _RTK_MAP_POSE_MAX_AGE_S:
+            return False
+        # /rtk/map_pose is only published after heading is ready, but honor the
+        # handshake status when it is available so WAIT_FIX/NEED_YAW_INIT cannot
+        # accidentally reuse a stale pose.
+        if self.latest_rtk_state is not None and self.latest_rtk_state != "ACTIVE":
+            return False
+        return True
+
+    def _has_active_rtk_transform(self) -> bool:
+        if self.latest_rtk_transform_received_at is None:
+            return False
+        return time.monotonic() - self.latest_rtk_transform_received_at <= _RTK_MAP_POSE_MAX_AGE_S
+
+    def _update_transform_from_rtk_map_pose(self) -> bool:
+        if not self._has_fresh_rtk_map_pose():
+            return False
+        if self.latest_odom_pose is None:
+            return False
+
+        # rtk_map_pose is T_map_body. SLAM odom is T_odom_body.
+        # map_node stores T_from_map_to_odom as T_odom_map, because published
+        # map poses use inv(T_from_map_to_odom) @ T_odom_body.
+        self.T_from_map_to_odom = self.latest_odom_pose @ np.linalg.inv(self.latest_rtk_map_pose)
+        self.latest_rtk_transform_received_at = time.monotonic()
+        self.first_done = True
+
+        now = time.monotonic()
+        if now - self._last_rtk_relocalization_pub_at >= 0.5:
+            stamp = self.latest_rtk_map_pose_stamp_msg or self.get_clock().now().to_msg()
+            self.relocation_pub.publish(np2msg(self.latest_rtk_map_pose, stamp, "world", "rtk"))
+            self._last_rtk_relocalization_pub_at = now
+        if now - self._last_rtk_log_at >= 5.0:
+            xy = self.latest_rtk_map_pose[:2, 3]
+            self.get_logger().info(
+                f"Using /rtk/map_pose for localization: x={xy[0]:.2f}, y={xy[1]:.2f}"
+            )
+            self._last_rtk_log_at = now
+        return True
+
     def nav_refresh_timer_callback(self):
         if self.latest_odom_pose is None:
             return
@@ -793,6 +895,8 @@ class MapNode(Node):
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
+        if self._has_active_rtk_transform():
+            return
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
         if not (self.enable_first_done and self.first_done):
