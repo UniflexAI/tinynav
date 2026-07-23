@@ -371,8 +371,15 @@ class BackendNode(Ros2NodeManager):
                 self._rtk_yaw_init_thread is not None
                 and self._rtk_yaw_init_thread.is_alive()
             )
-            nav_ready = self._nav_nodes_running and self._nav_active
-        if already_running or not nav_ready:
+            nav_ready = self._nav_nodes_running
+        if already_running:
+            return
+        if not nav_ready:
+            self._log_rtk_status(
+                'yaw_init_nav_ready',
+                ('not_running',),
+                'RTK yaw-init waiting: nav nodes are not running',
+            )
             return
         if not self._front_is_clear_for_rtk_yaw_init():
             return
@@ -401,9 +408,9 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().info('RTK yaw-init complete: RTK no longer requests heading init')
             return True
         with self._lock:
-            nav_ready = self._nav_nodes_running and self._nav_active
+            nav_ready = self._nav_nodes_running
         if not nav_ready:
-            self.get_logger().info('RTK yaw-init stopped: navigation is no longer active')
+            self.get_logger().info('RTK yaw-init stopped: nav nodes are no longer running')
             return True
         return not self._front_is_clear_for_rtk_yaw_init()
 
@@ -441,7 +448,6 @@ class BackendNode(Ros2NodeManager):
                 restart_cmd_vel = (
                     had_cmd_vel_proc
                     and self._nav_nodes_running
-                    and self._nav_active
                     and not self._loc_assist_enabled
                     and self._cmd_vel_proc is None
                 )

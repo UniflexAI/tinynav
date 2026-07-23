@@ -649,7 +649,7 @@ class PlanningNode(Node):
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='cc', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=2.0)
             self.front_clearance_pub.publish(Float32(data=float(front_clearance)))
             enter_threshold = 0.30
             should_reverse = front_clearance <= enter_threshold
