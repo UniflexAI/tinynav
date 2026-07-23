@@ -51,6 +51,7 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.3
+        self.max_reverse_angular_speed = 0.3
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(30.0)
@@ -124,11 +125,16 @@ class CmdVelControlNode(Node):
         out = Twist()
         out.linear.y = 0.0
 
-        # Reverse is a predefined planner vocabulary: straight back at fixed speed.
-        # Do not smooth or re-lock it here; just pass it through while stale/paused guards still work.
+        # Reverse is a predefined planner vocabulary. Pass it through while keeping
+        # a conservative yaw-rate cap so reverse-left/right recovery trajectories
+        # can actually be executed without spinning too aggressively.
         if target_cmd.linear.x < 0.0:
             out.linear.x = target_cmd.linear.x
-            out.angular.z = 0.0
+            out.angular.z = float(np.clip(
+                target_cmd.angular.z,
+                -self.max_reverse_angular_speed,
+                self.max_reverse_angular_speed,
+            ))
             prev_vx = self.prev_cmd.linear.x
             prev_wz = self.prev_cmd.angular.z
             self.cmd_pub.publish(out)
@@ -232,7 +238,7 @@ class CmdVelControlNode(Node):
         vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
         is_backward_segment = raw_vx < 0.0
         if is_backward_segment:
-            vyaw = 0.0
+            vyaw = float(np.clip(vyaw, -self.max_reverse_angular_speed, self.max_reverse_angular_speed))
 
         # Hack: if path first segment points >80 deg away from robot heading,
         # force an in-place turn. Skip explicit backward segments because reverse
