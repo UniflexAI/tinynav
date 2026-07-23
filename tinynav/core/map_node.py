@@ -552,6 +552,10 @@ class MapNode(Node):
         self._nav_subgoal_segment_length_m = 20.0
         self._nav_subgoal_arrival_xy_threshold = 3.0
         self._nav_subgoal_arrival_z_threshold = 2.0
+        self._nav_z_clamp_max_diff_m = 2.0
+        self._nav_z_clamp_sdf_xy_radius_m = 1.5
+        self._nav_z_clamp_sdf_z_window_m = 1.0
+        self._last_nav_z_clamp_log_time = 0.0
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -1348,9 +1352,10 @@ class MapNode(Node):
         self._nav_subgoals_in_map = []
         self._nav_subgoals_poi_index = self.poi_index
         self._nav_subgoal_index = 0
+        pose_for_planning = self._pose_with_nav_clamped_z(pose_in_map, path=None)
 
         with Timer(name = "generate nav subgoals", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            full_path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+            full_path = self.generate_nav_path_in_map(pose_in_map=pose_for_planning, target_poi=target_poi)
 
         if full_path is None or len(full_path) == 0:
             self.get_logger().warning("Failed to generate full path for nav subgoals; falling back to POI")
@@ -1398,13 +1403,18 @@ class MapNode(Node):
         return subgoals
 
     def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
-        pose_position = pose_in_map[:3, 3]
-        if (
+        reusable_cached_path = (
             self._cached_global_path is not None
             and self._cached_global_path_poi_index == self.poi_index
             and self._cached_global_path_goal is not None
             and np.linalg.norm(self._cached_global_path_goal - target_poi) < 1e-6
-        ):
+        )
+        pose_for_planning = self._pose_with_nav_clamped_z(
+            pose_in_map,
+            path=self._cached_global_path if reusable_cached_path else None,
+        )
+        pose_position = pose_for_planning[:3, 3]
+        if reusable_cached_path:
             _, _, deviation = self._closest_point_on_path(self._cached_global_path, pose_position)
             if deviation <= self._replan_path_deviation_threshold:
                 return self._cached_global_path
@@ -1414,12 +1424,118 @@ class MapNode(Node):
             )
 
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=target_poi)
+            path = self.generate_nav_path_in_map(pose_in_map=pose_for_planning, target_poi=target_poi)
         if path is not None:
             self._cached_global_path = path
             self._cached_global_path_poi_index = self.poi_index
             self._cached_global_path_goal = np.array(target_poi, dtype=np.float64)
         return path
+
+    def _pose_with_nav_clamped_z(self, pose_in_map: np.ndarray, path: np.ndarray | None = None) -> np.ndarray:
+        pose_for_nav = pose_in_map.copy()
+        position = pose_for_nav[:3, 3]
+        clamped_z, source = self._nav_clamped_z(position, path)
+        if clamped_z is not None:
+            raw_z = float(position[2])
+            position[2] = clamped_z
+            self._log_nav_z_clamp(raw_z, clamped_z, source)
+        return pose_for_nav
+
+    def _nav_position_with_clamped_z(self, position: np.ndarray, path: np.ndarray | None = None) -> np.ndarray:
+        nav_position = np.array(position, dtype=np.float64)
+        clamped_z, source = self._nav_clamped_z(nav_position, path)
+        if clamped_z is not None:
+            raw_z = float(nav_position[2])
+            nav_position[2] = clamped_z
+            self._log_nav_z_clamp(raw_z, clamped_z, source)
+        return nav_position
+
+    def _nav_clamped_z(self, position: np.ndarray, path: np.ndarray | None = None) -> tuple[float | None, str]:
+        if path is not None and len(path) > 0:
+            _, closest_point, _ = self._closest_point_on_path_for_z_clamp(path, position)
+            z_diff = abs(float(closest_point[2] - position[2]))
+            if z_diff <= self._nav_z_clamp_max_diff_m:
+                return float(closest_point[2]), "path"
+            return None, "path_rejected"
+
+        return self._nav_clamped_z_from_sdf(position)
+
+    def _closest_point_on_path_for_z_clamp(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
+        if len(path) == 1:
+            point = np.array(path[0], dtype=np.float64)
+            xy_dist = float(np.linalg.norm(point[:2] - position[:2]))
+            z_dist = abs(float(point[2] - position[2]))
+            return 0, point, xy_dist + 0.3 * z_dist
+
+        best_index = 0
+        best_point = np.array(path[0], dtype=np.float64)
+        best_score = np.inf
+        for i in range(len(path) - 1):
+            a = path[i]
+            b = path[i + 1]
+            ab_xy = b[:2] - a[:2]
+            denom = float(np.dot(ab_xy, ab_xy))
+            ratio = 0.0 if denom <= 1e-9 else np.clip(np.dot(position[:2] - a[:2], ab_xy) / denom, 0.0, 1.0)
+            point = a + ratio * (b - a)
+            xy_dist = float(np.linalg.norm(point[:2] - position[:2]))
+            z_dist = abs(float(point[2] - position[2]))
+            score = xy_dist + 0.3 * z_dist
+            if score < best_score:
+                best_index = i
+                best_point = point
+                best_score = score
+        return best_index, best_point, best_score
+
+    def _nav_clamped_z_from_sdf(self, position: np.ndarray) -> tuple[float | None, str]:
+        occupancy_map_origin = self.occupancy_map_meta[:3]
+        resolution = float(self.occupancy_map_meta[3])
+        center_idx = np.array([
+            int((position[0] - occupancy_map_origin[0]) / resolution),
+            int((position[1] - occupancy_map_origin[1]) / resolution),
+            int((position[2] - occupancy_map_origin[2]) / resolution),
+        ], dtype=np.int32)
+        xy_radius = max(1, int(np.ceil(self._nav_z_clamp_sdf_xy_radius_m / resolution)))
+        z_window = max(1, int(np.ceil(self._nav_z_clamp_sdf_z_window_m / resolution)))
+        x0 = max(0, int(center_idx[0]) - xy_radius)
+        x1 = min(self.sdf_map.shape[0], int(center_idx[0]) + xy_radius + 1)
+        y0 = max(0, int(center_idx[1]) - xy_radius)
+        y1 = min(self.sdf_map.shape[1], int(center_idx[1]) + xy_radius + 1)
+        z0 = max(0, int(center_idx[2]) - z_window)
+        z1 = min(self.sdf_map.shape[2], int(center_idx[2]) + z_window + 1)
+        if x0 >= x1 or y0 >= y1 or z0 >= z1:
+            return None, "sdf_out_of_bounds"
+
+        sdf_crop = self.sdf_map[x0:x1, y0:y1, z0:z1]
+        occ_crop = self.occupancy_map[x0:x1, y0:y1, z0:z1]
+        valid = np.isfinite(sdf_crop) & (occ_crop != 2) & (sdf_crop < 0.2)
+        if not np.any(valid):
+            return None, "sdf_not_found"
+
+        xs, ys, zs = np.nonzero(valid)
+        world_x = (xs + x0) * resolution + occupancy_map_origin[0]
+        world_y = (ys + y0) * resolution + occupancy_map_origin[1]
+        world_z = (zs + z0) * resolution + occupancy_map_origin[2]
+        xy_dist = np.hypot(world_x - position[0], world_y - position[1])
+        z_dist = np.abs(world_z - position[2])
+        sdf_values = sdf_crop[xs, ys, zs]
+        score = xy_dist + 0.3 * z_dist + 0.5 * sdf_values
+        best = int(np.argmin(score))
+        clamped_z = float(world_z[best])
+        if abs(clamped_z - float(position[2])) > self._nav_z_clamp_max_diff_m:
+            return None, "sdf_rejected"
+        return clamped_z, "sdf"
+
+    def _log_nav_z_clamp(self, raw_z: float, clamped_z: float, source: str) -> None:
+        if abs(raw_z - clamped_z) < 0.05:
+            return
+        now = time.monotonic()
+        if now - self._last_nav_z_clamp_log_time < 2.0:
+            return
+        self._last_nav_z_clamp_log_time = now
+        self.get_logger().info(
+            f"nav_z_clamp source={source} raw_z={raw_z:.2f} clamped_z={clamped_z:.2f} "
+            f"diff={abs(raw_z - clamped_z):.2f}"
+        )
 
     def _closest_point_on_path(self, path: np.ndarray, position: np.ndarray) -> tuple[int, np.ndarray, float]:
         if len(path) == 1:
@@ -1443,7 +1559,8 @@ class MapNode(Node):
         return best_index, best_point, best_distance
 
     def _path_progress(self, path: np.ndarray, position: np.ndarray) -> tuple[np.ndarray, float]:
-        closest_index, closest_position, _ = self._closest_point_on_path(path, position)
+        nav_position = self._nav_position_with_clamped_z(position, path=path)
+        closest_index, closest_position, _ = self._closest_point_on_path(path, nav_position)
         remaining = np.linalg.norm(path[closest_index + 1] - closest_position) if closest_index + 1 < len(path) else 0.0
         for i in range(closest_index + 1, len(path) - 1):
             remaining += np.linalg.norm(path[i + 1] - path[i])
@@ -1486,7 +1603,7 @@ class MapNode(Node):
 
     def _publish_target_pose_from_path(self, paths_in_map: np.ndarray, pose_in_origin_odom: np.ndarray, stamp_msg=None):
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
-        pose_in_map_position = pose_in_map[:3, 3]
+        pose_in_map_position = self._nav_position_with_clamped_z(pose_in_map[:3, 3], path=paths_in_map)
         with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             max_speed = 0.5
             lookahead_distance = max_speed * self.target_pose_dist_factor
