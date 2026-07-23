@@ -17,11 +17,11 @@ Decoupled: consumes map_node output purely via topics; no tinynav imports.
 
 Usage (with map_node already relocalizing in the target map):
   uv run python /tinynav/rtk/rtk_align_calibrate.py --ros-args \
-      -p map_name:=<map_name> \
-      -p out:=<tinynav_map_path>/rtk_align.json
-  # drive the robot through the map (include turns), then Ctrl-C to fit+save.
-  # Write it INTO the map directory (next to nav_flow.json) so rtk_map_pose_node
-  # picks it up automatically for that map.
+      -p map_topic:=/map/current_map
+  # Drive through the map (include turns), then Ctrl-C to fit+save. Output goes to
+  # <map_dir>/rtk_align.json (map_dir learned from map_topic), next to
+  # nav_flow.json, so rtk_map_pose_node picks it up automatically for that map.
+  # Bench / bag replay without the topic: set -p out:=<path> explicitly.
 """
 import json
 import os
@@ -30,8 +30,10 @@ import sys
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rtk_geo
@@ -47,7 +49,12 @@ class RtkAlignCalibrate(Node):
         self.declare_parameter("reloc_topic", "/map/relocalization")
         self.declare_parameter("keyframe_odom_topic", "/slam/keyframe_odom")
         self.declare_parameter("fix_topic", "/fix")
-        self.declare_parameter("out", "rtk_align.json")
+        # Where to write rtk_align.json. Leave empty to auto-target the active
+        # map directory learned from map_topic (writes <map_dir>/rtk_align.json,
+        # next to nav_flow.json). Set explicitly to override (e.g. bag replay).
+        self.declare_parameter("map_topic", "/map/current_map")
+        self.declare_parameter("align_filename", "rtk_align.json")
+        self.declare_parameter("out", "")
         self.declare_parameter("map_name", "")
         self.declare_parameter("max_dt_s", 0.6)
         self.declare_parameter("gross_reject_m", 10.0)
@@ -56,10 +63,17 @@ class RtkAlignCalibrate(Node):
         self.kf = {}      # keyframe header ns -> arrival wall ns (this node's clock)
         self.fix = []     # (arrival wall ns, lat, lon, alt, status)
         self.reloc = []   # (reloc header ns, map_x, map_y)
+        self.map_dir = None   # active map directory, from map_topic (for auto-out)
 
         self.create_subscription(Odometry, self.get_parameter("keyframe_odom_topic").value, self.on_kf, 50)
         self.create_subscription(Odometry, self.get_parameter("reloc_topic").value, self.on_reloc, 50)
         self.create_subscription(NavSatFix, self.get_parameter("fix_topic").value, self.on_fix, 50)
+        # Latched sub so a map published before we started is still delivered.
+        latched = QoSProfile(
+            depth=1, history=HistoryPolicy.KEEP_LAST,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, self.get_parameter("map_topic").value, self.on_map, latched)
         self.create_timer(5.0, self._progress)
         self.get_logger().info(
             "rtk_align_calibrate collecting… drive through the map (with turns), Ctrl-C to fit.")
@@ -79,6 +93,13 @@ class RtkAlignCalibrate(Node):
 
     def on_fix(self, msg):
         self.fix.append((self._now(), msg.latitude, msg.longitude, msg.altitude, int(msg.status.status)))
+
+    def on_map(self, msg):
+        map_dir = (msg.data or "").strip()
+        if map_dir and map_dir != self.map_dir:
+            self.map_dir = map_dir
+            self.get_logger().info(f"active map dir: {map_dir} "
+                                   "(rtk_align.json will be written here)")
 
     def _progress(self):
         self.get_logger().info(f"collected: reloc={len(self.reloc)} fix={len(self.fix)} kf={len(self.kf)}")
@@ -111,6 +132,21 @@ class RtkAlignCalibrate(Node):
         return np.array(X), np.array(lla), np.array(stat)
 
     def fit_and_save(self):
+        # Resolve where to write: explicit 'out', else <map_dir>/align_filename
+        # from the map learned on map_topic.
+        out_path = self.get_parameter("out").value
+        map_name = self.get_parameter("map_name").value
+        if not out_path:
+            if not self.map_dir:
+                self.get_logger().error(
+                    "no 'out' set and no map dir received on map_topic; "
+                    "cannot decide where to write rtk_align.json "
+                    "(set -p out:=<path> or ensure map_topic is published)")
+                return
+            out_path = os.path.join(self.map_dir, self.get_parameter("align_filename").value)
+        if not map_name and self.map_dir:
+            map_name = os.path.basename(os.path.normpath(self.map_dir))
+
         paired = self._pair()
         if paired is None or len(paired[0]) == 0:
             self.get_logger().error("no paired samples; nothing to fit")
@@ -130,7 +166,7 @@ class RtkAlignCalibrate(Node):
         yaw, s, t2, mask, rmse = rtk_geo.robust_sim3(X[fixed], enu[fixed][:, :2], gross)
 
         out = {
-            "map": self.get_parameter("map_name").value or None,
+            "map": map_name or None,
             "model": "planar_sim3",
             "convention": ("p_enu = scale * R(yaw_deg) * p_map_xy + [tx,ty]; "
                            "inverse: p_map_xy = (1/scale) * R(yaw_deg)^T * (p_enu_xy - [tx,ty])"),
@@ -142,11 +178,10 @@ class RtkAlignCalibrate(Node):
                     "n_all_pairs": int(len(X)), "rmse_m": round(float(rmse), 3),
                     "gross_reject_m": gross},
         }
-        path = self.get_parameter("out").value
-        with open(path, "w") as f:
+        with open(out_path, "w") as f:
             json.dump(out, f, indent=2)
         self.get_logger().info(
-            f"WROTE {path}: yaw={np.degrees(yaw):.2f} scale={s:.4f} "
+            f"WROTE {out_path}: yaw={np.degrees(yaw):.2f} scale={s:.4f} "
             f"rmse={rmse:.2f}m used={int(mask.sum())}/{len(fixed)}")
 
 

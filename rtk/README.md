@@ -57,6 +57,17 @@ not part of the RTK module.** That publisher must:
 Until that topic exists, use the bench bypass `-p align_json:=<path>` to load a
 fixed `rtk_align.json` directly.
 
+## Heading (planned)
+
+`/rtk/map_pose` currently carries position only. Single-antenna RTK has no
+heading, and at night visual relocalization can fail, so map-frame yaw is
+recovered from **motion**: with RTK at FIXED/FLOAT, the course-over-ground of the
+RTK trajectory (through the same Sim3) gives the heading in the map frame after
+the robot travels ~1 m. This node stays **passive** — it never commands motion;
+the navigation/control layer (which owns obstacle avoidance) drives, and this
+node only observes the resulting motion to fit yaw, refining it continuously
+while the robot moves.
+
 ## Quick start
 
 ```bash
@@ -67,15 +78,18 @@ cp rtk/.ntrip.env.example rtk/.ntrip.env && chmod 600 rtk/.ntrip.env   # edit it
 docker exec tinynav-dev tmux new-session -d -s rtk /tinynav/service/start_rtk_bridge.sh
 # verify (odom needs RTK FIXED/FLOAT):  ros2 topic hz /rtk/odom
 
-# 3. Calibrate a map (with map_node relocalizing in it), drive with turns, Ctrl-C:
+# 3. Calibrate a map (with map_node relocalizing in it), drive with turns, Ctrl-C.
+#    Output auto-targets <map_dir>/rtk_align.json (map_dir learned from map_topic,
+#    like the runtime node). Bag replay / no topic: add -p out:=<path>.
 uv run python /tinynav/rtk/rtk_align_calibrate.py --ros-args \
-    -p map_name:=<map_name> \
-    -p out:=<tinynav_map_path>/rtk_align.json
+    -p map_topic:=/map/current_map
 
 # 4. Runtime position-in-map (topic-gated on the current map)
 uv run python /tinynav/rtk/rtk_map_pose_node.py --ros-args \
     -p map_topic:=/map/current_map
-# -> /rtk/map_pose (nav_msgs/Odometry, map frame). Position only; covariance
-#    reflects RTK quality (tight at FIXED, loose at DGNSS). Orientation TODO
-#    (single antenna): to be filled from VIO / motion-fit heading.
+# -> /rtk/map_pose (nav_msgs/Odometry, map frame). Publishes at any real fix
+#    (min_status default STATUS_FIX); covariance reflects RTK quality (tight at
+#    FIXED/FLOAT ~0.25, loose at DGNSS ~25) so the consumer can weight it.
+#    Position only for now; orientation is identity + unknown covariance until a
+#    heading is wired in (from VIO / motion-fit — see below).
 ```
