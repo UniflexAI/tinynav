@@ -429,7 +429,7 @@ def _load_map_pois(map_dir: Path, map_name: str) -> dict[int, dict[str, Any]]:
 
 
 def _poi_choice_label(poi_id: int, poi: dict[str, Any]) -> str:
-    return f"{poi_id}: {poi.get('name', f'POI_{poi_id}')}"
+    return str(poi.get("name", f"POI_{poi_id}"))
 
 
 def _target_poi_options(map_dir: Path, map_name: str) -> list[str]:
@@ -439,18 +439,15 @@ def _target_poi_options(map_dir: Path, map_name: str) -> list[str]:
     return [_poi_choice_label(poi_id, poi) for poi_id, poi in pois.items()]
 
 
-def _parse_poi_choice(value: str) -> int | str | None:
+def _parse_poi_choice(value: str) -> str | None:
     text = str(value).strip()
     if not text or text == "(no POIs)":
         return None
-    prefix = text.split(":", 1)[0].strip()
-    if prefix.lstrip("-").isdigit():
-        return int(prefix)
     return text
 
 
-def _parse_poi_ref_list(value: str) -> list[int | str]:
-    refs: list[int | str] = []
+def _parse_poi_ref_list(value: str) -> list[str]:
+    refs: list[str] = []
     for part in str(value).split(","):
         token = part.strip()
         if not token:
@@ -479,6 +476,19 @@ def _find_nav_flow_rule(
     if rule is None:
         rule = nav_flow.get(str(poi_index))
     return rule if isinstance(rule, dict) else None
+
+
+def _remove_nav_flow_rule(nav_flow: dict[str, Any], poi_index: int, poi_name: str | None) -> None:
+    if poi_name and isinstance(nav_flow.get("by_name"), dict):
+        nav_flow["by_name"].pop(poi_name, None)
+        if not nav_flow["by_name"]:
+            nav_flow.pop("by_name", None)
+    by_id = nav_flow.get("by_id")
+    if isinstance(by_id, dict):
+        by_id.pop(str(poi_index), None)
+        if not by_id:
+            nav_flow.pop("by_id", None)
+    nav_flow.pop(str(poi_index), None)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +536,7 @@ def create_poi_ui(
                 "Name",
                 initial_value=str(poi_points[poi_index].get("name", f"POI_{poi_index}")),
             )
+            original_poi_name = str(name_text.value).strip() or f"POI_{poi_index}"
             gui_vector3 = server.gui.add_vector3(
                 "Position",
                 initial_value=poi_points[poi_index]['position'],
@@ -650,12 +661,13 @@ def create_poi_ui(
             handoff_controls["poi_list"].value = ""
             _set_handoff_status("Cleared target POI list")
 
+        def _current_poi_name() -> str:
+            return str(poi_points[poi_index].get("name", f"POI_{poi_index}")).strip() or f"POI_{poi_index}"
+
         def _remove_handoff_rule() -> None:
-            by_id = nav_flow.get("by_id")
-            if isinstance(by_id, dict):
-                by_id.pop(str(poi_index), None)
-                if not by_id:
-                    nav_flow.pop("by_id", None)
+            if original_poi_name != _current_poi_name():
+                _remove_nav_flow_rule(nav_flow, poi_index, original_poi_name)
+            _remove_nav_flow_rule(nav_flow, poi_index, _current_poi_name())
             _save_json_dict(nav_flow_path, nav_flow)
 
         @handoff_controls["save"].on_click
@@ -669,10 +681,13 @@ def create_poi_ui(
                 _set_handoff_status("Choose a target map first")
                 return
             poi_list = _parse_poi_ref_list(str(handoff_controls["poi_list"].value))
-            by_id = nav_flow.setdefault("by_id", {})
-            if not isinstance(by_id, dict):
-                by_id = {}
-                nav_flow["by_id"] = by_id
+            if original_poi_name != _current_poi_name():
+                _remove_nav_flow_rule(nav_flow, poi_index, original_poi_name)
+            _remove_nav_flow_rule(nav_flow, poi_index, _current_poi_name())
+            by_name = nav_flow.setdefault("by_name", {})
+            if not isinstance(by_name, dict):
+                by_name = {}
+                nav_flow["by_name"] = by_name
             rule: dict[str, Any] = {
                 "target_map": target_map,
                 "poi_list": poi_list,
@@ -682,7 +697,7 @@ def create_poi_ui(
                 rule["zupt"] = True
             elif zupt == "disable":
                 rule["zupt"] = False
-            by_id[str(poi_index)] = rule
+            by_name[_current_poi_name()] = rule
             _save_json_dict(nav_flow_path, nav_flow)
             _set_handoff_status(f"Saved handoff to {target_map} with {len(poi_list)} POIs")
 
@@ -743,6 +758,7 @@ def create_poi_ui(
 
     @delete_button.on_click
     def _(_) -> None:
+        deleted_poi_name = str(poi_points[poi_index].get("name", f"POI_{poi_index}"))
         del poi_points[poi_index]
         if nav_state is not None:
             if nav_state.get("start_poi_id") == poi_index:
@@ -756,12 +772,14 @@ def create_poi_ui(
         if poi_handles_registry is not None:
             poi_handles_registry.pop(poi_index, None)
         if nav_flow is not None and nav_flow_path is not None:
-            by_id = nav_flow.get("by_id")
-            if isinstance(by_id, dict) and str(poi_index) in by_id:
-                by_id.pop(str(poi_index), None)
-                if not by_id:
-                    nav_flow.pop("by_id", None)
-                _save_json_dict(nav_flow_path, nav_flow)
+            if original_poi_name != deleted_poi_name:
+                _remove_nav_flow_rule(nav_flow, poi_index, original_poi_name)
+            _remove_nav_flow_rule(
+                nav_flow,
+                poi_index,
+                deleted_poi_name,
+            )
+            _save_json_dict(nav_flow_path, nav_flow)
         if refresh_nav_markers is not None:
             refresh_nav_markers()
 
