@@ -53,9 +53,8 @@ class CmdVelControlNode(Node):
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.3
         self.max_reverse_speed = 0.45
-        self.vx_ki = 0.25
-        self.vx_i_limit_forward = 0.05
-        self.vx_i_limit_reverse = 0.10
+        self.vx_ki = 0.10
+        self.vx_i_limit_reverse = 0.05
         self.vx_integral = 0.0
         self.vx_integral_target_sign = 0.0
         self.actual_vx = 0.0
@@ -134,7 +133,7 @@ class CmdVelControlNode(Node):
         self.vx_integral_target_sign = 0.0
 
     def _apply_vx_pi(self, target_vx: float, dt: float):
-        if abs(target_vx) < 0.05 or not np.isfinite(self.actual_vx):
+        if target_vx >= -0.05 or not np.isfinite(self.actual_vx):
             self._reset_vx_integral()
             return target_vx, 0.0, 0.0
 
@@ -144,16 +143,17 @@ class CmdVelControlNode(Node):
         self.vx_integral_target_sign = target_sign
 
         error = float(target_vx - self.actual_vx)
+        if abs(error) < 0.03:
+            self._reset_vx_integral()
+            return target_vx, 0.0, error
+
         self.vx_integral += error * dt
-        i_limit = self.vx_i_limit_reverse if target_vx < 0.0 else self.vx_i_limit_forward
+        i_limit = self.vx_i_limit_reverse
         integral_limit = i_limit / max(self.vx_ki, 1e-6)
         self.vx_integral = float(np.clip(self.vx_integral, -integral_limit, integral_limit))
         i_term = float(np.clip(self.vx_ki * self.vx_integral, -i_limit, i_limit))
         compensated_vx = target_vx + i_term
-        if target_vx < 0.0:
-            compensated_vx = float(np.clip(compensated_vx, -self.max_reverse_speed, 0.0))
-        else:
-            compensated_vx = float(np.clip(compensated_vx, 0.0, 0.5))
+        compensated_vx = float(np.clip(compensated_vx, -self.max_reverse_speed, 0.0))
         return compensated_vx, i_term, error
 
     def cmd_timer_callback(self):
