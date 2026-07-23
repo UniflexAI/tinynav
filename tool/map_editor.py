@@ -372,6 +372,116 @@ def _save_paths_json(path: Path, paths: dict[int, dict[str, Any]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Nav flow helpers
+# ---------------------------------------------------------------------------
+
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"Warning: failed to read {path}: {exc}")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_json_dict(path: Path, data: dict[str, Any]) -> None:
+    with path.open("w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _maps_dir_for_map(map_dir: Path) -> Path:
+    return map_dir.parent if map_dir.parent.name == "maps" else map_dir.parent / "maps"
+
+
+def _available_map_names(map_dir: Path) -> list[str]:
+    maps_dir = _maps_dir_for_map(map_dir)
+    if not maps_dir.exists():
+        return []
+    names = []
+    for child in sorted(maps_dir.iterdir(), key=lambda p: p.name):
+        if child.is_dir() and (child / "pois.json").exists():
+            names.append(child.name)
+    return names
+
+
+def _load_map_pois(map_dir: Path, map_name: str) -> dict[int, dict[str, Any]]:
+    if not map_name:
+        return {}
+    pois_path = _maps_dir_for_map(map_dir) / map_name / "pois.json"
+    raw = _load_json_dict(pois_path)
+    pois: dict[int, dict[str, Any]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            poi_id = int(value.get("id", key))
+        except (TypeError, ValueError):
+            continue
+        pois[poi_id] = {
+            **value,
+            "id": poi_id,
+            "name": str(value.get("name", f"POI_{poi_id}")),
+        }
+    return dict(sorted(pois.items()))
+
+
+def _poi_choice_label(poi_id: int, poi: dict[str, Any]) -> str:
+    return f"{poi_id}: {poi.get('name', f'POI_{poi_id}')}"
+
+
+def _target_poi_options(map_dir: Path, map_name: str) -> list[str]:
+    pois = _load_map_pois(map_dir, map_name)
+    if not pois:
+        return ["(no POIs)"]
+    return [_poi_choice_label(poi_id, poi) for poi_id, poi in pois.items()]
+
+
+def _parse_poi_choice(value: str) -> int | str | None:
+    text = str(value).strip()
+    if not text or text == "(no POIs)":
+        return None
+    prefix = text.split(":", 1)[0].strip()
+    if prefix.lstrip("-").isdigit():
+        return int(prefix)
+    return text
+
+
+def _parse_poi_ref_list(value: str) -> list[int | str]:
+    refs: list[int | str] = []
+    for part in str(value).split(","):
+        token = part.strip()
+        if not token:
+            continue
+        parsed = _parse_poi_choice(token)
+        if parsed is None:
+            continue
+        refs.append(parsed)
+    return refs
+
+
+def _format_poi_ref_list(refs: list[Any]) -> str:
+    return ", ".join(str(ref) for ref in refs if isinstance(ref, (int, str)))
+
+
+def _find_nav_flow_rule(
+    nav_flow: dict[str, Any],
+    poi_index: int,
+    poi_name: str | None = None,
+) -> dict[str, Any] | None:
+    rule = None
+    if poi_name and isinstance(nav_flow.get("by_name"), dict):
+        rule = nav_flow["by_name"].get(poi_name)
+    if rule is None and isinstance(nav_flow.get("by_id"), dict):
+        rule = nav_flow["by_id"].get(str(poi_index))
+    if rule is None:
+        rule = nav_flow.get(str(poi_index))
+    return rule if isinstance(rule, dict) else None
+
+
+# ---------------------------------------------------------------------------
 # POI UI helpers  (from feat/editor-3d-occupancy-toggle)
 # ---------------------------------------------------------------------------
 
@@ -398,6 +508,10 @@ def create_poi_ui(
     nav_state: dict | None = None,
     refresh_nav_markers=None,
     poi_handles_registry: dict | None = None,
+    map_dir: Path | None = None,
+    nav_flow: dict[str, Any] | None = None,
+    nav_flow_path: Path | None = None,
+    available_maps: list[str] | None = None,
 ):
     with poi_list_container:
         with server.gui.add_folder(f"POI_{poi_index}") as poi_container:
@@ -426,6 +540,69 @@ def create_poi_ui(
             if nav_state is not None:
                 set_start_button = server.gui.add_button("Set as Start", color=(40, 220, 80))
                 set_goal_button = server.gui.add_button("Set as Goal", color=(255, 80, 80))
+            handoff_controls = None
+            if map_dir is not None and nav_flow is not None and nav_flow_path is not None:
+                maps = available_maps or _available_map_names(map_dir)
+                current_rule = _find_nav_flow_rule(
+                    nav_flow,
+                    poi_index,
+                    poi_name=str(poi_points[poi_index].get("name", f"POI_{poi_index}")),
+                )
+                current_target_map = ""
+                current_poi_list: list[Any] = []
+                current_zupt = "unchanged"
+                if current_rule is not None:
+                    current_target_map = str(current_rule.get("target_map") or current_rule.get("map") or "")
+                    raw_poi_list = current_rule.get("poi_list", [])
+                    if isinstance(raw_poi_list, list):
+                        current_poi_list = raw_poi_list
+                    if current_rule.get("zupt") is True:
+                        current_zupt = "enable"
+                    elif current_rule.get("zupt") is False:
+                        current_zupt = "disable"
+                if current_target_map and current_target_map not in maps:
+                    maps = [current_target_map, *maps]
+                map_options = maps or ["(no maps)"]
+                initial_map = current_target_map if current_target_map in map_options else map_options[0]
+                initial_poi_options = _target_poi_options(map_dir, initial_map)
+                with server.gui.add_folder("Nav Flow Handoff"):
+                    handoff_enabled = server.gui.add_checkbox("Enabled", initial_value=current_rule is not None)
+                    target_map_dropdown = server.gui.add_dropdown(
+                        "Target Map",
+                        options=map_options,
+                        initial_value=initial_map,
+                    )
+                    target_poi_dropdown = server.gui.add_dropdown(
+                        "Target POI",
+                        options=initial_poi_options,
+                        initial_value=initial_poi_options[0],
+                    )
+                    add_target_poi_button = server.gui.add_button("Append Target POI")
+                    target_pois_text = server.gui.add_text(
+                        "POI List",
+                        initial_value=_format_poi_ref_list(current_poi_list),
+                    )
+                    clear_target_pois_button = server.gui.add_button("Clear POI List")
+                    zupt_dropdown = server.gui.add_dropdown(
+                        "ZUPT",
+                        options=["unchanged", "enable", "disable"],
+                        initial_value=current_zupt,
+                    )
+                    save_handoff_button = server.gui.add_button("Save Handoff", color=(80, 200, 80))
+                    remove_handoff_button = server.gui.add_button("Remove Handoff", color=(255, 80, 80))
+                    handoff_status = server.gui.add_text("Status", initial_value="Ready")
+                handoff_controls = {
+                    "enabled": handoff_enabled,
+                    "target_map": target_map_dropdown,
+                    "target_poi": target_poi_dropdown,
+                    "poi_list": target_pois_text,
+                    "zupt": zupt_dropdown,
+                    "add_poi": add_target_poi_button,
+                    "clear_pois": clear_target_pois_button,
+                    "save": save_handoff_button,
+                    "remove": remove_handoff_button,
+                    "status": handoff_status,
+                }
             delete_button = server.gui.add_button("Delete POI", color=(255, 0, 0))
 
     if set_start_button is not None:
@@ -441,6 +618,79 @@ def create_poi_ui(
             nav_state["goal_poi_id"] = poi_index
             if refresh_nav_markers is not None:
                 refresh_nav_markers()
+
+    if handoff_controls is not None:
+        def _set_handoff_status(text: str) -> None:
+            handoff_controls["status"].value = text
+
+        @handoff_controls["target_map"].on_update
+        def _(_) -> None:
+            selected_map = str(handoff_controls["target_map"].value)
+            options = _target_poi_options(map_dir, selected_map)
+            try:
+                handoff_controls["target_poi"].options = options
+                handoff_controls["target_poi"].value = options[0]
+                _set_handoff_status(f"Loaded {len(options) if options != ['(no POIs)'] else 0} POIs from {selected_map}")
+            except Exception:
+                _set_handoff_status("Target map changed; restart editor if POI choices did not refresh")
+
+        @handoff_controls["add_poi"].on_click
+        def _(_) -> None:
+            ref = _parse_poi_choice(str(handoff_controls["target_poi"].value))
+            if ref is None:
+                _set_handoff_status("No target POI selected")
+                return
+            refs = _parse_poi_ref_list(str(handoff_controls["poi_list"].value))
+            refs.append(ref)
+            handoff_controls["poi_list"].value = _format_poi_ref_list(refs)
+            _set_handoff_status(f"Added target POI {ref}")
+
+        @handoff_controls["clear_pois"].on_click
+        def _(_) -> None:
+            handoff_controls["poi_list"].value = ""
+            _set_handoff_status("Cleared target POI list")
+
+        def _remove_handoff_rule() -> None:
+            by_id = nav_flow.get("by_id")
+            if isinstance(by_id, dict):
+                by_id.pop(str(poi_index), None)
+                if not by_id:
+                    nav_flow.pop("by_id", None)
+            _save_json_dict(nav_flow_path, nav_flow)
+
+        @handoff_controls["save"].on_click
+        def _(_) -> None:
+            if not handoff_controls["enabled"].value:
+                _remove_handoff_rule()
+                _set_handoff_status("Removed disabled handoff")
+                return
+            target_map = str(handoff_controls["target_map"].value).strip()
+            if not target_map or target_map == "(no maps)":
+                _set_handoff_status("Choose a target map first")
+                return
+            poi_list = _parse_poi_ref_list(str(handoff_controls["poi_list"].value))
+            by_id = nav_flow.setdefault("by_id", {})
+            if not isinstance(by_id, dict):
+                by_id = {}
+                nav_flow["by_id"] = by_id
+            rule: dict[str, Any] = {
+                "target_map": target_map,
+                "poi_list": poi_list,
+            }
+            zupt = str(handoff_controls["zupt"].value)
+            if zupt == "enable":
+                rule["zupt"] = True
+            elif zupt == "disable":
+                rule["zupt"] = False
+            by_id[str(poi_index)] = rule
+            _save_json_dict(nav_flow_path, nav_flow)
+            _set_handoff_status(f"Saved handoff to {target_map} with {len(poi_list)} POIs")
+
+        @handoff_controls["remove"].on_click
+        def _(_) -> None:
+            handoff_controls["enabled"].value = False
+            _remove_handoff_rule()
+            _set_handoff_status("Removed handoff")
 
     def update_name(event):
         new_name = str(name_text.value).strip()
@@ -505,6 +755,13 @@ def create_poi_ui(
         gizmo.remove()
         if poi_handles_registry is not None:
             poi_handles_registry.pop(poi_index, None)
+        if nav_flow is not None and nav_flow_path is not None:
+            by_id = nav_flow.get("by_id")
+            if isinstance(by_id, dict) and str(poi_index) in by_id:
+                by_id.pop(str(poi_index), None)
+                if not by_id:
+                    nav_flow.pop("by_id", None)
+                _save_json_dict(nav_flow_path, nav_flow)
         if refresh_nav_markers is not None:
             refresh_nav_markers()
 
@@ -653,6 +910,9 @@ def main(args: Args) -> None:
         "path_handle": None,
         "poi_role_labels": {},
     }
+    nav_flow_path = map_dir / "nav_flow.json"
+    nav_flow = _load_json_dict(nav_flow_path)
+    available_maps = _available_map_names(map_dir)
 
     def refresh_poi_role_labels() -> None:
         for poi_id, label in list(nav_state.get("poi_role_labels", {}).items()):
@@ -750,7 +1010,20 @@ def main(args: Args) -> None:
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_point['position'],
             )
-            create_poi_ui(server, poi_list_container, int(poi_id), poi_points, sphere_handle, nav_state, refresh_nav_markers, poi_handles_registry)
+            create_poi_ui(
+                server,
+                poi_list_container,
+                int(poi_id),
+                poi_points,
+                sphere_handle,
+                nav_state,
+                refresh_nav_markers,
+                poi_handles_registry,
+                map_dir=map_dir,
+                nav_flow=nav_flow,
+                nav_flow_path=nav_flow_path,
+                available_maps=available_maps,
+            )
 
         @add_poi_button.on_click
         def _(_) -> None:
@@ -775,7 +1048,20 @@ def main(args: Args) -> None:
                 color=(np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255)),
                 position=poi_points[poi_id]['position'],
             )
-            create_poi_ui(server, poi_list_container, poi_id, poi_points, sphere_handle, nav_state, refresh_nav_markers, poi_handles_registry)
+            create_poi_ui(
+                server,
+                poi_list_container,
+                poi_id,
+                poi_points,
+                sphere_handle,
+                nav_state,
+                refresh_nav_markers,
+                poi_handles_registry,
+                map_dir=map_dir,
+                nav_flow=nav_flow,
+                nav_flow_path=nav_flow_path,
+                available_maps=available_maps,
+            )
 
     # ------------------------------------------------------------------
     # Occupancy grid + SDF map
