@@ -418,6 +418,13 @@ class BackendNode(Ros2NodeManager):
         interval = 1.0 / max(_RTK_YAW_INIT_RATE_HZ, 1.0)
         deadline = time.monotonic() + max(_RTK_YAW_INIT_DURATION_S, 0.0)
         stop = self._rtk_yaw_init_stop_event
+        loc_assist_running = (
+            self._loc_assist_thread is not None
+            and self._loc_assist_thread.is_alive()
+        )
+        if loc_assist_running:
+            self._stop_loc_assist()
+            self.get_logger().info('RTK yaw-init stopped localization assist for direct /cmd_vel ownership')
         with self._lock:
             cmd_vel_proc = self._cmd_vel_proc
             self._cmd_vel_proc = None
