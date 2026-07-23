@@ -1360,7 +1360,7 @@ class MapNode(Node):
                 return closest_position
             return select_target_position_on_path(
                 remaining_path,
-                closest_position,
+                pose_in_map_position,  #closest_position,
                 lookahead_distance=lookahead_distance,
                 turn_angle_threshold_rad=np.deg2rad(70.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
