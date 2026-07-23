@@ -212,6 +212,7 @@ class PlanningState {
   final List<TrajPoint> mapGlobalPath;
   final GridInfo? gridInfo;
   final TrajPoint? navTargetPose;
+  final List<Poi> activeNavPois;
   final List<TrajPoint> footprint;
   final List<VoxelPoint> voxelPoints;
 
@@ -227,6 +228,7 @@ class PlanningState {
     this.mapGlobalPath = const [],
     this.gridInfo,
     this.navTargetPose,
+    this.activeNavPois = const [],
     this.footprint = const [],
     this.voxelPoints = const [],
   });
@@ -267,6 +269,9 @@ class PlanningState {
               (j['nav_target_pose']['y'] as num).toDouble(),
             )
           : null,
+      activeNavPois: (j['active_nav_pois'] as List? ?? []).map((p) {
+        return Poi.fromJson(p as Map<String, dynamic>);
+      }).toList(),
       footprint: (j['footprint'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;
         return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());

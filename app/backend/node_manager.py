@@ -125,6 +125,7 @@ class BackendNode(Ros2NodeManager):
         self._vio_guard_recovering: bool = False
         self._vio_resume_poi_ids: list[int | str] = []
         self._active_nav_poi_ids: list[int | str] = []
+        self._active_nav_pois: list[dict] = []
 
         # Debug recording (independent of main state machine)
         self._debug_record_proc: subprocess.Popen | None = None
@@ -262,6 +263,8 @@ class BackendNode(Ros2NodeManager):
                 if seq != self._nav_done_seq or self._map_handoff_active or self.state != 'navigation':
                     return
                 self._nav_active = False
+                self._active_nav_poi_ids = []
+                self._active_nav_pois = []
                 self.state = 'idle'
                 should_publish_nav_inactive = True
             if should_publish_nav_inactive:
@@ -961,6 +964,7 @@ class BackendNode(Ros2NodeManager):
                 'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
+                'active_nav_pois': list(self._active_nav_pois),
                 'footprint': list(self._footprint),
                 'voxel_points': list(self._voxel_points),
             }
@@ -1707,6 +1711,9 @@ class BackendNode(Ros2NodeManager):
         Sending an empty dict clears the current nav target. Returns whether a
         non-empty navigation target was published."""
         if poi_id is None:
+            with self._lock:
+                self._active_nav_poi_ids = []
+                self._active_nav_pois = []
             self._cmd_pois_pub.publish(String(data='{}'))
             return False
         pois_file = os.path.join(self.map_path, 'pois.json')
@@ -1721,6 +1728,8 @@ class BackendNode(Ros2NodeManager):
             return False
         # Re-index as "0" to match pub_pois.py convention expected by map_node
         payload = {'0': pois[key]}
+        with self._lock:
+            self._active_nav_pois = list(payload.values())
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         return True
 
@@ -1751,6 +1760,8 @@ class BackendNode(Ros2NodeManager):
             self._active_nav_poi_ids = list(poi_ids)
             self._nav_progress = None
         if not poi_ids:
+            with self._lock:
+                self._active_nav_pois = []
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)
         else:
@@ -1784,6 +1795,8 @@ class BackendNode(Ros2NodeManager):
                     payload[str(len(payload))] = poi
                 else:
                     self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
+            with self._lock:
+                self._active_nav_pois = list(payload.values())
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
             self._set_nav_active(bool(payload))
         with self._lock:
@@ -1805,6 +1818,9 @@ class BackendNode(Ros2NodeManager):
                 self._nav_progress = None
             self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         else:
+            with self._lock:
+                self._active_nav_poi_ids = []
+                self._active_nav_pois = []
             self._set_nav_active(False)
         with self._lock:
             nav_running = self._nav_nodes_running
@@ -1821,6 +1837,7 @@ class BackendNode(Ros2NodeManager):
             return
         with self._lock:
             self._active_nav_poi_ids = []
+            self._active_nav_pois = []
             self._vio_resume_poi_ids = []
             self._vio_guard_stopped = False
             self._vio_guard_recovering = False

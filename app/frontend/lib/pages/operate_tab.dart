@@ -146,6 +146,8 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
     final isNavigating = status?.rawState == 'navigation';
     final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
+    final backendNavPois = planning?.activeNavPois ?? const <Poi>[];
+    final displayNavPois = isNavigating && backendNavPois.isNotEmpty ? backendNavPois : activeNavPois;
 
     return Column(
       children: [
@@ -163,8 +165,8 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         mapInfo: mapInfo,
                         baseUrl: baseUrl,
                         planning: planning,
-                        pois: activeNavPois,
-                        starredPoi: isNavigating && activeNavPois.isNotEmpty ? activeNavPois.last : null,
+                        pois: displayNavPois,
+                        starredPoi: isNavigating && displayNavPois.isNotEmpty ? displayNavPois.last : null,
                         activeMap: status?.activeMap,
                       )
                     : _LocalPlanningView(
@@ -241,7 +243,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   bottom: 52,
                   left: 10,
                   right: 10,
-                  child: _NavProgressOverlay(np: np, arrived: _navArrived, pois: activeNavPois),
+                  child: _NavProgressOverlay(np: np, arrived: _navArrived, pois: displayNavPois),
                 ),
               Positioned(
                 bottom: 10,
