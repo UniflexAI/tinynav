@@ -10,6 +10,7 @@ class MapOverlayPainter extends CustomPainter {
   final MapInfo mapInfo;
   final Pose? pose;
   final List<Poi> pois;
+  final Poi? starredPoi;
   final List<TrajPoint> globalPath;
   final bool showGlobalPath;
 
@@ -17,6 +18,7 @@ class MapOverlayPainter extends CustomPainter {
     required this.mapInfo,
     this.pose,
     this.pois = const [],
+    this.starredPoi,
     this.globalPath = const [],
     this.showGlobalPath = true,
   });
@@ -41,6 +43,7 @@ class MapOverlayPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (showGlobalPath) _drawGlobalPath(canvas, size);
     _drawPois(canvas, size);
+    _drawStarredPoi(canvas, size);
     _drawPose(canvas, size);
   }
 
@@ -68,6 +71,60 @@ class MapOverlayPainter extends CustomPainter {
       )..layout();
       tp.paint(canvas, c + const Offset(10, -6));
     }
+  }
+
+  Path _starPath(Offset center, double outerRadius, double innerRadius) {
+    final path = Path();
+    const points = 5;
+    const startAngle = -math.pi / 2;
+    for (var i = 0; i < points * 2; i++) {
+      final radius = i.isEven ? outerRadius : innerRadius;
+      final angle = startAngle + i * math.pi / points;
+      final p = Offset(
+        center.dx + math.cos(angle) * radius,
+        center.dy + math.sin(angle) * radius,
+      );
+      if (i == 0) {
+        path.moveTo(p.dx, p.dy);
+      } else {
+        path.lineTo(p.dx, p.dy);
+      }
+    }
+    path.close();
+    return path;
+  }
+
+  void _drawStarredPoi(Canvas canvas, Size size) {
+    final poi = starredPoi;
+    if (poi == null) return;
+
+    final c = _imageToCanvas(_worldToImage(poi.x, poi.y), size);
+    final star = _starPath(c, 14, 6);
+    canvas.drawPath(
+      star,
+      Paint()
+        ..color = const Color(0xFFFFD54F)
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawPath(
+      star,
+      Paint()
+        ..color = Colors.black87
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0,
+    );
+
+    const labelStyle = TextStyle(
+      color: Color(0xFFFFF8E1),
+      fontSize: 12,
+      fontWeight: FontWeight.bold,
+      shadows: [Shadow(blurRadius: 4, color: Colors.black)],
+    );
+    final tp = TextPainter(
+      text: TextSpan(text: poi.name, style: labelStyle),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(canvas, c + const Offset(16, -8));
   }
 
   void _drawPose(Canvas canvas, Size size) {
@@ -133,6 +190,7 @@ class MapOverlayPainter extends CustomPainter {
   bool shouldRepaint(MapOverlayPainter old) =>
       old.pose != pose ||
       old.pois != pois ||
+      old.starredPoi != starredPoi ||
       old.globalPath != globalPath ||
       old.showGlobalPath != showGlobalPath;
 }

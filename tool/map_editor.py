@@ -408,6 +408,10 @@ def create_poi_ui(
                     initial_value=_poi_path_role_label(poi_index, nav_state),
                 )
                 nav_state.setdefault("poi_role_labels", {})[poi_index] = role_label
+            name_text = server.gui.add_text(
+                "Name",
+                initial_value=str(poi_points[poi_index].get("name", f"POI_{poi_index}")),
+            )
             gui_vector3 = server.gui.add_vector3(
                 "Position",
                 initial_value=poi_points[poi_index]['position'],
@@ -437,6 +441,14 @@ def create_poi_ui(
             nav_state["goal_poi_id"] = poi_index
             if refresh_nav_markers is not None:
                 refresh_nav_markers()
+
+    def update_name(event):
+        new_name = str(name_text.value).strip()
+        if not new_name:
+            name_text.value = str(poi_points[poi_index].get("name", f"POI_{poi_index}"))
+            return
+        poi_points[poi_index]["name"] = new_name
+    name_text.on_update(update_name)
 
     def update_scale(event):
         sphere_handle.radius = scale.value
@@ -705,11 +717,15 @@ def main(args: Args) -> None:
     # ------------------------------------------------------------------
     if os.path.exists(f"{map_dir}/pois.json"):
         with open(f"{map_dir}/pois.json", "r") as f:
-            poi_points = json.load(f)
+            poi_points = json.load(f) or {}
+            if not isinstance(poi_points, dict):
+                poi_points = {}
             poi_points = {int(k): v for k, v in poi_points.items()}
             for k, v in poi_points.items():
+                v.setdefault('id', k)
+                v.setdefault('name', f"POI_{k}")
                 v['position'] = np.array(v['position'])
-            poi_id_counter = max(map(lambda x: int(x), poi_points.keys())) + 1
+            poi_id_counter = max(poi_points.keys(), default=-1) + 1
 
     # ------------------------------------------------------------------
     # POI management UI

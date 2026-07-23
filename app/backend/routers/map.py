@@ -2,6 +2,9 @@ import io
 import json
 import os
 import re
+import signal
+import subprocess
+import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +17,10 @@ from ..map_renderer import render_map
 from ..state import runner
 
 router = APIRouter(tags=['map'])
+
+_map_editor_proc: subprocess.Popen | None = None
+_map_editor_map: str | None = None
+_map_editor_log = None
 
 
 def _require_node():
@@ -104,6 +111,80 @@ def _resolve_map_path(map_name: str) -> str:
     if not os.path.isdir(path) or not os.path.exists(os.path.join(path, 'occupancy_grid.npy')):
         raise HTTPException(404, f'Map {map_name!r} not found')
     return path
+
+
+def _map_editor_running() -> bool:
+    global _map_editor_proc
+    return _map_editor_proc is not None and _map_editor_proc.poll() is None
+
+
+def _stop_map_editor():
+    global _map_editor_proc, _map_editor_map, _map_editor_log
+    if _map_editor_proc is not None and _map_editor_proc.poll() is None:
+        try:
+            os.killpg(os.getpgid(_map_editor_proc.pid), signal.SIGTERM)
+            _map_editor_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(_map_editor_proc.pid), signal.SIGKILL)
+            _map_editor_proc.wait(timeout=3)
+        except ProcessLookupError:
+            pass
+    if _map_editor_log is not None:
+        try:
+            _map_editor_log.close()
+        except Exception:
+            pass
+    _map_editor_proc = None
+    _map_editor_map = None
+    _map_editor_log = None
+
+
+@router.get('/preview/{map_name}/editor')
+def map_preview_editor_status(map_name: str):
+    _resolve_map_path(map_name)
+    return {
+        'running': _map_editor_running() and _map_editor_map == map_name,
+        'activeMap': _map_editor_map if _map_editor_running() else None,
+        'url': 'http://<robot-ip>:8080',
+    }
+
+
+@router.post('/preview/{map_name}/editor/start')
+def map_preview_editor_start(map_name: str):
+    global _map_editor_proc, _map_editor_map, _map_editor_log
+    path = _resolve_map_path(map_name)
+    if _map_editor_running():
+        if _map_editor_map == map_name:
+            return {'ok': True, 'running': True, 'activeMap': map_name, 'url': 'http://<robot-ip>:8080'}
+        _stop_map_editor()
+
+    root = os.environ.get('TINYNAV_DB_PATH', '/tinynav/tinynav_db')
+    logs_dir = os.path.join(root, 'logs')
+    os.makedirs(logs_dir, exist_ok=True)
+    log_path = os.path.join(logs_dir, f'map_editor_{map_name}_{int(time.time())}.log')
+    _map_editor_log = open(log_path, 'a', buffering=1)
+    cmd = ['uv', 'run', 'python', 'tool/map_editor.py', '--tinynav-map-path', path]
+    try:
+        _map_editor_proc = subprocess.Popen(
+            cmd,
+            cwd='/tinynav',
+            stdout=_map_editor_log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except Exception as e:
+        _stop_map_editor()
+        raise HTTPException(500, f'Failed to start map editor: {e}') from e
+    _map_editor_map = map_name
+    return {'ok': True, 'running': True, 'activeMap': map_name, 'url': 'http://<robot-ip>:8080', 'log': log_path}
+
+
+@router.post('/preview/{map_name}/editor/stop')
+def map_preview_editor_stop(map_name: str):
+    _resolve_map_path(map_name)
+    if _map_editor_running() and _map_editor_map == map_name:
+        _stop_map_editor()
+    return {'ok': True, 'running': False}
 
 
 @router.get('/preview/{map_name}')

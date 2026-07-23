@@ -1342,10 +1342,16 @@ class MapNode(Node):
         pose_in_map_position: np.ndarray,
         lookahead_distance: float,
     ) -> np.ndarray:
+        if len(paths_in_map) == 0:
+            return pose_in_map_position
+        closest_idx, closest_position, _ = self._closest_point_on_path(paths_in_map, pose_in_map_position)
         if self.select_target_position_on_path_on:
+            remaining_path = paths_in_map[closest_idx + 1 :]
+            if len(remaining_path) == 0:
+                return closest_position
             return select_target_position_on_path(
-                paths_in_map,
-                pose_in_map_position,
+                remaining_path,
+                closest_position,
                 lookahead_distance=lookahead_distance,
                 turn_angle_threshold_rad=np.deg2rad(70.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
@@ -1354,9 +1360,6 @@ class MapNode(Node):
                 turn_window_distance=0.4,
             )
 
-        if len(paths_in_map) == 0:
-            return pose_in_map_position
-        closest_idx, closest_position, _ = self._closest_point_on_path(paths_in_map, pose_in_map_position)
         target_position = paths_in_map[-1]
         start_point = closest_position
         accumulated_distance = 0.0
@@ -1404,18 +1407,21 @@ class MapNode(Node):
         return path[-1]
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
+        profile_start_time = time.perf_counter()
         occupancy_map_origin = self.occupancy_map_meta[:3]
         resolution = self.occupancy_map_meta[3]
+        pose_position = pose_in_map[:3, 3]
         start_idx = np.array([
-            int((pose_in_map[0, 3] - occupancy_map_origin[0]) / resolution),
-            int((pose_in_map[1, 3] - occupancy_map_origin[1]) / resolution),
-            int((pose_in_map[2, 3] - occupancy_map_origin[2]) / resolution)
+            int((pose_position[0] - occupancy_map_origin[0]) / resolution),
+            int((pose_position[1] - occupancy_map_origin[1]) / resolution),
+            int((pose_position[2] - occupancy_map_origin[2]) / resolution)
         ], dtype=np.int32)
         poi_goal_idx = np.array([
             int((target_poi[0] - occupancy_map_origin[0]) / resolution),
             int((target_poi[1] - occupancy_map_origin[1]) / resolution),
             int((target_poi[2] - occupancy_map_origin[2]) / resolution)
         ], dtype=np.int32)
+        subgoal_label = f"{self._nav_subgoal_index + 1}/{len(self._nav_subgoals_in_map)}" if self._nav_subgoals_in_map else "none"
 
         if (
             start_idx[0] < 0
@@ -1431,29 +1437,72 @@ class MapNode(Node):
             or poi_goal_idx[2] < 0
             or poi_goal_idx[2] >= self.occupancy_map.shape[2]
         ):
+            self.get_logger().warning(
+                "nav_path_profile failed=out_of_bounds "
+                f"subgoal={subgoal_label} "
+                f"pose=({pose_position[0]:.2f},{pose_position[1]:.2f},{pose_position[2]:.2f}) "
+                f"target=({target_poi[0]:.2f},{target_poi[1]:.2f},{target_poi[2]:.2f}) "
+                f"start_idx={tuple(start_idx)} goal_idx={tuple(poi_goal_idx)} "
+                f"map_shape={self.occupancy_map.shape}"
+            )
             return None 
+        start_snap_start_time = time.perf_counter()
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
+        start_snap_ms = (time.perf_counter() - start_snap_start_time) * 1000.0
+        goal_snap_start_time = time.perf_counter()
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+        goal_snap_ms = (time.perf_counter() - goal_snap_start_time) * 1000.0
 
         if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
             self.get_logger().warning(
-                f"search_close_to_sdf_map returned empty path: start_idx={tuple(start_idx)}, goal_idx={tuple(poi_goal_idx)}"
+                "nav_path_profile failed=empty_sdf_snap "
+                f"subgoal={subgoal_label} "
+                f"pose=({pose_position[0]:.2f},{pose_position[1]:.2f},{pose_position[2]:.2f}) "
+                f"target=({target_poi[0]:.2f},{target_poi[1]:.2f},{target_poi[2]:.2f}) "
+                f"start_idx={tuple(start_idx)} goal_idx={tuple(poi_goal_idx)} "
+                f"start_snap_len={len(sdf_start_path)} goal_snap_len={len(sdf_goal_path)} "
+                f"start_snap_ms={start_snap_ms:.0f} goal_snap_ms={goal_snap_ms:.0f}"
             )
             return None
 
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
+        sdf_search_start_time = time.perf_counter()
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        sdf_search_ms = (time.perf_counter() - sdf_search_start_time) * 1000.0
         if len(path_sdf) == 0:
             self.get_logger().warning(
-                f"search_within_sdf_map returned empty path: start_idx={tuple(sdf_start_sdf)}, goal_idx={tuple(sdf_goal_sdf)}"
+                "nav_path_profile failed=empty_sdf_path "
+                f"subgoal={subgoal_label} "
+                f"pose=({pose_position[0]:.2f},{pose_position[1]:.2f},{pose_position[2]:.2f}) "
+                f"target=({target_poi[0]:.2f},{target_poi[1]:.2f},{target_poi[2]:.2f}) "
+                f"start_idx={tuple(start_idx)} goal_idx={tuple(poi_goal_idx)} "
+                f"sdf_start_idx={tuple(sdf_start_sdf)} sdf_goal_idx={tuple(sdf_goal_sdf)} "
+                f"start_snap_len={len(sdf_start_path)} goal_snap_len={len(sdf_goal_path)} "
+                f"start_snap_ms={start_snap_ms:.0f} goal_snap_ms={goal_snap_ms:.0f} "
+                f"sdf_search_ms={sdf_search_ms:.0f}"
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
+            shortcut_start_time = time.perf_counter()
             pruned_path = shortcut_prune_path(path, self.sdf_map, self.occupancy_map, resolution)
+            shortcut_ms = (time.perf_counter() - shortcut_start_time) * 1000.0
             if len(pruned_path) < len(path):
                 self.get_logger().info(f"shortcut pruned nav path: {len(path)} -> {len(pruned_path)} points")
             converted_path = np.array(pruned_path) * resolution + occupancy_map_origin
+            total_ms = (time.perf_counter() - profile_start_time) * 1000.0
+            self.get_logger().info(
+                "nav_path_profile ok "
+                f"subgoal={subgoal_label} "
+                f"pose=({pose_position[0]:.2f},{pose_position[1]:.2f},{pose_position[2]:.2f}) "
+                f"target=({target_poi[0]:.2f},{target_poi[1]:.2f},{target_poi[2]:.2f}) "
+                f"start_idx={tuple(start_idx)} goal_idx={tuple(poi_goal_idx)} "
+                f"sdf_start_idx={tuple(sdf_start_sdf)} sdf_goal_idx={tuple(sdf_goal_sdf)} "
+                f"start_snap_len={len(sdf_start_path)} goal_snap_len={len(sdf_goal_path)} "
+                f"sdf_path_len={len(path_sdf)} raw_path_len={len(path)} pruned_path_len={len(pruned_path)} "
+                f"start_snap_ms={start_snap_ms:.0f} goal_snap_ms={goal_snap_ms:.0f} "
+                f"sdf_search_ms={sdf_search_ms:.0f} shortcut_ms={shortcut_ms:.0f} total_ms={total_ms:.0f}"
+            )
             return converted_path
         return None
 
