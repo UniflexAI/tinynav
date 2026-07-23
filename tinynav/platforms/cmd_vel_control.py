@@ -52,6 +52,15 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.3
+        self.max_reverse_speed = 0.45
+        self.vx_ki = 0.25
+        self.vx_i_limit_forward = 0.05
+        self.vx_i_limit_reverse = 0.10
+        self.vx_integral = 0.0
+        self.vx_integral_target_sign = 0.0
+        self.actual_vx = 0.0
+        self._last_pose_robot_T = None
+        self._last_pose_stamp = None
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
@@ -70,6 +79,7 @@ class CmdVelControlNode(Node):
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
+        self._reset_vx_integral()
         if not self._paused:
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
@@ -77,6 +87,8 @@ class CmdVelControlNode(Node):
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
         self._nav_active = bool(msg.data)
+        if self._nav_active != was_active:
+            self._reset_vx_integral()
         if was_active and not self._nav_active:
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
@@ -87,9 +99,62 @@ class CmdVelControlNode(Node):
 
     def pose_callback(self, msg):
         self.pose = msg
+        try:
+            T = self._odom_msg_to_np(msg)
+            T_robot = T @ self.T_robot_to_camera
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if stamp <= 0.0:
+                stamp = time.monotonic()
+            if self._last_pose_robot_T is not None and self._last_pose_stamp is not None:
+                dt = stamp - self._last_pose_stamp
+                if 1e-3 <= dt <= 0.5:
+                    delta = np.linalg.inv(self._last_pose_robot_T) @ T_robot
+                    measured_vx = float(delta[0, 3] / dt)
+                    self.actual_vx = 0.7 * self.actual_vx + 0.3 * measured_vx
+            self._last_pose_robot_T = T_robot
+            self._last_pose_stamp = stamp
+        except Exception:
+            pass
+
+    @staticmethod
+    def _odom_msg_to_np(msg):
+        T = np.eye(4)
+        position = msg.pose.pose.position
+        rot = msg.pose.pose.orientation
+        quat = [rot.x, rot.y, rot.z, rot.w]
+        T[:3, :3] = R.from_quat(quat).as_matrix()
+        T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
+        return T
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
+
+    def _reset_vx_integral(self):
+        self.vx_integral = 0.0
+        self.vx_integral_target_sign = 0.0
+
+    def _apply_vx_pi(self, target_vx: float, dt: float):
+        if abs(target_vx) < 0.05 or not np.isfinite(self.actual_vx):
+            self._reset_vx_integral()
+            return target_vx, 0.0, 0.0
+
+        target_sign = float(np.sign(target_vx))
+        if self.vx_integral_target_sign != 0.0 and target_sign != self.vx_integral_target_sign:
+            self._reset_vx_integral()
+        self.vx_integral_target_sign = target_sign
+
+        error = float(target_vx - self.actual_vx)
+        self.vx_integral += error * dt
+        i_limit = self.vx_i_limit_reverse if target_vx < 0.0 else self.vx_i_limit_forward
+        integral_limit = i_limit / max(self.vx_ki, 1e-6)
+        self.vx_integral = float(np.clip(self.vx_integral, -integral_limit, integral_limit))
+        i_term = float(np.clip(self.vx_ki * self.vx_integral, -i_limit, i_limit))
+        compensated_vx = target_vx + i_term
+        if target_vx < 0.0:
+            compensated_vx = float(np.clip(compensated_vx, -self.max_reverse_speed, 0.0))
+        else:
+            compensated_vx = float(np.clip(compensated_vx, 0.0, 0.5))
+        return compensated_vx, i_term, error
 
     def cmd_timer_callback(self):
         now = time.monotonic()
@@ -122,6 +187,14 @@ class CmdVelControlNode(Node):
         else:
             stale_state = "fresh"
 
+        raw_target_vx = target_cmd.linear.x
+        vx_i_term = 0.0
+        vx_error = 0.0
+        if stale_state == "fresh":
+            target_cmd.linear.x, vx_i_term, vx_error = self._apply_vx_pi(target_cmd.linear.x, dt)
+        else:
+            self._reset_vx_integral()
+
         out = Twist()
         out.linear.y = 0.0
 
@@ -134,7 +207,7 @@ class CmdVelControlNode(Node):
             prev_wz = self.prev_cmd.angular.z
             self.cmd_pub.publish(out)
             self.prev_cmd = out
-            self._log_cmd_debug(now, age, stale_state, target_cmd, out, prev_vx, prev_wz, reverse_passthrough=True)
+            self._log_cmd_debug(now, age, stale_state, target_cmd, out, prev_vx, prev_wz, raw_target_vx, vx_error, vx_i_term, reverse_passthrough=True)
             return
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
@@ -164,9 +237,9 @@ class CmdVelControlNode(Node):
         prev_wz = self.prev_cmd.angular.z
         self.cmd_pub.publish(out)
         self.prev_cmd = out
-        self._log_cmd_debug(now, age, stale_state, target_cmd, out, prev_vx, prev_wz, reverse_passthrough=False)
+        self._log_cmd_debug(now, age, stale_state, target_cmd, out, prev_vx, prev_wz, raw_target_vx, vx_error, vx_i_term, reverse_passthrough=False)
 
-    def _log_cmd_debug(self, now, age, stale_state, target_cmd, out, prev_vx, prev_wz, reverse_passthrough):
+    def _log_cmd_debug(self, now, age, stale_state, target_cmd, out, prev_vx, prev_wz, raw_target_vx, vx_error, vx_i_term, reverse_passthrough):
         if (
             now - self._last_cmd_debug_log_time < 0.5
             and stale_state == "fresh"
@@ -178,7 +251,9 @@ class CmdVelControlNode(Node):
             "cmd_vel_debug "
             f"age={age:.2f} stale_state={stale_state} "
             f"path_dt_ema={self.path_period_ema:.2f} "
-            f"target_vx={target_cmd.linear.x:.2f} target_wz={target_cmd.angular.z:.2f} "
+            f"raw_target_vx={raw_target_vx:.2f} target_vx={target_cmd.linear.x:.2f} "
+            f"target_wz={target_cmd.angular.z:.2f} actual_vx={self.actual_vx:.2f} "
+            f"vx_error={vx_error:.2f} vx_integral={self.vx_integral:.2f} vx_i_term={vx_i_term:.2f} "
             f"out_vx={out.linear.x:.2f} out_wz={out.angular.z:.2f} "
             f"prev_vx={prev_vx:.2f} prev_wz={prev_wz:.2f} "
             f"reverse_passthrough={reverse_passthrough}"
