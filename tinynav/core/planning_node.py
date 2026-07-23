@@ -34,6 +34,7 @@ class RobotConfig:
     control_x: float = 0.0
     control_y: float = 0.0
     safety_radius: float = 0.5
+    comfort_radius: float = 0.8
 
     @property
     def cam_offset_3d(self):
@@ -58,6 +59,7 @@ GO2_CONFIG = RobotConfig(
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
+    comfort_radius=0.8,
 )
 
 B2_CONFIG = RobotConfig(
@@ -66,6 +68,7 @@ B2_CONFIG = RobotConfig(
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
+    comfort_radius=0.8,
 )
 
 # === Helper functions ===
@@ -261,7 +264,7 @@ def generate_predefined_trajectory_vocabularies(
     return np.asarray(trajectories), np.asarray(params)
 
 @njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
+def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1, comfort_radius=0.8,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
     """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
     scores = []
@@ -317,12 +320,17 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
         elif min_dist_for_traj != float('inf'):
-            if min_dist_for_traj > safety_radius:
+            if min_dist_for_traj > comfort_radius:
                 scores.append(0.0)
             else:
                 max_steps = len(traj)
                 decay_factor = (max_steps - closest_step_for_traj) / max_steps
-                base_score = 1.0 / (min_dist_for_traj + 1e-3)
+                if min_dist_for_traj <= safety_radius:
+                    base_score = 1.0 / (min_dist_for_traj + 1e-3)
+                else:
+                    comfort_span = max(comfort_radius - safety_radius, 1e-3)
+                    comfort_ratio = (comfort_radius - min_dist_for_traj) / comfort_span
+                    base_score = 0.05 * comfort_ratio * comfort_ratio
                 scores.append(decay_factor * base_score)
         else:
             scores.append(0.0)
@@ -361,7 +369,7 @@ class PlanningNode(Node):
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
             f"ctrl=({self.robot.control_x},{self.robot.control_y}), "
-            f"safety_r={self.robot.safety_radius}m)"
+            f"safety_r={self.robot.safety_radius}m, comfort_r={self.robot.comfort_radius}m)"
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
@@ -643,7 +651,17 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
+            scores, occ_points = score_trajectories_by_ESDF(
+                trajectories,
+                ESDF_map,
+                self.origin,
+                self.resolution,
+                self.robot.safety_radius,
+                self.robot.comfort_radius,
+                front_len,
+                rear_len,
+                half_w,
+            )
             scores = np.asarray(scores, dtype=np.float64)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
@@ -674,6 +692,7 @@ class PlanningNode(Node):
                     self.origin,
                     self.resolution,
                     self.robot.safety_radius,
+                    self.robot.comfort_radius,
                     front_len,
                     rear_len,
                     half_w,
