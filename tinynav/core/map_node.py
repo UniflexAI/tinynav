@@ -364,7 +364,7 @@ class MapNode(Node):
             timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
             if success:
-                self.try_lock_transform_from_map_to_odom(timestamp_ns)
+                self.try_lock_transform_from_map_to_odom(timestamp_ns, keyframe_image_msg.header.stamp)
 
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
@@ -535,10 +535,8 @@ class MapNode(Node):
         features = asyncio.run(self.super_point_extractor.infer(image))
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
-            # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
-            self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
             return True, pose_in_world
@@ -579,7 +577,7 @@ class MapNode(Node):
             pass
 
 
-    def try_lock_transform_from_map_to_odom(self, timestamp: int):
+    def try_lock_transform_from_map_to_odom(self, timestamp: int, stamp):
         """Lock T_from_map_to_odom from a single consistent burst of relocalizations.
 
         Each successful relocalization gives one observation of the (constant)
@@ -588,6 +586,11 @@ class MapNode(Node):
         recent few and only lock once they all agree spatially (pairwise translation
         spread <= reloc_lock_tol). Once locked we never recompute -- the caller stops
         relocalizing and rides odom.
+
+        /map/relocalization now fires here (on lock), not per-attempt in
+        keyframe_relocalization: consumers waiting on it want to know the instant
+        nav can actually plan a path, not the first (possibly wrong) single-frame
+        guess well before the lock.
         """
         if timestamp not in self.pose_graph_used_pose:
             return
@@ -614,6 +617,7 @@ class MapNode(Node):
 
         # Consistent burst -> lock to the most recent observation and freeze.
         self.T_from_map_to_odom = observation_T_from_map_to_odom
+        self.relocation_pub.publish(np2msg(camera_in_map_world, stamp, "world", "camera"))
         self.get_logger().info(
             f"[reloc-lock] locked T_from_map_to_odom (spread={spread:.2f}m over "
             f"{self.reloc_lock_window} obs)")
