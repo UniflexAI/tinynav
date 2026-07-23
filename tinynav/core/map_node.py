@@ -27,6 +27,7 @@ from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
+from tinynav.core.planning_node import GO2_CONFIG
 logger = logging.getLogger(__name__)
 
 
@@ -173,14 +174,6 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                         if neighbor not in parent:
                             parent[neighbor] = current
     return []
-
-# The nav odometry pose is the CAMERA pose; the camera sits this far ahead of the
-# robot control center along body-forward (RobotConfig.camera_x for the GO2). POI
-# arrival is a "did the body reach the POI" test, so it must be measured from the
-# control center — otherwise a POI beside/under the robot (e.g. near the rear
-# footprint) reads a full body-offset too far and never registers as reached, and
-# nav sits there forever. Keep in sync with planning_node RobotConfig.camera_x.
-_CAM_FWD_OFFSET_M = 0.2
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
@@ -664,10 +657,14 @@ class MapNode(Node):
 
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
-        # Arrival is a body-reached test: shift from the camera back to the control
-        # center along body-forward (the +Z column of the map-frame pose). See
-        # _CAM_FWD_OFFSET_M. `pos` (camera) is still used for path following below.
-        arrival_pos = pos - _CAM_FWD_OFFSET_M * pose_in_map[:3, 2]
+        # Arrival is a "did the body reach the POI" test, but the odom pose is the
+        # CAMERA pose — measuring from it leaves a POI beside/under the robot (e.g.
+        # near the rear footprint) reading a full body-offset too far, so it never
+        # registers as reached and nav sits there forever. Shift camera -> control
+        # center using the shared robot config (same transform as planning_node's
+        # camera_to_robot_center) so the offset can't drift from a hardcoded copy.
+        # `pos` (camera) is still used for path following below.
+        arrival_pos = pos - pose_in_map[:3, :3] @ GO2_CONFIG.cam_offset_3d
 
         if np.linalg.norm(poi[:2] - arrival_pos[:2]) < 0.5 and abs(poi[2] - arrival_pos[2]) < 2.0:
             if self._leg_initial_length is not None:

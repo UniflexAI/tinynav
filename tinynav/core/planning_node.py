@@ -812,8 +812,8 @@ class PlanningNode(Node):
                 cur_err = abs(_wrap(bearing - _world_heading(trajectories[top_indices[0]][0])))
                 if dist_goal > 0.5 and cur_err > np.radians(60.0):
                     _head_err = lambda i: abs(_wrap(bearing - _world_heading(trajectories[i][-1])))
-                    turn_i = min(feasible, key=_head_err)
-                    if _head_err(turn_i) < cur_err - np.radians(5.0):
+                    turn_err, turn_i = min((_head_err(i), i) for i in feasible)
+                    if turn_err < cur_err - np.radians(5.0):
                         top_indices = [turn_i]
                         self.last_param = params[turn_i]
                         self.get_logger().info(

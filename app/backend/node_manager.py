@@ -833,13 +833,12 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
-            self._nav_paused = False
-        # Republish resume on the LATCHED /nav/paused so the freshly spawned
-        # cmd_vel_control (TRANSIENT_LOCAL subscriber) doesn't inherit a stale
-        # 'paused' latched before this restart and silently freeze — a POI sent
-        # after relocalize would otherwise be swallowed. Mirrors cmd_stop_nav_nodes
-        # resetting _nav_paused; here we must also re-latch, not just reset the flag.
-        self._pause_pub.publish(Bool(data=False))
+        # Re-latch resume on /nav/paused: the freshly spawned cmd_vel_control is a
+        # TRANSIENT_LOCAL subscriber and would otherwise inherit a stale 'paused'
+        # latched before this restart and silently freeze — a POI sent after
+        # relocalize would be swallowed. _set_nav_paused resets the flag and
+        # re-latches together (mirrors cmd_stop_nav_nodes resetting _nav_paused).
+        self._set_nav_paused(False)
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
@@ -1115,15 +1114,19 @@ class BackendNode(Ros2NodeManager):
         else:
             self._stop_all()
 
-    def cmd_nav_pause(self):
+    def _set_nav_paused(self, paused: bool):
+        """Set the pause flag and re-latch /nav/paused together, so the in-memory
+        flag and the latched topic (which a freshly spawned cmd_vel_control reads
+        on startup) can never diverge. Single source for pause/resume/restart."""
         with self._lock:
-            self._nav_paused = True
-        self._pause_pub.publish(Bool(data=True))
+            self._nav_paused = paused
+        self._pause_pub.publish(Bool(data=paused))
+
+    def cmd_nav_pause(self):
+        self._set_nav_paused(True)
 
     def cmd_nav_resume(self):
-        with self._lock:
-            self._nav_paused = False
-        self._pause_pub.publish(Bool(data=False))
+        self._set_nav_paused(False)
 
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))
