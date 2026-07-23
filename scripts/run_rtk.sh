@@ -13,10 +13,12 @@
 #
 # NTRIP credentials are read from an env file kept OUT of git
 # (see rtk/.ntrip.env.example). Override paths via env vars if needed.
-set -uo pipefail
-
+# Source ROS BEFORE set -u: ROS setup.bash references unbound vars
+# (e.g. AMENT_TRACE_SETUP_FILES) and would abort the script under nounset.
 source /opt/ros/humble/setup.bash 2>/dev/null || true
 [ -f /tinynav/install/setup.bash ] && source /tinynav/install/setup.bash 2>/dev/null || true
+
+set -uo pipefail
 
 # NTRIP account (TINYNAV_NTRIP_*). Kept out of git; see rtk/.ntrip.env.example.
 ENV_FILE="${RTK_ENV_FILE:-/tinynav/rtk/.ntrip.env}"
