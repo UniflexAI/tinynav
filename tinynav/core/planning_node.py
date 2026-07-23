@@ -157,7 +157,7 @@ class ObstacleConfig:
     robot_z_bottom: float = -0.5
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.3
+    min_wall_span_m: float = 0.4
     dilation_cells: int = 0
 
 
