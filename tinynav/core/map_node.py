@@ -1316,6 +1316,16 @@ class MapNode(Node):
                 return
             pose_in_origin_odom = self.pose_graph_used_pose[timestamp]
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
+        if self.rtk_mode == "replace" and len(poi) >= 3:
+            # RTK / File B supply no usable z (/rtk/map_pose z is 0), but the map
+            # ground sits at a very different height (this map ~ -2.7 m). Left at
+            # 0, pose_in_map.z is ~map_z off and blows past every 2-3 m z gate
+            # (POI arrival, subgoal arrival, path/SDF z-clamp -- whose SDF search
+            # even centres on the wrong z), so the robot never advances and
+            # circles in place. Pin z to the active POI's ground height
+            # (flat-level assumption) so all z comparisons are map-frame vs
+            # map-frame. Does not touch xy or heading.
+            pose_in_map[2, 3] = float(poi[2])
         publish_stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, publish_stamp, "world", "map"))
 
