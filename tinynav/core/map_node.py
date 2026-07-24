@@ -889,10 +889,26 @@ class MapNode(Node):
         if self.latest_odom_pose is None:
             return False
 
-        # rtk_map_pose is T_map_body. SLAM odom is T_odom_body.
-        # map_node stores T_from_map_to_odom as T_odom_map, because published
-        # map poses use inv(T_from_map_to_odom) @ T_odom_body.
-        self.T_from_map_to_odom = self.latest_odom_pose @ np.linalg.inv(self.latest_rtk_map_pose)
+        # T_from_map_to_odom is the map-world -> odom-world transform. Both worlds
+        # are gravity-aligned (Z-up), so it MUST be a pure yaw about Z plus a
+        # planar translation. Do NOT build it as odom @ inv(rtk_pose): the SLAM
+        # odom rotation is camera-optical (forward = optical +Z) while rtk_map_pose
+        # carries a planar-yaw quaternion -- multiplying the two mixes conventions
+        # and contaminates the rotation, which skews every map->odom target
+        # transform so the robot veers. Instead take the yaw offset from the two
+        # headings and anchor the translation to the current position match.
+        odom_pose = self.latest_odom_pose
+        rtk_pose = self.latest_rtk_map_pose
+        fwd = odom_pose[:3, :3] @ np.array([0.0, 0.0, 1.0])   # camera forward, odom world
+        heading_odom = np.arctan2(fwd[1], fwd[0])
+        psi_map = np.arctan2(rtk_pose[1, 0], rtk_pose[0, 0])
+        phi = heading_odom - psi_map
+        c, s = np.cos(phi), np.sin(phi)
+        Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        T = np.eye(4)
+        T[:3, :3] = Rz
+        T[:3, 3] = odom_pose[:3, 3] - Rz @ rtk_pose[:3, 3]   # inv(T)@odom position == rtk xy
+        self.T_from_map_to_odom = T
         self.latest_rtk_transform_received_at = time.monotonic()
         self.first_done = True
 
