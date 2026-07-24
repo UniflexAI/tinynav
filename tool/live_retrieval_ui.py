@@ -94,8 +94,11 @@ def keypoint_with_depth_to_3d(keypoints: np.ndarray, depth: np.ndarray, pose_fro
         else:
             point_in_camera.append([0.0, 0.0, 0.0])
             inliers.append(False)
-    point_in_camera = np.array(point_in_camera)
-    inliers = np.array(inliers)
+    # reshape(-1, 3), not a bare np.array(...): with 0 keypoints (now reachable now that a
+    # candidate's stats are always computed, even ones with very few/no raw matches -- see
+    # retrieval_loop), np.array([]) is shape (0,) and the matmul below fails a core-dim check.
+    point_in_camera = np.array(point_in_camera).reshape(-1, 3)
+    inliers = np.array(inliers, dtype=bool)
     rotation = pose_from_camera_to_world[:3, :3]
     translation = pose_from_camera_to_world[:3, 3]
     point_in_world = (rotation @ point_in_camera.T).T + translation
