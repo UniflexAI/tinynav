@@ -61,3 +61,17 @@ unitree = [
     "pymeshlab==2022.2.post4",
     "newrawpy<=1.0.0b0",
 ]
+# Only needed to run scripts/export_efficientloftr_onnx.py (PyTorch -> ONNX, one-time per
+# platform; the resulting .onnx is committed under tinynav/models/, same as dinov2/dinov3/
+# superpoint/etc.). Not a runtime dependency of tinynav.core.models_trt.EfficientLoFTRTRT,
+# which only needs the compiled TensorRT engine.
+efficientloftr = [
+    "torch>=2.4,<2.11",
+    "kornia",         # third_party/EfficientLoFTR/src/loftr: create_meshgrid, dsnt subpix ops
+    "yacs",           # third_party/EfficientLoFTR/src/loftr: CfgNode-based model config
+    "loguru",         # third_party/EfficientLoFTR/src/loftr: logging calls
+    "onnx",
+    "gdown",              # fetches the pretrained eloftr_outdoor.ckpt from its Google Drive release
+    "pytorch_lightning",  # the .ckpt was saved via a PL wrapper; needed to unpickle it at all,
+                          # even though only the plain state_dict tensors inside are actually used
+]

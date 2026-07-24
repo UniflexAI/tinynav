@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import logging
 import os
 import shelve
@@ -37,6 +38,7 @@ from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
+from tinynav.core.vlad_retrieval import compute_vlad, fit_vlad_codebook
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
 
@@ -52,6 +54,13 @@ class BuildMapArgs:
     # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
+    # Number of VLAD codebook clusters used to re-embed retrieval features from color images.
+    vlad_num_clusters: int = 64
+    # Keyframes randomly sampled to fit the VLAD codebook (standard VLAD/BoVW practice -- a
+    # representative subset is enough to fit cluster centers). Pooling every keyframe's patch
+    # tokens at once instead (keyframes x 256 patches x 768 dims, plus k-means working memory)
+    # is multiple GB on a large map and OOM-killed the process here.
+    vlad_codebook_fit_keyframes: int = 300
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
@@ -185,6 +194,31 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
     loop_list = []
     for idx in top_k_indices:
         if similarity_array[idx] > loop_similarity_threshold:
+            loop_list.append((idx, similarity_array[idx]))
+    return loop_list[-loop_top_k:]
+
+def find_loop_by_zscore(target_embedding:np.ndarray, embeddings:np.ndarray, z_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
+    """Like find_loop, but accepts a candidate based on how many standard deviations its
+    similarity sits above the mean of *all* candidates for this query, rather than an absolute
+    cosine-similarity cutoff.
+
+    VLAD's absolute similarity scale is compressed by nuisance factors (lighting, compression,
+    pose) that shift the whole distribution together, so a fixed absolute threshold calibrated
+    on one map/session drifts on another. The gap between a true match and the rest of the map
+    (its z-score) stays large and stable across conditions, so thresholding on that instead is
+    robust without per-deployment recalibration.
+    """
+    if len(embeddings) == 0:
+        return []
+    similarity_array = einops.einsum(target_embedding, embeddings, "d, n d -> n")
+    std = similarity_array.std()
+    if std == 0.0:
+        return []
+    z_scores = (similarity_array - similarity_array.mean()) / std
+    top_k_indices = np.argsort(similarity_array, axis = 0)
+    loop_list = []
+    for idx in top_k_indices:
+        if z_scores[idx] > z_threshold:
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
@@ -368,12 +402,15 @@ class TinyNavDB():
                 os.remove(f"{map_save_path}/embeddings.db")
             if os.path.exists(f"{map_save_path}/semantic_embeddings.db"):
                 os.remove(f"{map_save_path}/semantic_embeddings.db")
+            if os.path.exists(f"{map_save_path}/color_features.db"):
+                os.remove(f"{map_save_path}/color_features.db")
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
         self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
+        self.color_features = IntKeyShelf(f"{map_save_path}/color_features")
 
-    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None, color_features:dict = None):
         if infra1_image is not None:
             self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
@@ -386,6 +423,8 @@ class TinyNavDB():
             self.semantic_embeddings[key] = semantic_embedding
         if features is not None:
             self.features[key] = features
+        if color_features is not None:
+            self.color_features[key] = color_features
 
     def get_depth_embedding_features_images(self, key:int):
         key_int = int(key)
@@ -413,11 +452,21 @@ class TinyNavDB():
     def has_semantic_embedding(self, key:int) -> bool:
         return key in self.semantic_embeddings
 
+    def get_depth(self, key:int):
+        return self.depths[key]
+
+    def get_color_features(self, key:int):
+        return self.color_features[key]
+
+    def has_color_features(self, key:int) -> bool:
+        return key in self.color_features
+
     def close(self):
         self.features.close()
         self.embeddings.close()
         self.semantic_embeddings.close()
         self.depths.close()
+        self.color_features.close()
         self.infra1_video_db.close()
         self.rgb_video_db.close()
 
@@ -573,12 +622,16 @@ class BuildMapNode(Node):
         map_save_path: str,
         verbose_timer: bool = True,
         global_frames_ratio: float = 1.1,
+        vlad_num_clusters: int = 64,
+        vlad_codebook_fit_keyframes: int = 300,
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
             raise ValueError(f"global_frames_ratio must be >= 1.0, got {global_frames_ratio}")
         self.verbose_timer = verbose_timer
         self.global_frames_ratio = global_frames_ratio
+        self.vlad_num_clusters = vlad_num_clusters
+        self.vlad_codebook_fit_keyframes = vlad_codebook_fit_keyframes
         # Keyframe count at the last global refinement (COLMAP: ba_prev_num_reg_frames).
         self._global_prev_num_frames = 0
         self.logger = logging.getLogger(__name__)
@@ -642,6 +695,7 @@ class BuildMapNode(Node):
         self.rgb_camera_info_sub = Subscriber(self, CameraInfo, "/camera/camera/color/camera_info")
         self.rgb_camera_info_sub.registerCallback(self.rgb_camera_info_callback)
         self.rgb_camera_K = None
+        self.rgb_image_shape = None
 
     def tf_callback(self, msg:TFMessage):
         T_infra1_to_link = None
@@ -749,6 +803,17 @@ class BuildMapNode(Node):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
 
+        if self.T_rgb_to_infra1 is not None and self.rgb_camera_K is not None:
+            with self.stage_timer.timed("color_features"):
+                # Reference depth in the RGB frame is reprojected on demand at relocalization
+                # time from this stored infra1 depth (see MapNode.relocalize_with_depth) instead
+                # of being persisted per keyframe, which used to bloat map storage several-fold
+                # (dense float32 depth at RGB resolution vs. the sparser infra1 depth).
+                self.rgb_image_shape = rgb_image.shape[:2]
+                color_gray = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
+                color_features = asyncio.run(self.super_point_extractor.infer(color_gray))
+                self.db.set_entry(keyframe_image_timestamp, color_features = color_features)
+
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_image_timestamp] = odom
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
@@ -773,6 +838,47 @@ class BuildMapNode(Node):
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
+
+    def rebuild_retrieval_embeddings_from_color(self, db: TinyNavDB) -> None:
+        """Replace the mono/CLS-token retrieval embeddings with color-image DINOv2 patch
+        tokens aggregated via VLAD. Runs once, after mapping finishes, over every keyframe.
+
+        The codebook is fit from a bounded random sample of keyframes' patch tokens (standard
+        VLAD/BoVW practice -- a representative subset is enough to fit cluster centers), not by
+        pooling every keyframe's patches at once: on a large map, that pooled set (keyframes x
+        256 patches x 768 dims) plus k-means' own working memory is several GB and OOM-killed
+        this process. The final per-keyframe embedding pass streams one keyframe at a time
+        instead of holding every keyframe's patch tokens in memory together.
+        """
+        timestamps = sorted(self.pose_graph_used_pose.keys())
+        if len(timestamps) == 0:
+            self.get_logger().warning("No keyframes available to fit VLAD codebook, skipping re-embedding")
+            return
+
+        def load_patch_tokens(timestamp):
+            _, _, _, rgb_loader, _ = db.get_depth_embedding_features_images(timestamp)
+            return asyncio.run(self.dinov2_model.infer_patch_tokens(rgb_loader()))
+
+        rng = np.random.default_rng(0)
+        sample_size = min(self.vlad_codebook_fit_keyframes, len(timestamps))
+        sample_indices = rng.choice(len(timestamps), size=sample_size, replace=False)
+        sampled_patch_tokens = [load_patch_tokens(timestamps[i]) for i in sample_indices]
+        pooled_patch_tokens = np.concatenate(sampled_patch_tokens, axis=0)
+        del sampled_patch_tokens
+
+        num_clusters = min(self.vlad_num_clusters, pooled_patch_tokens.shape[0])
+        codebook = fit_vlad_codebook(pooled_patch_tokens, num_clusters=num_clusters)
+        np.save(f"{self.map_save_path}/vlad_codebook.npy", codebook)
+        del pooled_patch_tokens
+
+        for timestamp in timestamps:
+            patch_tokens = load_patch_tokens(timestamp)
+            db.embeddings[timestamp] = compute_vlad(patch_tokens, codebook)
+
+        self.get_logger().info(
+            f"Re-embedded {len(timestamps)} keyframes with a {num_clusters}-cluster VLAD codebook "
+            f"fit from {sample_size} sampled keyframes"
+        )
 
     def detect_loop_closure(self, timestamp: int) -> None:
         target_embedding = self.db.get_embedding(timestamp)
@@ -872,13 +978,24 @@ class BuildMapNode(Node):
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
+        if self.rgb_image_shape is not None:
+            np.save(f"{self.map_save_path}/rgb_image_shape.npy", np.array(self.rgb_image_shape))
 
         # Flush and close writable DB first, then reopen DB for occupancy generation.
         self.db.close()
         occupancy_db = TinyNavDB(self.map_save_path, is_scratch=False)
 
+        with self.stage_timer.timed("vlad_reembed_from_color"):
+            self.rebuild_retrieval_embeddings_from_color(occupancy_db)
+
+        # Free the TensorRT models now that feature/embedding extraction is done -- occupancy
+        # map generation below is memory-hungry on its own (dense voxel grids), and these
+        # engines' host-side buffers otherwise sit unused for the rest of save_mapping().
+        del self.super_point_extractor, self.light_glue_matcher, self.dinov2_model, self.semantic_embedder
+        gc.collect()
+
         # Generate occupancy map
-        occupancy_resolution = 0.1
+        occupancy_resolution = 0.2
         occupancy_step = 10
         occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
             self.pose_graph_used_pose,
@@ -1033,6 +1150,8 @@ if __name__ == '__main__':
         parsed_args.map_save_path,
         verbose_timer=parsed_args.verbose_timer,
         global_frames_ratio=parsed_args.global_frames_ratio,
+        vlad_num_clusters=parsed_args.vlad_num_clusters,
+        vlad_codebook_fit_keyframes=parsed_args.vlad_codebook_fit_keyframes,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)

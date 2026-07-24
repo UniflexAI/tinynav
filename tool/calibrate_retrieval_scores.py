@@ -61,11 +61,14 @@ def main() -> None:
         similarities = map_embeddings @ query_embedding
         best_idx = int(np.argmax(similarities))
         best_score = float(similarities[best_idx])
+        std = similarities.std()
+        z_score = float((best_score - similarities.mean()) / std) if std > 0.0 else 0.0
         match_timestamp = int(idx_to_timestamp[best_idx])
-        results.append({"query_timestamp_ns": timestamp_ns, "match_timestamp_ns": match_timestamp, "similarity": best_score})
-        print(f"t={timestamp_ns} similarity={best_score:.4f} match={match_timestamp}")
+        results.append({"query_timestamp_ns": timestamp_ns, "match_timestamp_ns": match_timestamp, "similarity": best_score, "z_score": z_score})
+        print(f"t={timestamp_ns} similarity={best_score:.4f} z_score={z_score:.2f} match={match_timestamp}")
 
     scores = np.array([r["similarity"] for r in results])
+    zscores = np.array([r["z_score"] for r in results])
     stats = {
         "count": len(scores),
         "min": float(scores.min()),
@@ -76,6 +79,10 @@ def main() -> None:
         "p25": float(np.percentile(scores, 25)),
         "p75": float(np.percentile(scores, 75)),
         "p90": float(np.percentile(scores, 90)),
+        "z_min": float(zscores.min()),
+        "z_max": float(zscores.max()),
+        "z_mean": float(zscores.mean()),
+        "z_median": float(np.median(zscores)),
     }
     print("=== score distribution ===")
     print(json.dumps(stats, indent=2))

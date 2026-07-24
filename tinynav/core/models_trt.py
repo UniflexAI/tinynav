@@ -145,6 +145,124 @@ class TRTBase:
         return results
 
 
+class EfficientLoFTRTRT:
+    """Dense/detector-free image matcher (github.com/zju3dv/EfficientLoFTR).
+
+    Unlike every other wrapper in this file, this does not inherit TRTBase / use CUDA graph
+    replay. EfficientLoFTR's speed comes from an intentional sparse-compute design: cheap
+    coarse matching runs over the whole 1/8-resolution grid, but the expensive fine-detail
+    refinement only runs on the handful of promising coarse candidates it finds -- a genuinely
+    data-dependent match count, not a fixed-size padded array like SuperPoint's keypoints.
+    TensorRT's compiler cannot lower that internal data-dependent shape to the fixed buffer
+    addresses CUDA graph replay requires (confirmed empirically: engine build succeeds, but
+    graph capture does not), and collapsing it to a fixed-size computation instead would mean
+    running fine refinement on every coarse cell unconditionally -- tens of times more compute,
+    defeating the point of using this model on Jetson Orin's compute budget. So this uses a
+    custom IOutputAllocator to read back TensorRT's own resolved per-call match count instead.
+
+    mconf's scale depends on which config the loaded engine was exported with (see
+    scripts/export_efficientloftr_onnx.py --model-type): the default 'opt' config skips the
+    softmax normalization step entirely as its own efficiency optimization, so mconf is a raw,
+    unbounded logit score meaningfully compared only against its own ~25+ threshold -- not the
+    [0,1] probability 'full' produces, where ~0.2+ is the equivalent cutoff. Don't threshold
+    mconf against a hardcoded probability-shaped constant without checking which config the
+    deployed .plan actually is.
+    """
+
+    class _OutputAllocator(trt.IOutputAllocator):
+        def __init__(self, max_bytes: int):
+            trt.IOutputAllocator.__init__(self)
+            self.ptr = cudart.cudaMalloc(max_bytes)[1]
+            self.max_bytes = max_bytes
+            self.shape = None
+
+        def reallocate_output_async(self, tensor_name, memory, size, alignment, stream):
+            if size > self.max_bytes:
+                raise RuntimeError(
+                    f"EfficientLoFTR output {tensor_name!r} needs {size} bytes, "
+                    f"only {self.max_bytes} pre-allocated (see EfficientLoFTRTRT.max_matches)"
+                )
+            return self.ptr
+
+        def notify_shape(self, tensor_name, shape):
+            self.shape = tuple(shape)
+
+    def __init__(self, engine_path=f"/tinynav/tinynav/models/efficientloftr_outdoor_opt_fp16_{platform.machine()}.plan"):
+        TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+        with open(engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
+            self.engine = runtime.deserialize_cuda_engine(f.read())
+        self.context = self.engine.create_execution_context()
+
+        image0_shape = self.engine.get_tensor_shape("image0")
+        self.net_h, self.net_w = int(image0_shape[2]), int(image0_shape[3])
+        self.context.set_input_shape("image0", (1, 1, self.net_h, self.net_w))
+        self.context.set_input_shape("image1", (1, 1, self.net_h, self.net_w))
+
+        # Coarse matching proposes at most one candidate per 1/8-resolution grid cell, so this
+        # bounds the true (data-dependent) match count for this engine's fixed input shape.
+        self.max_matches = (self.net_h // 8) * (self.net_w // 8)
+
+        _, self.stream = cudart.cudaStreamCreate()
+        self._d_image0 = cudart.cudaMalloc(self.net_h * self.net_w * 4)[1]
+        self._d_image1 = cudart.cudaMalloc(self.net_h * self.net_w * 4)[1]
+        self.context.set_tensor_address("image0", self._d_image0)
+        self.context.set_tensor_address("image1", self._d_image1)
+
+        self._alloc_mkpts0 = self._OutputAllocator(self.max_matches * 2 * 4)
+        self._alloc_mkpts1 = self._OutputAllocator(self.max_matches * 2 * 4)
+        self._alloc_mconf = self._OutputAllocator(self.max_matches * 4)
+        self.context.set_output_allocator("mkpts0", self._alloc_mkpts0)
+        self.context.set_output_allocator("mkpts1", self._alloc_mkpts1)
+        self.context.set_output_allocator("mconf", self._alloc_mconf)
+        logging.info(f"load {engine_path} done!")
+
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 and image.shape[2] >= 3 else image
+        gray = cv2.resize(gray, (self.net_w, self.net_h), interpolation=cv2.INTER_AREA)
+        return (gray.astype(np.float32) / 255.0)[None, None]
+
+    @staticmethod
+    def _rescale_to_original(kpts: np.ndarray, orig_h: int, orig_w: int, net_h: int, net_w: int) -> np.ndarray:
+        # Pixel-center convention, matching SuperPointTRT.infer()'s own rescale.
+        scale_x = orig_w / net_w
+        scale_y = orig_h / net_h
+        kpts = kpts.copy()
+        kpts[:, 0] = (kpts[:, 0] + 0.5) * scale_x - 0.5
+        kpts[:, 1] = (kpts[:, 1] + 0.5) * scale_y - 0.5
+        return kpts
+
+    async def infer(self, image0: np.ndarray, image1: np.ndarray) -> dict:
+        """Matches image0 (reference) against image1 (query). Keypoint coordinates in the
+        returned dict are rescaled back to each input image's own original resolution (image0's
+        own shape for mkpts0, image1's own shape for mkpts1) -- they need not match."""
+        h0_in, w0_in = image0.shape[:2]
+        h1_in, w1_in = image1.shape[:2]
+        img0 = np.ascontiguousarray(self.preprocess_image(image0))
+        img1 = np.ascontiguousarray(self.preprocess_image(image1))
+
+        cudart.cudaMemcpyAsync(self._d_image0, img0.ctypes.data, img0.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+        cudart.cudaMemcpyAsync(self._d_image1, img1.ctypes.data, img1.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
+
+        self.context.execute_async_v3(stream_handle=self.stream)
+
+        _, event = cudart.cudaEventCreate()
+        cudart.cudaEventRecord(event, self.stream)
+        while cudart.cudaEventQuery(event)[0] == cudart.cudaError_t.cudaErrorNotReady:
+            await asyncio.sleep(0)
+
+        num_matches = self._alloc_mconf.shape[0]
+        mkpts0 = np.empty((num_matches, 2), dtype=np.float32)
+        mkpts1 = np.empty((num_matches, 2), dtype=np.float32)
+        mconf = np.empty((num_matches,), dtype=np.float32)
+        if num_matches > 0:
+            cudart.cudaMemcpy(mkpts0.ctypes.data, self._alloc_mkpts0.ptr, mkpts0.nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost)
+            cudart.cudaMemcpy(mkpts1.ctypes.data, self._alloc_mkpts1.ptr, mkpts1.nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost)
+            cudart.cudaMemcpy(mconf.ctypes.data, self._alloc_mconf.ptr, mconf.nbytes, cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost)
+            mkpts0 = self._rescale_to_original(mkpts0, h0_in, w0_in, self.net_h, self.net_w)
+            mkpts1 = self._rescale_to_original(mkpts1, h1_in, w1_in, self.net_h, self.net_w)
+        return {"mkpts0": mkpts0, "mkpts1": mkpts1, "mconf": mconf}
+
+
 class SuperPointTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/superpoint_fp16_dynamic_{platform.machine()}.plan"):
         super().__init__(engine_path)
@@ -238,7 +356,11 @@ class Dinov2TRT(TRTBase):
 
     def preprocess_image(self, image, target_size=224):
         image = cv2.resize(image, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        if image.ndim == 3 and image.shape[2] == 3:
+            # Real color image (BGR from cv_bridge) rather than a mono image repeated 3x.
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
 
         image = einops.rearrange(image, "h w c-> 1 c h w")
         image = image.astype(np.float32) / 255.0
@@ -253,6 +375,13 @@ class Dinov2TRT(TRTBase):
         np.copyto(self.inputs[0]["host"], image)
         results = await self.run_graph()
         return results["last_hidden_state"][:, 0, :].squeeze(0)
+
+    async def infer_patch_tokens(self, image):
+        # shape: (256, 768) - excludes the CLS token at index 0.
+        image = self.preprocess_image(image)
+        np.copyto(self.inputs[0]["host"], image)
+        results = await self.run_graph()
+        return results["last_hidden_state"][:, 1:, :].squeeze(0)
 
 
 class SigLIPImageTRT(TRTBase):
