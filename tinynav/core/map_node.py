@@ -12,19 +12,21 @@ import json
 import heapq
 from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
 from sensor_msgs.msg import Image, CameraInfo
-from message_filters import TimeSynchronizer, Subscriber
+from message_filters import ApproximateTimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
 from codetiming import Timer
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT, EfficientLoFTRTRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
-from tinynav.core.build_map_node import find_loop, solve_pose_graph
+from tinynav.core.build_map_node import find_loop, find_loop_by_zscore, solve_pose_graph
+from tinynav.core.depth_reprojection import reproject_depth_to_camera
+from tinynav.core.vlad_retrieval import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
@@ -189,6 +191,14 @@ class MapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
+        # SuperPoint+LightGlue above stays in use for the mono/infra1 pose-graph loop closure in
+        # keyframe_mapping (unrelated to relocalization); this is only for relocalize_with_depth's
+        # color-image matching against the pre-built map, which needs a much bigger day/night
+        # appearance gap covered than same-session pose-graph loop closure ever sees. Measured on
+        # this branch's own calibration data: SuperPoint+LightGlue relocalized ~9% of VLAD-
+        # confident cross-session frames; EfficientLoFTR ~39% on the same data (see
+        # tool/count_loftr_vs_sp_lg.py).
+        self.efficientloftr_matcher = EfficientLoFTRTRT()
         self.tinynav_db_path = tinynav_db_path
 
         self.bridge = CvBridge()
@@ -197,6 +207,7 @@ class MapNode(Node):
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
+        self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
 
@@ -208,7 +219,9 @@ class MapNode(Node):
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
         self.localization_data_saved_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
-        self.ts = TimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub], 10)
+        self.ts = ApproximateTimeSynchronizer(
+            [self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 200, 0.02
+        )
         self.ts.registerCallback(self.keyframe_callback)
 
         self.camera_info_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
@@ -226,20 +239,30 @@ class MapNode(Node):
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
-        # Calibrated against map_day_20260716: 40 geometrically-verified same-session loop
-        # closures scored 0.459-0.795 in VLAD-cosine space, while ~250 cross-session/different-
-        # location queries topped out at 0.444 -- 0.85 (tuned for the old CLS-embedding scheme)
-        # rejected almost every real match once retrieval switched to color VLAD.
-        self.relocalization_threshold = 0.5
+        # A fixed absolute VLAD-similarity cutoff drifts across sessions/lighting: nuisance
+        # factors (day/night, compression, pose) shift the whole similarity distribution
+        # together, so "same place" and "different place" sit at different absolute scales on
+        # different maps. What stays stable is how far the top candidate sits above the noise
+        # floor of the rest of the map (its z-score) -- e.g. a verified true match measured at
+        # z~8.4 while unrelated keyframes cluster at z~0 by construction, regardless of the
+        # absolute similarity scale involved. z_threshold=4 sits comfortably above that noise
+        # floor with a wide margin below observed true matches.
+        self.relocalization_z_threshold = 4.0
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
+        self.map_rgb_K = np.load(f"{tinynav_map_path}/rgb_camera_intrinsics.npy", allow_pickle=True)
+        self.map_T_rgb_to_infra1 = np.load(f"{tinynav_map_path}/T_rgb_to_infra1.npy", allow_pickle=True)
+        assert self.map_T_rgb_to_infra1 is not None and self.map_T_rgb_to_infra1.shape == (4, 4), \
+            f"Map at {tinynav_map_path} has no valid T_rgb_to_infra1.npy; rebuild it to use color-image relocalization."
+        self.map_rgb_image_shape = np.load(f"{tinynav_map_path}/rgb_image_shape.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
         self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
         self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
+        self.vlad_codebook = np.load(f"{tinynav_map_path}/vlad_codebook.npy")
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
@@ -341,11 +364,11 @@ class MapNode(Node):
                 save_finished_msg.data = False
                 self.localization_data_saved_pub.publish(save_finished_msg)
 
-    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
+    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
-        image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
+        rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
-        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, rgb_image)
         if success:
             self.compute_transform_from_map_to_odom()
 
@@ -445,13 +468,13 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
-    def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+    def relocalize_with_depth(self, rgb_keyframe: np.ndarray, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
-        query_embedding = self.get_embeddings(keyframe)
-        query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
+        patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(rgb_keyframe))
+        query_embedding_normed = compute_vlad(patch_tokens, self.vlad_codebook)
 
-        idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
+        idx_and_similarity_array = find_loop_by_zscore(query_embedding_normed, self.map_embeddings, self.relocalization_z_threshold, self.relocalization_loop_top_k)
         max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
         if len(idx_and_similarity_array) == 0:
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
@@ -460,14 +483,32 @@ class MapNode(Node):
         pnp_candidates = []
         for idx_in_map, similarity in idx_and_similarity_array:
             timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
-            reference_keyframe_pose = self.map_poses[timestamp_in_map]
-            reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
-            reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
-                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+            _, _, _, reference_rgb_loader, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
+            reference_rgb_image = reference_rgb_loader()
+            if reference_rgb_image is None:
+                print(f"no color image stored for keyframe {timestamp_in_map}, skipping")
+                continue
+            reference_rgb_pose_in_world = self.map_poses[timestamp_in_map] @ self.map_T_rgb_to_infra1
+            # Reprojected on demand from the stored infra1 depth rather than persisted per
+            # keyframe at map-build time, which used to bloat map storage several-fold.
+            reference_color_depth = reproject_depth_to_camera(
+                self.db.get_depth(timestamp_in_map),
+                self.map_K,
+                np.linalg.inv(self.map_T_rgb_to_infra1),
+                self.map_rgb_K,
+                self.map_rgb_image_shape,
+            )
+            # Dense/detector-free match: EfficientLoFTR takes the raw reference+query images
+            # directly rather than precomputed SuperPoint keypoints -- see the __init__ comment
+            # on why this replaced SuperPoint+LightGlue for this specific matching step.
+            match_result = asyncio.run(self.efficientloftr_matcher.infer(reference_rgb_image, rgb_keyframe))
+            reference_matched_keypoints = match_result["mkpts0"]
+            keyframe_matched_keypoints = match_result["mkpts1"]
+            if len(reference_matched_keypoints) < 50:
+                print(f"not enough matched features to relocalize, {len(reference_matched_keypoints)} < 50")
                 continue
 
-            point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
+            point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_color_depth, reference_rgb_pose_in_world, K)
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
@@ -476,10 +517,10 @@ class MapNode(Node):
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        success, best_rgb_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, K)
         if success:
-            print(f"relocalization pose : {best_pose_in_camera}")
-            return True, best_pose_in_camera, pose_cov_weight
+            print(f"relocalization pose (rgb camera) : {best_rgb_pose_in_camera}")
+            return True, best_rgb_pose_in_camera, pose_cov_weight
 
         print("no valid PnP relocalization candidate found")
         return False, np.eye(4), -np.inf
@@ -514,12 +555,14 @@ class MapNode(Node):
         return point_in_world, inliers
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
-        features = asyncio.run(self.super_point_extractor.infer(image))
-        res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
+    def keyframe_relocalization(self, timestamp, rgb_image:np.ndarray) -> tuple[bool, np.ndarray]:
+        res, rgb_pose_in_camera, pose_cov_weight = self.relocalize_with_depth(rgb_image, self.map_rgb_K)
         if res:
             # publish the relocalization pose for debug
-            pose_in_world = np.linalg.inv(pose_in_camera)
+            # relocalize_with_depth solves for the query RGB camera's pose; convert back to the
+            # infra1/SLAM frame that self.odom/self.pose_graph_used_pose are expressed in.
+            rgb_pose_in_world = np.linalg.inv(rgb_pose_in_camera)
+            pose_in_world = rgb_pose_in_world @ np.linalg.inv(self.map_T_rgb_to_infra1)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
