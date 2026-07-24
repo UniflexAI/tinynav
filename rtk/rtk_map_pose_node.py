@@ -111,6 +111,10 @@ class RtkMapPoseNode(Node):
         # Not loaded until a map is resolved. on_fix stays silent until then.
         self.loaded_path = None
         self.meta = self.enu = self.yaw = self.scale = self.t2 = None
+        self.pts_map = self.pts_enu = None     # local-weighted correspondence cloud
+        self.local_bw = 5.0
+        self.local_min_pts = 15
+        self.local_bw_max = 40.0
         # Heading fusion state.
         self.sy = StraightYaw(
             min_dist=float(self.get_parameter("heading_min_dist_m").value),
@@ -184,18 +188,38 @@ class RtkMapPoseNode(Node):
         except Exception as exc:
             self.get_logger().error(f"failed to load {path}: {exc}")
             return False
+        # Optional local-weighted correspondence cloud: when present, the fix->map
+        # conversion uses a Sim3 fit locally around each fix (absorbs the VIO map
+        # warp a single global Sim3 cannot), falling back to the global Sim3.
+        self.pts_map = self.pts_enu = None
+        pts = self.meta.get("points") if isinstance(self.meta, dict) else None
+        if isinstance(pts, dict) and pts.get("map_xy") and pts.get("enu_xy"):
+            try:
+                pm = np.asarray(pts["map_xy"], float)
+                pe = np.asarray(pts["enu_xy"], float)
+                if pm.ndim == 2 and pm.shape == pe.shape and len(pm) >= 5:
+                    self.pts_map, self.pts_enu = pm, pe
+            except Exception as exc:
+                self.get_logger().warning(f"ignoring align 'points': {exc}")
+        lc = self.meta.get("local") if isinstance(self.meta, dict) else None
+        lc = lc if isinstance(lc, dict) else {}
+        self.local_bw = float(lc.get("bw_m", 5.0))
+        self.local_min_pts = int(lc.get("min_neighbors", 15))
+        self.local_bw_max = float(lc.get("bw_max_m", 40.0))
         self._reset_heading()            # new map frame -> re-bootstrap heading
         self.loaded_path = path
         self.get_logger().info(
             f"loaded rtk_align: map={self.meta.get('map')} path={path} "
             f"yaw={math.degrees(self.yaw):.1f} scale={self.scale:.4f} "
-            f"origin=({self.enu.lat:.7f},{self.enu.lon:.7f})")
+            f"origin=({self.enu.lat:.7f},{self.enu.lon:.7f}) "
+            f"local={'on(%d pts,bw=%.1f)' % (len(self.pts_map), self.local_bw) if self.pts_map is not None else 'off'}")
         return True
 
     def _clear_active_map(self, reason):
         had_map = self.enu is not None or self.loaded_path is not None
         self.loaded_path = None
         self.meta = self.enu = self.yaw = self.scale = self.t2 = None
+        self.pts_map = self.pts_enu = None
         self._reset_heading()
         if had_map:
             self.get_logger().info(f"cleared active RTK map: {reason}")
@@ -250,7 +274,13 @@ class RtkMapPoseNode(Node):
         if msg.latitude == 0.0 and msg.longitude == 0.0:
             return
         enu = self.enu.lla_to_enu(msg.latitude, msg.longitude, msg.altitude)
-        xy = rtk_geo.enu_to_map_xy(self.yaw, self.scale, self.t2, enu[:2])
+        if self.pts_map is not None:
+            xy, _, _ = rtk_geo.enu_to_map_xy_local(
+                self.pts_map, self.pts_enu, enu[:2],
+                bw=self.local_bw, min_pts=self.local_min_pts, bw_max=self.local_bw_max,
+                fallback=(self.yaw, self.scale, self.t2))
+        else:
+            xy = rtk_geo.enu_to_map_xy(self.yaw, self.scale, self.t2, enu[:2])
         self.last_xy = (float(xy[0]), float(xy[1]))
         # Straight-segment heading observation -> bootstrap / correct the filter.
         obs = self.sy.add(self.last_xy[0], self.last_xy[1])
