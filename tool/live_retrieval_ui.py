@@ -412,7 +412,10 @@ HTML_PAGE = """<!doctype html>
   .row { display: flex; gap: 16px; flex-wrap: wrap; }
   .panel { flex: 1 1 380px; min-width: 300px; background: #1a1a1a; border-radius: 8px; padding: 12px; box-sizing: border-box; }
   .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin: 0 0 8px; }
-  .panel img { width: 100%; height: auto; border-radius: 4px; background: #000; display: block; }
+  /* Fixed aspect-ratio boxes (matching this map's 1920x1088 color camera) so the page layout
+     never depends on which image happens to be loaded -- swapping src, or having no image yet,
+     no longer grows/shrinks the panel and shoves the rest of the page around. */
+  .panel img { width: 100%; aspect-ratio: 1920 / 1088; object-fit: contain; border-radius: 4px; background: #000; display: block; }
   .meta { font-size: 12px; color: #aaa; margin-top: 8px; display: flex; justify-content: space-between; }
   #score { font-size: 28px; font-weight: 700; text-align: center; margin: 12px 0; }
   #score.confident { color: #4caf50; }
@@ -421,12 +424,15 @@ HTML_PAGE = """<!doctype html>
   #bar-fill { height: 100%; background: #4caf50; width: 0%; transition: width 0.2s linear; }
   #reloc-panel { background: #1a1a1a; border-radius: 8px; padding: 12px; margin-top: 16px; box-sizing: border-box; }
   #reloc-panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin: 0 0 8px; }
-  #reloc-status { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+  #reloc-status { font-size: 15px; font-weight: 600; margin-bottom: 8px; min-height: 1.2em; }
   #reloc-status.success { color: #4caf50; }
   #reloc-status.fail { color: #e05a4e; }
   #reloc-status.skipped { color: #666; }
-  #reloc-stats { font-size: 12px; color: #aaa; display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
-  #reloc-vis { width: 100%; height: auto; border-radius: 4px; background: #000; display: none; }
+  #reloc-stats { font-size: 12px; color: #aaa; display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; min-height: 1.2em; }
+  /* Two camera images side by side -> twice the width, same height as a single panel image.
+     visibility (not display) is toggled in JS so this box keeps reserving its space even when
+     there's nothing to show yet, instead of collapsing to 0 height and yanking the page below it. */
+  #reloc-vis { width: 100%; aspect-ratio: 3840 / 1088; object-fit: contain; border-radius: 4px; background: #000; display: block; visibility: hidden; }
 </style>
 </head>
 <body>
@@ -503,7 +509,7 @@ function connect() {
     if (!data.relocalization_attempted) {
       relocStatusEl.textContent = "skipped — " + data.relocalization_reason;
       relocStatusEl.className = "skipped";
-      relocVisEl.style.display = "none";
+      relocVisEl.style.visibility = "hidden";
     } else if (data.relocalization_success) {
       relocStatusEl.textContent = "SUCCESS";
       relocStatusEl.className = "success";
@@ -524,9 +530,9 @@ function connect() {
       : "pose: n/a";
     if (data.match_vis_b64) {
       relocVisEl.src = "data:image/jpeg;base64," + data.match_vis_b64;
-      relocVisEl.style.display = "block";
+      relocVisEl.style.visibility = "visible";
     } else {
-      relocVisEl.style.display = "none";
+      relocVisEl.style.visibility = "hidden";
     }
   };
 }
