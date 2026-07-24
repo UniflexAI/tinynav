@@ -1326,16 +1326,8 @@ class MapNode(Node):
                 return
             pose_in_origin_odom = self.pose_graph_used_pose[timestamp]
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
-        if self.rtk_mode == "replace" and len(poi) >= 3:
-            # RTK / File B supply no usable z (/rtk/map_pose z is 0), but the map
-            # ground sits at a very different height (this map ~ -2.7 m). Left at
-            # 0, pose_in_map.z is ~map_z off and blows past every 2-3 m z gate
-            # (POI arrival, subgoal arrival, path/SDF z-clamp -- whose SDF search
-            # even centres on the wrong z), so the robot never advances and
-            # circles in place. Pin z to the active POI's ground height
-            # (flat-level assumption) so all z comparisons are map-frame vs
-            # map-frame. Does not touch xy or heading.
-            pose_in_map[2, 3] = float(poi[2])
+        if self.rtk_mode == "replace":
+            pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
         publish_stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, publish_stamp, "world", "map"))
 
@@ -1345,7 +1337,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5:  # TEMP DEBUG: z gate disabled (was: and diff_position_norm_z < 2.0)
+            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
@@ -1426,7 +1418,7 @@ class MapNode(Node):
             subgoal = self._nav_subgoals_in_map[self._nav_subgoal_index]
             diff_xy = np.linalg.norm(subgoal[:2] - pose_position[:2])
             diff_z = np.linalg.norm(subgoal[2] - pose_position[2])
-            if diff_xy >= self._nav_subgoal_arrival_xy_threshold:  # TEMP DEBUG: z gate disabled (was: or diff_z >= self._nav_subgoal_arrival_z_threshold)
+            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or diff_z >= self._nav_subgoal_arrival_z_threshold:
                 break
             self._nav_subgoal_index += 1
             self._current_nav_path_in_map = None
@@ -1525,6 +1517,26 @@ class MapNode(Node):
             self._cached_global_path_poi_index = self.poi_index
             self._cached_global_path_goal = np.array(target_poi, dtype=np.float64)
         return path
+
+    def _rtk_map_ground_z(self, position: np.ndarray) -> float:
+        """Map-frame ground z at the robot's xy, for RTK replace mode only.
+
+        RTK / File B publish z=0, and RTK altitude cannot be used either: the
+        map's z is warped by VIO vertical drift (POIs on the same physical floor
+        differ by ~7 m in map z), so RTK's near-flat altitude does not match it.
+        z must come from the map side. Prefer the nearest point on the cached
+        global path (it carries the true along-route map z); fall back to the
+        active POI's z, else keep the incoming z. This is an override (not the
+        small-diff `_nav_clamped_z` snap, which would reject the large RTK-vs-map
+        z gap), so the arrival / subgoal / z-clamp gates then compare map-vs-map.
+        """
+        path = self._current_nav_path_in_map
+        if path is not None and len(path) > 0:
+            _, closest, _ = self._closest_point_on_path_for_z_clamp(path, position)
+            return float(closest[2])
+        if 0 <= self.poi_index < len(self.pois) and len(self.pois[self.poi_index]) >= 3:
+            return float(self.pois[self.poi_index][2])
+        return float(position[2])
 
     def _pose_with_nav_clamped_z(self, pose_in_map: np.ndarray, path: np.ndarray | None = None) -> np.ndarray:
         pose_for_nav = pose_in_map.copy()
@@ -1698,6 +1710,8 @@ class MapNode(Node):
 
     def _publish_target_pose_from_path(self, paths_in_map: np.ndarray, pose_in_origin_odom: np.ndarray, stamp_msg=None):
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
+        if self.rtk_mode == "replace":
+            pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
         pose_in_map_position = self._nav_position_with_clamped_z(pose_in_map[:3, 3], path=paths_in_map)
         with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             max_speed = 0.5
