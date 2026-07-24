@@ -86,6 +86,74 @@ def enu_to_map_xy(yaw, s, t2, enu_xy):
     return (r2.T @ (np.asarray(enu_xy)[:2] - np.asarray(t2))) / s
 
 
+def umeyama_2d_scale_weighted(X, Y, w):
+    """Weighted planar Sim3 fit: min sum_i w_i ||s R X_i + t - Y_i||. -> yaw,s,t2.
+
+    Same model as umeyama_2d_scale but each correspondence carries a weight w_i;
+    used by the locally-weighted (LOWESS-style) alignment.
+    """
+    X = np.asarray(X)[:, :2]
+    Y = np.asarray(Y)[:, :2]
+    w = np.asarray(w, float)
+    W = w.sum()
+    if W <= 0.0:
+        return 0.0, 1.0, np.zeros(2)
+    mx = (w[:, None] * X).sum(0) / W
+    my = (w[:, None] * Y).sum(0) / W
+    xc = X - mx
+    yc = Y - my
+    a = (w * (xc[:, 0] * yc[:, 0] + xc[:, 1] * yc[:, 1])).sum()  # weighted dot
+    b = (w * (xc[:, 0] * yc[:, 1] - xc[:, 1] * yc[:, 0])).sum()  # weighted cross
+    yaw = float(np.arctan2(b, a))
+    denom = (w * (xc ** 2).sum(1)).sum()
+    s = float(np.hypot(a, b) / denom) if denom > 1e-12 else 1.0
+    c, sn = np.cos(yaw), np.sin(yaw)
+    r2 = np.array([[c, -sn], [sn, c]])
+    t2 = my - s * (r2 @ mx)
+    return yaw, s, t2
+
+
+def local_sim3_at(pts_map, pts_enu, query_enu, bw=5.0, min_pts=15, bw_max=40.0):
+    """Locally-weighted planar Sim3 (map->ENU) around a query ENU position.
+
+    Weights the stored map<->ENU correspondences by a Gaussian of their ENU
+    distance to the query (bw = std, metres); widens bw geometrically if fewer
+    than `min_pts` neighbours carry meaningful weight (handles sparse regions /
+    trajectory ends). Absorbs the smooth VIO drift warp a single global Sim3
+    cannot. Returns (yaw, s, t2, n_used, bw_used).
+    """
+    pe = np.asarray(pts_enu)[:, :2]
+    d = np.linalg.norm(pe - np.asarray(query_enu)[:2], axis=1)
+    b = float(bw)
+    w = np.exp(-(d ** 2) / (2.0 * b * b))
+    for _ in range(8):
+        if int((w > 0.05).sum()) >= min_pts or b >= bw_max:
+            break
+        b = min(b * 1.5, bw_max)
+        w = np.exp(-(d ** 2) / (2.0 * b * b))
+    yaw, s, t2 = umeyama_2d_scale_weighted(pts_map, pe, w)
+    return yaw, s, t2, int((w > 0.05).sum()), b
+
+
+def enu_to_map_xy_local(pts_map, pts_enu, query_enu, bw=5.0, min_pts=15,
+                        bw_max=40.0, fallback=None):
+    """Local-weighted inverse: map xy for a query ENU point.
+
+    Fits a Sim3 local to the query (local_sim3_at) and inverts it; falls back to
+    the global Sim3 tuple (yaw,s,t2) when too few usable neighbours. Returns
+    (map_xy (2,), local_yaw_rad, n_used).
+    """
+    n = 0 if pts_map is None else len(pts_map)
+    if n >= 5:
+        yaw, s, t2, used, _ = local_sim3_at(pts_map, pts_enu, query_enu, bw, min_pts, bw_max)
+        if used >= 5 and s > 1e-6:
+            return enu_to_map_xy(yaw, s, t2, query_enu), yaw, used
+    if fallback is not None:
+        y, s, t2 = fallback
+        return enu_to_map_xy(y, s, t2, query_enu), float(y), 0
+    return np.zeros(2), 0.0, 0
+
+
 def load_align(path):
     """Load rtk_align.json -> (meta, EnuFrame, yaw_rad, scale, t2)."""
     with open(path) as f:

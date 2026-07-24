@@ -58,6 +58,11 @@ class RtkAlignCalibrate(Node):
         self.declare_parameter("map_name", "")
         self.declare_parameter("max_dt_s", 0.6)
         self.declare_parameter("gross_reject_m", 10.0)
+        # Local-weighted alignment: keep correspondences within local_keep_m of the
+        # global fit as the point cloud (drop only >5 m gross blunders); runtime
+        # fits a Sim3 locally with Gaussian bandwidth local_bw_m.
+        self.declare_parameter("local_keep_m", 5.0)
+        self.declare_parameter("local_bw_m", 5.0)
         self.declare_parameter("min_pairs", 20)
 
         self.kf = {}      # keyframe header ns -> arrival wall ns (this node's clock)
@@ -165,18 +170,37 @@ class RtkAlignCalibrate(Node):
         gross = float(self.get_parameter("gross_reject_m").value)
         yaw, s, t2, mask, rmse = rtk_geo.robust_sim3(X[fixed], enu[fixed][:, :2], gross)
 
+        # Local-weighted correspondence cloud: the global Sim3 is limited to
+        # ~1.5 m by the VIO map warp; storing the map<->ENU pairs lets the runtime
+        # fit a Sim3 locally around each fix (~0.3 m). Keep every fixed pair whose
+        # residual to the global fit is under `local_keep_m` (drop only the >5 m
+        # gross blunders, e.g. pre-convergence reloc jumps); the rest are all
+        # valid points to fit.
+        Xf = X[fixed][:, :2]
+        Ef = enu[fixed][:, :2]
+        keep_m = float(self.get_parameter("local_keep_m").value)
+        rr = rtk_geo.sim3_resid(yaw, s, t2, Xf, Ef)
+        pmask = rr <= keep_m
+        local_bw = float(self.get_parameter("local_bw_m").value)
+
         out = {
             "map": map_name or None,
-            "model": "planar_sim3",
+            "model": "local_weighted_sim3",
             "convention": ("p_enu = scale * R(yaw_deg) * p_map_xy + [tx,ty]; "
-                           "inverse: p_map_xy = (1/scale) * R(yaw_deg)^T * (p_enu_xy - [tx,ty])"),
+                           "inverse: p_map_xy = (1/scale) * R(yaw_deg)^T * (p_enu_xy - [tx,ty]). "
+                           "Runtime prefers local-weighted Sim3 over 'points'; 'sim3' is the global fallback."),
             "origin_lla": {"lat": float(o[0]), "lon": float(o[1]), "alt": float(o[2])},
             "sim3": {"yaw_deg": float(np.degrees(yaw)), "scale": float(s),
                      "tx": float(t2[0]), "ty": float(t2[1])},
+            "local": {"model": "local_weighted_sim3", "bw_m": local_bw,
+                      "min_neighbors": 15, "bw_max_m": 40.0},
+            "points": {"map_xy": np.round(Xf[pmask], 4).tolist(),
+                       "enu_xy": np.round(Ef[pmask], 4).tolist()},
             "orientation": "position-only (single antenna); use VIO orientation",
             "fit": {"n_used": int(mask.sum()), "n_fixed_pairs": int(len(fixed)),
                     "n_all_pairs": int(len(X)), "rmse_m": round(float(rmse), 3),
-                    "gross_reject_m": gross},
+                    "gross_reject_m": gross, "n_local_points": int(pmask.sum()),
+                    "local_keep_m": keep_m},
         }
         with open(out_path, "w") as f:
             json.dump(out, f, indent=2)
