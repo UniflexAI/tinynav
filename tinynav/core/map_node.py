@@ -521,6 +521,7 @@ class MapNode(Node):
         self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
+        self._rtk_yaw_offset = None   # map<-odom yaw offset, locked once on first RTK fix
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
         self.latest_rtk_map_pose = None
@@ -899,15 +900,24 @@ class MapNode(Node):
         # headings and anchor the translation to the current position match.
         odom_pose = self.latest_odom_pose
         rtk_pose = self.latest_rtk_map_pose
-        fwd = odom_pose[:3, :3] @ np.array([0.0, 0.0, 1.0])   # camera forward, odom world
-        heading_odom = np.arctan2(fwd[1], fwd[0])
-        psi_map = np.arctan2(rtk_pose[1, 0], rtk_pose[0, 0])
-        phi = heading_odom - psi_map
+        if self._rtk_yaw_offset is None:
+            # The map-world -> odom-world yaw offset is a physical constant: File
+            # B's heading (psi_map) and this heading_odom both derive from the SAME
+            # /slam/odometry, so their difference does not change over time. Fix it
+            # ONCE on the first fix. Recomputing it every fix let the ~0.1 s
+            # sampling skew between File B's psi_map and this heading_odom (worst
+            # while turning) perturb the yaw each fix -> the whole map frame
+            # rotated and the global yaw/path jittered at the fix rate.
+            fwd = odom_pose[:3, :3] @ np.array([0.0, 0.0, 1.0])   # camera forward, odom world
+            heading_odom = np.arctan2(fwd[1], fwd[0])
+            psi_map = np.arctan2(rtk_pose[1, 0], rtk_pose[0, 0])
+            self._rtk_yaw_offset = heading_odom - psi_map
+        phi = self._rtk_yaw_offset
         c, s = np.cos(phi), np.sin(phi)
         Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
         T = np.eye(4)
         T[:3, :3] = Rz
-        T[:3, 3] = odom_pose[:3, 3] - Rz @ rtk_pose[:3, 3]   # inv(T)@odom position == rtk xy
+        T[:3, 3] = odom_pose[:3, 3] - Rz @ rtk_pose[:3, 3]   # translation still tracks RTK each fix
         self.T_from_map_to_odom = T
         self.latest_rtk_transform_received_at = time.monotonic()
         self.first_done = True
