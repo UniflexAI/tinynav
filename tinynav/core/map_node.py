@@ -1,6 +1,7 @@
 import rclpy
 import os
 import time
+import functools
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path, Odometry
@@ -468,6 +469,28 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
+    @functools.lru_cache(maxsize=None)
+    def _get_reference_rgb_image(self, timestamp_in_map) -> np.ndarray | None:
+        """See _get_reference_color_depth for why this is cached."""
+        _, _, _, reference_rgb_loader, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
+        return reference_rgb_loader()
+
+    @functools.lru_cache(maxsize=None)
+    def _get_reference_color_depth(self, timestamp_in_map) -> np.ndarray:
+        """Pure function of timestamp_in_map for the node's lifetime (map data never changes at
+        runtime), and the same handful of keyframes get re-nominated as VLAD retrieval candidates
+        across many consecutive query frames (measured: 900 candidate evaluations across 300
+        frames touched only 32 distinct keyframes) -- so caching turns ~96% of calls into a
+        lookup instead of a re-run of the reprojection/decode. maxsize=None since the key space
+        is just the map's keyframes, a small fixed set, not something to evict from."""
+        return reproject_depth_to_camera(
+            self.db.get_depth(timestamp_in_map),
+            self.map_K,
+            np.linalg.inv(self.map_T_rgb_to_infra1),
+            self.map_rgb_K,
+            self.map_rgb_image_shape,
+        )
+
     def relocalize_with_depth(self, rgb_keyframe: np.ndarray, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
@@ -483,21 +506,12 @@ class MapNode(Node):
         pnp_candidates = []
         for idx_in_map, similarity in idx_and_similarity_array:
             timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
-            _, _, _, reference_rgb_loader, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
-            reference_rgb_image = reference_rgb_loader()
+            reference_rgb_image = self._get_reference_rgb_image(timestamp_in_map)
             if reference_rgb_image is None:
                 print(f"no color image stored for keyframe {timestamp_in_map}, skipping")
                 continue
             reference_rgb_pose_in_world = self.map_poses[timestamp_in_map] @ self.map_T_rgb_to_infra1
-            # Reprojected on demand from the stored infra1 depth rather than persisted per
-            # keyframe at map-build time, which used to bloat map storage several-fold.
-            reference_color_depth = reproject_depth_to_camera(
-                self.db.get_depth(timestamp_in_map),
-                self.map_K,
-                np.linalg.inv(self.map_T_rgb_to_infra1),
-                self.map_rgb_K,
-                self.map_rgb_image_shape,
-            )
+            reference_color_depth = self._get_reference_color_depth(timestamp_in_map)
             # Dense/detector-free match: EfficientLoFTR takes the raw reference+query images
             # directly rather than precomputed SuperPoint keypoints -- see the __init__ comment
             # on why this replaced SuperPoint+LightGlue for this specific matching step.
