@@ -18,7 +18,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32, Twist
-from std_msgs.msg import Header, Float32, Bool
+from std_msgs.msg import Header, Bool
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
@@ -159,12 +159,11 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.4
-    robot_z_top: float = 0.4
+    robot_z_bottom: float = -0.45
+    robot_z_top: float = 0.2
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
     ground_band_m: float = 0.3
-    floating_min_span_m: float = 0.1
     dilation_cells: int = 0
 
 
@@ -173,8 +172,8 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
     The span filter only applies to cells whose lowest occupied voxel sits near
     the ground (within ground_band_m of robot_z_bottom): walls have large z-span
     while stair risers / ground bumps have small span. Cells whose occupancy
-    starts above that ground band (floating / mid-height obstacles) use a much
-    smaller span threshold (floating_min_span_m) just to reject single-voxel
+    starts above that ground band (floating / mid-height obstacles) use a
+    single-voxel span threshold (resolution) just to reject single-voxel
     noise, so real low-profile obstacles are still kept."""
     config = config or ObstacleConfig()
     h, w, z_dim = occupancy_grid.shape
@@ -196,10 +195,10 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
         low_z_rel = z_rel_band[np.clip(occ_low, 0, n_z - 1).astype(np.int64)]
         near_ground = low_z_rel <= config.robot_z_bottom + config.ground_band_m
         # ground-anchored cells: full span filter (wall vs stair/bump);
-        # floating cells: small span filter just to reject single-voxel noise
+        # floating cells: single-voxel span filter just to reject noise
         span_ok = np.where(near_ground,
                            z_span >= config.min_wall_span_m,
-                           z_span >= config.floating_min_span_m)
+                           z_span >= resolution)
         obstacle = has_occ & span_ok
 
     if config.dilation_cells > 0 and np.any(obstacle):
@@ -210,12 +209,11 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]), vx_max=0.5
 ):
     """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
-    vx_max = 0.5
     n_vx = max(3, int(num_samples / 2))
     vx_samples = np.linspace(0.0, vx_max, n_vx)
     omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
@@ -418,7 +416,11 @@ class PlanningNode(Node):
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.resolution = 0.05
-        self.obstacle_config = ObstacleConfig()
+        # dilation_cells inflates the live obstacle map (0.05 m/cell) to keep a hard
+        # standoff from walls indoors, so the robot maintains margin instead of
+        # driving the footprint up against a wall and wedging (all-collision freeze).
+        # 2 cells ~= 0.10 m. Raise for more standoff; too high closes tight doorways.
+        self.obstacle_config = ObstacleConfig(dilation_cells=2)
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
@@ -426,20 +428,50 @@ class PlanningNode(Node):
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
-        # Receding-horizon collision "commit" window (seconds). Hard collision is
-        # only checked over the first commit_horizon_s of each trajectory; a wall
-        # farther than that no longer vetoes the whole path, so the robot keeps
-        # advancing toward clutter and re-plans every cycle instead of freezing on
-        # the stay-put (vx=0) trajectory. <=0 disables (checks the full horizon).
-        self.declare_parameter('collision_horizon_s', 1.5)
         self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
-        horizon_s = float(self.get_parameter('collision_horizon_s').value)
-        self._collision_check_steps = int(round(horizon_s / self._traj_dt)) if horizon_s > 0 else 0
+
+        # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
+        # Peak forward speed is modulated per cycle by the free space ahead: full speed
+        # in the open, creep in tight spots (this also subsumes the old openness prior).
+        # Depth latency (~100ms) + raycast makes the effective clearance smaller than
+        # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
+        self.declare_parameter('vx_max', 0.6)        # peak forward speed (m/s)
+        self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
+        self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
+        self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full vx_max
+        self.declare_parameter('clear_scan_m', 2.0)  # forward clearance scan cap (m)
+        self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
+        self._vx_max = float(self.get_parameter('vx_max').value)
+        self._vx_min = float(self.get_parameter('vx_min').value)
+        self._clear_c0_m = float(self.get_parameter('clear_c0_m').value)
+        self._clear_open_m = float(self.get_parameter('clear_open_m').value)
+        self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
+        self._t_react_s = float(self.get_parameter('t_react_s').value)
+
+        # --- Receding-horizon collision "commit" window ---
+        # Hard collision is checked only over a fixed *distance* ahead (commit_dist_m):
+        # a wall farther than that no longer vetoes the whole path, so the robot keeps
+        # advancing toward clutter and re-plans every cycle instead of freezing on the
+        # stay-put (vx=0) trajectory. The step count is derived per cycle from the
+        # allowed speed (see _commit_check_steps) so the committed distance stays
+        # constant regardless of how fast we are going.
+        self.declare_parameter('commit_dist_m', 0.8)
+        self.declare_parameter('min_horizon_s', 0.8)
+        self.declare_parameter('max_horizon_s', 3.0)
+        self._commit_dist_m = float(self.get_parameter('commit_dist_m').value)
+        self._min_horizon_s = float(self.get_parameter('min_horizon_s').value)
+        self._max_horizon_s = float(self.get_parameter('max_horizon_s').value)
+
+        # Fixed-speed reverse fallback: driven when every trajectory is in collision
+        # but the blockage is ahead (not already under the footprint).
+        self.declare_parameter('reverse_speed_fallback', 0.2)
+        self._reverse_speed_fallback = float(self.get_parameter('reverse_speed_fallback').value)
+
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
         self.last_T = None
-        self.last_param = (0.0, 0.0) # acc and gyro
+        self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
@@ -447,14 +479,6 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
-
-        # Openness prior from map_node: min static obstacle-ESDF (m) over the upcoming
-        # global segment. Used to modulate safety_radius: tight in pinches, base in open.
-        self._safety_base = float(self.robot.safety_radius)
-        self._nav_openness = None
-        self._nav_openness_stamp_ns = None  # node-clock ns when openness was last received
-        self._openness_ttl_ns = int(2.0e9)  # openness older than this -> fall back to base
-        self.create_subscription(Float32, '/mapping/path_openness', self.path_openness_callback, 10)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -488,13 +512,6 @@ class PlanningNode(Node):
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
 
-    def path_openness_callback(self, msg):
-        # Just record the prior + arrival time. The effective safety_radius is derived
-        # per planning cycle (see _effective_safety_radius) so it self-heals back to
-        # base when the openness stream stops, instead of freezing at the last value.
-        self._nav_openness = float(msg.data)
-        self._nav_openness_stamp_ns = self.get_clock().now().nanoseconds
-
     def _signal_fresh(self, stamp_ns, window_ns):
         """True if a signal last stamped at stamp_ns is still within window_ns of
         now. Never-received (stamp_ns None) -> stale, the safe default."""
@@ -502,14 +519,31 @@ class PlanningNode(Node):
             return False
         return self.get_clock().now().nanoseconds - stamp_ns <= window_ns
 
-    def _effective_safety_radius(self):
-        # Static openness prior (m) -> safety_radius. Tighten toward narrow corridors:
-        # safety = clip((openness - robot.width) * 0.75, base*0.75, base). Falls back to
-        # base when no openness has been received or the last one is stale.
-        b = self._safety_base
-        if self._nav_openness is None or not self._signal_fresh(self._nav_openness_stamp_ns, self._openness_ttl_ns):
-            return b
-        return min(b, max(b * 0.75, (self._nav_openness - self.robot.width) * 0.75))
+    def _speed_from_clearance(self, clearance_m, v_prev):
+        """Linear peak-speed schedule from forward clearance, discounted for reaction
+        latency (the robot travels ~v_prev*t_react before a new command takes effect).
+        net clearance <= clear_c0_m -> vx_min; >= clear_open_m -> vx_max; linear between."""
+        c_eff = max(0.0, clearance_m - v_prev * self._t_react_s)
+        # np.interp saturates to the endpoints outside [clear_c0_m, clear_open_m].
+        return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
+                               [self._vx_min, self._vx_max]))
+
+    def _commit_check_steps(self, v_allow):
+        """Collision-check step count so the committed *distance* stays ~constant
+        (commit_dist_m) regardless of speed. Slower -> longer time window."""
+        horizon_s = np.clip(self._commit_dist_m / max(v_allow, 1e-3),
+                            self._min_horizon_s, self._max_horizon_s)
+        return int(round(horizon_s / self._traj_dt))
+
+    def _publish_velocity_ff(self, vx, omega):
+        """Publish a (vx, omega) feedforward on /planning/velocity_ff. angular.x
+        carries the fixed-speed reverse flag, derived from the sign of vx here so the
+        reverse-vocabulary convention cmd_vel_control consumes lives in one place."""
+        ff = Twist()
+        ff.linear.x = vx
+        ff.angular.z = omega
+        ff.angular.x = 1.0 if vx < 0.0 else 0.0
+        self.velocity_ff_pub.publish(ff)
 
     def info_callback(self, msg):
         if self.K is None:
@@ -709,7 +743,11 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
+            # Forward clearance drives both the peak-speed schedule and the reverse gate.
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
+            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])))
+            collision_check_steps = self._commit_check_steps(v_allow)
+            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q, vx_max=v_allow)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
@@ -718,11 +756,10 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
-            safety_radius = self._effective_safety_radius()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, safety_radius, front_len, rear_len, half_w, self._collision_check_steps)
+            safety_radius = self.robot.safety_radius
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, safety_radius, front_len, rear_len, half_w, collision_check_steps)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
             should_reverse = front_clearance <= enter_threshold
 
@@ -753,6 +790,12 @@ class PlanningNode(Node):
                     f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
                     f'should_reverse={should_reverse}'
                 )
+                # Fallback: if the blockage is ahead (not already under the footprint),
+                # back out slowly instead of freezing so the next cycle can re-plan.
+                # When the footprint cell is itself an obstacle (phantom ground/self)
+                # we stay put rather than reversing blindly into noise.
+                if should_reverse and not center_obst:
+                    self._publish_velocity_ff(-self._reverse_speed_fallback, 0.0)
                 return
 
             # --- Stage 1: hard feasibility filter ---
@@ -826,7 +869,8 @@ class PlanningNode(Node):
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
                 f'feasible={len(feasible)} fwd_feasible={n_fwd_feasible} '
-                f'should_reverse={should_reverse} check_steps={self._collision_check_steps} '
+                f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
+                f'should_reverse={should_reverse} check_steps={collision_check_steps} '
                 f'on_stairs={on_stairs}'
             )
 
@@ -847,11 +891,7 @@ class PlanningNode(Node):
             dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
             sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / traj_dt)
 
-            ff = Twist()
-            ff.linear.x = sel_vx
-            ff.angular.z = sel_omega
-            ff.angular.x = 1.0 if sel_vx < 0.0 else 0.0
-            self.velocity_ff_pub.publish(ff)
+            self._publish_velocity_ff(sel_vx, sel_omega)
 
             # path
             path = Path()
