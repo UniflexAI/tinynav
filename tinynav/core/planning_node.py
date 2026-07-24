@@ -637,14 +637,14 @@ class PlanningNode(Node):
         norm = float(np.linalg.norm(direction))
         if norm <= 1e-6:
             return fallback_quat
-        forward = np.array([direction[0] / norm, direction[1] / norm, 0.0], dtype=np.float64)
-        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        x_axis = np.cross(up, forward)
+        z_axis = np.array([direction[0] / norm, direction[1] / norm, 0.0], dtype=np.float64)
+        y_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        x_axis = np.cross(y_axis, z_axis)
         x_norm = float(np.linalg.norm(x_axis))
         if x_norm <= 1e-6:
             return fallback_quat
         x_axis /= x_norm
-        rot = np.column_stack([x_axis, up, forward])
+        rot = np.column_stack([x_axis, y_axis, z_axis])
         return matrix_to_quat(rot)
 
     def _publish_astar_path(self, points, header, fallback_quat):
@@ -978,6 +978,10 @@ class PlanningNode(Node):
                             f"reason={astar_reason} points={len(astar_points)} "
                             f"front_clearance={front_clearance:.2f} enter_threshold={enter_threshold:.2f} "
                             f"target_dist={target_dist:.2f} astar_ms={astar_ms:.0f} "
+                            f"start=({init_p[0]:.2f},{init_p[1]:.2f}) "
+                            f"target=({self.target_pose[0]:.2f},{self.target_pose[1]:.2f}) "
+                            f"p0=({astar_points[0][0]:.2f},{astar_points[0][1]:.2f}) "
+                            f"p1=({astar_points[1][0]:.2f},{astar_points[1][1]:.2f}) "
                             f"dilation_cells={self.obstacle_config.dilation_cells} "
                             f"comfort_radius={self.robot.comfort_radius:.2f}"
                         )
