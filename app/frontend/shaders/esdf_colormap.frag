@@ -10,8 +10,9 @@
 // single source of truth in Dart while the shader stays generic.
 //
 // (The scalar used to arrive JET-colourised and was recovered here by hue;
-// that colour roundtrip is gone — the backend now ships the raw scalar, which
-// is smaller and removes the compression artefacts the recovery had to fight.)
+// now the backend inverts the colourmap and ships the raw scalar instead,
+// which is smaller and removes the compression artefacts the hue recovery had
+// to fight.)
 //
 // Uniform layout (must match _EsdfShaderPainter in esdf_colormap_layer.dart):
 //   setFloat(0,1) -> uSize
