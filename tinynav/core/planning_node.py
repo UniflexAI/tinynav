@@ -478,7 +478,7 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
-        # Stair hint from stair_hint_node: when active, relax the obstacle z-span
+        # Stair hint from map_node's /planning/on_stairs: when active, relax the obstacle z-span
         # filter (raise min_wall_span_m above the strict default) so the ascending
         # staircase stops reading as a wall while taller verticals still block.
         # GLOBAL span switch, not spatial -> low obstacles ON the stair region are

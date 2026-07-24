@@ -222,7 +222,6 @@ class BackendNode(Ros2NodeManager):
         self._nav_nodes_running: bool = False
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
-        self._stair_hint_proc: subprocess.Popen | None = None
         self._on_stairs: bool = False
 
         self._nav_progress: dict | None = None
@@ -798,12 +797,6 @@ class BackendNode(Ros2NodeManager):
             ],
             env=_env,
         )
-        self._stair_hint_proc = self._launch_proc(
-            'stair_hint',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/stair_hint_node.py',
-             '--tinynav_map_path', self.map_path],
-            env=_env,
-        )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
             ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
@@ -817,10 +810,8 @@ class BackendNode(Ros2NodeManager):
         self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
-        self._kill_proc(self._stair_hint_proc)
         self._map_node_proc = None
         self._cmd_vel_proc = None
-        self._stair_hint_proc = None
         with self._lock:
             self._nav_nodes_running = False
             self._localized = False
@@ -836,11 +827,9 @@ class BackendNode(Ros2NodeManager):
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
         self._kill_proc(self._cmd_vel_proc)
-        self._kill_proc(self._stair_hint_proc)
         self._map_node_proc = None
         self._planning_proc = None
         self._cmd_vel_proc = None
-        self._stair_hint_proc = None
 
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -853,12 +842,6 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc = self._launch_proc(
             'map_node',
             ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
-             '--tinynav_map_path', self.map_path],
-            env=_env,
-        )
-        self._stair_hint_proc = self._launch_proc(
-            'stair_hint',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/stair_hint_node.py',
              '--tinynav_map_path', self.map_path],
             env=_env,
         )
@@ -1218,7 +1201,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._stair_hint_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)

@@ -870,8 +870,8 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
 
         # Stair hint: label each capture-path sample climbing/flat from the
-        # (loop-closed) pose trajectory. Rides on poses.npy; the nav-time
-        # stair_hint_node reads path_climb.npy to gate z-span strictness.
+        # (loop-closed) pose trajectory. Rides on poses.npy; at nav time map_node
+        # reads path_climb.npy and publishes /planning/on_stairs to gate z-span.
         try:
             path_climb = compute_path_climb(self.pose_graph_used_pose)
             np.save(f"{self.map_save_path}/path_climb.npy", path_climb)
