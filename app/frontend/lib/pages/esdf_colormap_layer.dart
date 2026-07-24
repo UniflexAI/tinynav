@@ -22,14 +22,14 @@ const LinearGradient _kEsdfHeatmap = LinearGradient(
   stops: [0.0, 0.15, 0.30, 0.45, 0.60, 0.78, 1.0],
 );
 
-/// Renders the ESDF heatmap bytes recoloured through the `esdf_colormap`
-/// fragment shader, replacing the baked-in JET palette with [_kEsdfHeatmap].
+/// Renders the ESDF heatmap by colourising the backend's scalar field through
+/// the `esdf_colormap` fragment shader using the [_kEsdfHeatmap] palette.
 ///
-/// The source bytes arrive already colourised (JET, baked upstream). The shader
-/// recovers a scalar per pixel and looks up a new colour from a palette LUT.
-/// If the shader or image is not ready yet (or the shader asset fails to load),
-/// it falls back to the original [Image.memory] bitmap so behaviour never
-/// degrades below the previous implementation.
+/// The source bytes are a single-channel scalar image (0 = danger .. 1 =
+/// far-field); the shader maps each pixel through the palette LUT. Until the
+/// shader/image are ready (or if the shader asset fails to load) it falls back
+/// to [Image.memory], which shows the raw scalar as grayscale — degraded but
+/// still readable, and only during the brief one-time shader load.
 class EsdfColormapLayer extends StatefulWidget {
   final Uint8List bytes;
   final double opacity;
