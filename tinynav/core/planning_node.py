@@ -660,9 +660,8 @@ class PlanningNode(Node):
         path = Path()
         path.header = header
         path.header.frame_id = "world"
-        for i, point in enumerate(points):
-            next_point = points[min(i + 1, len(points) - 1)]
-            quat = self._quat_from_path_direction(point, next_point, fallback_quat)
+        for point in points:
+            quat = fallback_quat
             pose = PoseStamped()
             pose.header = header
             pose.pose.position.x = float(point[0])
