@@ -34,7 +34,7 @@ class RobotConfig:
     control_x: float = 0.0
     control_y: float = 0.0
     safety_radius: float = 0.5
-    comfort_radius: float = 0.8
+    comfort_radius: float = 0.5
 
     @property
     def cam_offset_3d(self):
@@ -59,7 +59,7 @@ GO2_CONFIG = RobotConfig(
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
-    comfort_radius=0.8,
+    comfort_radius=0.2,
 )
 
 B2_CONFIG = RobotConfig(
@@ -68,7 +68,7 @@ B2_CONFIG = RobotConfig(
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
-    comfort_radius=0.8,
+    comfort_radius=0.2,
 )
 
 # === Helper functions ===
@@ -425,18 +425,31 @@ class PlanningNode(Node):
         except json.JSONDecodeError as exc:
             self.get_logger().warning(f"Failed to parse /planning/config: {exc}")
             return
-        if not isinstance(config, dict) or "dilation_cells" not in config:
+        if not isinstance(config, dict):
             return
-        try:
-            dilation_cells = int(config["dilation_cells"])
-        except (TypeError, ValueError):
-            self.get_logger().warning(f"Invalid planning dilation_cells: {config.get('dilation_cells')!r}")
-            return
-        dilation_cells = max(0, min(20, dilation_cells))
-        old = self.obstacle_config.dilation_cells
-        self.obstacle_config.dilation_cells = dilation_cells
-        if old != dilation_cells:
-            self.get_logger().info(f"Updated planning dilation_cells: {old} -> {dilation_cells}")
+        if "dilation_cells" in config:
+            try:
+                dilation_cells = int(config["dilation_cells"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning dilation_cells: {config.get('dilation_cells')!r}")
+            else:
+                dilation_cells = max(0, min(20, dilation_cells))
+                old = self.obstacle_config.dilation_cells
+                self.obstacle_config.dilation_cells = dilation_cells
+                if old != dilation_cells:
+                    self.get_logger().info(f"Updated planning dilation_cells: {old} -> {dilation_cells}")
+
+        if "comfort_radius" in config:
+            try:
+                comfort_radius = float(config["comfort_radius"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning comfort_radius: {config.get('comfort_radius')!r}")
+            else:
+                comfort_radius = max(self.robot.safety_radius, min(3.0, comfort_radius))
+                old = self.robot.comfort_radius
+                self.robot.comfort_radius = comfort_radius
+                if abs(old - comfort_radius) > 1e-6:
+                    self.get_logger().info(f"Updated planning comfort_radius: {old:.2f} -> {comfort_radius:.2f}")
 
     def poi_change_callback(self, msg):
         self.target_pose = None
