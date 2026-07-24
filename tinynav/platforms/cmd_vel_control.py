@@ -10,9 +10,6 @@ import numpy as np
 import logging
 import time
 
-# Module-level logger for cases where self.get_logger() is not available
-logger = logging.getLogger(__name__)
-
 class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
@@ -32,7 +29,6 @@ class CmdVelControlNode(Node):
         self.cam_forward_offset = 0.5
         self.T_camera_to_control = self.T_robot_to_camera.copy()
         self.T_camera_to_control[2, 3] = -self.cam_forward_offset  # back along camera +z (=forward)
-        self.last_path_time = 0.0
         self.pose = None
         self.path = None
         self._path_xy = None          # (N,2) cached path XY, updated in path_callback
@@ -74,6 +70,9 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = 0.03
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
+        # Forward-speed cap; must match the planner's vx_max or its clearance-scaled
+        # speed-up is silently clipped back here.
+        self.max_forward_speed = 0.6
 
         self.latest_cmd = Twist()
         self.path_vyaw_ff = 0.0
@@ -198,7 +197,6 @@ class CmdVelControlNode(Node):
             target_cmd.angular.z *= 0.5
 
         out = Twist()
-        out.linear.y = 0.0
 
         # Reverse is a fixed-speed straight-back vocabulary; pass it through unsmoothed.
         if target_cmd.linear.x < 0.0:
@@ -256,8 +254,6 @@ class CmdVelControlNode(Node):
         self._path_pose_yaw = np.arctan2(2.0 * (qy * qz - qw * qx),
                                          2.0 * (qx * qz + qw * qy))
 
-        ros_now = self.get_clock().now().to_msg()
-        self.last_path_time = ros_now.sec + ros_now.nanosec * 1e-9
         now_mono = time.monotonic()
         if self.last_path_update_time is not None:
             period = np.clip(now_mono - self.last_path_update_time, 0.05, 0.5)
@@ -277,7 +273,7 @@ class CmdVelControlNode(Node):
         if is_backward_segment:
             vx = -self.fixed_reverse_speed
         else:
-            vx = float(np.clip(raw_vx, 0.0, 0.5))
+            vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
             # Preserve turn radius (vx/omega) when omega exceeds the cap: scale vx by the
             # same ratio instead of just clipping omega (which would widen the radius).
             if abs(vyaw) > self.max_angular_speed:
