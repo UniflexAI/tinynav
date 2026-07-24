@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Runtime: turn live RTK into the robot's position in the saved map.
+"""Runtime: turn live RTK (+ IMU) into the robot's pose in the saved map.
 
 Converts each /fix (lat/lon) to map-frame XY via the inverse planar Sim3 stored
 in a per-map rtk_align.json (produced by rtk_align_calibrate.py), and publishes
-/rtk/map_pose (nav_msgs/Odometry, map frame).
+/rtk/map_pose (nav_msgs/Odometry, map frame) with position AND heading.
 
-Position only: single-antenna RTK has no usable heading, so orientation is left
-identity for a downstream consumer to fill (VIO / motion-fit). The pose
-covariance encodes RTK quality (tight at RTK FIXED/FLOAT, loose at DGNSS) so the
-consumer can decide how to use it (primary at FIXED, only a search-range
-constraint at DGNSS).
+Heading (see rtk_heading.py):
+  Single-antenna RTK has no direct heading; course-over-ground only works while
+  driving straight forward and is useless during spot turns / reverse — exactly
+  what a navigating robot does. So heading is a fusion:
+    * high-rate IMU gyro   -> responsive heading (tracks turns / reverse),
+    * low-rate RTK track    -> absolute drift-free heading, but only sampled when
+                               the recent travel is straight enough.
+  The IMU carries the heading through turns; each straight RTK segment corrects
+  the gyro's slow drift and its bias. First straight segment also bootstraps the
+  absolute heading (the NEED_YAW_INIT -> ACTIVE handshake).
 
 Map gating (which rtk_align.json to load):
   This node does NOT hard-code a map. It subscribes to `map_topic` (std_msgs/
   String = the current map DIRECTORY path) and loads `<map_dir>/rtk_align.json`
   from it, mirroring how map_node reads nav_flow.json from the same directory.
-  It only publishes /rtk/map_pose once a map with an rtk_align.json is active;
-  if the map has no rtk_align.json (not RTK-calibrated) it stays silent.
+  It only publishes /rtk/map_pose once a map with an rtk_align.json is active.
 
   IMPORTANT (integration contract): publishing `map_topic` is the map/navigation
   owner's job, NOT part of the RTK module. That publisher must:
@@ -39,18 +43,19 @@ import json
 import math
 import os
 import sys
-from collections import deque
 
-import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import NavSatFix, NavSatStatus
+from rclpy.qos import (QoSProfile, DurabilityPolicy, ReliabilityPolicy,
+                       HistoryPolicy, qos_profile_sensor_data)
+from sensor_msgs.msg import NavSatFix, NavSatStatus, Imu
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rtk_geo
+from rtk_heading import (StraightYaw, HeadingFilter, OdomOffsetHeading,
+                         yaw_from_odom_quat)
 
 
 class RtkMapPoseNode(Node):
@@ -62,22 +67,35 @@ class RtkMapPoseNode(Node):
         self.declare_parameter("align_filename", "rtk_align.json")
         self.declare_parameter("align_json", "")
         self.declare_parameter("fix_topic", "/fix")
+        # Heading relative source: "odom" (VIO yaw from /slam/odometry, default)
+        # or "imu" (integrate /lidar_imu gyro). Both are anchored to the map by
+        # the same straight-segment RTK correction.
+        self.declare_parameter("heading_source", "odom")
+        self.declare_parameter("imu_topic", "/lidar_imu")
+        self.declare_parameter("odom_topic", "/slam/odometry")
+        self.declare_parameter("heading_odom_alpha", 0.2)  # odom->map offset LP
+        # False (default) = heading is pure odom + a one-time initial offset
+        # (offset bootstrapped from the first straight RTK segment, then locked;
+        # RTK no longer corrects heading). True = keep low-pass RTK correction.
+        self.declare_parameter("heading_odom_correct", False)
         self.declare_parameter("output_topic", "/rtk/map_pose")
         self.declare_parameter("map_frame_id", "map")
         self.declare_parameter("child_frame_id", "rtk")
         # Publish only at RTK FIXED/FLOAT (q4/5): cm-level fixes. DGNSS/single are
-        # too noisy both for the position and for the motion-fit heading.
+        # too noisy both for the position and for the straight-segment heading.
         self.declare_parameter("min_status", int(NavSatStatus.STATUS_GBAS_FIX))
-        # Heading from RTK motion (course-over-ground): map-frame yaw = direction
-        # of travel of the map-frame track over the last heading_min_dist_m. No
-        # IMU/VIO, so yaw is only trustworthy while moving forward; its covariance
-        # inflates once the last fit goes stale (robot stopped / may have turned
-        # in place, which we cannot observe without an inertial source).
-        self.declare_parameter("heading_min_dist_m", 1.0)
-        self.declare_parameter("yaw_std_deg", 5.0)
-        self.declare_parameter("heading_stale_s", 3.0)
-        # Handshake status topic (std_msgs/String JSON), published continuously so
-        # the navigation node knows when to drive the ~1 m yaw-init forward motion.
+        # RTK straight-segment heading observation (course-over-ground).
+        self.declare_parameter("heading_min_dist_m", 1.0)   # window length
+        self.declare_parameter("straight_max_offline_m", 0.15)  # straightness gate
+        # IMU / heading fusion.
+        self.declare_parameter("heading_kp", 0.2)           # angle pull per obs
+        self.declare_parameter("heading_ki", 0.02)          # bias learn per obs
+        self.declare_parameter("gravity_tau_s", 1.0)        # gravity low-pass
+        self.declare_parameter("yaw_rate_sign", 1.0)        # flip if turns invert
+        # Yaw covariance model (deg): base + drift growth since last correction.
+        self.declare_parameter("yaw_base_std_deg", 3.0)
+        self.declare_parameter("yaw_drift_deg_per_s", 0.05)
+        # Handshake status topic (std_msgs/String JSON).
         self.declare_parameter("status_topic", "/rtk/init_status")
         self.declare_parameter("status_rate_hz", 2.0)
         self.declare_parameter("fix_timeout_s", 2.0)
@@ -86,21 +104,34 @@ class RtkMapPoseNode(Node):
         self.min_status = int(self.get_parameter("min_status").value)
         self.map_frame = self.get_parameter("map_frame_id").value
         self.child_frame = self.get_parameter("child_frame_id").value
-        self.heading_min_dist = float(self.get_parameter("heading_min_dist_m").value)
-        self.yaw_var_fresh = math.radians(float(self.get_parameter("yaw_std_deg").value)) ** 2
-        self.heading_stale_s = float(self.get_parameter("heading_stale_s").value)
+        self.fix_timeout_s = float(self.get_parameter("fix_timeout_s").value)
+        self.yaw_base_std_deg = float(self.get_parameter("yaw_base_std_deg").value)
+        self.yaw_drift_deg_per_s = float(self.get_parameter("yaw_drift_deg_per_s").value)
 
         # Not loaded until a map is resolved. on_fix stays silent until then.
         self.loaded_path = None
         self.meta = self.enu = self.yaw = self.scale = self.t2 = None
-        # Course-over-ground heading state (map frame).
-        self.track = deque(maxlen=400)   # recent map-frame (x, y) at q4/5
-        self.yaw_est = None              # last fitted map-frame heading (rad)
-        self.last_fit_wall = None        # wall time (s) of the last heading fit
+        # Heading fusion state.
+        self.sy = StraightYaw(
+            min_dist=float(self.get_parameter("heading_min_dist_m").value),
+            max_offline_m=float(self.get_parameter("straight_max_offline_m").value))
+        self.heading_source = str(self.get_parameter("heading_source").value).lower()
+        if self.heading_source == "imu":
+            self.hf = HeadingFilter(
+                kp=float(self.get_parameter("heading_kp").value),
+                ki=float(self.get_parameter("heading_ki").value),
+                g_tau=float(self.get_parameter("gravity_tau_s").value),
+                yaw_rate_sign=float(self.get_parameter("yaw_rate_sign").value))
+        else:
+            self.heading_source = "odom"
+            self.hf = OdomOffsetHeading(
+                alpha=float(self.get_parameter("heading_odom_alpha").value),
+                correct=bool(self.get_parameter("heading_odom_correct").value))
+        self.last_xy = None              # latest map-frame position (x, y)
+        self.last_imu_t = None           # last IMU header time (s), for dt
         # Latest-fix bookkeeping for the handshake status.
-        self.last_status = -1            # last NavSatStatus.status seen
-        self.last_fix_wall = None        # wall time (s) of the last fix
-        self.fix_timeout_s = float(self.get_parameter("fix_timeout_s").value)
+        self.last_status = -1
+        self.last_fix_wall = None
 
         self.pub = self.create_publisher(
             Odometry, self.get_parameter("output_topic").value, 10)
@@ -108,6 +139,13 @@ class RtkMapPoseNode(Node):
             String, self.get_parameter("status_topic").value, 10)
         self.create_subscription(
             NavSatFix, self.get_parameter("fix_topic").value, self.on_fix, 20)
+        if self.heading_source == "imu":
+            self.create_subscription(
+                Imu, self.get_parameter("imu_topic").value, self.on_imu,
+                qos_profile_sensor_data)
+        else:
+            self.create_subscription(
+                Odometry, self.get_parameter("odom_topic").value, self.on_odom, 20)
         rate = float(self.get_parameter("status_rate_hz").value)
         self.create_timer(1.0 / rate if rate > 0 else 1.0, self._publish_status)
 
@@ -131,10 +169,11 @@ class RtkMapPoseNode(Node):
                 f"{self.get_parameter('map_topic').value!r} "
                 "(publishes /rtk/map_pose once a map with rtk_align.json is active)")
 
+    # ---- map gating -------------------------------------------------------
     def _reset_heading(self):
-        self.track.clear()
-        self.yaw_est = None
-        self.last_fit_wall = None
+        self.sy.reset()
+        self.hf.reset()
+        self.last_xy = None
 
     def _load(self, path):
         """Load an rtk_align.json; return True on success."""
@@ -149,7 +188,7 @@ class RtkMapPoseNode(Node):
         self.loaded_path = path
         self.get_logger().info(
             f"loaded rtk_align: map={self.meta.get('map')} path={path} "
-            f"yaw={np.degrees(self.yaw):.1f} scale={self.scale:.4f} "
+            f"yaw={math.degrees(self.yaw):.1f} scale={self.scale:.4f} "
             f"origin=({self.enu.lat:.7f},{self.enu.lon:.7f})")
         return True
 
@@ -170,7 +209,6 @@ class RtkMapPoseNode(Node):
         if path == self.loaded_path:
             return                       # already active, nothing to do
         if not os.path.isfile(path):
-            # Map switched to one without a calibration -> stop publishing.
             self._clear_active_map(f"missing {self.align_filename} in {map_dir!r}")
             self.get_logger().warning(
                 f"map {map_dir!r} has no {self.align_filename} "
@@ -178,81 +216,73 @@ class RtkMapPoseNode(Node):
             return
         self._load(path)
 
+    # ---- sensors ----------------------------------------------------------
     def _now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
-    def _update_heading(self, x, y):
-        """Map-frame yaw from a least-squares line fit over the last
-        heading_min_dist_m of the map-frame track (course-over-ground). A line
-        fit over all points in the window is far less sensitive to per-fix noise
-        than a single two-point chord, so a shorter window still gives a stable
-        yaw. Sign is resolved by net travel so the heading points forward."""
-        self.track.append((x, y))
-        # Window = newest back to the first point >= heading_min_dist away.
-        min_d2 = self.heading_min_dist ** 2
-        start = None
-        for i in range(len(self.track) - 1, -1, -1):
-            px, py = self.track[i]
-            if (x - px) ** 2 + (y - py) ** 2 >= min_d2:
-                start = i
-                break
-        if start is None:
-            return                                   # < heading_min_dist so far
-        window = list(self.track)[start:]            # oldest -> newest, spans ~1 m
-        if len(window) < 2:
-            return
-        P = np.asarray(window, dtype=float)
-        net = P[-1] - P[0]                           # net travel (sign reference)
-        c = P - P.mean(axis=0)
-        _, vecs = np.linalg.eigh(c.T @ c)            # ascending eigenvalues
-        axis = vecs[:, -1]                           # principal (line) direction
-        if float(axis @ net) < 0.0:                  # orient along travel
-            axis = -axis
-        self.yaw_est = math.atan2(float(axis[1]), float(axis[0]))
-        self.last_fit_wall = self._now_s()
+    def on_imu(self, msg: Imu):
+        """Advance the heading with the gyro (gravity-projected). High rate."""
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.last_imu_t is not None:
+            dt = t - self.last_imu_t
+            if 0.0 < dt < 0.5:           # ignore gaps / out-of-order stamps
+                self.hf.imu_update(
+                    (msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z),
+                    (msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z),
+                    dt)
+        self.last_imu_t = t
+
+    def on_odom(self, msg: Odometry):
+        """Feed the odometry (VIO) heading as the relative source. High rate."""
+        q = msg.pose.pose.orientation
+        self.hf.set_odom_yaw(yaw_from_odom_quat(q.x, q.y, q.z, q.w))
 
     def on_fix(self, msg: NavSatFix):
         # Record quality/time first (drives the handshake status even at low fix).
         self.last_status = int(msg.status.status)
         self.last_fix_wall = self._now_s()
-        if self.enu is None:                 # gated: no active map yet
+        if self.enu is None:                      # gated: no active map yet
             return
         if msg.status.status < self.min_status:   # q4/5 only
             return
-        if not (np.isfinite(msg.latitude) and np.isfinite(msg.longitude)):
+        if not (math.isfinite(msg.latitude) and math.isfinite(msg.longitude)):
             return
         if msg.latitude == 0.0 and msg.longitude == 0.0:
             return
         enu = self.enu.lla_to_enu(msg.latitude, msg.longitude, msg.altitude)
         xy = rtk_geo.enu_to_map_xy(self.yaw, self.scale, self.t2, enu[:2])
+        self.last_xy = (float(xy[0]), float(xy[1]))
+        # Straight-segment heading observation -> bootstrap / correct the filter.
+        obs = self.sy.add(self.last_xy[0], self.last_xy[1])
+        if obs is not None:
+            self.hf.rtk_observe(obs[0], self._now_s())
+        # Publish the pose ONCE PER FIX so the position is always fresh: the RTK
+        # position only changes at the /fix rate (~1 Hz), so emitting faster would
+        # just repeat the same point and mislead a consumer into "not moving".
+        # The heading in each message is the current fused yaw (the IMU has kept
+        # it correct through any turns/reverse between fixes).
+        if self.hf.ready:
+            self._publish_pose(msg.header.stamp)
 
-        self._update_heading(float(xy[0]), float(xy[1]))
-        if self.yaw_est is None:
-            # Position + orientation are published together; hold until the robot
-            # has moved enough for a first heading fit.
-            return
-
-        # yaw covariance: fresh right after a motion fit, inflated once stale
-        # (robot may have stopped or turned in place — unobservable here).
-        age = self._now_s() - self.last_fit_wall
-        yaw_var = self.yaw_var_fresh if age <= self.heading_stale_s else math.radians(90.0) ** 2
-        half = self.yaw_est / 2.0
-
+    # ---- outputs ----------------------------------------------------------
+    def _publish_pose(self, stamp):
+        now = self._now_s()
+        half = self.hf.heading / 2.0
         od = Odometry()
-        od.header.stamp = msg.header.stamp
+        od.header.stamp = stamp
         od.header.frame_id = self.map_frame
         od.child_frame_id = self.child_frame
-        od.pose.pose.position.x = float(xy[0])
-        od.pose.pose.position.y = float(xy[1])
+        od.pose.pose.position.x = self.last_xy[0]
+        od.pose.pose.position.y = self.last_xy[1]
         od.pose.pose.position.z = 0.0
         od.pose.pose.orientation.z = math.sin(half)   # yaw about map +Z
         od.pose.pose.orientation.w = math.cos(half)
-
         cov = [0.0] * 36
-        cov[0] = cov[7] = 0.25     # x, y (RTK FIXED/FLOAT, cm-level)
-        cov[14] = 1e6              # z (2D fit, unknown)
-        cov[21] = cov[28] = 1e6    # roll, pitch unknown
-        cov[35] = yaw_var          # yaw from motion fit
+        cov[0] = cov[7] = 0.25         # x, y (RTK FIXED/FLOAT, cm-level)
+        cov[14] = 1e6                  # z (2D fit, unknown)
+        cov[21] = cov[28] = 1e6        # roll, pitch unknown
+        cov[35] = self.hf.yaw_var(now, self.yaw_base_std_deg,
+                                  self.yaw_drift_deg_per_s)
         od.pose.covariance = cov
         self.pub.publish(od)
 
@@ -262,7 +292,7 @@ class RtkMapPoseNode(Node):
         States:
           NO_MAP        - no active map / no rtk_align.json -> nothing to do
           WAIT_FIX      - map ready, waiting for RTK FIXED/FLOAT (q4/5)
-          NEED_YAW_INIT - map + q4/5 but no heading yet -> DRIVE FORWARD ~1 m
+          NEED_YAW_INIT - map + q4/5 but heading not bootstrapped -> DRIVE ~1 m
           ACTIVE        - heading acquired; /rtk/map_pose is publishing
         The nav node should drive the robot slowly forward (with its own obstacle
         avoidance) while need_forward_init is true, and stop once ACTIVE.
@@ -271,7 +301,7 @@ class RtkMapPoseNode(Node):
         fix_recent = (self.last_fix_wall is not None
                       and self._now_s() - self.last_fix_wall < self.fix_timeout_s)
         fix_ok = fix_recent and self.last_status >= self.min_status  # q4/5
-        yaw_ready = self.yaw_est is not None
+        yaw_ready = self.hf.ready
         if not have_map:
             state = "NO_MAP"
         elif not fix_ok:
@@ -288,7 +318,8 @@ class RtkMapPoseNode(Node):
             "fix_ok": bool(fix_ok),
             "navsat_status": self.last_status,   # 2 == GBAS_FIX (RTK q4/5)
             "yaw_ready": yaw_ready,
-            "yaw_deg": None if not yaw_ready else round(math.degrees(self.yaw_est), 1),
+            "yaw_deg": None if not yaw_ready else round(math.degrees(self.hf.heading), 1),
+            "heading_source": self.heading_source,
         }
         self.status_pub.publish(String(data=json.dumps(payload, separators=(",", ":"))))
 
