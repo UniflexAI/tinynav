@@ -9,6 +9,7 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
+from tinynav.core.planning_node import GO2_CONFIG
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -25,8 +26,10 @@ class CmdVelControlNode(Node):
             [0, 0, 0, 1]]
         )
         # Camera sits this far ahead of the control center; heading must be referenced
-        # at the control center or the short path lies behind the camera.
-        self.cam_forward_offset = 0.5
+        # at the control center or the short path lies behind the camera. Derived from
+        # the shared GO2_CONFIG so it can't drift out of sync with the planner's
+        # footprint geometry (cam_offset_3d forward component = camera_x - control_x).
+        self.cam_forward_offset = float(GO2_CONFIG.cam_offset_3d[2])
         self.T_camera_to_control = self.T_robot_to_camera.copy()
         self.T_camera_to_control[2, 3] = -self.cam_forward_offset  # back along camera +z (=forward)
         self.pose = None

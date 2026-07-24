@@ -58,9 +58,9 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.7, width=0.3,
-    camera_x=0.2, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
+    length=0.6, width=0.3,
+    camera_x=0.35, camera_y=0.0,
+    control_x=0.05, control_y=0.0,
     safety_radius=0.2,
 )
 
@@ -416,11 +416,7 @@ class PlanningNode(Node):
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.resolution = 0.05
-        # dilation_cells inflates the live obstacle map (0.05 m/cell) to keep a hard
-        # standoff from walls indoors, so the robot maintains margin instead of
-        # driving the footprint up against a wall and wedging (all-collision freeze).
-        # 2 cells ~= 0.10 m. Raise for more standoff; too high closes tight doorways.
-        self.obstacle_config = ObstacleConfig(dilation_cells=2)
+        self.obstacle_config = ObstacleConfig()
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
@@ -511,6 +507,27 @@ class PlanningNode(Node):
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+
+    def _snap_target_to_free(self, target, obstacle_mask, search_cells=8):
+        """If the goal cell is an obstacle, move it to the nearest obstacle-free cell
+        within search_cells (expanding-box search, first free cell wins). Keeps the
+        goal off obstacles so the distance-to-goal term can't pull the footprint into
+        one. Goal already free (or off-grid) -> returned unchanged."""
+        rows, cols = obstacle_mask.shape
+        tx = int((target[0] - self.origin[0]) / self.resolution)
+        ty = int((target[1] - self.origin[1]) / self.resolution)
+        if not (0 <= tx < rows and 0 <= ty < cols) or not obstacle_mask[tx, ty]:
+            return target
+        for r in range(1, search_cells + 1):
+            x0, x1 = max(0, tx - r), min(rows - 1, tx + r)
+            y0, y1 = max(0, ty - r), min(cols - 1, ty + r)
+            for x in range(x0, x1 + 1):
+                for y in range(y0, y1 + 1):
+                    if not obstacle_mask[x, y]:
+                        wx = self.origin[0] + (x + 0.5) * self.resolution
+                        wy = self.origin[1] + (y + 0.5) * self.resolution
+                        return np.array([wx, wy, target[2]])
+        return target
 
     def _signal_fresh(self, stamp_ns, window_ns):
         """True if a signal last stamped at stamp_ns is still within window_ns of
@@ -763,11 +780,11 @@ class PlanningNode(Node):
             enter_threshold = 0.30
             should_reverse = front_clearance <= enter_threshold
 
-            # Goal used in the cost function.
-            target = self.target_pose
-
             if self.target_pose is None:
                 return
+
+            # Goal used in the cost function, snapped off any obstacle cell.
+            target = self._snap_target_to_free(self.target_pose, obstacle_mask)
 
             # World heading (rad) of a trajectory pose, body +Z-forward convention
             # (same as score_trajectories_by_ESDF and the published Path). Used both
