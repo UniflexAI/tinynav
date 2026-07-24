@@ -410,6 +410,7 @@ class PlanningNode(Node):
         )
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
+        self.reverse_enter_threshold = 0.30
 
         self.smoothed_velocity = 0.0
         self._last_avoidance_debug_log_time = 0.0
@@ -450,6 +451,22 @@ class PlanningNode(Node):
                 self.robot.comfort_radius = comfort_radius
                 if abs(old - comfort_radius) > 1e-6:
                     self.get_logger().info(f"Updated planning comfort_radius: {old:.2f} -> {comfort_radius:.2f}")
+
+        if "reverse_enter_threshold" in config:
+            try:
+                reverse_enter_threshold = float(config["reverse_enter_threshold"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning reverse_enter_threshold: {config.get('reverse_enter_threshold')!r}"
+                )
+            else:
+                reverse_enter_threshold = max(0.0, min(2.0, reverse_enter_threshold))
+                old = self.reverse_enter_threshold
+                self.reverse_enter_threshold = reverse_enter_threshold
+                if abs(old - reverse_enter_threshold) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning reverse_enter_threshold: {old:.2f} -> {reverse_enter_threshold:.2f}"
+                    )
 
     def poi_change_callback(self, msg):
         self.target_pose = None
@@ -682,7 +699,7 @@ class PlanningNode(Node):
         with Timer(name='cc', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=2.0)
             self.front_clearance_pub.publish(Float32(data=float(front_clearance)))
-            enter_threshold = 0.30
+            enter_threshold = self.reverse_enter_threshold
             should_reverse = front_clearance <= enter_threshold
             valid_traj_count = int(np.sum(np.isfinite(scores)))
             all_collision = valid_traj_count == 0

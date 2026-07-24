@@ -446,6 +446,7 @@ class MapNode(Node):
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
         self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
+        self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
         self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
@@ -681,6 +682,33 @@ class MapNode(Node):
         self.get_logger().info(f"Using planning.comfort_radius={comfort_radius:.2f}")
         return comfort_radius
 
+    def _load_planning_reverse_enter_threshold(self, tinynav_map_path: str) -> float | None:
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(
+                f"Failed to read nav_flow.json: {exc}; not overriding planning.reverse_enter_threshold"
+            )
+            return None
+        if not isinstance(config, dict):
+            return None
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict) or "reverse_enter_threshold" not in planning_config:
+            return None
+        value = planning_config.get("reverse_enter_threshold")
+        try:
+            reverse_enter_threshold = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning.reverse_enter_threshold={value!r}; not overriding")
+            return None
+        reverse_enter_threshold = max(0.0, min(2.0, reverse_enter_threshold))
+        self.get_logger().info(f"Using planning.reverse_enter_threshold={reverse_enter_threshold:.2f}")
+        return reverse_enter_threshold
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -715,6 +743,8 @@ class MapNode(Node):
         }
         if self.planning_comfort_radius is not None:
             config["comfort_radius"] = self.planning_comfort_radius
+        if self.planning_reverse_enter_threshold is not None:
+            config["reverse_enter_threshold"] = self.planning_reverse_enter_threshold
         msg.data = json.dumps(config)
         self.planning_config_pub.publish(msg)
         self.get_logger().info(f"Published /planning/config: {msg.data}")
