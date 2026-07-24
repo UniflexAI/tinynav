@@ -289,7 +289,12 @@ class BackendNode(Ros2NodeManager):
             arr = np.flipud(arr.transpose(1, 0, 2))
             # Invert JET colormap so dangerous (near obstacle) = red, safe = blue.
             arr = arr[:, :, ::-1]
-            _, buf = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            # Lossless PNG: the ESDF has sharp colour boundaries, and any JPEG
+            # chroma bleed/desaturation makes the frontend shader's
+            # kMinSaturation cutoff drop edge pixels to "no data" (transparent),
+            # leaving jagged/mottled gaps in the danger region. Grid is small, so
+            # PNG cost is negligible.
+            _, buf = cv2.imencode('.png', arr, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             with self._lock:
                 self._esdf_bytes = buf.tobytes()
         except Exception:
