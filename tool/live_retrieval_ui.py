@@ -102,9 +102,13 @@ def keypoint_with_depth_to_3d(keypoints: np.ndarray, depth: np.ndarray, pose_fro
     return point_in_world, inliers
 
 
-def match_sp_lg(superpoint: SuperPointTRT, light_glue: LightGlueTRT, image0_bgr: np.ndarray, image1_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def match_sp_lg(superpoint: SuperPointTRT, light_glue: LightGlueTRT, image0_bgr: np.ndarray, image1_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     """SuperPoint+LightGlue equivalent of EfficientLoFTRTRT.infer's (mkpts0, mkpts1, mconf)
     return shape, so callers can swap matchers without branching downstream (PnP, visualization).
+    Also returns each image's raw (pre-matching) SuperPoint keypoint count, since that's the
+    other half of "why didn't this pair match" -- a low match count with plenty of raw keypoints
+    on both sides points at LightGlue/appearance gap, while a low raw keypoint count points at
+    SuperPoint itself (e.g. low texture, motion blur).
 
     The LightGlue TRT engine only exposes match_indices, not per-match scores, so mconf here is
     a constant placeholder (all matches equally "confident") -- it exists only so the UI's mconf
@@ -125,14 +129,19 @@ def match_sp_lg(superpoint: SuperPointTRT, light_glue: LightGlueTRT, image0_bgr:
     mkpts0 = feats0["kpts"][0][valid_mask]
     mkpts1 = feats1["kpts"][0][match_indices[valid_mask]]
     mconf = np.ones(len(mkpts0), dtype=np.float32)
-    return mkpts0, mkpts1, mconf
+    kpt_count0 = int(feats0["mask"].sum())
+    kpt_count1 = int(feats1["mask"].sum())
+    return mkpts0, mkpts1, mconf, kpt_count0, kpt_count1
 
 
 def draw_matches_image(image0: np.ndarray, image1: np.ndarray, keypoints0: np.ndarray, keypoints1: np.ndarray, inlier_mask: np.ndarray = None) -> np.ndarray:
     """keypoints0[i] and keypoints1[i] must already be paired (as returned by EfficientLoFTRTRT.infer).
 
-    inlier_mask, if given, colors PnP-inlier matches green and every other match (rejected by
-    depth validity or by PnP RANSAC) red, side by side on one canvas.
+    inlier_mask=None means these matches were never PnP-verified (e.g. the candidate didn't clear
+    the match-count/landmark-count gate before PnP would even run) -- drawn yellow, distinct from
+    a real boolean array, which colors PnP-inlier matches green and every other match (rejected by
+    depth validity or by PnP RANSAC) red. Conflating "unverified" with "verified good" would make
+    a near-miss candidate look identical to a successful relocalization.
     """
     h0, w0 = image0.shape[:2]
     h1, w1 = image1.shape[:2]
@@ -140,11 +149,12 @@ def draw_matches_image(image0: np.ndarray, image1: np.ndarray, keypoints0: np.nd
     canvas[:h0, :w0] = image0
     canvas[:h1, w0:w0 + w1] = image1
     if inlier_mask is None:
-        inlier_mask = np.ones(len(keypoints0), dtype=bool)
-    for (x0, y0), (x1, y1), is_inlier in zip(keypoints0, keypoints1, inlier_mask):
+        colors = [(0, 255, 255)] * len(keypoints0)  # BGR: yellow = raw match, not PnP-verified
+    else:
+        colors = [(0, 255, 0) if is_inlier else (0, 0, 255) for is_inlier in inlier_mask]  # green=inlier, red=rejected
+    for (x0, y0), (x1, y1), color in zip(keypoints0, keypoints1, colors):
         p0 = (int(x0), int(y0))
         p1 = (int(x1) + w0, int(y1))
-        color = (0, 255, 0) if is_inlier else (0, 0, 255)  # BGR: green=inlier, red=everything else
         cv2.circle(canvas, p0, 3, color, -1)
         cv2.circle(canvas, p1, 3, color, -1)
         cv2.line(canvas, p0, p1, color, 1)
@@ -208,8 +218,10 @@ def retrieval_loop(args: argparse.Namespace, state: RetrievalState) -> None:
         efficientloftr_matcher = EfficientLoFTRTRT()
 
         def match_images(image0, image1):
+            # EfficientLoFTR is detector-free -- there's no discrete "raw keypoint count" to
+            # report the way SuperPoint has one, so those two fields are always None here.
             match_result = asyncio.run(efficientloftr_matcher.infer(image0, image1))
-            return match_result["mkpts0"], match_result["mkpts1"], match_result["mconf"]
+            return match_result["mkpts0"], match_result["mkpts1"], match_result["mconf"], None, None
     else:
         superpoint_extractor = SuperPointTRT()
         light_glue_matcher = LightGlueTRT()
@@ -267,6 +279,8 @@ def retrieval_loop(args: argparse.Namespace, state: RetrievalState) -> None:
             reloc_reason = "z-score below threshold, relocalization not attempted"
             match_count = 0
             mean_conf = 0.0
+            superpoint_kpts_ref = None
+            superpoint_kpts_query = None
             pnp_inlier_count = 0
             pnp_point_count = 0
             pose_translation = None
@@ -274,13 +288,13 @@ def retrieval_loop(args: argparse.Namespace, state: RetrievalState) -> None:
 
             if is_confident:
                 idx_and_similarity = find_loop_by_zscore(query_embedding, map_embeddings, args.z_threshold, args.relocalization_top_k)
-                pnp_candidates = []
-                candidate_match_counts = []
-                candidate_mean_confs = []
-                candidate_ref_kpts = []
-                candidate_query_kpts = []
-                candidate_depth_inliers = []
-                candidate_ref_bgr = []
+                # Every VLAD candidate's real stats are recorded here, unconditionally -- the
+                # >=50-match / >80-landmark gate below only decides PnP *eligibility*, it must
+                # never decide whether a candidate's true match count gets reported. Skipping the
+                # recording step for sub-threshold candidates (the previous behavior) collapsed
+                # every candidate from 0 to 49 matches down to a displayed "0", indistinguishable
+                # from a real zero-match failure.
+                candidates = []
                 for idx_in_map, _ in idx_and_similarity:
                     ts_in_map = idx_to_timestamp[idx_in_map]
                     reference_rgb_pose_in_world = map_poses[ts_in_map] @ map_T_rgb_to_infra1
@@ -291,60 +305,68 @@ def retrieval_loop(args: argparse.Namespace, state: RetrievalState) -> None:
                     reference_color_depth = reproject_depth_to_camera(
                         db.get_depth(ts_in_map), map_K, np.linalg.inv(map_T_rgb_to_infra1), map_rgb_K, map_rgb_image_shape,
                     )
-                    ref_kpts, query_kpts, mconf = match_images(cand_rgb, query_image)
-                    if len(ref_kpts) < 50:
-                        continue
+                    ref_kpts, query_kpts, mconf, kpt_count_ref, kpt_count_query = match_images(cand_rgb, query_image)
                     point_3d_in_world, depth_inliers = keypoint_with_depth_to_3d(ref_kpts, reference_color_depth, reference_rgb_pose_in_world, map_rgb_K)
                     point_3d_list = point_3d_in_world[depth_inliers]
                     point_2d_list = query_kpts[depth_inliers]
-                    if len(point_2d_list) <= 80:
-                        continue
-                    pnp_candidates.append((point_3d_list, point_2d_list))
-                    candidate_match_counts.append(len(ref_kpts))
-                    candidate_mean_confs.append(float(mconf.mean()) if len(mconf) else 0.0)
-                    candidate_ref_kpts.append(ref_kpts)
-                    candidate_query_kpts.append(query_kpts)
-                    candidate_depth_inliers.append(depth_inliers)
-                    candidate_ref_bgr.append(cand_rgb)
+                    candidates.append({
+                        "ref_kpts": ref_kpts, "query_kpts": query_kpts,
+                        "match_count": len(ref_kpts), "mean_conf": float(mconf.mean()) if len(mconf) else 0.0,
+                        "kpt_count_ref": kpt_count_ref, "kpt_count_query": kpt_count_query,
+                        "point_3d_list": point_3d_list, "point_2d_list": point_2d_list, "point_count": len(point_2d_list),
+                        "depth_inliers": depth_inliers, "cand_rgb": cand_rgb,
+                        "eligible": len(ref_kpts) >= 50 and len(point_2d_list) > 80,
+                    })
 
-                def build_vis(i, inlier_mask=None):
-                    return draw_matches_image(
-                        candidate_ref_bgr[i], query_image, candidate_ref_kpts[i], candidate_query_kpts[i], inlier_mask,
-                    )
+                def build_vis(c, inlier_mask=None):
+                    return draw_matches_image(c["cand_rgb"], query_image, c["ref_kpts"], c["query_kpts"], inlier_mask)
 
-                if not pnp_candidates:
-                    reloc_reason = f"no VLAD candidate had enough {matcher_label} matches + valid depth landmarks"
+                if not candidates:
+                    reloc_reason = "no VLAD candidate had a valid reference image"
                 else:
-                    # Report the best-matching candidate's raw stats even if PnP itself later
-                    # fails geometrically, so "matches" always reflects what the matcher actually found.
-                    best_by_matches = int(np.argmax(candidate_match_counts))
-                    match_count = candidate_match_counts[best_by_matches]
-                    mean_conf = candidate_mean_confs[best_by_matches]
-                    match_vis_b64 = encode_jpeg_b64(build_vis(best_by_matches), max_edge_px=960)
+                    # Report the best-matching candidate's true raw stats regardless of whether
+                    # it (or any candidate) clears the PnP-eligibility gate below.
+                    best = max(candidates, key=lambda c: c["match_count"])
+                    match_count = best["match_count"]
+                    mean_conf = best["mean_conf"]
+                    superpoint_kpts_ref = best["kpt_count_ref"]
+                    superpoint_kpts_query = best["kpt_count_query"]
+                    match_vis_b64 = encode_jpeg_b64(build_vis(best), max_edge_px=960)  # yellow: not yet PnP-verified
 
-                    success, best_pose, _, best_candidate_index, inlier_count, point_count = rerank_by_pnp_inliers(pnp_candidates, map_rgb_K)
-                    pnp_inlier_count = inlier_count
-                    pnp_point_count = point_count
-                    if best_candidate_index >= 0:
-                        match_count = candidate_match_counts[best_candidate_index]
-                        mean_conf = candidate_mean_confs[best_candidate_index]
-                        # rerank_by_pnp_inliers only returns counts; re-run RANSAC on just the
-                        # winning candidate to recover which specific matches were inliers, for
-                        # the green/red visualization below.
-                        points_3d, points_2d = pnp_candidates[best_candidate_index]
-                        ransac_success, _, _, ransac_inliers = cv2.solvePnPRansac(points_3d, points_2d, map_rgb_K, None)
-                        depth_inliers = candidate_depth_inliers[best_candidate_index]
-                        full_inlier_mask = np.zeros(len(depth_inliers), dtype=bool)
-                        if ransac_success and ransac_inliers is not None:
-                            depth_valid_indices = np.where(depth_inliers)[0]
-                            full_inlier_mask[depth_valid_indices[ransac_inliers.flatten()]] = True
-                        match_vis_b64 = encode_jpeg_b64(build_vis(best_candidate_index, full_inlier_mask), max_edge_px=960)
-                    if success:
-                        reloc_success = True
-                        reloc_reason = None
-                        pose_translation = np.linalg.inv(best_pose)[:3, 3].tolist()
+                    eligible = [c for c in candidates if c["eligible"]]
+                    if not eligible:
+                        reloc_reason = (
+                            f"no VLAD candidate had enough {matcher_label} matches + valid depth landmarks "
+                            f"(best: {best['match_count']} matches, {best['point_count']} valid landmarks; need >=50 and >80)"
+                        )
                     else:
-                        reloc_reason = "PnP RANSAC failed to find a valid pose"
+                        pnp_candidates = [(c["point_3d_list"], c["point_2d_list"]) for c in eligible]
+                        success, best_pose, _, best_candidate_index, inlier_count, point_count = rerank_by_pnp_inliers(pnp_candidates, map_rgb_K)
+                        pnp_inlier_count = inlier_count
+                        pnp_point_count = point_count
+                        if best_candidate_index >= 0:
+                            winner = eligible[best_candidate_index]
+                            match_count = winner["match_count"]
+                            mean_conf = winner["mean_conf"]
+                            superpoint_kpts_ref = winner["kpt_count_ref"]
+                            superpoint_kpts_query = winner["kpt_count_query"]
+                            # rerank_by_pnp_inliers only returns counts; re-run RANSAC on just the
+                            # winning candidate to recover which specific matches were inliers, for
+                            # the green/red visualization below.
+                            points_3d, points_2d = pnp_candidates[best_candidate_index]
+                            ransac_success, _, _, ransac_inliers = cv2.solvePnPRansac(points_3d, points_2d, map_rgb_K, None)
+                            depth_inliers = winner["depth_inliers"]
+                            full_inlier_mask = np.zeros(len(depth_inliers), dtype=bool)
+                            if ransac_success and ransac_inliers is not None:
+                                depth_valid_indices = np.where(depth_inliers)[0]
+                                full_inlier_mask[depth_valid_indices[ransac_inliers.flatten()]] = True
+                            match_vis_b64 = encode_jpeg_b64(build_vis(winner, full_inlier_mask), max_edge_px=960)
+                        if success:
+                            reloc_success = True
+                            reloc_reason = None
+                            pose_translation = np.linalg.inv(best_pose)[:3, 3].tolist()
+                        else:
+                            reloc_reason = "PnP RANSAC failed to find a valid pose"
 
             frame_index += 1
             state.publish({
@@ -363,6 +385,8 @@ def retrieval_loop(args: argparse.Namespace, state: RetrievalState) -> None:
                 "relocalization_reason": reloc_reason,
                 "match_count": match_count,
                 "mean_conf": mean_conf,
+                "superpoint_kpts_ref": superpoint_kpts_ref,
+                "superpoint_kpts_query": superpoint_kpts_query,
                 "pnp_inlier_count": pnp_inlier_count,
                 "pnp_point_count": pnp_point_count,
                 "pose_translation": pose_translation,
@@ -424,9 +448,10 @@ HTML_PAGE = """<!doctype html>
   <div id="bar-track"><div id="bar-fill"></div></div>
 
   <div id="reloc-panel">
-    <h2>Relocalization &mdash; <span id="reloc-matcher-name">matcher</span> + PnP <span style="font-weight:400; text-transform:none; letter-spacing:normal; color:#666;">(green = PnP inlier, red = rejected match)</span></h2>
+    <h2>Relocalization &mdash; <span id="reloc-matcher-name">matcher</span> + PnP <span style="font-weight:400; text-transform:none; letter-spacing:normal; color:#666;">(yellow = raw match, not yet PnP-verified; green = PnP inlier; red = rejected match)</span></h2>
     <div id="reloc-status"></div>
     <div id="reloc-stats">
+      <span id="reloc-kpts"></span>
       <span id="reloc-matches"></span>
       <span id="reloc-conf"></span>
       <span id="reloc-inliers"></span>
@@ -488,7 +513,10 @@ function connect() {
     }
     document.getElementById("matcher-name").textContent = data.matcher_label + " relocalization";
     document.getElementById("reloc-matcher-name").textContent = data.matcher_label;
-    document.getElementById("reloc-matches").textContent = data.matcher_label + " matches: " + data.match_count;
+    document.getElementById("reloc-kpts").textContent = "SuperPoint keypoints (ref/query): " +
+      (data.superpoint_kpts_ref != null ? data.superpoint_kpts_ref : "n/a") + " / " +
+      (data.superpoint_kpts_query != null ? data.superpoint_kpts_query : "n/a");
+    document.getElementById("reloc-matches").textContent = "matched keypoints: " + data.match_count;
     document.getElementById("reloc-conf").textContent = "mean conf: " + data.mean_conf.toFixed(2);
     document.getElementById("reloc-inliers").textContent = "PnP inliers: " + data.pnp_inlier_count + " / " + data.pnp_point_count;
     document.getElementById("reloc-pose").textContent = data.pose_translation
