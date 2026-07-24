@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from numba import njit
 import message_filters
 import time
+import heapq
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
@@ -410,6 +411,7 @@ class PlanningNode(Node):
         )
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
+        self.astar_on = False
         self.reverse_enter_threshold = 0.30
 
         self.smoothed_velocity = 0.0
@@ -468,11 +470,204 @@ class PlanningNode(Node):
                         f"Updated planning reverse_enter_threshold: {old:.2f} -> {reverse_enter_threshold:.2f}"
                     )
 
+        if "astar_on" in config:
+            value = config["astar_on"]
+            if isinstance(value, bool):
+                astar_on = value
+            elif isinstance(value, str):
+                astar_on = value.strip().lower() in {"1", "true", "yes", "on"}
+            elif isinstance(value, (int, float)):
+                astar_on = bool(value)
+            else:
+                self.get_logger().warning(f"Invalid planning astar_on: {value!r}")
+                return
+            old = self.astar_on
+            self.astar_on = astar_on
+            if old != astar_on:
+                self.get_logger().info(f"Updated planning astar_on: {old} -> {astar_on}")
+
     def poi_change_callback(self, msg):
         self.target_pose = None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+
+    def _world_to_grid_xy(self, point_xy):
+        return (
+            int((point_xy[0] - self.origin[0]) / self.resolution),
+            int((point_xy[1] - self.origin[1]) / self.resolution),
+        )
+
+    def _grid_to_world_xy(self, index_xy):
+        return np.array([
+            self.origin[0] + index_xy[0] * self.resolution,
+            self.origin[1] + index_xy[1] * self.resolution,
+        ], dtype=np.float64)
+
+    def _in_grid_xy(self, index_xy, shape):
+        return 0 <= index_xy[0] < shape[0] and 0 <= index_xy[1] < shape[1]
+
+    def _clamp_goal_index_to_local_grid(self, start_idx, goal_idx, shape):
+        if self._in_grid_xy(goal_idx, shape):
+            return goal_idx
+        start = np.array(start_idx, dtype=np.float64)
+        goal = np.array(goal_idx, dtype=np.float64)
+        delta = goal - start
+        steps = int(max(abs(delta[0]), abs(delta[1]), 1.0))
+        last = start_idx
+        for step in range(1, steps + 1):
+            ratio = step / steps
+            idx = tuple(np.rint(start + ratio * delta).astype(np.int32).tolist())
+            if not self._in_grid_xy(idx, shape):
+                break
+            last = idx
+        return last
+
+    def _nearest_free_index(self, index_xy, obstacle_mask, ESDF_map):
+        if self._in_grid_xy(index_xy, obstacle_mask.shape) and not obstacle_mask[index_xy]:
+            return index_xy
+        best = None
+        best_score = float("inf")
+        max_radius = int(max(2, np.ceil(1.0 / self.resolution)))
+        cx, cy = index_xy
+        for radius in range(1, max_radius + 1):
+            x0 = max(0, cx - radius)
+            x1 = min(obstacle_mask.shape[0] - 1, cx + radius)
+            y0 = max(0, cy - radius)
+            y1 = min(obstacle_mask.shape[1] - 1, cy + radius)
+            for x in range(x0, x1 + 1):
+                for y in range(y0, y1 + 1):
+                    if obstacle_mask[x, y]:
+                        continue
+                    score = (x - cx) * (x - cx) + (y - cy) * (y - cy) - float(ESDF_map[x, y])
+                    if score < best_score:
+                        best_score = score
+                        best = (x, y)
+            if best is not None:
+                return best
+        return None
+
+    def _plan_local_astar_path(self, start_position, target_position, obstacle_mask, ESDF_map):
+        shape = obstacle_mask.shape
+        start_idx = self._world_to_grid_xy(start_position[:2])
+        goal_idx = self._world_to_grid_xy(target_position[:2])
+        if not self._in_grid_xy(start_idx, shape):
+            return None, "start_out_of_grid"
+        goal_idx = self._clamp_goal_index_to_local_grid(start_idx, goal_idx, shape)
+        start_idx = self._nearest_free_index(start_idx, obstacle_mask, ESDF_map)
+        goal_idx = self._nearest_free_index(goal_idx, obstacle_mask, ESDF_map)
+        if start_idx is None or goal_idx is None:
+            return None, "no_free_start_or_goal"
+        if start_idx == goal_idx:
+            return np.array([start_position, target_position], dtype=np.float64), "same_cell"
+
+        neighbors = [
+            (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+            (-1, -1, 1.414), (-1, 1, 1.414), (1, -1, 1.414), (1, 1, 1.414),
+        ]
+        open_heap = []
+        heapq.heappush(open_heap, (0.0, start_idx))
+        came_from = {start_idx: start_idx}
+        g_score = {start_idx: 0.0}
+        visited = set()
+        comfort_radius = max(self.robot.comfort_radius, self.robot.safety_radius)
+
+        while open_heap:
+            _, current = heapq.heappop(open_heap)
+            if current in visited:
+                continue
+            visited.add(current)
+            if current == goal_idx:
+                cells = []
+                node = current
+                while node != came_from[node]:
+                    cells.append(node)
+                    node = came_from[node]
+                cells.append(start_idx)
+                cells.reverse()
+                points = []
+                for cell in cells:
+                    xy = self._grid_to_world_xy(cell)
+                    points.append([xy[0], xy[1], start_position[2]])
+                return self._downsample_astar_points(np.array(points, dtype=np.float64)), "ok"
+
+            for dx, dy, step_cost in neighbors:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if not self._in_grid_xy(neighbor, shape):
+                    continue
+                if obstacle_mask[neighbor]:
+                    continue
+                clearance = float(ESDF_map[neighbor])
+                if clearance <= self.robot.safety_radius:
+                    continue
+                comfort_cost = 0.0
+                if clearance < comfort_radius:
+                    ratio = (comfort_radius - clearance) / max(comfort_radius - self.robot.safety_radius, 1e-3)
+                    comfort_cost = 5.0 * ratio * ratio
+                tentative = g_score[current] + step_cost + comfort_cost
+                if tentative >= g_score.get(neighbor, float("inf")):
+                    continue
+                came_from[neighbor] = current
+                g_score[neighbor] = tentative
+                heuristic = np.hypot(neighbor[0] - goal_idx[0], neighbor[1] - goal_idx[1])
+                heapq.heappush(open_heap, (tentative + heuristic, neighbor))
+
+        return None, "not_found"
+
+    def _downsample_astar_points(self, points):
+        if len(points) <= 2:
+            return points
+        min_spacing = 0.45
+        sampled = [points[0]]
+        accumulated = 0.0
+        last = points[0]
+        for point in points[1:]:
+            segment = float(np.linalg.norm(point[:2] - last[:2]))
+            accumulated += segment
+            if accumulated >= min_spacing:
+                sampled.append(point)
+                accumulated = 0.0
+            last = point
+        if np.linalg.norm(sampled[-1][:2] - points[-1][:2]) > 1e-6:
+            sampled.append(points[-1])
+        return np.array(sampled, dtype=np.float64)
+
+    def _quat_from_path_direction(self, current, next_point, fallback_quat):
+        direction = next_point[:2] - current[:2]
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-6:
+            return fallback_quat
+        forward = np.array([direction[0] / norm, direction[1] / norm, 0.0], dtype=np.float64)
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        x_axis = np.cross(up, forward)
+        x_norm = float(np.linalg.norm(x_axis))
+        if x_norm <= 1e-6:
+            return fallback_quat
+        x_axis /= x_norm
+        rot = np.column_stack([x_axis, up, forward])
+        return matrix_to_quat(rot)
+
+    def _publish_astar_path(self, points, header, fallback_quat):
+        if points is None or len(points) < 2:
+            return False
+        path = Path()
+        path.header = header
+        path.header.frame_id = "world"
+        for i, point in enumerate(points):
+            next_point = points[min(i + 1, len(points) - 1)]
+            quat = self._quat_from_path_direction(point, next_point, fallback_quat)
+            pose = PoseStamped()
+            pose.header = header
+            pose.pose.position.x = float(point[0])
+            pose.pose.position.y = float(point[1])
+            pose.pose.position.z = float(point[2])
+            pose.pose.orientation.x = float(quat[0])
+            pose.pose.orientation.y = float(quat[1])
+            pose.pose.orientation.z = float(quat[2])
+            pose.pose.orientation.w = float(quat[3])
+            path.poses.append(pose)
+        self.path_pub.publish(path)
+        return True
 
     def info_callback(self, msg):
         if self.K is None:
@@ -755,7 +950,42 @@ class PlanningNode(Node):
 
             top_k = 1
             recovery_reason = "normal"
-            if all_collision:
+            if self.target_pose is None:
+                return
+
+            if self.astar_on and not should_reverse and not all_collision:
+                astar_start_time = time.perf_counter()
+                fallback_quat = np.array([
+                    odom_msg.pose.pose.orientation.x,
+                    odom_msg.pose.pose.orientation.y,
+                    odom_msg.pose.pose.orientation.z,
+                    odom_msg.pose.pose.orientation.w,
+                ])
+                astar_points, astar_reason = self._plan_local_astar_path(
+                    init_p,
+                    self.target_pose,
+                    obstacle_mask,
+                    ESDF_map,
+                )
+                astar_ms = (time.perf_counter() - astar_start_time) * 1000.0
+                if astar_points is not None and self._publish_astar_path(astar_points, depth_msg.header, fallback_quat):
+                    now_debug = time.monotonic()
+                    if now_debug - self._last_avoidance_debug_log_time > 0.5:
+                        self._last_avoidance_debug_log_time = now_debug
+                        target_dist = float(np.linalg.norm(astar_points[-1] - self.target_pose))
+                        self.get_logger().info(
+                            "planning_astar_debug "
+                            f"reason={astar_reason} points={len(astar_points)} "
+                            f"front_clearance={front_clearance:.2f} enter_threshold={enter_threshold:.2f} "
+                            f"target_dist={target_dist:.2f} astar_ms={astar_ms:.0f} "
+                            f"dilation_cells={self.obstacle_config.dilation_cells} "
+                            f"comfort_radius={self.robot.comfort_radius:.2f}"
+                        )
+                    self.last_param = (0.0, 0.0)
+                    return
+                recovery_reason = f"astar_failed_{astar_reason}"
+
+            if all_collision or (self.astar_on and not should_reverse):
                 selected_index, recovery_reason = choose_recovery_index()
                 top_indices = np.array([selected_index], dtype=np.int64)
                 costs = np.full(len(trajectories), float("inf"), dtype=np.float64)
@@ -798,9 +1028,6 @@ class PlanningNode(Node):
             path = Path()
             path.header = depth_msg.header
             path.header.frame_id = "world"
-
-            if self.target_pose is None:
-                return
 
             if all_collision:
                 self.get_logger().warning(

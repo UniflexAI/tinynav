@@ -447,6 +447,7 @@ class MapNode(Node):
         self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
+        self.planning_astar_on = self._load_planning_astar_on(tinynav_map_path)
         self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
@@ -709,6 +710,34 @@ class MapNode(Node):
         self.get_logger().info(f"Using planning.reverse_enter_threshold={reverse_enter_threshold:.2f}")
         return reverse_enter_threshold
 
+    def _load_planning_astar_on(self, tinynav_map_path: str) -> bool | None:
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; not overriding planning.astar_on")
+            return None
+        if not isinstance(config, dict):
+            return None
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict) or "astar_on" not in planning_config:
+            return None
+        value = planning_config.get("astar_on")
+        if isinstance(value, bool):
+            astar_on = value
+        elif isinstance(value, str):
+            astar_on = value.strip().lower() in {"1", "true", "yes", "on"}
+        elif isinstance(value, (int, float)):
+            astar_on = bool(value)
+        else:
+            self.get_logger().warning(f"Invalid planning.astar_on={value!r}; not overriding")
+            return None
+        self.get_logger().info(f"Using planning.astar_on={astar_on}")
+        return astar_on
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -745,6 +774,8 @@ class MapNode(Node):
             config["comfort_radius"] = self.planning_comfort_radius
         if self.planning_reverse_enter_threshold is not None:
             config["reverse_enter_threshold"] = self.planning_reverse_enter_threshold
+        if self.planning_astar_on is not None:
+            config["astar_on"] = self.planning_astar_on
         msg.data = json.dumps(config)
         self.planning_config_pub.publish(msg)
         self.get_logger().info(f"Published /planning/config: {msg.data}")
