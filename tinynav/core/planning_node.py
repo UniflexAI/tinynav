@@ -589,7 +589,8 @@ class PlanningNode(Node):
                 for cell in cells:
                     xy = self._grid_to_world_xy(cell)
                     points.append([xy[0], xy[1], start_position[2]])
-                return self._downsample_astar_points(np.array(points, dtype=np.float64)), "ok"
+                points[0] = [start_position[0], start_position[1], start_position[2]]
+                return self._resample_astar_points(np.array(points, dtype=np.float64)), "ok"
 
             for dx, dy, step_cost in neighbors:
                 neighbor = (current[0] + dx, current[1] + dy)
@@ -614,22 +615,28 @@ class PlanningNode(Node):
 
         return None, "not_found"
 
-    def _downsample_astar_points(self, points):
+    def _resample_astar_points(self, points):
         if len(points) <= 2:
             return points
-        min_spacing = 0.45
-        sampled = [points[0]]
-        accumulated = 0.0
-        last = points[0]
+        spacing = 0.25
+        sampled = [points[0].copy()]
+        current = points[0].copy()
+        carry = 0.0
         for point in points[1:]:
-            segment = float(np.linalg.norm(point[:2] - last[:2]))
-            accumulated += segment
-            if accumulated >= min_spacing:
-                sampled.append(point)
-                accumulated = 0.0
-            last = point
+            segment_vec = point - current
+            segment_len = float(np.linalg.norm(segment_vec[:2]))
+            if segment_len <= 1e-9:
+                current = point.copy()
+                continue
+            direction = segment_vec / segment_len
+            distance = spacing - carry
+            while distance <= segment_len:
+                sampled.append(current + direction * distance)
+                distance += spacing
+            carry = segment_len - (distance - spacing)
+            current = point.copy()
         if np.linalg.norm(sampled[-1][:2] - points[-1][:2]) > 1e-6:
-            sampled.append(points[-1])
+            sampled.append(points[-1].copy())
         return np.array(sampled, dtype=np.float64)
 
     def _quat_from_path_direction(self, current, next_point, fallback_quat):
