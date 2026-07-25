@@ -522,6 +522,7 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
         self._rtk_yaw_offset = None   # map<-odom yaw offset, locked once on first RTK fix
+        self._last_rtk_ground_z = None  # last map-side (path-derived) ground z, for fallback
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
         self.latest_rtk_map_pose = None
@@ -984,7 +985,13 @@ class MapNode(Node):
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
-        if self._has_active_rtk_transform():
+        # In RTK replace mode RTK owns localization: never run visual relocalization.
+        # Otherwise it publishes a competing /map/relocalization arrow (frame "camera",
+        # different heading) and, on success, overwrites T_from_map_to_odom -> the web
+        # heading arrow flickers between the RTK heading and the visual one, and the map
+        # rotates. The time-based freshness check alone flickers around the 1 s threshold
+        # when /fix is ~1 Hz, so gate on the mode explicitly.
+        if self.rtk_mode == "replace" or self._has_active_rtk_transform():
             return
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
@@ -1283,6 +1290,8 @@ class MapNode(Node):
         """
         Solve the optmization problem.
         """
+        if self.rtk_mode == "replace":
+            return  # RTK owns T_from_map_to_odom in replace mode; never let visual reloc overwrite it
         relative_pose_constraint = []
         optimized_parameters = {
             0 : np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
@@ -1337,7 +1346,10 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+            # RTK replace mode is planar (map z is VIO-warped, RTK has no reliable z):
+            # gate POI arrival on xy only; the z term would spuriously block arrival.
+            z_arrived = self.rtk_mode == "replace" or diff_position_norm_z < 2.0
+            if diff_position_norm_xy < 0.5 and z_arrived:
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
@@ -1418,7 +1430,10 @@ class MapNode(Node):
             subgoal = self._nav_subgoals_in_map[self._nav_subgoal_index]
             diff_xy = np.linalg.norm(subgoal[:2] - pose_position[:2])
             diff_z = np.linalg.norm(subgoal[2] - pose_position[2])
-            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or diff_z >= self._nav_subgoal_arrival_z_threshold:
+            # Planar in RTK replace mode: don't let the z term block subgoal advance
+            # (would leave the target on the reached subgoal -> robot circles it).
+            z_blocks = self.rtk_mode != "replace" and diff_z >= self._nav_subgoal_arrival_z_threshold
+            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or z_blocks:
                 break
             self._nav_subgoal_index += 1
             self._current_nav_path_in_map = None
@@ -1525,15 +1540,27 @@ class MapNode(Node):
         map's z is warped by VIO vertical drift (POIs on the same physical floor
         differ by ~7 m in map z), so RTK's near-flat altitude does not match it.
         z must come from the map side. Prefer the nearest point on the cached
-        global path (it carries the true along-route map z); fall back to the
-        active POI's z, else keep the incoming z. This is an override (not the
-        small-diff `_nav_clamped_z` snap, which would reject the large RTK-vs-map
-        z gap), so the arrival / subgoal / z-clamp gates then compare map-vs-map.
+        global path (it carries the true along-route map z); when the path is
+        momentarily unavailable, keep the last path-derived z, then SDF ground.
+        This is an override (not the small-diff `_nav_clamped_z` snap, which would
+        reject the large RTK-vs-map z gap), so the arrival / subgoal / z-clamp
+        gates then compare map-vs-map.
         """
         path = self._current_nav_path_in_map
         if path is not None and len(path) > 0:
             _, closest, _ = self._closest_point_on_path_for_z_clamp(path, position)
-            return float(closest[2])
+            z = float(closest[2])
+            self._last_rtk_ground_z = z
+            return z
+        # Path momentarily unavailable (e.g. right after a subgoal advance clears it):
+        # keep the last map-side ground z, then SDF ground. Do NOT snap to the POI z --
+        # POIs on the same map differ ~7 m in VIO-warped z, so a wrong start z breaks
+        # the A* 3D start grid, replanning returns None, and the robot stalls/circles.
+        if self._last_rtk_ground_z is not None:
+            return self._last_rtk_ground_z
+        sdf_z, _ = self._nav_clamped_z_from_sdf(position)
+        if sdf_z is not None:
+            return float(sdf_z)
         if 0 <= self.poi_index < len(self.pois) and len(self.pois[self.poi_index]) >= 3:
             return float(self.pois[self.poi_index][2])
         return float(position[2])
