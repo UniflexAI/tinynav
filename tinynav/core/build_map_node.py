@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import logging
 import os
 import shelve
@@ -361,10 +362,8 @@ class TinyNavDB():
             fps=30,
         )
         if is_scratch:
-            for shelf_name in ("features", "depths", "embeddings", "semantic_embeddings", "vlad_descriptors", "patch_tokens", "metadata"):
-                db_file = f"{map_save_path}/{shelf_name}.db"
-                if os.path.exists(db_file):
-                    os.remove(db_file)
+            for db_file in glob.glob(f"{map_save_path}/*.db"):
+                os.remove(db_file)
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
         self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
