@@ -37,7 +37,7 @@ from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
-from tinynav.core.vlad import compute_vlad, train_vocabulary
+from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
 
@@ -371,16 +371,19 @@ class TinyNavDB():
                 os.remove(f"{map_save_path}/semantic_embeddings.db")
             if os.path.exists(f"{map_save_path}/vlad_descriptors.db"):
                 os.remove(f"{map_save_path}/vlad_descriptors.db")
+            if os.path.exists(f"{map_save_path}/patch_tokens.db"):
+                os.remove(f"{map_save_path}/patch_tokens.db")
             if os.path.exists(f"{map_save_path}/metadata.db"):
                 os.remove(f"{map_save_path}/metadata.db")
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
         self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
         self.vlad_descriptors = IntKeyShelf(f"{map_save_path}/vlad_descriptors")
+        self.patch_tokens = IntKeyShelf(f"{map_save_path}/patch_tokens")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
         self.metadata = shelve.open(f"{map_save_path}/metadata")
 
-    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None, vlad_descriptor:np.ndarray = None, infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None, vlad_descriptor:np.ndarray = None, patch_tokens:np.ndarray = None, infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
             self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
@@ -395,6 +398,8 @@ class TinyNavDB():
             self.features[key] = features
         if vlad_descriptor is not None:
             self.vlad_descriptors[key] = vlad_descriptor
+        if patch_tokens is not None:
+            self.patch_tokens[key] = patch_tokens
 
     def get_depth_embedding_features_images(self, key:int):
         key_int = int(key)
@@ -430,6 +435,7 @@ class TinyNavDB():
         self.embeddings.close()
         self.semantic_embeddings.close()
         self.vlad_descriptors.close()
+        self.patch_tokens.close()
         self.depths.close()
         self.metadata.close()
         self.infra1_video_db.close()
@@ -635,7 +641,6 @@ class BuildMapNode(Node):
         self.odom = {}
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
-        self.vlad_patch_tokens = {}
         self.last_keyframe_timestamp = None
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
@@ -756,8 +761,7 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("get_dinov2_descriptors"):
             embedding, patch_tokens = asyncio.run(self.dinov2_model.infer_global_and_patch_tokens(infra1_image))
             embedding = embedding / np.linalg.norm(embedding)
-            self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
-            self.vlad_patch_tokens[keyframe_image_timestamp] = patch_tokens
+            self.db.set_entry(keyframe_image_timestamp, embedding = embedding, patch_tokens = patch_tokens)
         with self.stage_timer.timed("get_semantic_embedding"):
             semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
             self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
@@ -891,11 +895,17 @@ class BuildMapNode(Node):
 
         with self.stage_timer.timed("vlad_save"):
             timestamps = list(self.pose_graph_used_pose.keys())
-            patch_tokens_list = [self.vlad_patch_tokens[timestamp] for timestamp in timestamps]
-            all_patch_tokens = np.concatenate(patch_tokens_list, axis=0)
-            vlad_centres = train_vocabulary(all_patch_tokens)
+            vlad_train_rng = np.random.default_rng(42)
+
+            def vlad_batch_iterator():
+                order = vlad_train_rng.permutation(timestamps)
+                for timestamp in order:
+                    yield self.db.patch_tokens[int(timestamp)]
+
+            vlad_centres = train_vocabulary_streaming(vlad_batch_iterator)
             self.db.set_vlad_centres(vlad_centres)
-            for timestamp, patch_tokens in zip(timestamps, patch_tokens_list):
+            for timestamp in timestamps:
+                patch_tokens = self.db.patch_tokens[timestamp]
                 self.db.set_entry(timestamp, vlad_descriptor=compute_vlad(patch_tokens, vlad_centres))
 
         # Flush and close writable DB first, then reopen DB for occupancy generation.

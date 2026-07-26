@@ -23,52 +23,75 @@ from scipy.spatial import cKDTree
 logger = logging.getLogger(__name__)
 
 
-def train_vocabulary(
-    patch_tokens: np.ndarray,
+def train_vocabulary_streaming(
+    batch_iterator_factory,
     vocab_size: int = 32,
-    iterations: int = 200,
+    epochs: int = 5,
     batch_size: int = 1024,
     seed: int = 42,
 ) -> np.ndarray:
-    """Train a MiniBatch K-means vocabulary on DINOv2 patch tokens.
+    """Train a K-means vocabulary via disk-streamed online updates.
+
+    Never materialises the full patch-token pool in memory: ``batch_iterator_factory()``
+    is called once per epoch and must return a fresh iterator over per-keyframe
+    (N_i, C) patch-token arrays (e.g. reading sequentially off a disk-backed store, in
+    a freshly shuffled keyframe order each call). Arrays are concatenated into
+    ``batch_size`` chunks on the fly; each chunk is assigned to its nearest centre
+    (against a frozen snapshot of the centres) and then folded in point-by-point via a
+    decaying running mean (Robbins-Monro / sequential k-means update), the same update
+    rule as classic online k-means.
 
     Args:
-        patch_tokens: (M, C) stacked patch tokens from all keyframes.
+        batch_iterator_factory: zero-arg callable returning a fresh iterator of
+            (N_i, C) patch-token arrays; called once per epoch.
         vocab_size: number of cluster centres (K).
-        iterations: minibatch k-means iterations.
-        batch_size: minibatch size.
+        epochs: number of streamed passes over the data.
+        batch_size: size of each online-update chunk.
         seed: RNG seed for reproducibility.
 
     Returns:
         centres: (vocab_size, C) L2-normalised cluster centres.
     """
     rng = np.random.default_rng(seed)
-    M = patch_tokens.shape[0]
-    if M < vocab_size:
-        raise ValueError(f"Need at least {vocab_size} tokens, got {M}")
+    centres = None
+    counts = None
 
-    # L2-normalise tokens before clustering (DINOv2 patch tokens are already
-    # normalised in practice, but enforce it here).
-    tokens = patch_tokens.astype(np.float32, copy=True)
-    norms = np.linalg.norm(tokens, axis=1, keepdims=True)
-    tokens /= np.maximum(norms, 1e-8)
+    def normalise(tokens: np.ndarray) -> np.ndarray:
+        tokens = tokens.astype(np.float32, copy=False)
+        norms = np.linalg.norm(tokens, axis=1, keepdims=True)
+        return tokens / np.maximum(norms, 1e-8)
 
-    centres = tokens[rng.choice(M, size=vocab_size, replace=False)].copy()
-    counts = np.zeros(vocab_size, dtype=np.int64)
-
-    for it in range(iterations):
-        batch = tokens[rng.choice(M, size=min(batch_size, M), replace=False)]
+    def apply_batch(batch: np.ndarray) -> None:
+        nonlocal centres, counts
+        if centres is None:
+            if len(batch) < vocab_size:
+                raise ValueError(f"Need at least {vocab_size} tokens in the first batch, got {len(batch)}")
+            centres = batch[rng.choice(len(batch), size=vocab_size, replace=False)].copy()
+            counts = np.zeros(vocab_size, dtype=np.int64)
         labels = cKDTree(centres).query(batch, k=1, workers=-1)[1]
         for label, vec in zip(labels, batch):
             counts[label] += 1
             eta = 1.0 / counts[label]
             centres[label] = (1.0 - eta) * centres[label] + eta * vec
-        if (it + 1) % 50 == 0:
-            logger.info(f"VLAD k-means iteration {it + 1}/{iterations}")
+
+    for epoch in range(epochs):
+        pending: list[np.ndarray] = []
+        pending_count = 0
+        for frame_tokens in batch_iterator_factory():
+            pending.append(normalise(frame_tokens))
+            pending_count += len(frame_tokens)
+            while pending_count >= batch_size:
+                buf = np.concatenate(pending, axis=0)
+                batch, rest = buf[:batch_size], buf[batch_size:]
+                pending = [rest] if len(rest) else []
+                pending_count = len(rest)
+                apply_batch(batch)
+        if pending_count > 0:
+            apply_batch(np.concatenate(pending, axis=0))
+        logger.info(f"VLAD streaming online k-means epoch {epoch + 1}/{epochs}")
 
     norms = np.linalg.norm(centres, axis=1, keepdims=True)
-    centres = (centres / np.maximum(norms, 1e-8)).astype(np.float32)
-    return centres
+    return (centres / np.maximum(norms, 1e-8)).astype(np.float32)
 
 
 def compute_vlad(patch_tokens: np.ndarray, centres: np.ndarray) -> np.ndarray:
