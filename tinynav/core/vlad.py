@@ -23,6 +23,12 @@ from scipy.spatial import cKDTree
 logger = logging.getLogger(__name__)
 
 
+def _l2_normalize_rows(x: np.ndarray) -> np.ndarray:
+    """L2-normalise each row of ``x``, guarding against near-zero norms."""
+    norms = np.linalg.norm(x, axis=1, keepdims=True)
+    return x / np.maximum(norms, 1e-8)
+
+
 def train_vocabulary_streaming(
     batch_iterator_factory,
     vocab_size: int = 32,
@@ -57,9 +63,7 @@ def train_vocabulary_streaming(
     counts = None
 
     def normalise(tokens: np.ndarray) -> np.ndarray:
-        tokens = tokens.astype(np.float32, copy=False)
-        norms = np.linalg.norm(tokens, axis=1, keepdims=True)
-        return tokens / np.maximum(norms, 1e-8)
+        return _l2_normalize_rows(tokens.astype(np.float32, copy=False))
 
     def apply_batch(batch: np.ndarray) -> None:
         nonlocal centres, counts
@@ -90,8 +94,7 @@ def train_vocabulary_streaming(
             apply_batch(np.concatenate(pending, axis=0))
         logger.info(f"VLAD streaming online k-means epoch {epoch + 1}/{epochs}")
 
-    norms = np.linalg.norm(centres, axis=1, keepdims=True)
-    return (centres / np.maximum(norms, 1e-8)).astype(np.float32)
+    return _l2_normalize_rows(centres).astype(np.float32)
 
 
 def compute_vlad(patch_tokens: np.ndarray, centres: np.ndarray) -> np.ndarray:
@@ -108,9 +111,7 @@ def compute_vlad(patch_tokens: np.ndarray, centres: np.ndarray) -> np.ndarray:
     if len(patch_tokens) == 0:
         return np.zeros(K * C, dtype=np.float32)
 
-    tokens = patch_tokens.astype(np.float32, copy=False)
-    norms = np.linalg.norm(tokens, axis=1, keepdims=True)
-    tokens /= np.maximum(norms, 1e-8)
+    tokens = _l2_normalize_rows(patch_tokens.astype(np.float32, copy=False))
 
     tree = cKDTree(centres)
     labels = tree.query(tokens, k=1, workers=-1)[1]
@@ -122,8 +123,7 @@ def compute_vlad(patch_tokens: np.ndarray, centres: np.ndarray) -> np.ndarray:
             residuals[k] = np.sum(tokens[mask] - centres[k], axis=0)
 
     # Intra-normalisation.
-    row_norms = np.linalg.norm(residuals, axis=1, keepdims=True)
-    residuals /= np.maximum(row_norms, 1e-8)
+    residuals = _l2_normalize_rows(residuals)
 
     descriptor = residuals.reshape(-1)
     desc_norm = np.linalg.norm(descriptor)
