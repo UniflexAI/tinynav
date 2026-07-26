@@ -45,7 +45,10 @@ def train_vocabulary_streaming(
     ``batch_size`` chunks on the fly; each chunk is assigned to its nearest centre
     (against a frozen snapshot of the centres) and then folded in point-by-point via a
     decaying running mean (Robbins-Monro / sequential k-means update), the same update
-    rule as classic online k-means.
+    rule as classic online k-means and as
+    https://gist.github.com/yjzhang/aaf460849a4398422785c0e85932688d — this
+    implementation batches the assignment step for throughput instead of updating one
+    point at a time.
 
     Args:
         batch_iterator_factory: zero-arg callable returning a fresh iterator of
