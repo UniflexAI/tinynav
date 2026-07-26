@@ -114,9 +114,9 @@ hf download --repo-type dataset UniflexAI/rosbag_tinynav_vlad_eval --local-dir /
 
 | Bag | Role |
 |---|---|
-| `bag_1970_01_01_08_07_55` | GT map (reference / retrieval database) |
-| `bag_1970_01_01_08_09_49` | Day query map |
-| `bag_1970_01_01_08_05_15` | Night query map |
+| `bag_gt` | GT map (reference / retrieval database) |
+| `bag_day` | Day query map |
+| `bag_night` | Night query map |
 
 ### Usage
 
