@@ -91,6 +91,43 @@ The benchmark generates:
 - **Visualization Data**: Trajectory plots and error distributions (if applicable)
 
 
+## Benchmark Pipeline 2: Cross-Map Self-Consistency Evaluation (VLAD)
+
+`map_retrieval_self_consistency.py` evaluates DINOv2 patch VLAD retrieval (the descriptor TinyNav actually ships and uses at runtime, see `tinynav/core/vlad.py`) across two independently-built maps **without needing a known coordinate transform between them**. Map B keyframes query Map A; the script fits its own SE(2) transform from the retrieval's own top-1 matches via RANSAC, then measures how consistent the rest of the top-k candidates are with that fitted transform.
+
+It always reads `vlad_descriptors.db` from both maps — there is no descriptor-backend switch, matching the fact that TinyNav's map-building and relocalization code (`build_map_node.py` / `map_node.py`) always uses VLAD with no other option (see the PR's "Notes" section).
+
+### Why self-consistency instead of a known transform
+
+Map A and Map B are each built independently (separate mapping runs), so their coordinate frames don't line up. There is no ready-made ground-truth transform between them, and getting one (e.g. manual alignment, a fixed marker) is extra setup. Fitting the transform from the retrieval's own top-1 matches avoids that setup — the trade-off is that the fitted transform is only as good as the retrieval being evaluated, so treat the resulting metrics as a **self-consistency signal**, not external ground-truth accuracy.
+
+### Usage
+
+```bash
+uv run python tool/benchmark/map_retrieval_self_consistency.py \
+  --map-a /tinynav/output/map_gt \
+  --map-b /tinynav/output/map_day \
+  --output-dir /tinynav/output/self_consistency_vlad
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--topk` | `1,3,5,10` | Comma-separated top-K values to report recall/precision/IoU for. |
+| `--distance-thresholds` | `0.5,1.0` | Comma-separated hit-radius thresholds in meters. |
+| `--ransac-threshold-m` | `0.5` | Inlier threshold (meters) for the SE(2) RANSAC fit. |
+| `--ransac-iterations` | `3000` | RANSAC iterations for the fit. |
+| `--every-n` | `1` | Evaluate every Nth Map B keyframe (use >1 to subsample for a quick check). |
+| `--max-queries` | `0` | Cap on number of Map B queries (`0` = no cap). |
+| `--seed` | `7` | RNG seed for RANSAC sampling. |
+
+### Output
+
+- `summary.json`: overall metrics, the fitted SE(2) transform, and top-1 residual stats (mean/median/p90).
+- `metrics.csv`: recall / precision / IoU for each top-K × distance-threshold combination.
+- `per_query_results.jsonl`: per-query retrieved candidates and the fitted-transform residual.
+
+Recommended primary score: `top1_inlier_ratio["0.5m"]` from `summary.json`.
+
 ## Future Benchmark Pipelines
 
 Additional benchmark pipelines will be added to evaluate:

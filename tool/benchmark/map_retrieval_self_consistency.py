@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 from tinynav.core.build_map_node import TinyNavDB
 
@@ -41,18 +40,7 @@ def _normalize_rows(rows: list[np.ndarray], map_path: Path) -> np.ndarray:
     return x / np.maximum(norms, 1e-8)
 
 
-def _load_stored_embeddings(map_path: Path, timestamps: list[int]) -> np.ndarray:
-    db = TinyNavDB(str(map_path), is_scratch=False)
-    rows: list[np.ndarray] = []
-    try:
-        for timestamp in timestamps:
-            rows.append(np.asarray(db.get_embedding(timestamp), dtype=np.float32))
-    finally:
-        db.close()
-    return _normalize_rows(rows, map_path)
-
-
-def _load_stored_vlad_embeddings(map_path: Path, timestamps: list[int]) -> np.ndarray:
+def _load_vlad_embeddings(map_path: Path, timestamps: list[int]) -> np.ndarray:
     db = TinyNavDB(str(map_path), is_scratch=False)
     rows: list[np.ndarray] = []
     try:
@@ -61,152 +49,6 @@ def _load_stored_vlad_embeddings(map_path: Path, timestamps: list[int]) -> np.nd
     finally:
         db.close()
     return _normalize_rows(rows, map_path)
-
-
-def _valid_superpoint_desc(feature: dict[str, Any]) -> np.ndarray:
-    desc = np.asarray(feature["descps"])
-    mask = np.asarray(feature.get("mask", np.ones(desc.shape[:2], dtype=bool))).reshape(-1)
-    desc = desc.reshape(-1, desc.shape[-1])[mask]
-    if desc.size == 0:
-        return np.zeros((0, 256), dtype=np.float32)
-    desc = desc.astype(np.float32, copy=False)
-    norms = np.linalg.norm(desc, axis=1, keepdims=True)
-    return desc / np.maximum(norms, 1e-8)
-
-
-def _load_superpoint_features(map_path: Path, timestamps: list[int]) -> list[np.ndarray]:
-    db = TinyNavDB(str(map_path), is_scratch=False)
-    rows: list[np.ndarray] = []
-    try:
-        for index, timestamp in enumerate(timestamps, start=1):
-            rows.append(_valid_superpoint_desc(db.features[int(timestamp)]))
-            if index % 300 == 0:
-                print(f"Loaded SuperPoint features {index}/{len(timestamps)} for {map_path}", flush=True)
-    finally:
-        db.close()
-    return rows
-
-
-def _sample_descriptors(
-    descs: list[np.ndarray],
-    sample_limit: int,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    total = sum(len(desc) for desc in descs)
-    if total == 0:
-        raise RuntimeError("No SuperPoint descriptors available for BoW vocabulary")
-    if total <= sample_limit:
-        return np.concatenate(descs, axis=0).astype(np.float32, copy=False)
-
-    pieces: list[np.ndarray] = []
-    for desc in descs:
-        if len(desc) == 0:
-            continue
-        count = min(len(desc), max(1, int(round(sample_limit * len(desc) / total))))
-        indices = rng.choice(len(desc), size=count, replace=False)
-        pieces.append(desc[indices])
-    sample = np.concatenate(pieces, axis=0)
-    if len(sample) > sample_limit:
-        indices = rng.choice(len(sample), size=sample_limit, replace=False)
-        sample = sample[indices]
-    return sample.astype(np.float32, copy=False)
-
-
-def _minibatch_kmeans(
-    sample: np.ndarray,
-    vocab_size: int,
-    rng: np.random.Generator,
-    iterations: int,
-    batch_size: int,
-) -> np.ndarray:
-    if len(sample) < vocab_size:
-        raise ValueError(f"Need at least {vocab_size} descriptors, got {len(sample)}")
-    centers = sample[rng.choice(len(sample), size=vocab_size, replace=False)].copy()
-    counts = np.zeros(vocab_size, dtype=np.int64)
-    for iteration in range(iterations):
-        batch = sample[rng.choice(len(sample), size=min(batch_size, len(sample)), replace=False)]
-        labels = cKDTree(centers).query(batch, k=1, workers=-1)[1]
-        for label, vector in zip(labels, batch):
-            counts[label] += 1
-            eta = 1.0 / counts[label]
-            centers[label] = (1.0 - eta) * centers[label] + eta * vector
-        if (iteration + 1) % 10 == 0:
-            print(f"BoW k-means iteration {iteration + 1}/{iterations}", flush=True)
-    norms = np.linalg.norm(centers, axis=1, keepdims=True)
-    return (centers / np.maximum(norms, 1e-8)).astype(np.float32)
-
-
-def _bow_histograms(descs: list[np.ndarray], centers: np.ndarray) -> np.ndarray:
-    tree = cKDTree(centers)
-    histograms = np.zeros((len(descs), len(centers)), dtype=np.float32)
-    for index, desc in enumerate(descs, start=1):
-        if len(desc):
-            labels = tree.query(desc, k=1, workers=-1)[1]
-            histograms[index - 1] = np.bincount(labels, minlength=len(centers)).astype(np.float32)
-        if index % 300 == 0:
-            print(f"BoW quantized {index}/{len(descs)}", flush=True)
-    return histograms
-
-
-def _tfidf_normalize(map_a_hist: np.ndarray, map_b_hist: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    document_frequency = np.count_nonzero(map_a_hist > 0, axis=0)
-    idf = np.log((1.0 + map_a_hist.shape[0]) / (1.0 + document_frequency)) + 1.0
-
-    def transform(histograms: np.ndarray) -> np.ndarray:
-        x = np.log1p(histograms) * idf[None, :]
-        norms = np.linalg.norm(x, axis=1, keepdims=True)
-        return (x / np.maximum(norms, 1e-8)).astype(np.float32)
-
-    return transform(map_a_hist), transform(map_b_hist)
-
-
-def _load_superpoint_bow_embeddings(
-    map_a: Path,
-    map_b: Path,
-    map_a_timestamps: list[int],
-    map_b_timestamps: list[int],
-    args: argparse.Namespace,
-) -> tuple[np.ndarray, np.ndarray]:
-    rng = np.random.default_rng(args.seed)
-    map_a_desc = _load_superpoint_features(map_a, map_a_timestamps)
-    map_b_desc = _load_superpoint_features(map_b, map_b_timestamps)
-    sample = _sample_descriptors(map_a_desc, args.bow_sample_limit, rng)
-    print(
-        f"Training BoW vocabulary: sample={sample.shape}, vocab_size={args.bow_vocab_size}",
-        flush=True,
-    )
-    centers = _minibatch_kmeans(
-        sample,
-        args.bow_vocab_size,
-        rng,
-        args.bow_kmeans_iterations,
-        args.bow_kmeans_batch_size,
-    )
-    map_a_hist = _bow_histograms(map_a_desc, centers)
-    map_b_hist = _bow_histograms(map_b_desc, centers)
-    return _tfidf_normalize(map_a_hist, map_b_hist)
-
-
-def _load_descriptor_embeddings(
-    map_a: Path,
-    map_b: Path,
-    map_a_timestamps: list[int],
-    map_b_timestamps: list[int],
-    args: argparse.Namespace,
-) -> tuple[np.ndarray, np.ndarray]:
-    if args.descriptor_backend == "stored":
-        return (
-            _load_stored_embeddings(map_a, map_a_timestamps),
-            _load_stored_embeddings(map_b, map_b_timestamps),
-        )
-    if args.descriptor_backend == "vlad":
-        return (
-            _load_stored_vlad_embeddings(map_a, map_a_timestamps),
-            _load_stored_vlad_embeddings(map_b, map_b_timestamps),
-        )
-    if args.descriptor_backend == "superpoint-bow":
-        return _load_superpoint_bow_embeddings(map_a, map_b, map_a_timestamps, map_b_timestamps, args)
-    raise ValueError(f"Unsupported descriptor backend: {args.descriptor_backend}")
 
 
 def _fit_se2(src_xy: np.ndarray, dst_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -334,13 +176,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     thresholds = _parse_float_list(args.distance_thresholds)
     max_topk = max(topk_values)
 
-    map_a_embeddings, map_b_embeddings = _load_descriptor_embeddings(
-        map_a,
-        map_b,
-        map_a_timestamps,
-        map_b_timestamps,
-        args,
-    )
+    map_a_embeddings = _load_vlad_embeddings(map_a, map_a_timestamps)
+    map_b_embeddings = _load_vlad_embeddings(map_b, map_b_timestamps)
     similarities = map_a_embeddings @ map_b_embeddings.T
     query_rows = _retrieve_rows(similarities, map_a_timestamps, map_a_poses, map_b_timestamps, max_topk)
 
@@ -398,10 +235,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     summary = {
         "type": "cross_map_self_consistency",
         "note": (
-            "T is fitted from this descriptor backend's Top1 keyframe matches. "
+            "T is fitted from VLAD Top1 keyframe matches. "
             "Metrics are self-consistency signals, not external GT accuracy."
         ),
-        "descriptor_backend": args.descriptor_backend,
         "map_a": str(map_a),
         "map_b": str(map_b),
         "map_a_keyframes": len(map_a_timestamps),
@@ -427,12 +263,6 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         "metrics": metrics,
         "elapsed_s": time.time() - start_time,
     }
-    if args.descriptor_backend == "superpoint-bow":
-        summary["bow"] = {
-            "vocab_size": args.bow_vocab_size,
-            "sample_limit": args.bow_sample_limit,
-            "kmeans_iterations": args.bow_kmeans_iterations,
-        }
 
     _write_jsonl(output_dir / "per_query_results.jsonl", query_rows)
     _write_csv(output_dir / "metrics.csv", metrics)
@@ -444,21 +274,12 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Self-supervised cross-map retrieval consistency evaluation. "
+            "Self-supervised cross-map VLAD retrieval consistency evaluation. "
             "Map B keyframes query Map A; a SE(2) transform is fitted from Top1 matches."
         )
     )
     parser.add_argument("--map-a", required=True, help="Reference map directory")
     parser.add_argument("--map-b", required=True, help="Query/eval map directory")
-    parser.add_argument(
-        "--descriptor-backend",
-        choices=["stored", "vlad", "superpoint-bow"],
-        default="stored",
-        help=(
-            "'stored' uses embeddings.db (DINOv2 global embedding), 'vlad' uses vlad_descriptors.db "
-            "(DINOv2 patch VLAD), 'superpoint-bow' builds a map-A SuperPoint BoW vocabulary."
-        ),
-    )
     parser.add_argument("--output-dir", default="/tinynav/output/map_retrieval_self_consistency")
     parser.add_argument("--topk", default="1,3,5,10")
     parser.add_argument("--distance-thresholds", default="0.5,1.0")
@@ -467,10 +288,6 @@ def main() -> None:
     parser.add_argument("--every-n", type=int, default=1)
     parser.add_argument("--max-queries", type=int, default=0)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--bow-vocab-size", type=int, default=512)
-    parser.add_argument("--bow-sample-limit", type=int, default=120_000)
-    parser.add_argument("--bow-kmeans-iterations", type=int, default=80)
-    parser.add_argument("--bow-kmeans-batch-size", type=int, default=4096)
     args = parser.parse_args()
 
     summary = run_eval(args)
