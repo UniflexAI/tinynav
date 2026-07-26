@@ -361,20 +361,10 @@ class TinyNavDB():
             fps=30,
         )
         if is_scratch:
-            if os.path.exists(f"{map_save_path}/features.db"):
-                os.remove(f"{map_save_path}/features.db")
-            if os.path.exists(f"{map_save_path}/depths.db"):
-                os.remove(f"{map_save_path}/depths.db")
-            if os.path.exists(f"{map_save_path}/embeddings.db"):
-                os.remove(f"{map_save_path}/embeddings.db")
-            if os.path.exists(f"{map_save_path}/semantic_embeddings.db"):
-                os.remove(f"{map_save_path}/semantic_embeddings.db")
-            if os.path.exists(f"{map_save_path}/vlad_descriptors.db"):
-                os.remove(f"{map_save_path}/vlad_descriptors.db")
-            if os.path.exists(f"{map_save_path}/patch_tokens.db"):
-                os.remove(f"{map_save_path}/patch_tokens.db")
-            if os.path.exists(f"{map_save_path}/metadata.db"):
-                os.remove(f"{map_save_path}/metadata.db")
+            for shelf_name in ("features", "depths", "embeddings", "semantic_embeddings", "vlad_descriptors", "patch_tokens", "metadata"):
+                db_file = f"{map_save_path}/{shelf_name}.db"
+                if os.path.exists(db_file):
+                    os.remove(db_file)
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
         self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
