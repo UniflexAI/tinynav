@@ -101,6 +101,23 @@ It always reads `vlad_descriptors.db` from both maps — there is no descriptor-
 
 Map A and Map B are each built independently (separate mapping runs), so their coordinate frames don't line up. There is no ready-made ground-truth transform between them, and getting one (e.g. manual alignment, a fixed marker) is extra setup. Fitting the transform from the retrieval's own top-1 matches avoids that setup — the trade-off is that the fitted transform is only as good as the retrieval being evaluated, so treat the resulting metrics as a **self-consistency signal**, not external ground-truth accuracy.
 
+### Test dataset
+
+The GT/day/night ROS bags used to produce the results below are published at
+[`UniflexAI/rosbag_tinynav_vlad_eval`](https://huggingface.co/datasets/UniflexAI/rosbag_tinynav_vlad_eval)
+on Hugging Face (same download pattern as `UniflexAI/rosbag2_go2_looper` in
+`scripts/run_rosbag_build_map.sh`):
+
+```bash
+hf download --repo-type dataset UniflexAI/rosbag_tinynav_vlad_eval --local-dir /tinynav/tinynav_db/rosbags
+```
+
+| Bag | Role |
+|---|---|
+| `bag_1970_01_01_08_07_55` | GT map (reference / retrieval database) |
+| `bag_1970_01_01_08_09_49` | Day query map |
+| `bag_1970_01_01_08_05_15` | Night query map |
+
 ### Usage
 
 ```bash
@@ -127,6 +144,30 @@ uv run python tool/benchmark/map_retrieval_self_consistency.py \
 - `per_query_results.jsonl`: per-query retrieved candidates and the fitted-transform residual.
 
 Recommended primary score: `top1_inlier_ratio["0.5m"]` from `summary.json`.
+
+### Example results
+
+Run against the GT/day/night bags above, comparing VLAD (this branch) against the DINOv2 global-embedding baseline from main. See the `feat(vlad): ...` PR description for the full write-up, including why the three VLAD training variants are grouped together (their differences aren't a reliable signal, see "Why batched, not strict single-point" there).
+
+#### Day: `map_day -> map_gt`
+
+| Method | Fit Inlier@1m | Top1 Mean | Top1 Median | Top1 P90 | R@1 0.5m | R@10 0.5m | IoU@10 0.5m |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| DINOv2 global | 92.03% | 0.433m | 0.229m | 0.839m | 78.80% | 97.44% | 0.3325 |
+| DINOv2 patch VLAD (original, in-memory) | 98.80% | 0.270m | 0.197m | 0.505m | 89.62% | 99.10% | 0.4161 |
+| + disk-persisted online k-means (strict single-point) | 99.10% | 0.232m | 0.180m | 0.413m | 93.08% | 99.25% | 0.4364 |
+| + disk-persisted online k-means (batched, **shipped**) | 98.05% | 0.304m | 0.194m | 0.509m | 88.87% | 99.25% | 0.4163 |
+
+#### Night: `map_night -> map_gt`
+
+| Method | Fit Inlier@1m | Top1 Mean | Top1 Median | Top1 P90 | R@1 0.5m | R@10 0.5m | IoU@10 0.5m |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| DINOv2 global | 29.31% | 8.698m | 8.099m | 22.559m | 23.34% | 35.96% | 0.0996 |
+| DINOv2 patch VLAD (original, in-memory) | 35.14% | 6.885m | 7.421m | 16.955m | 31.48% | 39.08% | 0.1422 |
+| + disk-persisted online k-means (strict single-point) | 35.28% | 6.568m | 7.271m | 16.579m | 31.75% | 37.04% | 0.1515 |
+| + disk-persisted online k-means (batched, **shipped**) | 36.64% | 6.626m | 7.382m | 16.701m | 31.21% | 39.89% | 0.1407 |
+
+All three DINOv2 patch VLAD variants clearly outperform the DINOv2 global baseline on both day and night.
 
 ## Future Benchmark Pipelines
 
