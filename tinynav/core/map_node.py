@@ -522,7 +522,11 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
         self._rtk_yaw_offset = None   # map<-odom yaw offset, locked once on first RTK fix
-        self._last_rtk_ground_z = None  # last map-side (path-derived) ground z, for fallback
+        # RTK replace mode only: stateless xy -> map-frame z lookup over the map keyframes.
+        self._rtk_kf_xy = None
+        self._rtk_kf_z = None
+        if self.rtk_mode == "replace":
+            self._build_rtk_ground_z_lookup()
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
         self.latest_rtk_map_pose = None
@@ -1533,31 +1537,68 @@ class MapNode(Node):
             self._cached_global_path_goal = np.array(target_poi, dtype=np.float64)
         return path
 
+    def _build_rtk_ground_z_lookup(self) -> None:
+        """RTK replace mode only: build the xy -> map-frame z table from the map keyframes.
+
+        poses.npy is the saved `pose_graph_used_pose`, i.e. exactly the same
+        quantity as the `pose_in_map` this node computes at runtime, and the same
+        frame the POIs and nav subgoals live in. Every keyframe is a place the
+        robot physically stood, so its z is always a valid A* start height.
+        The map is loaded once per node lifetime (a map switch restarts the node),
+        so this table is built once and never goes stale.
+        """
+        try:
+            positions = np.array([pose[:3, 3] for pose in self.map_poses.values()], dtype=np.float64)
+        except Exception as exc:
+            self.get_logger().warning(f"RTK ground-z lookup unavailable: {exc}")
+            return
+        if positions.size == 0:
+            self.get_logger().warning("RTK ground-z lookup unavailable: map has no keyframe poses")
+            return
+        self._rtk_kf_xy = np.ascontiguousarray(positions[:, :2])
+        self._rtk_kf_z = np.ascontiguousarray(positions[:, 2])
+        self.get_logger().info(
+            f"RTK ground-z lookup built from {len(self._rtk_kf_z)} keyframes "
+            f"(map z {self._rtk_kf_z.min():.2f}..{self._rtk_kf_z.max():.2f})"
+        )
+
     def _rtk_map_ground_z(self, position: np.ndarray) -> float:
-        """Map-frame ground z at the robot's xy, for RTK replace mode only.
+        """Map-frame z at the robot's xy, for RTK replace mode only.
 
         RTK / File B publish z=0, and RTK altitude cannot be used either: the
-        map's z is warped by VIO vertical drift (POIs on the same physical floor
-        differ by ~7 m in map z), so RTK's near-flat altitude does not match it.
-        z must come from the map side. Prefer the nearest point on the cached
-        global path (it carries the true along-route map z); when the path is
-        momentarily unavailable, keep the last path-derived z, then SDF ground.
-        This is an override (not the small-diff `_nav_clamped_z` snap, which would
+        map's z is warped by VIO vertical drift (map_go_1 spans ~7 m in map z on
+        one physical floor), so RTK's near-flat altitude does not match it. z must
+        come from the map side, and it must be available *unconditionally* -- z is
+        not merely a comparison term, it indexes the 3D occupancy/SDF grid, so a
+        wrong z puts `start_idx[2]` outside the grid (map_back_1 is only 36 cells
+        / 3.6 m tall), A* returns None, and the robot stalls or circles.
+
+        Interpolate over the nearest map keyframes in xy. This is stateless and
+        always available, unlike deriving z from the current nav path -- the path
+        needs a start z to be planned in the first place, and it is cleared on
+        every subgoal advance. Keyframe z is locally unambiguous: within 1.5 m in
+        xy the keyframe z spread is 0.12 m median / 0.52 m max on map_go_1 and
+        0.04 / 0.18 m on map_back_1, with no multi-level overlap on either map.
+
+        This is an override, not the small-diff `_nav_clamped_z` snap (which would
         reject the large RTK-vs-map z gap), so the arrival / subgoal / z-clamp
-        gates then compare map-vs-map.
+        gates downstream then compare map-vs-map.
         """
+        if self._rtk_kf_xy is not None:
+            dx = self._rtk_kf_xy[:, 0] - float(position[0])
+            dy = self._rtk_kf_xy[:, 1] - float(position[1])
+            d2 = dx * dx + dy * dy
+            k = min(3, d2.shape[0])
+            nearest = np.argpartition(d2, k - 1)[:k] if d2.shape[0] > k else np.arange(d2.shape[0])
+            weights = 1.0 / (np.sqrt(d2[nearest]) + 0.1)
+            return float(np.dot(self._rtk_kf_z[nearest], weights) / weights.sum())
+        # Degenerate map (no keyframe poses): fall back to the nav path, then SDF
+        # ground, then the POI z. Do NOT reach the raw position z -- it is RTK's 0,
+        # which is outside the grid entirely.
         path = self._current_nav_path_in_map
         if path is not None and len(path) > 0:
             _, closest, _ = self._closest_point_on_path_for_z_clamp(path, position)
-            z = float(closest[2])
-            self._last_rtk_ground_z = z
-            return z
-        # Path momentarily unavailable (e.g. right after a subgoal advance clears it):
-        # keep the last map-side ground z, then SDF ground. Do NOT snap to the POI z --
-        # POIs on the same map differ ~7 m in VIO-warped z, so a wrong start z breaks
-        # the A* 3D start grid, replanning returns None, and the robot stalls/circles.
-        if self._last_rtk_ground_z is not None:
-            return self._last_rtk_ground_z
+            return float(closest[2])
         sdf_z, _ = self._nav_clamped_z_from_sdf(position)
         if sdf_z is not None:
             return float(sdf_z)
