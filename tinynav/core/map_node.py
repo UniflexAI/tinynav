@@ -24,6 +24,7 @@ import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
+from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 from tinynav.core.planning_node import GO2_CONFIG
@@ -236,7 +237,6 @@ class MapNode(Node):
         self.loop_similarity_threshold = 0.90
         self.loop_top_k = 1
 
-        self.relocalization_threshold = 0.85
         self.relocalization_loop_top_k = 3
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
@@ -248,8 +248,25 @@ class MapNode(Node):
         self.speed_index = PathSpeedIndex.load(speed_path) if os.path.exists(speed_path) else None
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
-        self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
-        self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
+        self.vlad_timestamps = list(self.map_poses.keys())
+        try:
+            self.vlad_centres = self.db.metadata["vlad_centres"]
+            self.map_vlad_descriptors = np.stack([
+                self.db.vlad_descriptors[timestamp]
+                for timestamp in self.vlad_timestamps
+            ])
+        except KeyError as exc:
+            raise RuntimeError(
+                "This map does not contain a complete DINOv2 patch VLAD "
+                "relocalization index. Rebuild the map with this branch before "
+                f"running map_node. map_path={tinynav_map_path}, missing_key={exc}"
+            ) from exc
+        self.get_logger().info(
+            "Using DINOv2 patch VLAD relocalization index: "
+            f"vocab={self.vlad_centres.shape}, "
+            f"descriptors={self.map_vlad_descriptors.shape}, "
+            f"keyframes={len(self.vlad_timestamps)}"
+        )
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
         self.sdf_map = np.load(f"{tinynav_map_path}/sdf_map.npy")
@@ -438,6 +455,10 @@ class MapNode(Node):
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
 
+    def get_vlad_descriptor(self, image: np.ndarray) -> np.ndarray:
+        patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(image))
+        return compute_vlad(patch_tokens, self.vlad_centres)
+
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
@@ -473,18 +494,24 @@ class MapNode(Node):
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
-        query_embedding = self.get_embeddings(keyframe)
-        query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
 
-        idx_and_similarity_array = find_loop(query_embedding_normed, self.map_embeddings, self.relocalization_threshold, self.relocalization_loop_top_k)
-        max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
+        query_vlad = self.get_vlad_descriptor(keyframe)
+        idx_and_similarity_array = find_loop(
+            query_vlad,
+            self.map_vlad_descriptors,
+            -1.0,
+            self.relocalization_loop_top_k,
+        )
         if len(idx_and_similarity_array) == 0:
-            print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
+            print("VLAD: no relocalization candidates")
             return False, np.eye(4), -np.inf
+        candidate_timestamps = [
+            int(self.vlad_timestamps[idx_in_map])
+            for idx_in_map, _similarity in idx_and_similarity_array
+        ]
 
         pnp_candidates = []
-        for idx_in_map, similarity in idx_and_similarity_array:
-            timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
+        for timestamp_in_map in candidate_timestamps:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)

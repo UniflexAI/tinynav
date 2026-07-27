@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import logging
 import os
 import shelve
@@ -39,6 +40,7 @@ from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.stair_hint import compute_path_climb
 from tinynav.core.path_speed import compute_path_speed
 from tinynav.core.semantic_retrieval import normalize_embedding
+from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
 
@@ -362,20 +364,17 @@ class TinyNavDB():
             fps=30,
         )
         if is_scratch:
-            if os.path.exists(f"{map_save_path}/features.db"):
-                os.remove(f"{map_save_path}/features.db")
-            if os.path.exists(f"{map_save_path}/depths.db"):
-                os.remove(f"{map_save_path}/depths.db")
-            if os.path.exists(f"{map_save_path}/embeddings.db"):
-                os.remove(f"{map_save_path}/embeddings.db")
-            if os.path.exists(f"{map_save_path}/semantic_embeddings.db"):
-                os.remove(f"{map_save_path}/semantic_embeddings.db")
+            for db_file in glob.glob(f"{map_save_path}/*.db"):
+                os.remove(db_file)
         self.features = IntKeyShelf(f"{map_save_path}/features")
         self.embeddings = IntKeyShelf(f"{map_save_path}/embeddings")
         self.semantic_embeddings = IntKeyShelf(f"{map_save_path}/semantic_embeddings")
+        self.vlad_descriptors = IntKeyShelf(f"{map_save_path}/vlad_descriptors")
+        self.patch_tokens = IntKeyShelf(f"{map_save_path}/patch_tokens")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
+        self.metadata = shelve.open(f"{map_save_path}/metadata")
 
-    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None,  infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None, vlad_descriptor:np.ndarray = None, patch_tokens:np.ndarray = None, infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
             self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
@@ -388,6 +387,10 @@ class TinyNavDB():
             self.semantic_embeddings[key] = semantic_embedding
         if features is not None:
             self.features[key] = features
+        if vlad_descriptor is not None:
+            self.vlad_descriptors[key] = vlad_descriptor
+        if patch_tokens is not None:
+            self.patch_tokens[key] = patch_tokens
 
     def get_depth_embedding_features_images(self, key:int):
         key_int = int(key)
@@ -415,11 +418,17 @@ class TinyNavDB():
     def has_semantic_embedding(self, key:int) -> bool:
         return key in self.semantic_embeddings
 
+    def set_vlad_centres(self, centres: np.ndarray):
+        self.metadata["vlad_centres"] = centres
+
     def close(self):
         self.features.close()
         self.embeddings.close()
         self.semantic_embeddings.close()
+        self.vlad_descriptors.close()
+        self.patch_tokens.close()
         self.depths.close()
+        self.metadata.close()
         self.infra1_video_db.close()
         self.rgb_video_db.close()
 
@@ -740,10 +749,10 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("save_image_and_depth"):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
-        with self.stage_timer.timed("get_embeddings"):
-            embedding = self.get_embeddings(infra1_image)
+        with self.stage_timer.timed("get_dinov2_descriptors"):
+            embedding, patch_tokens = asyncio.run(self.dinov2_model.infer_global_and_patch_tokens(infra1_image))
             embedding = embedding / np.linalg.norm(embedding)
-            self.db.set_entry(keyframe_image_timestamp, embedding = embedding)
+            self.db.set_entry(keyframe_image_timestamp, embedding = embedding, patch_tokens = patch_tokens)
         with self.stage_timer.timed("get_semantic_embedding"):
             semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
             self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
@@ -898,6 +907,21 @@ class BuildMapNode(Node):
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
+
+        with self.stage_timer.timed("vlad_save"):
+            timestamps = list(self.pose_graph_used_pose.keys())
+            vlad_train_rng = np.random.default_rng(42)
+
+            def vlad_batch_iterator():
+                order = vlad_train_rng.permutation(timestamps)
+                for timestamp in order:
+                    yield self.db.patch_tokens[int(timestamp)]
+
+            vlad_centres = train_vocabulary_streaming(vlad_batch_iterator)
+            self.db.set_vlad_centres(vlad_centres)
+            for timestamp in timestamps:
+                patch_tokens = self.db.patch_tokens[timestamp]
+                self.db.set_entry(timestamp, vlad_descriptor=compute_vlad(patch_tokens, vlad_centres))
 
         # Flush and close writable DB first, then reopen DB for occupancy generation.
         self.db.close()
