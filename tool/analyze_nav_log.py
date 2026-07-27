@@ -133,6 +133,28 @@ def main():
         print(f"  失败原因: {reasons}")
     print()
 
+    # ---- the thing that actually decides fast vs slow --------------------
+    # search_within_sdf_map drains SDF bucket 0 across the whole map before it
+    # touches bucket 1, so a goal snapped into bucket 1 costs a full sweep.
+    # Both endpoints in bucket 0 is the healthy state.
+    pairs = {}
+    for line in ok:
+        sb = re.search(r"start_bin=(\d+)", line)
+        gb = re.search(r"goal_bin=(\d+)", line)
+        ms = re.search(r"sdf_search_ms=(\d+)", line)
+        if sb and gb and ms:
+            pairs.setdefault((int(sb.group(1)), int(gb.group(1))), []).append(int(ms.group(1)))
+    if pairs:
+        print("== 端点落在哪个 SDF 桶 (goal_bin>0 = 病态,要扫光整个 bucket 0) ==")
+        for (s, g), v in sorted(pairs.items()):
+            flag = "  🔴" if g > 0 else ""
+            print(f"  start_bin={s} goal_bin={g} : {len(v):>4} 次   "
+                  f"sdf_search 中位={pct(v,50):>6.0f}ms 最大={max(v):>6.0f}ms{flag}")
+        bad = sum(len(v) for (s, g), v in pairs.items() if g > 0)
+        print(f"  -> goal_bin>0 占 {bad}/{sum(len(v) for v in pairs.values())}"
+              f"{'  ✅ 已消除' if bad == 0 else ''}")
+        print()
+
     # ---- is the search crawling the 3D volume? ---------------------------
     exp = fields.get("expanded", [])
     sdf = fields.get("sdf_search_ms", [])
