@@ -199,6 +199,12 @@ def reconstruct_path_sdf(parent:dict, current:tuple):
         current = parent[current]
     return path[::-1]
 
+# SDF bands that bucket the A* open set. search_within_sdf_map drains bucket 0
+# before it looks at bucket 1, so the endpoint snap below must land inside
+# bucket 0 -- these two numbers have to stay tied together, hence one constant.
+SDF_BINS = [0.15, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+
 def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, stop_distance:np.ndarray):
     start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else start_index
     open_heap = [(sdf_map[start_index], start_index)]
@@ -316,8 +322,20 @@ def shortcut_prune_path(
     return pruned + tail
 
 
+def sdf_queue_index(sdf_value: float) -> int:
+    for idx, threshold in enumerate(SDF_BINS):
+        if sdf_value < threshold:
+            return idx
+    return len(SDF_BINS)
+
+
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float, stats: dict | None = None):
     """A* over the SDF grid.
+
+    The open set is bucketed by SDF band and the loop always drains the lowest
+    non-empty bucket first, so the goal is only reachable once its own bucket is
+    being drained. Keep both endpoints in bucket 0 (see SDF_BINS) or the search
+    has to exhaust every bucket-0 cell on the map before it can pop the goal.
 
     `stats`, when given, is filled with how much of the grid the search actually
     had to touch: `expanded` nodes and the z-layer span they covered. That is the
@@ -326,7 +344,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
     """
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
-    sdf_bins = [0.15, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+    sdf_bins = SDF_BINS
 
     def _record(visited_set, found):
         if stats is None:
@@ -335,11 +353,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
         stats.update(expanded=len(visited_set), z_lo=min(zs), z_hi=max(zs),
                      z_span=max(zs) - min(zs), found=found)
 
-    def get_queue_index(sdf_value: float) -> int:
-        for idx, threshold in enumerate(sdf_bins):
-            if sdf_value < threshold:
-                return idx
-        return len(sdf_bins)
+    get_queue_index = sdf_queue_index
 
     open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
     open_sets = [set() for _ in range(len(sdf_bins) + 1)]
@@ -1963,10 +1977,15 @@ class MapNode(Node):
             )
             return None 
         start_snap_start_time = time.perf_counter()
-        sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
+        # Snap into SDF bucket 0, not merely "near a surface". The A* drains bucket
+        # 0 across the whole map before it touches bucket 1, so an endpoint landing
+        # in bucket 1 (sdf 0.15-0.20) costs a full sweep of every bucket-0 cell --
+        # measured at 21986 nodes / 8.6 s on map_go_1, versus ~102 nodes when both
+        # endpoints share bucket 0.
+        sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, SDF_BINS[0])
         start_snap_ms = (time.perf_counter() - start_snap_start_time) * 1000.0
         goal_snap_start_time = time.perf_counter()
-        sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+        sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, SDF_BINS[0])
         goal_snap_ms = (time.perf_counter() - goal_snap_start_time) * 1000.0
 
         if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
@@ -1983,6 +2002,12 @@ class MapNode(Node):
 
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
+        start_sdf_val = float(self.sdf_map[tuple(sdf_start_sdf)])
+        goal_sdf_val = float(self.sdf_map[tuple(sdf_goal_sdf)])
+        endpoint_profile = (
+            f"start_sdf={start_sdf_val:.3f} start_bin={sdf_queue_index(start_sdf_val)} "
+            f"goal_sdf={goal_sdf_val:.3f} goal_bin={sdf_queue_index(goal_sdf_val)} "
+        )
         sdf_search_start_time = time.perf_counter()
         search_stats: dict = {}
         path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution, search_stats)
@@ -2002,7 +2027,7 @@ class MapNode(Node):
                 f"sdf_start_idx={tuple(sdf_start_sdf)} sdf_goal_idx={tuple(sdf_goal_sdf)} "
                 f"start_snap_len={len(sdf_start_path)} goal_snap_len={len(sdf_goal_path)} "
                 f"start_snap_ms={start_snap_ms:.0f} goal_snap_ms={goal_snap_ms:.0f} "
-                f"sdf_search_ms={sdf_search_ms:.0f} {search_profile}"
+                f"sdf_search_ms={sdf_search_ms:.0f} {search_profile}{endpoint_profile}"
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
@@ -2024,7 +2049,7 @@ class MapNode(Node):
                 f"sdf_path_len={len(path_sdf)} raw_path_len={len(path)} pruned_path_len={len(pruned_path)} "
                 f"start_snap_ms={start_snap_ms:.0f} goal_snap_ms={goal_snap_ms:.0f} "
                 f"sdf_search_ms={sdf_search_ms:.0f} shortcut_ms={shortcut_ms:.0f} total_ms={total_ms:.0f} "
-                f"{search_profile}"
+                f"{search_profile}{endpoint_profile}"
             )
             return converted_path
         return None
