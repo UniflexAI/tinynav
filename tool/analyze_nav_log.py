@@ -17,7 +17,8 @@ import re
 import sys
 
 STAMP = re.compile(r"^\[\w+\] \[(\d+\.\d+)\]")
-KV = re.compile(r"(\w+)=(-?[\d.]+)")
+# A plain scalar only: `z_range=34..79` must not parse as a number.
+KV = re.compile(r"(\w+)=(-?\d+(?:\.\d+)?)(?![\d.])")
 
 
 def find_logs():
@@ -84,15 +85,30 @@ def main():
             nm = re.search(r"name=(\w+)", line)
             if nm and "gap_s" in d:
                 gaps.setdefault(nm.group(1), []).append(float(d["gap_s"]))
-    print("== 执行器阻塞 (cb_gap: 回调比周期晚多少) ==")
+    # A callback can miss its period by a little just from ordinary jitter (or
+    # because the source runs slower than the period we told the logger). Only
+    # gaps of a second or more mean the node was actually wedged, so separate
+    # them -- lumping the two together inflates "time stalled" several-fold.
+    STALL_S = 1.0
+    print(f"== 执行器阻塞 (cb_gap;>={STALL_S:.0f}s 才算真阻塞,其余是抖动) ==")
     if not gaps:
         print("  无 —— 没有回调被显著延迟 ✅")
+    worst = 0.0
     for name, g in sorted(gaps.items()):
-        total = sum(x for x in g)
-        print(f"  {name:<20} 次数={len(g):<5} 中位={pct(g,50):.2f}s "
-              f"90%={pct(g,90):.2f}s 最大={max(g):.2f}s  累计滞后={total:.0f}s")
-        if t0 is not None and t1 and t1 > t0:
-            print(f"  {'':<20} -> 约占运行时长的 {100*total/(t1-t0):.0f}%")
+        stalls = [x for x in g if x >= STALL_S]
+        jitter = [x for x in g if x < STALL_S]
+        if stalls:
+            tot = sum(stalls)
+            worst = max(worst, tot)
+            share = f" -> 占运行时长 {100*tot/(t1-t0):.0f}%" if t0 is not None and t1 > t0 else ""
+            print(f"  {name:<20} 🔴 真阻塞 {len(stalls)} 次  中位={pct(stalls,50):.1f}s "
+                  f"最大={max(stalls):.1f}s  累计={tot:.0f}s{share}")
+        if jitter:
+            print(f"  {name:<20}    抖动   {len(jitter)} 次  中位={pct(jitter,50):.2f}s "
+                  f"最大={max(jitter):.2f}s  (正常)")
+    if worst and t0 is not None and t1 > t0:
+        print(f"\n  -> 本次运行约 {100*worst/(t1-t0):.0f}% 的时间 map_node 是卡死的:"
+              f"定位不更新、目标点不发布、子目标不推进")
     print()
 
     # ---- planner ---------------------------------------------------------

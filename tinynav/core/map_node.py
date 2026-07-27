@@ -884,7 +884,7 @@ class MapNode(Node):
         # /rtk/map_pose arrives per fix (~10 Hz). A gap much larger than that means
         # this callback was queued behind a slow replan, i.e. localization went
         # blind for that long -- not that RTK stopped.
-        self._log_callback_gap("rtk_map_pose", "_last_rtk_cb_at", 0.1)
+        self._log_callback_gap("rtk_map_pose", "_last_rtk_cb_at", 0.2)
         self.latest_rtk_map_pose, _ = msg2np(msg)
         self.latest_rtk_map_pose_stamp_msg = msg.header.stamp
         self.latest_rtk_map_pose_received_at = time.monotonic()
