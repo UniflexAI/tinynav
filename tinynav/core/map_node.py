@@ -316,10 +316,24 @@ def shortcut_prune_path(
     return pruned + tail
 
 
-def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
+def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float, stats: dict | None = None):
+    """A* over the SDF grid.
+
+    `stats`, when given, is filled with how much of the grid the search actually
+    had to touch: `expanded` nodes and the z-layer span they covered. That is the
+    number to look at when a replan takes seconds -- it says whether the search is
+    crawling the 3D volume rather than the route.
+    """
     start = tuple(start.flatten()) if isinstance(start, np.ndarray) else start
     goal = tuple(goal.flatten()) if isinstance(goal, np.ndarray) else goal
     sdf_bins = [0.15, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+    def _record(visited_set, found):
+        if stats is None:
+            return
+        zs = [v[2] for v in visited_set] or [start[2]]
+        stats.update(expanded=len(visited_set), z_lo=min(zs), z_hi=max(zs),
+                     z_span=max(zs) - min(zs), found=found)
 
     def get_queue_index(sdf_value: float) -> int:
         for idx, threshold in enumerate(sdf_bins):
@@ -350,6 +364,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
             continue
         visited.add(current)
         if current == goal:
+            _record(visited, True)
             return reconstruct_path_sdf(parent, current)
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
@@ -373,6 +388,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                         )
                         if neighbor not in parent:
                             parent[neighbor] = current
+    _record(visited, False)
     return []
 
 class MapNode(Node):
@@ -865,6 +881,10 @@ class MapNode(Node):
     def rtk_map_pose_callback(self, msg: Odometry):
         if self.rtk_mode != "replace":
             return
+        # /rtk/map_pose arrives per fix (~10 Hz). A gap much larger than that means
+        # this callback was queued behind a slow replan, i.e. localization went
+        # blind for that long -- not that RTK stopped.
+        self._log_callback_gap("rtk_map_pose", "_last_rtk_cb_at", 0.1)
         self.latest_rtk_map_pose, _ = msg2np(msg)
         self.latest_rtk_map_pose_stamp_msg = msg.header.stamp
         self.latest_rtk_map_pose_received_at = time.monotonic()
@@ -962,7 +982,28 @@ class MapNode(Node):
             stamp_msg=self.latest_odom_stamp_msg,
         )
 
+    def _log_callback_gap(self, name: str, attr: str, expected_s: float) -> None:
+        """Report when a callback fires far later than its period.
+
+        map_node runs on the default single-threaded executor, so a slow replan
+        stalls every other callback in this node -- RTK pose updates included.
+        That stall is invisible in the per-stage timings; it only shows up as the
+        gap between consecutive callbacks, which is what this records.
+        """
+        now = time.monotonic()
+        previous = getattr(self, attr, None)
+        setattr(self, attr, now)
+        if previous is None:
+            return
+        gap = now - previous
+        if gap > expected_s * 1.5:
+            self.get_logger().warning(
+                f"cb_gap name={name} gap_s={gap:.2f} expected_s={expected_s:.2f} "
+                f"late_s={gap - expected_s:.2f}"
+            )
+
     def target_pose_timer_callback(self):
+        self._log_callback_gap("target_pose_timer", "_last_target_tick_at", 1.0)
         if self.latest_odom_pose is None:
             return
         if self.T_from_map_to_odom is None:
@@ -1910,8 +1951,14 @@ class MapNode(Node):
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
         sdf_search_start_time = time.perf_counter()
-        path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution)
+        search_stats: dict = {}
+        path_sdf = search_within_sdf_map(sdf_start_sdf, sdf_goal_sdf, self.sdf_map, self.occupancy_map, resolution, search_stats)
         sdf_search_ms = (time.perf_counter() - sdf_search_start_time) * 1000.0
+        search_profile = (
+            f"expanded={search_stats.get('expanded', -1)} "
+            f"z_span={search_stats.get('z_span', -1)} "
+            f"z_range={search_stats.get('z_lo', -1)}..{search_stats.get('z_hi', -1)} "
+        )
         if len(path_sdf) == 0:
             self.get_logger().warning(
                 "nav_path_profile failed=empty_sdf_path "
@@ -1922,7 +1969,7 @@ class MapNode(Node):
                 f"sdf_start_idx={tuple(sdf_start_sdf)} sdf_goal_idx={tuple(sdf_goal_sdf)} "
                 f"start_snap_len={len(sdf_start_path)} goal_snap_len={len(sdf_goal_path)} "
                 f"start_snap_ms={start_snap_ms:.0f} goal_snap_ms={goal_snap_ms:.0f} "
-                f"sdf_search_ms={sdf_search_ms:.0f}"
+                f"sdf_search_ms={sdf_search_ms:.0f} {search_profile}"
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
@@ -1943,7 +1990,8 @@ class MapNode(Node):
                 f"start_snap_len={len(sdf_start_path)} goal_snap_len={len(sdf_goal_path)} "
                 f"sdf_path_len={len(path_sdf)} raw_path_len={len(path)} pruned_path_len={len(pruned_path)} "
                 f"start_snap_ms={start_snap_ms:.0f} goal_snap_ms={goal_snap_ms:.0f} "
-                f"sdf_search_ms={sdf_search_ms:.0f} shortcut_ms={shortcut_ms:.0f} total_ms={total_ms:.0f}"
+                f"sdf_search_ms={sdf_search_ms:.0f} shortcut_ms={shortcut_ms:.0f} total_ms={total_ms:.0f} "
+                f"{search_profile}"
             )
             return converted_path
         return None
