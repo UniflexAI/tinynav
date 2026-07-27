@@ -971,6 +971,7 @@ class MapNode(Node):
             timestamp=None,
             pose_in_origin_odom=self.latest_odom_pose,
             stamp_msg=self.latest_odom_stamp_msg,
+            force_replan=True,
         )
         if self._current_nav_path_in_map is None:
             return
@@ -1327,7 +1328,13 @@ class MapNode(Node):
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
-    def try_publish_nav_path(self, timestamp: int | None, pose_in_origin_odom: np.ndarray | None = None, stamp_msg=None):
+    def try_publish_nav_path(
+        self,
+        timestamp: int | None,
+        pose_in_origin_odom: np.ndarray | None = None,
+        stamp_msg=None,
+        force_replan: bool = False,
+    ):
         self.get_logger().debug(f"try_publish_nav_path, timestamp: {timestamp}")
         if self.T_from_map_to_odom is None:
             self.get_logger().debug("Relocalization not successful yet, skip publishing nav path")
@@ -1396,7 +1403,19 @@ class MapNode(Node):
 
         target_poi = self.pois[self.poi_index]
         nav_goal = self._get_current_nav_goal_in_map(pose_in_map, target_poi)
-        paths_in_map = self._get_or_replan_global_path(pose_in_map, nav_goal)
+        if force_replan:
+            with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
+                generated_path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=nav_goal)
+            if generated_path is not None and len(generated_path) > 0:
+                paths_in_map = generated_path
+                self._cached_global_path = generated_path
+                self._cached_global_path_poi_index = self.poi_index
+                self._cached_global_path_goal = np.array(nav_goal, dtype=np.float64)
+            else:
+                paths_in_map = self._current_nav_path_in_map
+                self.get_logger().warning("Failed to regenerate global path; reusing previous path")
+        else:
+            paths_in_map = self._get_or_replan_global_path(pose_in_map, nav_goal)
 
         if paths_in_map is not None:
             self._current_nav_path_in_map = paths_in_map
@@ -1429,7 +1448,6 @@ class MapNode(Node):
             self._publish_path_in_map(self.global_plan_pub, paths_in_map)
             self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
         else:
-            self._current_nav_path_in_map = None
             self.get_logger().debug("No path found in map")
 
     def _get_current_nav_goal_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
@@ -1756,7 +1774,8 @@ class MapNode(Node):
     ) -> np.ndarray:
         if len(paths_in_map) == 0:
             return pose_in_map_position
-        closest_idx, closest_position, _ = self._closest_point_on_path(paths_in_map, pose_in_map_position)
+        closest_idx = int(np.argmin(np.linalg.norm(paths_in_map[:, :2] - pose_in_map_position[:2], axis=1)))
+        closest_position = paths_in_map[closest_idx]
         if self.select_target_position_on_path_on:
             remaining_path = paths_in_map[closest_idx + 1 :]
             if len(remaining_path) == 0:
