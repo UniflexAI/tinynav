@@ -930,7 +930,20 @@ class MapNode(Node):
         now = time.monotonic()
         if now - self._last_rtk_relocalization_pub_at >= 0.5:
             stamp = self.latest_rtk_map_pose_stamp_msg or self.get_clock().now().to_msg()
-            self.relocation_pub.publish(np2msg(self.latest_rtk_map_pose, stamp, "world", "rtk"))
+            # Publish inv(T) @ odom, NOT latest_rtk_map_pose. The translation is the
+            # same either way (T was just anchored so that inv(T) @ odom reproduces
+            # the RTK position exactly), but the rotation convention differs and the
+            # consumers assume the camera one: File B sends a pure yaw-about-Z
+            # quaternion (qx = qy = 0), while the web arrow derives heading by
+            # projecting the body +Z axis onto the map XY plane
+            # (node_manager._odom_to_dict, matching SLAM's camera-optical poses).
+            # For a pure yaw quaternion that projection is identically (0, 0), so the
+            # arrow fell back to 0 deg and flickered against the correct heading that
+            # /mapping/current_pose_in_map publishes at 1 Hz -- and sat at 0 deg
+            # outright before navigation starts, when that topic is not published yet.
+            self.relocation_pub.publish(
+                np2msg(np.linalg.inv(T) @ odom_pose, stamp, "world", "camera")
+            )
             self._last_rtk_relocalization_pub_at = now
         if now - self._last_rtk_log_at >= 5.0:
             xy = self.latest_rtk_map_pose[:2, 3]
@@ -1350,10 +1363,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            # RTK replace mode is planar (map z is VIO-warped, RTK has no reliable z):
-            # gate POI arrival on xy only; the z term would spuriously block arrival.
-            z_arrived = self.rtk_mode == "replace" or diff_position_norm_z < 2.0
-            if diff_position_norm_xy < 0.5 and z_arrived:
+            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
@@ -1434,10 +1444,7 @@ class MapNode(Node):
             subgoal = self._nav_subgoals_in_map[self._nav_subgoal_index]
             diff_xy = np.linalg.norm(subgoal[:2] - pose_position[:2])
             diff_z = np.linalg.norm(subgoal[2] - pose_position[2])
-            # Planar in RTK replace mode: don't let the z term block subgoal advance
-            # (would leave the target on the reached subgoal -> robot circles it).
-            z_blocks = self.rtk_mode != "replace" and diff_z >= self._nav_subgoal_arrival_z_threshold
-            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or z_blocks:
+            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or diff_z >= self._nav_subgoal_arrival_z_threshold:
                 break
             self._nav_subgoal_index += 1
             self._current_nav_path_in_map = None
