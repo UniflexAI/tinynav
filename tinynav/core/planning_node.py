@@ -380,7 +380,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
+        self.depth_sub = message_filters.Subscriber(self, Image, '/camera/camera/depth/image_rect_raw')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
@@ -623,7 +623,15 @@ class PlanningNode(Node):
         if self.K is None:
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+            # The raycaster wants metres. /slam/depth is 32FC1 already in metres,
+            # but the camera's own /camera/camera/depth/image_rect_raw is mono16 in
+            # millimetres -- cv_bridge converts the dtype and not the unit, so a
+            # straight 32FC1 request would hand the raycaster values 1000x too big.
+            # Accept either topic by scaling on the declared encoding.
+            if depth_msg.encoding in ('16UC1', 'mono16'):
+                depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32) / 1000.0
+            else:
+                depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T,_ = msg2np(odom_msg)
             if self.last_T is None:
