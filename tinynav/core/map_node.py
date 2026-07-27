@@ -444,7 +444,6 @@ class MapNode(Node):
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
-        self.z_disable = self._load_z_disable(tinynav_map_path)
         self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
@@ -630,32 +629,6 @@ class MapNode(Node):
             self.get_logger().warning(f"Invalid select_target_position_on_path_on={value!r}; using {default_value}")
             return default_value
         self.get_logger().info(f"Using select_target_position_on_path_on={enabled}")
-        return enabled
-
-    def _load_z_disable(self, tinynav_map_path: str) -> bool:
-        default_value = False
-        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
-        if not os.path.exists(config_path):
-            return default_value
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-        except Exception as exc:
-            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using z_disable={default_value}")
-            return default_value
-        if not isinstance(config, dict):
-            return default_value
-        value = config.get("z_disable", default_value)
-        if isinstance(value, bool):
-            enabled = value
-        elif isinstance(value, str):
-            enabled = value.strip().lower() in {"1", "true", "yes", "on"}
-        elif isinstance(value, (int, float)):
-            enabled = bool(value)
-        else:
-            self.get_logger().warning(f"Invalid z_disable={value!r}; using {default_value}")
-            return default_value
-        self.get_logger().info(f"Using z_disable={enabled}")
         return enabled
 
     def _load_planning_dilation_cells(self, tinynav_map_path: str) -> int:
@@ -1343,7 +1316,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and (self.z_disable or diff_position_norm_z < 2.0):
+            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
@@ -1377,15 +1350,13 @@ class MapNode(Node):
         target_poi = self.pois[self.poi_index]
         nav_goal = self._get_current_nav_goal_in_map(pose_in_map, target_poi)
         if force_replan:
-            pose_for_planning = self._pose_with_nav_clamped_z(pose_in_map, path=self._current_nav_path_in_map)
-            nav_goal_for_planning = self._nav_goal_for_planning(nav_goal, pose_for_planning)
             with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                generated_path = self.generate_nav_path_in_map(pose_in_map=pose_for_planning, target_poi=nav_goal_for_planning)
+                generated_path = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=nav_goal)
             if generated_path is not None and len(generated_path) > 0:
                 paths_in_map = generated_path
                 self._cached_global_path = generated_path
                 self._cached_global_path_poi_index = self.poi_index
-                self._cached_global_path_goal = np.array(nav_goal_for_planning, dtype=np.float64)
+                self._cached_global_path_goal = np.array(nav_goal, dtype=np.float64)
             else:
                 paths_in_map = self._current_nav_path_in_map
                 self.get_logger().warning("Failed to regenerate global path; reusing previous path")
@@ -1437,9 +1408,7 @@ class MapNode(Node):
             subgoal = self._nav_subgoals_in_map[self._nav_subgoal_index]
             diff_xy = np.linalg.norm(subgoal[:2] - pose_position[:2])
             diff_z = np.linalg.norm(subgoal[2] - pose_position[2])
-            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or (
-                not self.z_disable and diff_z >= self._nav_subgoal_arrival_z_threshold
-            ):
+            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or diff_z >= self._nav_subgoal_arrival_z_threshold:
                 break
             self._nav_subgoal_index += 1
             self._current_nav_path_in_map = None
@@ -1461,14 +1430,13 @@ class MapNode(Node):
         self._nav_subgoals_poi_index = self.poi_index
         self._nav_subgoal_index = 0
         pose_for_planning = self._pose_with_nav_clamped_z(pose_in_map, path=None)
-        target_for_planning = self._nav_goal_for_planning(target_poi, pose_for_planning)
 
         with Timer(name = "generate nav subgoals", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            full_path = self.generate_nav_path_in_map(pose_in_map=pose_for_planning, target_poi=target_for_planning)
+            full_path = self.generate_nav_path_in_map(pose_in_map=pose_for_planning, target_poi=target_poi)
 
         if full_path is None or len(full_path) == 0:
             self.get_logger().warning("Failed to generate full path for nav subgoals; falling back to POI")
-            self._nav_subgoals_in_map = [np.array(target_for_planning, dtype=np.float64)]
+            self._nav_subgoals_in_map = [np.array(target_poi, dtype=np.float64)]
             self._publish_path_in_map(self.final_global_plan_pub, [])
             return
 
@@ -1477,7 +1445,7 @@ class MapNode(Node):
         self._nav_subgoals_in_map = self._split_path_into_subgoals(
             full_path,
             self._nav_subgoal_segment_length_m,
-            target_for_planning,
+            target_poi,
         )
         self.get_logger().info(
             f"Generated {len(self._nav_subgoals_in_map)} nav subgoals for POI {self.poi_index}"
@@ -1512,19 +1480,16 @@ class MapNode(Node):
         return subgoals
 
     def _get_or_replan_global_path(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray | None:
-        initial_pose_for_planning = self._pose_with_nav_clamped_z(pose_in_map, path=None)
-        target_for_planning = self._nav_goal_for_planning(target_poi, initial_pose_for_planning)
         reusable_cached_path = (
             self._cached_global_path is not None
             and self._cached_global_path_poi_index == self.poi_index
             and self._cached_global_path_goal is not None
-            and np.linalg.norm(self._cached_global_path_goal - target_for_planning) < 1e-6
+            and np.linalg.norm(self._cached_global_path_goal - target_poi) < 1e-6
         )
         pose_for_planning = self._pose_with_nav_clamped_z(
             pose_in_map,
             path=self._cached_global_path if reusable_cached_path else None,
         )
-        target_for_planning = self._nav_goal_for_planning(target_poi, pose_for_planning)
         pose_position = pose_for_planning[:3, 3]
         if reusable_cached_path:
             _, _, deviation = self._closest_point_on_path(self._cached_global_path, pose_position)
@@ -1536,18 +1501,12 @@ class MapNode(Node):
             )
 
         with Timer(name = "generate nav path in map", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            path = self.generate_nav_path_in_map(pose_in_map=pose_for_planning, target_poi=target_for_planning)
+            path = self.generate_nav_path_in_map(pose_in_map=pose_for_planning, target_poi=target_poi)
         if path is not None:
             self._cached_global_path = path
             self._cached_global_path_poi_index = self.poi_index
-            self._cached_global_path_goal = np.array(target_for_planning, dtype=np.float64)
+            self._cached_global_path_goal = np.array(target_poi, dtype=np.float64)
         return path
-
-    def _nav_goal_for_planning(self, target: np.ndarray, pose_for_planning: np.ndarray) -> np.ndarray:
-        goal = np.array(target, dtype=np.float64).copy()
-        if self.z_disable:
-            goal[2] = float(pose_for_planning[2, 3])
-        return goal
 
     def _pose_with_nav_clamped_z(self, pose_in_map: np.ndarray, path: np.ndarray | None = None) -> np.ndarray:
         pose_for_nav = pose_in_map.copy()
@@ -1732,8 +1691,6 @@ class MapNode(Node):
                 lookahead_distance,
             )
             target_position_in_map = np.array([target_position[0], target_position[1], target_position[2]])
-            if self.z_disable:
-                target_position_in_map[2] = pose_in_map[:3, 3][2]
             T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
             target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
             dummy_pose = np.eye(4)
