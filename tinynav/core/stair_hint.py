@@ -10,10 +10,11 @@ teleports (rejected by a sign-consistency test). At nav time a tiny node looks
 up the nearest labelled sample to the robot's pose-in-map and emits a boolean.
 
 Pure numpy; no ROS, no occupancy grid — rides on `poses.npy` which build_map
-already saves.
+already saves. Shared lookup scaffolding lives in path_prior.
 """
 from __future__ import annotations
 import numpy as np
+from tinynav.core.path_prior import poses_to_positions, horizontal_arclength, PathSampleIndex
 
 # Defaults (tunable). See discussion: 0.25 m net rise over a +/-1 m window trades
 # single-step sensitivity for gait robustness (a ~5 cm bob nets ~0).
@@ -21,16 +22,6 @@ WIN_M = 1.0            # half-window horizontal arclength (m)
 MIN_RISE = 0.25        # min sustained net |dz| over the window to call it climbing (m)
 CONSISTENCY = 0.6      # min fraction of in-window steps whose dz sign matches the net
 MAX_STEP_DZ = 0.5      # a single consecutive |dz| above this = VIO teleport -> not climbing
-ASSOC_M = 1.5          # nav-time trajectory-association radius: how close the robot must be to
-                       # the capture path for that path point's climb label to apply. Beyond it
-                       # the robot is off the recorded trajectory -> label not trusted -> flat.
-
-
-def poses_to_positions(poses) -> np.ndarray:
-    """poses: dict{timestamp:int -> 4x4} (as saved by build_map). Returns (N,3)
-    translations ordered by timestamp (== capture order)."""
-    keys = sorted(poses.keys())
-    return np.array([np.asarray(poses[k])[:3, 3] for k in keys], dtype=np.float64)
 
 
 def compute_path_climb(poses, win_m=WIN_M, min_rise=MIN_RISE,
@@ -49,9 +40,7 @@ def compute_path_climb(poses, win_m=WIN_M, min_rise=MIN_RISE,
     out[:, :3] = pos
     if n < 3:
         return out
-    # cumulative horizontal arclength
-    dxy = np.linalg.norm(np.diff(pos[:, :2], axis=0), axis=1)
-    s = np.concatenate([[0.0], np.cumsum(dxy)])
+    s = horizontal_arclength(pos)
     z = pos[:, 2]
     for i in range(n):
         j0 = np.searchsorted(s, s[i] - win_m, side='left')
@@ -71,29 +60,13 @@ def compute_path_climb(poses, win_m=WIN_M, min_rise=MIN_RISE,
     return out
 
 
-class PathClimbIndex:
+class PathClimbIndex(PathSampleIndex):
     """Nav-time lookup: is the robot on a climbing stretch of the capture path?"""
-
-    def __init__(self, path_climb: np.ndarray, assoc_m: float = ASSOC_M):
-        self.pts = np.asarray(path_climb, dtype=np.float64)
-        self.assoc_m = float(assoc_m)
-
-    @classmethod
-    def load(cls, npy_path: str, **kw) -> "PathClimbIndex":
-        return cls(np.load(npy_path), **kw)
 
     def on_stairs(self, position_xyz) -> bool:
         """True if the robot's nearest capture-path sample is within assoc_m and is
-        labelled climbing. The nearest sample is found in full 3D so stacked floors
-        don't alias; assoc_m is the trajectory-association radius — beyond it the
-        robot is off the recorded path and the label is not trusted (=> flat/strict,
-        the safe default). Lead before the flight comes from the +/-WIN_M labelling
-        window, not from this radius."""
-        if self.pts.shape[0] == 0:
-            return False
-        p = np.asarray(position_xyz, dtype=np.float64)[:3]
-        d3 = np.linalg.norm(self.pts[:, :3] - p, axis=1)
-        i = int(np.argmin(d3))
-        if d3[i] > self.assoc_m:
-            return False
-        return bool(self.pts[i, 3] >= 0.5)
+        labelled climbing. Off the recorded path (>assoc_m) the label is not trusted
+        => flat/strict, the safe default. Lead before the flight comes from the
+        +/-WIN_M labelling window, not from the association radius."""
+        v = self.nearest_value(position_xyz)
+        return v is not None and v >= 0.5

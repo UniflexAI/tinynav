@@ -37,6 +37,7 @@ from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.stair_hint import compute_path_climb
+from tinynav.core.path_speed import compute_path_speed
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
@@ -879,6 +880,18 @@ class BuildMapNode(Node):
             self.get_logger().info(f"Saved path_climb.npy ({n_climb}/{len(path_climb)} samples climbing)")
         except Exception as e:
             self.get_logger().error(f"Failed to compute path_climb: {e}")
+
+        # Capture-speed prior: the operator's local speed along the trajectory.
+        # Rides on the same poses; at nav time map_node reads path_speed.npy and
+        # publishes /planning/speed_cap so planning caps peak forward speed by it.
+        try:
+            path_speed = compute_path_speed(self.pose_graph_used_pose)
+            np.save(f"{self.map_save_path}/path_speed.npy", path_speed)
+            finite = np.isfinite(path_speed[:, 3])
+            med = float(np.median(path_speed[finite, 3])) if finite.any() else float('nan')
+            self.get_logger().info(f"Saved path_speed.npy (median capture speed {med:.2f} m/s)")
+        except Exception as e:
+            self.get_logger().error(f"Failed to compute path_speed: {e}")
 
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)

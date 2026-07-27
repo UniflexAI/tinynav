@@ -3,7 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
@@ -19,6 +19,7 @@ class CmdVelControlNode(Node):
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
         self.create_subscription(Twist, '/planning/velocity_ff', self.velocity_ff_callback, 10)
+        self.create_subscription(Float32, '/planning/forward_speed_cap', self._forward_speed_cap_callback, 10)
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -73,9 +74,17 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = 0.03
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
-        # Forward-speed cap; must match the planner's vx_max or its clearance-scaled
-        # speed-up is silently clipped back here.
-        self.max_forward_speed = 0.6
+        # Forward-speed cap tracks the planner's open-space target (capture-speed prior,
+        # or its vx_max fallback) via /planning/forward_speed_cap, so a prior that raises
+        # speed above the old static default is executed here too instead of being clipped.
+        # When the stream is absent/stale, fall back to this static ceiling -- a
+        # deliberate conservative floor, intentionally independent of the planner's
+        # vx_max (we clip to a known-safe speed rather than trust a value we no
+        # longer receive), so it does not track vx_max if that is retuned.
+        self.max_forward_speed_fallback = 0.6
+        self._forward_speed_cap = None
+        self._forward_speed_cap_time = None
+        self.forward_speed_cap_ttl_s = 2.0
 
         self.latest_cmd = Twist()
         self.path_vyaw_ff = 0.0
@@ -109,6 +118,19 @@ class CmdVelControlNode(Node):
 
     def pose_callback(self, msg):
         self.pose = msg
+
+    def _forward_speed_cap_callback(self, msg):
+        self._forward_speed_cap = float(msg.data)
+        self._forward_speed_cap_time = time.monotonic()
+
+    def _current_forward_cap(self):
+        """Planner's open-space target speed if a fresh, finite value is available,
+        else the static fallback ceiling. _forward_speed_cap and its timestamp are set
+        together, so the value None-check also guards the timestamp."""
+        if (self._forward_speed_cap is not None and np.isfinite(self._forward_speed_cap)
+                and time.monotonic() - self._forward_speed_cap_time <= self.forward_speed_cap_ttl_s):
+            return self._forward_speed_cap
+        return self.max_forward_speed_fallback
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
@@ -276,7 +298,7 @@ class CmdVelControlNode(Node):
         if is_backward_segment:
             vx = -self.fixed_reverse_speed
         else:
-            vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
+            vx = float(np.clip(raw_vx, 0.0, self._current_forward_cap()))
             # Preserve turn radius (vx/omega) when omega exceeds the cap: scale vx by the
             # same ratio instead of just clipping omega (which would widen the radius).
             if abs(vyaw) > self.max_angular_speed:

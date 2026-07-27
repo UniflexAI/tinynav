@@ -14,11 +14,10 @@ import cv2
 import rclpy
 import message_filters
 from rclpy.node import Node
-from rclpy.time import Time
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32, Twist
-from std_msgs.msg import Header, Bool
+from std_msgs.msg import Header, Bool, Float32
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
@@ -402,6 +401,9 @@ class PlanningNode(Node):
         # consumes this directly instead of reverse-engineering it from path poses.
         # angular.x is a backward-segment flag (fixed-speed reverse vocabulary).
         self.velocity_ff_pub = self.create_publisher(Twist, '/planning/velocity_ff', 10)
+        # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
+        # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
+        self.forward_speed_cap_pub = self.create_publisher(Float32, '/planning/forward_speed_cap', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
@@ -427,17 +429,22 @@ class PlanningNode(Node):
         self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
 
         # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
-        # Peak forward speed is modulated per cycle by the free space ahead: full speed
-        # in the open, creep in tight spots (this also subsumes the old openness prior).
+        # Peak forward speed is modulated per cycle by the free space ahead: the open-space
+        # TARGET in tight spots creeps to vx_min (this also subsumes the old openness prior).
+        # The open target itself is the capture-speed prior (see _open_target_speed) when
+        # available, else vx_max -- so vx_max is the no-capture fallback, NOT the ceiling;
+        # the prior may raise the target above it, up to vx_hard_max (hardware absolute).
         # Depth latency (~100ms) + raycast makes the effective clearance smaller than
         # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
-        self.declare_parameter('vx_max', 0.6)        # peak forward speed (m/s)
+        self.declare_parameter('vx_max', 0.6)        # open-space target when NO capture prior (fallback)
+        self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (hardware)
         self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
         self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
-        self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full vx_max
+        self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
         self.declare_parameter('clear_scan_m', 2.0)  # forward clearance scan cap (m)
         self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
         self._vx_max = float(self.get_parameter('vx_max').value)
+        self._vx_hard_max = float(self.get_parameter('vx_hard_max').value)
         self._vx_min = float(self.get_parameter('vx_min').value)
         self._clear_c0_m = float(self.get_parameter('clear_c0_m').value)
         self._clear_open_m = float(self.get_parameter('clear_open_m').value)
@@ -466,12 +473,7 @@ class PlanningNode(Node):
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
-        self.last_T = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
-        self.stamp = None
-        self.current_pose = None  # Store the latest pose from odometry
-
-        self.smoothed_velocity = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -492,6 +494,20 @@ class PlanningNode(Node):
         self._on_stairs_true_stamp_ns = None
         self.create_subscription(Bool, '/planning/on_stairs', self.on_stairs_callback, 10)
 
+        # Capture-speed prior from map_node's /planning/speed_cap: the operator's
+        # local speed (m/s) near the robot. It IS the open-space target speed (scaled
+        # by capture_speed_gain, since capture is deliberately slow for mapping
+        # stability), clamped to [vx_min, vx_hard_max] -- so it may raise the target
+        # above vx_max where the operator went fast, never past the hardware ceiling.
+        # NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
+        self.declare_parameter('capture_speed_gain', 1.2)
+        self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
+        self.declare_parameter('speed_cap_ttl_s', 2.0)
+        self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)
+        self._speed_cap = None
+        self._speed_cap_stamp_ns = None
+        self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
+
     # --- callbacks ---------------------------------------------------------
     def on_stairs_callback(self, msg):
         # Latch only the True edge; _on_stairs_active's hold window gives the exit
@@ -501,6 +517,23 @@ class PlanningNode(Node):
 
     def _on_stairs_active(self):
         return self._signal_fresh(self._on_stairs_true_stamp_ns, self._stair_hold_ns)
+
+    def speed_cap_callback(self, msg):
+        self._speed_cap = float(msg.data)
+        self._speed_cap_stamp_ns = self.get_clock().now().nanoseconds
+
+    def _open_target_speed(self):
+        """Open-space target forward speed: the capture-speed prior (scaled by
+        capture_speed_gain) when a fresh, finite value is available, else vx_max
+        (the no-capture fallback). Clamped to [vx_min, vx_hard_max] -- the prior may
+        raise the target above vx_max but never past the hardware ceiling."""
+        # _signal_fresh short-circuits on a never-received (None) stamp, so a fresh
+        # stamp implies _speed_cap was set -> the isfinite guard is safe.
+        if (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
+                and np.isfinite(self._speed_cap)):
+            return float(np.clip(self._speed_cap * self._capture_speed_gain,
+                                 self._vx_min, self._vx_hard_max))
+        return self._vx_max
 
     def poi_change_callback(self, msg):
         self.target_pose = None
@@ -536,14 +569,15 @@ class PlanningNode(Node):
             return False
         return self.get_clock().now().nanoseconds - stamp_ns <= window_ns
 
-    def _speed_from_clearance(self, clearance_m, v_prev):
+    def _speed_from_clearance(self, clearance_m, v_prev, v_open):
         """Linear peak-speed schedule from forward clearance, discounted for reaction
         latency (the robot travels ~v_prev*t_react before a new command takes effect).
-        net clearance <= clear_c0_m -> vx_min; >= clear_open_m -> vx_max; linear between."""
+        net clearance <= clear_c0_m -> vx_min; >= clear_open_m -> v_open; linear between.
+        v_open is the open-space target (capture-speed prior or vx_max fallback)."""
         c_eff = max(0.0, clearance_m - v_prev * self._t_react_s)
         # np.interp saturates to the endpoints outside [clear_c0_m, clear_open_m].
         return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
-                               [self._vx_min, self._vx_max]))
+                               [self._vx_min, v_open]))
 
     def _commit_check_steps(self, v_allow):
         """Collision-check step count so the committed *distance* stays ~constant
@@ -712,15 +746,7 @@ class PlanningNode(Node):
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
-            stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T,_ = msg2np(odom_msg)
-            if self.last_T is None:
-                self.last_T = T.copy()
-                self.smoothed_velocity = 0.0
-                self.last_stamp = 0
-                self.smoothed_velocity = 0.0
-            velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
-            self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
@@ -762,14 +788,15 @@ class PlanningNode(Node):
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             # Forward clearance drives both the peak-speed schedule and the reverse gate.
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
-            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])))
+            v_open = self._open_target_speed()
+            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
+            # Publish the prior-driven open target so cmd_vel caps to the same ceiling.
+            self.forward_speed_cap_pub.publish(Float32(data=float(v_open)))
             collision_check_steps = self._commit_check_steps(v_allow)
             trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q, vx_max=v_allow)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
-            self.last_T = T
-            self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
@@ -903,10 +930,9 @@ class PlanningNode(Node):
             # camera pitches (where -omega_y would be subtly wrong).
             sel_traj = trajectories[top_indices[0]]
             sel_vx = float(params[top_indices[0]][0])
-            traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
 
             dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
-            sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / traj_dt)
+            sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
             self._publish_velocity_ff(sel_vx, sel_omega)
 
