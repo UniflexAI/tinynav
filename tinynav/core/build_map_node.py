@@ -38,7 +38,7 @@ from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
-from tinynav.core.vlad_retrieval import compute_vlad, fit_vlad_codebook
+from tinynav.core.vlad_retrieval import compute_vlad, train_vocabulary_streaming
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
 
@@ -56,11 +56,10 @@ class BuildMapArgs:
     global_frames_ratio: float = 1.1
     # Number of VLAD codebook clusters used to re-embed retrieval features from color images.
     vlad_num_clusters: int = 64
-    # Keyframes randomly sampled to fit the VLAD codebook (standard VLAD/BoVW practice -- a
-    # representative subset is enough to fit cluster centers). Pooling every keyframe's patch
-    # tokens at once instead (keyframes x 256 patches x 768 dims, plus k-means working memory)
-    # is multiple GB on a large map and OOM-killed the process here.
-    vlad_codebook_fit_keyframes: int = 300
+    # Streamed passes over every keyframe's color patch tokens when fitting the VLAD codebook
+    # (see train_vocabulary_streaming) -- unlike a pooled-sample Lloyd's k-means fit, this stays
+    # within the "one batch of tokens" memory bound no matter how many keyframes the map has.
+    vlad_codebook_epochs: int = 1
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
@@ -623,7 +622,7 @@ class BuildMapNode(Node):
         verbose_timer: bool = True,
         global_frames_ratio: float = 1.1,
         vlad_num_clusters: int = 64,
-        vlad_codebook_fit_keyframes: int = 300,
+        vlad_codebook_epochs: int = 1,
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
@@ -631,7 +630,7 @@ class BuildMapNode(Node):
         self.verbose_timer = verbose_timer
         self.global_frames_ratio = global_frames_ratio
         self.vlad_num_clusters = vlad_num_clusters
-        self.vlad_codebook_fit_keyframes = vlad_codebook_fit_keyframes
+        self.vlad_codebook_epochs = vlad_codebook_epochs
         # Keyframe count at the last global refinement (COLMAP: ba_prev_num_reg_frames).
         self._global_prev_num_frames = 0
         self.logger = logging.getLogger(__name__)
@@ -843,12 +842,13 @@ class BuildMapNode(Node):
         """Replace the mono/CLS-token retrieval embeddings with color-image DINOv2 patch
         tokens aggregated via VLAD. Runs once, after mapping finishes, over every keyframe.
 
-        The codebook is fit from a bounded random sample of keyframes' patch tokens (standard
-        VLAD/BoVW practice -- a representative subset is enough to fit cluster centers), not by
-        pooling every keyframe's patches at once: on a large map, that pooled set (keyframes x
-        256 patches x 768 dims) plus k-means' own working memory is several GB and OOM-killed
-        this process. The final per-keyframe embedding pass streams one keyframe at a time
-        instead of holding every keyframe's patch tokens in memory together.
+        The codebook is fit by streaming every keyframe's patch tokens through online k-means
+        (train_vocabulary_streaming) instead of pooling them into one array for Lloyd's k-means:
+        on a large map, pooling even a bounded keyframe sample (keyframes x 256 patches x 768
+        dims, plus k-means' own working memory) is several GB and OOM-killed this process.
+        Streaming keeps peak memory to a single batch, so the codebook can be fit from every
+        keyframe rather than a capped random sample. The final per-keyframe embedding pass then
+        re-runs inference once per keyframe to encode against the fitted codebook.
         """
         timestamps = sorted(self.pose_graph_used_pose.keys())
         if len(timestamps) == 0:
@@ -859,25 +859,24 @@ class BuildMapNode(Node):
             _, _, _, rgb_loader, _ = db.get_depth_embedding_features_images(timestamp)
             return asyncio.run(self.dinov2_model.infer_patch_tokens(rgb_loader()))
 
-        rng = np.random.default_rng(0)
-        sample_size = min(self.vlad_codebook_fit_keyframes, len(timestamps))
-        sample_indices = rng.choice(len(timestamps), size=sample_size, replace=False)
-        sampled_patch_tokens = [load_patch_tokens(timestamps[i]) for i in sample_indices]
-        pooled_patch_tokens = np.concatenate(sampled_patch_tokens, axis=0)
-        del sampled_patch_tokens
+        def patch_token_batches():
+            for timestamp in timestamps:
+                yield load_patch_tokens(timestamp)
 
-        num_clusters = min(self.vlad_num_clusters, pooled_patch_tokens.shape[0])
-        codebook = fit_vlad_codebook(pooled_patch_tokens, num_clusters=num_clusters)
+        codebook = train_vocabulary_streaming(
+            patch_token_batches,
+            num_clusters=self.vlad_num_clusters,
+            epochs=self.vlad_codebook_epochs,
+        )
         np.save(f"{self.map_save_path}/vlad_codebook.npy", codebook)
-        del pooled_patch_tokens
 
         for timestamp in timestamps:
             patch_tokens = load_patch_tokens(timestamp)
             db.embeddings[timestamp] = compute_vlad(patch_tokens, codebook)
 
         self.get_logger().info(
-            f"Re-embedded {len(timestamps)} keyframes with a {num_clusters}-cluster VLAD codebook "
-            f"fit from {sample_size} sampled keyframes"
+            f"Re-embedded {len(timestamps)} keyframes with a {self.vlad_num_clusters}-cluster VLAD "
+            f"codebook streamed over all {len(timestamps)} keyframes ({self.vlad_codebook_epochs} epoch(s))"
         )
 
     def detect_loop_closure(self, timestamp: int) -> None:
@@ -1151,7 +1150,7 @@ if __name__ == '__main__':
         verbose_timer=parsed_args.verbose_timer,
         global_frames_ratio=parsed_args.global_frames_ratio,
         vlad_num_clusters=parsed_args.vlad_num_clusters,
-        vlad_codebook_fit_keyframes=parsed_args.vlad_codebook_fit_keyframes,
+        vlad_codebook_epochs=parsed_args.vlad_codebook_epochs,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)

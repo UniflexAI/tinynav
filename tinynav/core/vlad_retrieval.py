@@ -1,6 +1,79 @@
 import numpy as np
 
 
+def train_vocabulary_streaming(
+    batch_iterator_factory,
+    num_clusters: int,
+    epochs: int = 1,
+    batch_size: int = 1024,
+    seed: int = 0,
+) -> np.ndarray:
+    """Fit a VLAD codebook via streamed online k-means instead of Lloyd's k-means over a
+    pooled, in-memory sample of patch descriptors.
+
+    ``fit_vlad_codebook`` requires every training descriptor concatenated into one array
+    up front; on a large map, pooling even a bounded keyframe sample (keyframes x patches
+    x dims, plus k-means' own working memory) is multiple GB and risks OOM. This instead
+    calls ``batch_iterator_factory()`` once per epoch to get a fresh iterator over
+    per-keyframe (N_i, D) descriptor arrays (e.g. re-run inference or a freshly shuffled
+    disk read), concatenates them into ``batch_size`` chunks on the fly, and folds each
+    chunk into the centres via a decaying running-mean update (Robbins-Monro / sequential
+    k-means, https://gist.github.com/yjzhang/aaf460849a4398422785c0e85932688d) instead of
+    holding the full training pool in memory at once. Operates in the same raw (non
+    L2-normalised) descriptor space as ``fit_vlad_codebook`` so the resulting codebook is
+    a drop-in replacement for ``compute_vlad`` below.
+
+    Args:
+        batch_iterator_factory: zero-arg callable returning a fresh iterator of
+            (N_i, D) patch-descriptor arrays; called once per epoch.
+        num_clusters: number of cluster centres (K).
+        epochs: number of streamed passes over the data.
+        batch_size: size of each online-update chunk.
+        seed: RNG seed for reproducibility.
+
+    Returns:
+        centres: (num_clusters, D) cluster centres.
+    """
+    rng = np.random.default_rng(seed)
+    centres = None
+    counts = None
+
+    def apply_batch(batch: np.ndarray) -> None:
+        nonlocal centres, counts
+        if centres is None:
+            if len(batch) < num_clusters:
+                raise ValueError(f"Need at least {num_clusters} descriptors in the first batch, got {len(batch)}")
+            centres = batch[rng.choice(len(batch), size=num_clusters, replace=False)].copy()
+            counts = np.zeros(num_clusters, dtype=np.int64)
+        distances = (
+            np.sum(batch ** 2, axis=1, keepdims=True)
+            + np.sum(centres ** 2, axis=1)
+            - 2.0 * batch @ centres.T
+        )
+        labels = np.argmin(distances, axis=1)
+        for label, vec in zip(labels, batch):
+            counts[label] += 1
+            eta = 1.0 / counts[label]
+            centres[label] = (1.0 - eta) * centres[label] + eta * vec
+
+    for _epoch in range(epochs):
+        pending: list[np.ndarray] = []
+        pending_count = 0
+        for frame_descriptors in batch_iterator_factory():
+            pending.append(np.asarray(frame_descriptors, dtype=np.float32))
+            pending_count += len(frame_descriptors)
+            while pending_count >= batch_size:
+                buf = np.concatenate(pending, axis=0)
+                batch, rest = buf[:batch_size], buf[batch_size:]
+                pending = [rest] if len(rest) else []
+                pending_count = len(rest)
+                apply_batch(batch)
+        if pending_count > 0:
+            apply_batch(np.concatenate(pending, axis=0))
+
+    return centres.astype(np.float32)
+
+
 def fit_vlad_codebook(patch_descriptors: np.ndarray, num_clusters: int, num_iters: int = 25, seed: int = 0) -> np.ndarray:
     """Fit a VLAD codebook (cluster centers) over a pool of patch descriptors via Lloyd's k-means.
 
