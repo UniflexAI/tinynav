@@ -1370,7 +1370,12 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+            # RTK replace mode navigates a planar world: RTK has no usable z and the
+            # map's own z is VIO-warped, so the z term carries no information here
+            # (neither map has any multi-level xy overlap). Gate arrival on xy alone
+            # rather than let z block it.
+            z_arrived = self.rtk_mode == "replace" or diff_position_norm_z < 2.0
+            if diff_position_norm_xy < 0.5 and z_arrived:
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
@@ -1462,7 +1467,11 @@ class MapNode(Node):
             subgoal = self._nav_subgoals_in_map[self._nav_subgoal_index]
             diff_xy = np.linalg.norm(subgoal[:2] - pose_position[:2])
             diff_z = np.linalg.norm(subgoal[2] - pose_position[2])
-            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or diff_z >= self._nav_subgoal_arrival_z_threshold:
+            # Planar in RTK replace mode (see the POI arrival gate): the z term would
+            # only ever stall the advance, leaving the target on a subgoal the robot
+            # has already reached -- which reads as circling it.
+            z_blocks = self.rtk_mode != "replace" and diff_z >= self._nav_subgoal_arrival_z_threshold
+            if diff_xy >= self._nav_subgoal_arrival_xy_threshold or z_blocks:
                 break
             self._nav_subgoal_index += 1
             self._current_nav_path_in_map = None
