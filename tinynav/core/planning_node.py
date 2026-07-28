@@ -866,11 +866,19 @@ class PlanningNode(Node):
             # Distance to the goal (primary), clearance (prefer staying out of the
             # safety band, but yield to progress when a corridor forces intrusion),
             # and a smoothness term resisting command chatter.
+            # Goal distance is the CLOSEST APPROACH along the rollout, not the distance
+            # at its end. Terminal distance implicitly encodes a deceleration law -- the
+            # trajectory ending nearest a goal d metres away is the one with
+            # vx ~ d/duration -- so vx was driven to zero as the goal was approached,
+            # and once the lattice step exceeded that value the stay-put trajectory won
+            # outright: the robot froze a few centimetres short with a forward-pointing
+            # path and no speed. Closest approach does not penalise overshoot, so speed
+            # near the goal stays whatever clearance allows and stopping is left to
+            # map_node's arrival test, which is the component that owns it.
+            # `target` is non-None here (guarded before the snap above).
             def preference_cost(i):
                 traj, param = trajectories[i], params[i]
-                traj_end = np.array(traj[-1, :3])
-                target_end = target if target is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
+                dist = float(np.min(np.linalg.norm(traj[:, :3] - target, axis=1)))
                 smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
                 return (scores[i] * 100000
                         + 100 * dist
@@ -880,10 +888,12 @@ class PlanningNode(Node):
             self.last_param = params[top_indices[0]]
 
             # --- Escape the "goal behind me" freeze ---
-            # preference_cost only rewards a smaller trajectory-END distance to the
-            # goal. When the goal is behind/beside the robot, every forward trajectory
-            # ends FARTHER and an in-place rotation leaves the end distance unchanged,
-            # so the greedy minimum is to sit still (sel vx≈0) and the robot never
+            # preference_cost only rewards getting CLOSER to the goal somewhere along
+            # the rollout. When the goal is behind/beside the robot and no feasible
+            # trajectory can curve back to approach it, every candidate scores the same
+            # (their shared start point is the closest approach), so the greedy minimum
+            # falls through to the smoothness tie-break -- which keeps whatever we were
+            # already doing, including sitting still (sel vx≈0), and the robot never
             # turns to face a goal behind it. Detect that stall and, when we are not
             # effectively on the goal yet, re-pick the feasible trajectory whose END
             # heading best points AT the goal — the robot rotates to face it, and once
