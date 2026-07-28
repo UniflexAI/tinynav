@@ -460,13 +460,16 @@ class PlanningNode(Node):
         # lidar_sync_callback / _plan_and_publish). Lidar scans arrive at a much lower rate
         # than depth (~10Hz vs 30Hz) and are paired with an independent pose source, so this
         # uses an approximate (slop-tolerant) sync instead of an exact one.
-        # T_C_L (lidar->camera) from dataset/beijing_lidar_bags/bag_2026_07_22_16_51_42/extrinsic_result.txt
-        # -- specific to that Hesai lidar + camera rig, recalibrate for a different mount.
-        self.T_lidar_to_cam = np.array([
-            [-0.999648198409,  0.026354994898, -0.002982224338,  0.030410834781],
-            [-0.026362114616, -0.999649640618,  0.002373799727, -1.010115720321],
-            [-0.002918618008,  0.002451582360,  0.999992735680, -0.066218594762],
-            [ 0.000000000000,  0.000000000000,  0.000000000000,  1.000000000000],
+        # T_lidar_to_body (front lidar -> base_link), from Unitree's A2 SDK factory
+        # calibration (support.unitree.com A2_SDK_Development_Guide). /slam/odometry_visual's
+        # rotation is used directly as the robot's world orientation throughout this file
+        # (see generate_trajectory_library_3d / _plan_and_publish), so we compose the lidar
+        # extrinsic straight onto it rather than routing through a separate camera frame.
+        self.T_lidar_to_body = np.array([
+            [0.0, 0.0, 1.0, 0.33767],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.08134],
+            [0.0, 0.0, 0.0, 1.0],
         ], dtype=np.float64)
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
@@ -768,7 +771,7 @@ class PlanningNode(Node):
             points_lidar = np.stack([cloud['x'], cloud['y'], cloud['z']], axis=-1).astype(np.float64)
             points_lidar = points_lidar[::self.lidar_step]
             T, _ = msg2np(pose_msg)
-            T_lidar_to_world = T @ self.T_lidar_to_cam
+            T_lidar_to_world = T @ self.T_lidar_to_body
 
         with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self._roll_grid_if_needed(T)
