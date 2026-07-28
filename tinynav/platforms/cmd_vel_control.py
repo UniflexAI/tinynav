@@ -46,8 +46,10 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
-        # Hardware execution limit, independent of the planner's own sampling range.
-        self.max_angular_speed = float(np.pi / 3)  # rad/s
+        # Hardware execution limit (upstream's value). Deliberately BELOW the planner's
+        # +/-pi/3 omega sampling: raising it to match the lattice made this clamp a
+        # no-op, which also disabled the radius-preserving vx scale-down it feeds.
+        self.max_angular_speed = 0.8  # rad/s
         self.path_period_ema = 0.12
         # Heading-drift control: PI on heading drift. I learns each device's open-loop
         # yaw bias (zero steady-state error); P provides damping (do not set 0).
@@ -77,6 +79,19 @@ class CmdVelControlNode(Node):
         self.min_effective_angular_speed = 0.03
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
+        # Rotate-first (upstream's gate, keyed off the planner's own feedforward): when
+        # the plan turns hard enough that driving forward would cut the corner, zero vx
+        # and turn in place until it straightens out. Upstream measured the angle from
+        # Path geometry because that is where it derived (vx, omega); here the planner
+        # publishes its chosen omega, so gate on that -- same quantity, with no
+        # dependence on the Path's decimation stride or lookahead horizon.
+        # Threshold: upstream tripped at 0.45 rad of heading change 1.0 s downrange,
+        # which for the lattice's constant-curvature arcs is |omega| * 1.1 / 2, i.e.
+        # 0.82 rad/s. Its proportional term (1.6 * error) clipped to the max for every
+        # omega the +/-pi/3 lattice can produce, so the turn was always the clamp value;
+        # commanding the clamp directly is the same command with one fewer dead knob.
+        self.rotate_first_omega = 0.82          # rad/s of planned turn that trips it
+        self.rotate_first_max_omega = 0.6       # rad/s turn-in-place rate
         # Forward-speed cap tracks the planner's open-space target (capture-speed prior,
         # or its vx_max fallback) via /planning/forward_speed_cap, so a prior that raises
         # speed above the old static default is executed here too instead of being clipped.
@@ -217,6 +232,20 @@ class CmdVelControlNode(Node):
             vyaw = self.path_vyaw_ff - bias_rate
         target_cmd.angular.z = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
 
+        # Rotate-first, ahead of the stale guards: those only ever attenuate, so they
+        # must run last. Gated on the planner's UNCLAMPED omega (path_vyaw_raw), not the
+        # clamped path_vyaw_ff -- the clamp sits at max_angular_speed, below this
+        # threshold, so gating on the clamped value would make this unreachable. Reverse
+        # is excluded (the fixed-speed vocabulary owns its own heading). Replaces the
+        # drift-PI yaw outright: turning in place covers no distance for a per-metre
+        # bias to apply over, and bias learning is already gated off below
+        # yaw_bias_min_vx.
+        if (target_cmd.linear.x > 0.0 and not self.is_backward_segment
+                and abs(self.path_vyaw_raw) > self.rotate_first_omega):
+            target_cmd.linear.x = 0.0
+            target_cmd.angular.z = float(np.copysign(self.rotate_first_max_omega,
+                                                     self.path_vyaw_raw))
+
         if age > stale_stop_s:
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
@@ -311,11 +340,15 @@ class CmdVelControlNode(Node):
         # Feedforward yaw rate; the heading-drift PI is applied per-tick in the timer.
         self.is_backward_segment = is_backward_segment
         self.path_vyaw_ff = 0.0 if is_backward_segment else vyaw
+        # How hard the plan itself turns, BEFORE the max_angular_speed clamp above. The
+        # clamp is what we can execute; this is what was asked for, and rotate-first
+        # needs the latter to tell "too sharp to drive through" from "at the limit".
+        self.path_vyaw_raw = 0.0 if is_backward_segment else float(msg.angular.z)
         self.latest_cmd.linear.x = float(vx)
         self.latest_cmd.linear.y = 0.0
         self.logger.debug(
             f"target_vx={self.latest_cmd.linear.x:.3f} vyaw_ff={self.path_vyaw_ff:.3f} "
-            f"backward={self.is_backward_segment}"
+            f"vyaw_raw={self.path_vyaw_raw:.3f} backward={self.is_backward_segment}"
         )
 
     def destroy_node(self):
