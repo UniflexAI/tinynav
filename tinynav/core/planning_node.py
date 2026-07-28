@@ -498,6 +498,7 @@ class PlanningNode(Node):
         T_body_to_cam = np.linalg.inv(T_cam_to_body)
         self.T_lidar_to_cam = T_body_to_cam @ T_lidar_to_body
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
+        self.lidar_min_range = 0.2  # metres; drop closer returns as sensor blind-zone noise
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
@@ -811,6 +812,11 @@ class PlanningNode(Node):
                 return
             points_lidar = np.stack([cloud['x'], cloud['y'], cloud['z']], axis=-1).astype(np.float64)
             points_lidar = points_lidar[::self.lidar_step]
+            # Drop near-range returns inside the sensor's blind zone -- these are noisy
+            # self-occlusion hits off the mount/chassis rather than real obstacles.
+            points_lidar = points_lidar[np.linalg.norm(points_lidar, axis=1) >= self.lidar_min_range]
+            if points_lidar.shape[0] == 0:
+                return
             T, _ = msg2np(pose_msg)
             T_lidar_to_world = T @ self.T_lidar_to_cam
 
