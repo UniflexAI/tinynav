@@ -509,6 +509,7 @@ class PlanningNode(Node):
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 5
         self.occupancy_grid = np.zeros(self.grid_shape)
+        self.occupancy_source = 'depth'  # 'depth' or 'lidar' -- exclusive, set live via /planning/config
         self.K = None
         self.baseline = None
         self.last_T = None
@@ -556,6 +557,16 @@ class PlanningNode(Node):
                 self.obstacle_config.dilation_cells = dilation_cells
                 if old != dilation_cells:
                     self.get_logger().info(f"Updated planning dilation_cells: {old} -> {dilation_cells}")
+
+        if "occupancy_source" in config:
+            occupancy_source = config["occupancy_source"]
+            if occupancy_source not in ("depth", "lidar"):
+                self.get_logger().warning(f"Invalid planning occupancy_source: {occupancy_source!r} (must be 'depth' or 'lidar')")
+            else:
+                old = self.occupancy_source
+                self.occupancy_source = occupancy_source
+                if old != occupancy_source:
+                    self.get_logger().info(f"Updated planning occupancy_source: {old} -> {occupancy_source}")
 
         if "comfort_radius" in config:
             try:
@@ -752,6 +763,8 @@ class PlanningNode(Node):
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
+        if self.occupancy_source != 'depth':
+            return
         if self.K is None:
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -790,6 +803,8 @@ class PlanningNode(Node):
 
     @Timer(name="Lidar Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def lidar_sync_callback(self, lidar_msg, pose_msg):
+        if self.occupancy_source != 'lidar':
+            return
         with Timer(name='lidar preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             cloud = pc2.read_points(lidar_msg, field_names=("x", "y", "z"), skip_nans=True)
             if cloud.shape[0] == 0:
