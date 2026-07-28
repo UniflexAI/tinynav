@@ -118,8 +118,8 @@ def nav_nodes_disable():
 def nav_loc_assist(req: dict):
     node = _require_node()
     enabled = bool(req.get('enabled', False))
-    node.cmd_set_loc_assist(enabled)
-    return {'ok': True, 'enabled': enabled}
+    effective_enabled = node.cmd_set_loc_assist(enabled)
+    return {'ok': True, 'enabled': effective_enabled}
 
 
 @router.get('/loc-assist')
