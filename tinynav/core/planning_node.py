@@ -559,6 +559,7 @@ class PlanningNode(Node):
                 if old != dilation_cells:
                     self.get_logger().info(f"Updated planning dilation_cells: {old} -> {dilation_cells}")
 
+        # ros2 topic pub --once /planning/config std_msgs/msg/String "data: '{\"occupancy_source\": \"lidar\"}'"
         if "occupancy_source" in config:
             occupancy_source = config["occupancy_source"]
             if occupancy_source not in ("depth", "lidar"):
