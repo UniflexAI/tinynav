@@ -429,6 +429,21 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+# Fixed camera-optical <-> body-frame axis mapping. Assumes the camera is mounted with its
+# bore-sight aligned with the robot's forward direction (no additional tilt/roll):
+#   body +x (forward) = camera +z (forward)
+#   body +y (left)    = camera -x (camera +x is right)
+#   body +z (up)      = camera -y (camera +y is down)
+# Validated against the bag-derived lidar->camera calibration this replaces: composing this
+# with Unitree's factory lidar->base_link extrinsic reproduces that calibration's rotation
+# to ~1.5 degrees (its translation was for a different rig/mount and is not used).
+R_BODY_TO_CAM_OPTICAL = np.array([
+    [0.0, -1.0, 0.0],
+    [0.0, 0.0, -1.0],
+    [1.0, 0.0, 0.0],
+])
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -462,15 +477,26 @@ class PlanningNode(Node):
         # uses an approximate (slop-tolerant) sync instead of an exact one.
         # T_lidar_to_body (front lidar -> base_link), from Unitree's A2 SDK factory
         # calibration (support.unitree.com A2_SDK_Development_Guide). /slam/odometry_visual's
-        # rotation is used directly as the robot's world orientation throughout this file
-        # (see generate_trajectory_library_3d / _plan_and_publish), so we compose the lidar
-        # extrinsic straight onto it rather than routing through a separate camera frame.
-        self.T_lidar_to_body = np.array([
+        # pose is in the camera-optical frame, not base_link, so this composes lidar->body
+        # with a camera->body transform (built from the robot's camera_x/camera_y mount
+        # offset plus the fixed camera<->body rotation above) to get lidar->camera, letting
+        # lidar_sync_callback keep using the same T_cam_to_world @ T_lidar_to_cam chain as
+        # the depth path.
+        T_lidar_to_body = np.array([
             [0.0, 0.0, 1.0, 0.33767],
             [1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.08134],
             [0.0, 0.0, 0.0, 1.0],
         ], dtype=np.float64)
+        T_cam_to_body = np.eye(4)
+        T_cam_to_body[:3, :3] = R_BODY_TO_CAM_OPTICAL.T
+        T_cam_to_body[:3, 3] = [
+            self.robot.camera_x - self.robot.control_x,
+            self.robot.camera_y - self.robot.control_y,
+            0.0,
+        ]
+        T_body_to_cam = np.linalg.inv(T_cam_to_body)
+        self.T_lidar_to_cam = T_body_to_cam @ T_lidar_to_body
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
@@ -771,7 +797,7 @@ class PlanningNode(Node):
             points_lidar = np.stack([cloud['x'], cloud['y'], cloud['z']], axis=-1).astype(np.float64)
             points_lidar = points_lidar[::self.lidar_step]
             T, _ = msg2np(pose_msg)
-            T_lidar_to_world = T @ self.T_lidar_to_body
+            T_lidar_to_world = T @ self.T_lidar_to_cam
 
         with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self._roll_grid_if_needed(T)
