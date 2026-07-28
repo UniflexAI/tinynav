@@ -18,7 +18,7 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Float32, Header, String
 from codetiming import Timer
 import cv2
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, pose_msg2np
+from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 
 @dataclass
@@ -449,7 +449,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.depth_sub = message_filters.Subscriber(self, Image, '/camera/camera/depth/image_rect_raw')
+        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
@@ -470,7 +470,7 @@ class PlanningNode(Node):
         ], dtype=np.float64)
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
-        self.lidar_pose_sub = message_filters.Subscriber(self, PoseStamped, '/insight/vio_20hz')
+        self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
             [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.1)
         self.lidar_ts.registerCallback(self.lidar_sync_callback)
@@ -767,7 +767,7 @@ class PlanningNode(Node):
                 return
             points_lidar = np.stack([cloud['x'], cloud['y'], cloud['z']], axis=-1).astype(np.float64)
             points_lidar = points_lidar[::self.lidar_step]
-            T = pose_msg2np(pose_msg)
+            T, _ = msg2np(pose_msg)
             T_lidar_to_world = T @ self.T_lidar_to_cam
 
         with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -775,8 +775,8 @@ class PlanningNode(Node):
             new_occ = run_raycasting_points_loopy(points_lidar, T_lidar_to_world, self.grid_shape, self.origin, self.resolution)
             self._integrate_occupancy(new_occ)
 
-        init_q = np.array([pose_msg.pose.orientation.x, pose_msg.pose.orientation.y,
-                            pose_msg.pose.orientation.z, pose_msg.pose.orientation.w])
+        init_q = np.array([pose_msg.pose.pose.orientation.x, pose_msg.pose.pose.orientation.y,
+                            pose_msg.pose.pose.orientation.z, pose_msg.pose.pose.orientation.w])
         self._plan_and_publish(T, init_q, lidar_msg.header)
 
     def _plan_and_publish(self, T, init_q, header):
