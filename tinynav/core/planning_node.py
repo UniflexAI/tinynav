@@ -18,7 +18,7 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Float32, Header, String
 from codetiming import Timer
 import cv2
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, pose_msg2np
 
 
 @dataclass
@@ -142,6 +142,75 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
                     pass
                 else:
                     occupancy_grid[end_voxel_x, end_voxel_y, end_voxel_z] += 0.2
+
+    # Explicit clipping loop
+    for i in range(grid_shape_x):
+        for j in range(grid_shape_y):
+            for k in range(grid_shape_z):
+                if occupancy_grid[i, j, k] < -0.1:
+                    occupancy_grid[i, j, k] = -0.1
+                elif occupancy_grid[i, j, k] > 0.1:
+                    occupancy_grid[i, j, k] = 0.1
+
+    return occupancy_grid
+
+
+@njit(cache=True)
+def run_raycasting_points_loopy(points, T_sensor_to_world, grid_shape, origin, resolution):
+    """
+    Same free-space carving / hit accumulation scheme as run_raycasting_loopy, but the
+    input is already a set of sensor-frame 3D points (e.g. radar returns) instead of a
+    depth image, so there is no per-pixel intrinsics projection step.
+    """
+    occupancy_grid = np.zeros(grid_shape)
+    grid_shape_x, grid_shape_y, grid_shape_z = grid_shape
+    origin_x, origin_y, origin_z = origin
+
+    sensor_orig_x = T_sensor_to_world[0, 3]
+    sensor_orig_y = T_sensor_to_world[1, 3]
+    sensor_orig_z = T_sensor_to_world[2, 3]
+
+    start_voxel_x = int(np.floor((sensor_orig_x - origin_x) / resolution))
+    start_voxel_y = int(np.floor((sensor_orig_y - origin_y) / resolution))
+    start_voxel_z = int(np.floor((sensor_orig_z - origin_z) / resolution))
+
+    for n in range(points.shape[0]):
+        px, py, pz = points[n, 0], points[n, 1], points[n, 2]
+
+        # Transform to world coordinates (manual matrix multiplication)
+        pw_x = T_sensor_to_world[0, 0] * px + T_sensor_to_world[0, 1] * py + T_sensor_to_world[0, 2] * pz + T_sensor_to_world[0, 3]
+        pw_y = T_sensor_to_world[1, 0] * px + T_sensor_to_world[1, 1] * py + T_sensor_to_world[1, 2] * pz + T_sensor_to_world[1, 3]
+        pw_z = T_sensor_to_world[2, 0] * px + T_sensor_to_world[2, 1] * py + T_sensor_to_world[2, 2] * pz + T_sensor_to_world[2, 3]
+
+        # Calculate end voxel
+        end_voxel_x = int(np.floor((pw_x - origin_x) / resolution))
+        end_voxel_y = int(np.floor((pw_y - origin_y) / resolution))
+        end_voxel_z = int(np.floor((pw_z - origin_z) / resolution))
+
+        # Bresenham's line algorithm (simplified)
+        diff_x = end_voxel_x - start_voxel_x
+        diff_y = end_voxel_y - start_voxel_y
+        diff_z = end_voxel_z - start_voxel_z
+
+        steps = max(abs(diff_x), abs(diff_y), abs(diff_z))
+        if steps == 0:
+            continue
+
+        for i in range(steps + 1):
+            t = i / steps
+            interp_x = int(round(start_voxel_x + t * diff_x))
+            interp_y = int(round(start_voxel_y + t * diff_y))
+            interp_z = int(round(start_voxel_z + t * diff_z))
+
+            if (0 <= interp_x < grid_shape_x and
+                0 <= interp_y < grid_shape_y and
+                0 <= interp_z < grid_shape_z):
+                occupancy_grid[interp_x, interp_y, interp_z] -= 0.05
+
+        if (0 <= end_voxel_x < grid_shape_x and
+            0 <= end_voxel_y < grid_shape_y and
+            0 <= end_voxel_z < grid_shape_z):
+            occupancy_grid[end_voxel_x, end_voxel_y, end_voxel_z] += 0.2
 
     # Explicit clipping loop
     for i in range(grid_shape_x):
@@ -387,6 +456,25 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
+        # Lidar-driven occupancy grid input (feeds the same rolling grid as depth, see
+        # lidar_sync_callback / _plan_and_publish). Lidar scans arrive at a much lower rate
+        # than depth (~10Hz vs 30Hz) and are paired with an independent pose source, so this
+        # uses an approximate (slop-tolerant) sync instead of an exact one.
+        # T_C_L (lidar->camera) from dataset/beijing_lidar_bags/bag_2026_07_22_16_51_42/extrinsic_result.txt
+        # -- specific to that Hesai lidar + camera rig, recalibrate for a different mount.
+        self.T_lidar_to_cam = np.array([
+            [-0.999648198409,  0.026354994898, -0.002982224338,  0.030410834781],
+            [-0.026362114616, -0.999649640618,  0.002373799727, -1.010115720321],
+            [-0.002918618008,  0.002451582360,  0.999992735680, -0.066218594762],
+            [ 0.000000000000,  0.000000000000,  0.000000000000,  1.000000000000],
+        ], dtype=np.float64)
+        self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
+        self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
+        self.lidar_pose_sub = message_filters.Subscriber(self, PoseStamped, '/insight/vio_20hz')
+        self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
+            [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.1)
+        self.lidar_ts.registerCallback(self.lidar_sync_callback)
+
         self.grid_shape = (80, 80, 40)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
@@ -618,6 +706,21 @@ class PlanningNode(Node):
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
+    def _roll_grid_if_needed(self, T):
+        center = self.origin + np.array(self.grid_shape) * self.resolution / 2
+        robot_pos = T[:3, 3]
+        delta = robot_pos - center
+        if np.linalg.norm(delta) > .1:
+            new_center = robot_pos
+            new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
+            self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+
+    def _integrate_occupancy(self, new_occ):
+        self.occupancy_grid *= 0.994
+        self.occupancy_grid += new_occ
+        self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+        self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
@@ -645,20 +748,38 @@ class PlanningNode(Node):
             cx, cy = self.K[0, 2], self.K[1, 2]
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-            robot_pos = T[:3, 3]
-            delta = robot_pos - center
-            if np.linalg.norm(delta) > .1:
-                new_center = robot_pos
-                new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
-                self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+            self._roll_grid_if_needed(T)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.994
-            self.occupancy_grid += new_occ
-            self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+            self._integrate_occupancy(new_occ)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+        self.last_T = T
+        self.last_stamp = stamp
 
+        init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y,
+                            odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
+        self._plan_and_publish(T, init_q, depth_msg.header)
+
+    @Timer(name="Lidar Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
+    def lidar_sync_callback(self, lidar_msg, pose_msg):
+        with Timer(name='lidar preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            cloud = pc2.read_points(lidar_msg, field_names=("x", "y", "z"), skip_nans=True)
+            if cloud.shape[0] == 0:
+                return
+            points_lidar = np.stack([cloud['x'], cloud['y'], cloud['z']], axis=-1).astype(np.float64)
+            points_lidar = points_lidar[::self.lidar_step]
+            T = pose_msg2np(pose_msg)
+            T_lidar_to_world = T @ self.T_lidar_to_cam
+
+        with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self._roll_grid_if_needed(T)
+            new_occ = run_raycasting_points_loopy(points_lidar, T_lidar_to_world, self.grid_shape, self.origin, self.resolution)
+            self._integrate_occupancy(new_occ)
+
+        init_q = np.array([pose_msg.pose.orientation.x, pose_msg.pose.orientation.y,
+                            pose_msg.pose.orientation.z, pose_msg.pose.orientation.w])
+        self._plan_and_publish(T, init_q, lidar_msg.header)
+
+    def _plan_and_publish(self, T, init_q, header):
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
@@ -668,24 +789,17 @@ class PlanningNode(Node):
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
-            self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2] * self.resolution / 2)
-            self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
-            self.publish_footprint(T, depth_msg.header.stamp)
+            self.publish_height_map(T[:3,3], ESDF_map, header)
+            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            self.publish_obstacle_mask(obstacle_mask, header.stamp)
+            self.publish_footprint(T, header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
-            init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(
-                init_p=init_p, init_q=init_q
-            )
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
-                init_p=init_p, init_q=init_q
-            )
+            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
-            self.last_T = T
-            self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
@@ -804,7 +918,7 @@ class PlanningNode(Node):
 
             # path
             path = Path()
-            path.header = depth_msg.header
+            path.header = header
             path.header.frame_id = "world"
 
             if self.target_pose is None:
@@ -821,7 +935,7 @@ class PlanningNode(Node):
                 for j in range(0, len(trajectories[i]), 10):
                     x,y,z,qx,qy,qz,qw = trajectories[i][j]
                     pose = PoseStamped()
-                    pose.header = depth_msg.header
+                    pose.header = header
                     pose.pose.position.x = x
                     pose.pose.position.y = y
                     pose.pose.position.z = z
