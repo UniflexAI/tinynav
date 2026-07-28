@@ -28,7 +28,6 @@ from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
-from tinynav.core.planning_node import GO2_CONFIG
 from tinynav.core.stair_hint import PathClimbIndex
 from tinynav.core.path_speed import PathSpeedIndex
 logger = logging.getLogger(__name__)
@@ -810,16 +809,14 @@ class MapNode(Node):
 
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
-        # Arrival is a "did the body reach the POI" test, but the odom pose is the
-        # CAMERA pose — measuring from it leaves a POI beside/under the robot (e.g.
-        # near the rear footprint) reading a full body-offset too far, so it never
-        # registers as reached and nav sits there forever. Shift camera -> control
-        # center using the shared robot config (same transform as planning_node's
-        # camera_to_robot_center) so the offset can't drift from a hardcoded copy.
-        # `pos` (camera) is still used for path following below.
-        arrival_pos = pos - pose_in_map[:3, :3] @ GO2_CONFIG.cam_offset_3d
-
-        if np.linalg.norm(poi[:2] - arrival_pos[:2]) < 0.5 and abs(poi[2] - arrival_pos[2]) < 2.0:
+        # Arrival is measured from the CAMERA pose, not the control center. Shifting it
+        # back to the control center is more literally correct ("did the body reach the
+        # POI") but it costs cam_offset (0.30 m) of extra approach before arrival fires,
+        # and that margin is what keeps the robot out of the planner's near-goal dead
+        # zone: with a camera reference, arrival triggers while the control center is
+        # still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
+        # Measuring from the camera declares arrival early; that is the point.
+        if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
             if self._leg_initial_length is not None:
                 self.nav_progress_pub.publish(String(data=json.dumps({
                     "poi_index": self.poi_index,

@@ -451,19 +451,12 @@ class PlanningNode(Node):
         self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
         self._t_react_s = float(self.get_parameter('t_react_s').value)
 
-        # --- Receding-horizon collision "commit" window ---
-        # Hard collision is checked only over a fixed *distance* ahead (commit_dist_m):
-        # a wall farther than that no longer vetoes the whole path, so the robot keeps
-        # advancing toward clutter and re-plans every cycle instead of freezing on the
-        # stay-put (vx=0) trajectory. The step count is derived per cycle from the
-        # allowed speed (see _commit_check_steps) so the committed distance stays
-        # constant regardless of how fast we are going.
-        self.declare_parameter('commit_dist_m', 0.8)
-        self.declare_parameter('min_horizon_s', 0.8)
-        self.declare_parameter('max_horizon_s', 3.0)
-        self._commit_dist_m = float(self.get_parameter('commit_dist_m').value)
-        self._min_horizon_s = float(self.get_parameter('min_horizon_s').value)
-        self._max_horizon_s = float(self.get_parameter('max_horizon_s').value)
+        # Collision is checked over the WHOLE 3 s rollout (main's behaviour): a
+        # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
+        # so a distant wall could not veto a trajectory whose near segment is clear --
+        # but it lets the planner commit to trajectories it has not fully vetted, and
+        # the freeze it was meant to prevent turned out to have other causes.
+        # score_trajectories_by_ESDF scans the full trajectory when check_steps <= 0.
 
         # Fixed-speed reverse fallback: driven when every trajectory is in collision
         # but the blockage is ahead (not already under the footprint).
@@ -496,11 +489,14 @@ class PlanningNode(Node):
 
         # Capture-speed prior from map_node's /planning/speed_cap: the operator's
         # local speed (m/s) near the robot. It IS the open-space target speed (scaled
-        # by capture_speed_gain, since capture is deliberately slow for mapping
-        # stability), clamped to [vx_min, vx_hard_max] -- so it may raise the target
-        # above vx_max where the operator went fast, never past the hardware ceiling.
-        # NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
-        self.declare_parameter('capture_speed_gain', 1.2)
+        # by capture_speed_gain), clamped to [vx_min, vx_hard_max] -- so it may raise
+        # the target above vx_max where the operator went fast, never past the hardware
+        # ceiling. NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
+        # Gain 1.0: replay the capture speed as driven. It was >1 on the theory that
+        # capture is deliberately slow for mapping stability and replay can afford to
+        # be quicker, but the operator's speed is already the best evidence of what
+        # this stretch tolerates, so scaling it up just overdrives the tight parts.
+        self.declare_parameter('capture_speed_gain', 1.0)
         self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
         self.declare_parameter('speed_cap_ttl_s', 2.0)
         self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)
@@ -541,11 +537,17 @@ class PlanningNode(Node):
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
 
-    def _snap_target_to_free(self, target, obstacle_mask, search_cells=8):
+    def _snap_target_to_free(self, target, obstacle_mask, search_cells=4):
         """If the goal cell is an obstacle, move it to the nearest obstacle-free cell
         within search_cells (expanding-box search, first free cell wins). Keeps the
         goal off obstacles so the distance-to-goal term can't pull the footprint into
-        one. Goal already free (or off-grid) -> returned unchanged."""
+        one. Goal already free (or off-grid) -> returned unchanged.
+
+        search_cells caps how far the goal can move: 4 * resolution(0.05) = 0.2 m.
+        Every metre of displacement is a metre of disagreement between where planning
+        drives and where map_node measures arrival from, and that gap is what strands
+        the robot short of a POI, so keep this small even if it means the goal stays
+        on an obstacle (the collision filter still refuses to drive into it)."""
         rows, cols = obstacle_mask.shape
         tx = int((target[0] - self.origin[0]) / self.resolution)
         ty = int((target[1] - self.origin[1]) / self.resolution)
@@ -578,13 +580,6 @@ class PlanningNode(Node):
         # np.interp saturates to the endpoints outside [clear_c0_m, clear_open_m].
         return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
                                [self._vx_min, v_open]))
-
-    def _commit_check_steps(self, v_allow):
-        """Collision-check step count so the committed *distance* stays ~constant
-        (commit_dist_m) regardless of speed. Slower -> longer time window."""
-        horizon_s = np.clip(self._commit_dist_m / max(v_allow, 1e-3),
-                            self._min_horizon_s, self._max_horizon_s)
-        return int(round(horizon_s / self._traj_dt))
 
     def _publish_velocity_ff(self, vx, omega):
         """Publish a (vx, omega) feedforward on /planning/velocity_ff. angular.x
@@ -792,7 +787,6 @@ class PlanningNode(Node):
             v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
             # Publish the prior-driven open target so cmd_vel caps to the same ceiling.
             self.forward_speed_cap_pub.publish(Float32(data=float(v_open)))
-            collision_check_steps = self._commit_check_steps(v_allow)
             trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q, vx_max=v_allow)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
@@ -801,7 +795,7 @@ class PlanningNode(Node):
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
             safety_radius = self.robot.safety_radius
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, safety_radius, front_len, rear_len, half_w, collision_check_steps)
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             enter_threshold = 0.30
@@ -814,8 +808,8 @@ class PlanningNode(Node):
             target = self._snap_target_to_free(self.target_pose, obstacle_mask)
 
             # World heading (rad) of a trajectory pose, body +Z-forward convention
-            # (same as score_trajectories_by_ESDF and the published Path). Used both
-            # by the turn-to-goal escape below and the velocity feedforward.
+            # (same as score_trajectories_by_ESDF and the published Path). Used by the
+            # velocity feedforward to derive omega from the trajectory's own poses.
             def _world_heading(pose7):
                 qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
                 return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
@@ -879,34 +873,6 @@ class PlanningNode(Node):
             top_indices = [min(feasible, key=preference_cost)]
             self.last_param = params[top_indices[0]]
 
-            # --- Escape the "goal behind me" freeze ---
-            # preference_cost only rewards a smaller trajectory-END distance to the
-            # goal. When the goal is behind/beside the robot, every forward trajectory
-            # ends FARTHER and an in-place rotation leaves the end distance unchanged,
-            # so the greedy minimum is to sit still (sel vx≈0) and the robot never
-            # turns to face a goal behind it. Detect that stall and, when we are not
-            # effectively on the goal yet, re-pick the feasible trajectory whose END
-            # heading best points AT the goal — the robot rotates to face it, and once
-            # the goal is ahead the normal cost drives forward next cycle. The >0.5m
-            # gate matches map_node's arrival radius (control-center referenced): if
-            # we're inside it, arrival fires instead, so don't spin.
-            if abs(float(params[top_indices[0]][0])) < 1e-2:
-                rob_xy = np.asarray(init_p)[:2]
-                goal_xy = np.asarray(target)[:2]
-                dist_goal = float(np.linalg.norm(goal_xy - rob_xy))
-                _wrap = lambda a: (a + np.pi) % (2 * np.pi) - np.pi
-                bearing = np.arctan2(goal_xy[1] - rob_xy[1], goal_xy[0] - rob_xy[0])
-                cur_err = abs(_wrap(bearing - _world_heading(trajectories[top_indices[0]][0])))
-                if dist_goal > 0.5 and cur_err > np.radians(60.0):
-                    _head_err = lambda i: abs(_wrap(bearing - _world_heading(trajectories[i][-1])))
-                    turn_err, turn_i = min((_head_err(i), i) for i in feasible)
-                    if turn_err < cur_err - np.radians(5.0):
-                        top_indices = [turn_i]
-                        self.last_param = params[turn_i]
-                        self.get_logger().info(
-                            f'turn-to-goal: goal {np.degrees(cur_err):.0f}deg off heading '
-                            f'dist={dist_goal:.2f}m -> rotating to face it')
-
             # Confirm what actually got selected: if vx≈0 while feasible forward
             # trajectories exist, the robot is "stuck by cost", not by collision.
             n_fwd_feasible = sum(1 for i in feasible if params[i][0] > 1e-3)
@@ -914,7 +880,7 @@ class PlanningNode(Node):
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
                 f'feasible={len(feasible)} fwd_feasible={n_fwd_feasible} '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} check_steps={collision_check_steps} '
+                f'should_reverse={should_reverse} '
                 f'on_stairs={on_stairs}'
             )
 

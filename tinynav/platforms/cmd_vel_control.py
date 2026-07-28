@@ -69,7 +69,10 @@ class CmdVelControlNode(Node):
         self.drift_filter_tau = 0.15   # s
         self._drift_lp = None          # low-passed drift state (rad)
         # Static-friction compensation: very small vx often cannot move the robot.
-        self.min_effective_linear_speed = 0.2
+        # 0.1 (main's value): 0.2 doubled the step this deadzone injects at every stop
+        # and doubled the creep speed the planner's sub-minimum targets get raised to,
+        # which overshot the goal.
+        self.min_effective_linear_speed = 0.1
         # Yaw deadzone; must stay below the per-device yaw bias we cancel.
         self.min_effective_angular_speed = 0.03
         self.linear_engage_threshold = 0.04
