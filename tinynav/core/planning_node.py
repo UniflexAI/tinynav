@@ -279,13 +279,8 @@ def generate_predefined_trajectory_vocabularies(
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
-                                front_len=0.35, rear_len=0.35, half_w=0.15, check_steps=0):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners).
-
-    check_steps > 0 limits the collision/clearance scan to the first `check_steps`
-    poses (a receding-horizon "commit" window): a far-downrange collision no longer
-    vetoes the whole trajectory, so the robot can still commit to a path whose near
-    segment is clear and re-plan next cycle. check_steps <= 0 scans the full traj."""
+                                front_len=0.35, rear_len=0.35, half_w=0.15):
+    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
@@ -295,10 +290,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
 
-        n_check = len(traj)
-        if check_steps > 0 and check_steps < n_check:
-            n_check = check_steps
-        for i in range(n_check):
+        for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
             qx, qy, qz, qw = traj[i, 3], traj[i, 4], traj[i, 5], traj[i, 6]
 
@@ -451,12 +443,11 @@ class PlanningNode(Node):
         self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
         self._t_react_s = float(self.get_parameter('t_react_s').value)
 
-        # Collision is checked over the WHOLE 3 s rollout (main's behaviour): a
+        # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
         # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
         # so a distant wall could not veto a trajectory whose near segment is clear --
-        # but it lets the planner commit to trajectories it has not fully vetted, and
-        # the freeze it was meant to prevent turned out to have other causes.
-        # score_trajectories_by_ESDF scans the full trajectory when check_steps <= 0.
+        # but it let the planner commit to trajectories it had not fully vetted, and the
+        # freeze it was meant to prevent turned out to have other causes.
 
         # Fixed-speed reverse fallback: driven when every trajectory is in collision
         # but the blockage is ahead (not already under the footprint).
@@ -836,49 +827,36 @@ class PlanningNode(Node):
                     self._publish_velocity_ff(-self._reverse_speed_fallback, 0.0)
                 return
 
-            # --- Stage 1: hard feasibility filter ---
-            # Only genuinely binding constraints are filters; everything that is a
-            # soft margin stays in the cost (Stage 2). Two hard constraints:
-            #   - collision (score == inf): the footprint touches an obstacle.
-            #   - reverse gate: drive backward iff the corridor ahead is blocked.
-            # Clearance (ESDF < safety_radius) is NOT a hard filter: safety_radius
-            # is a margin, not a collision boundary, and a corridor narrower than
-            # the band forces every forward trajectory to intrude into it. Filtering
-            # those out leaves only trajectories that score 0 by leaving the mapped
-            # grid (treated as "clear"), so the robot veers into the unknown instead
-            # of through the corridor. Clearance is handled softly below instead.
-            # The reverse gate is lexicographic: prefer gate-matching trajectories,
-            # fall back to any non-colliding one so the robot never stalls outright.
-            non_collision = [i for i in range(len(trajectories)) if scores[i] != float('inf')]
-            gate_ok = lambda i: (params[i][0] < 0.0) == should_reverse
-            for candidate_filter in (gate_ok, lambda i: True):
-                feasible = [i for i in non_collision if candidate_filter(i)]
-                if feasible:
-                    break
-
-            # --- Stage 2: soft preference cost over the feasible set ---
-            # Distance to the goal (primary), clearance (prefer staying out of the
-            # safety band, but yield to progress when a corridor forces intrusion),
-            # and a smoothness term resisting command chatter.
-            def preference_cost(i):
+            # Single cost, as upstream: clearance + distance-to-goal + smoothness, with
+            # the reverse gate as a large additive penalty rather than a hard filter.
+            # The penalty degrades gracefully on its own -- a colliding trajectory costs
+            # scores[i]*100000 == inf, which loses to any non-colliding gate violator --
+            # so it already gives the "never stall outright" fallback that a two-stage
+            # filter had to spell out, in one term. Clearance stays soft on purpose:
+            # safety_radius is a margin, not a collision boundary, and a corridor
+            # narrower than the band forces every forward trajectory to intrude into it.
+            def cost_function(i):
                 traj, param = trajectories[i], params[i]
+                reverse_gate_penalty = 0.0 if (param[0] < 0.0) == should_reverse else 1e9
                 traj_end = np.array(traj[-1, :3])
                 target_end = target if target is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
                 smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
                 return (scores[i] * 100000
                         + 100 * dist
-                        + 10 * smooth)
+                        + 10 * smooth
+                        + reverse_gate_penalty)
 
-            top_indices = [min(feasible, key=preference_cost)]
+            top_indices = [min(range(len(trajectories)), key=cost_function)]
             self.last_param = params[top_indices[0]]
 
-            # Confirm what actually got selected: if vx≈0 while feasible forward
+            # Confirm what actually got selected: if vx≈0 while non-colliding forward
             # trajectories exist, the robot is "stuck by cost", not by collision.
-            n_fwd_feasible = sum(1 for i in feasible if params[i][0] > 1e-3)
+            n_fwd_ok = sum(1 for i in range(len(trajectories))
+                           if params[i][0] > 1e-3 and scores[i] != float('inf'))
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
-                f'feasible={len(feasible)} fwd_feasible={n_fwd_feasible} '
+                f'fwd_ok={n_fwd_ok} '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
                 f'should_reverse={should_reverse} '
                 f'on_stairs={on_stairs}'
