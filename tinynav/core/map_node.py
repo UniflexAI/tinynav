@@ -129,7 +129,7 @@ def select_target_position_on_path(
     path_points: np.ndarray,
     current_position: np.ndarray,
     lookahead_distance: float,
-    turn_angle_threshold_rad: float = np.deg2rad(70.0),
+    turn_angle_threshold_rad: float = np.deg2rad(60.0),
     reversal_angle_threshold_rad: float = np.deg2rad(120.0),
     turn_stop_margin: float = 0.15,
     min_turn_distance: float = 0.5,
@@ -1452,7 +1452,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and (self.z_disable or diff_position_norm_z < 2.0):
+            if diff_position_norm_xy < 0.75 and (self.z_disable or diff_position_norm_z < 2.0):
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
