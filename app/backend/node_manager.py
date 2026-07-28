@@ -1451,9 +1451,13 @@ class BackendNode(Ros2NodeManager):
             map_node_cmd,
             env=_env,
         )
+        rtk_mode = self._load_nav_flow_rtk_mode()
         with self._lock:
             loc_assist = self._loc_assist_enabled
-        if loc_assist:
+        if loc_assist and rtk_mode == 'replace':
+            self.get_logger().info('Localization assist is enabled but ignored because current nav_flow uses RTK replace mode')
+            self._stop_loc_assist()
+        if loc_assist and rtk_mode != 'replace':
             # Don't start cmd_vel_control yet; start localization assist sweep
             self._start_loc_assist(_env)
         else:
@@ -1535,10 +1539,17 @@ class BackendNode(Ros2NodeManager):
         """Enable or disable the auto-localization assist toggle."""
         with self._lock:
             self._loc_assist_enabled = enabled
+        if not enabled:
+            self._stop_loc_assist()
         self.get_logger().info(f'Localization assist {"enabled" if enabled else "disabled"}')
+        return enabled
 
     def _start_loc_assist(self, env: dict):
         """Start the yaw sweep thread (no cmd_vel_control process)."""
+        if self._load_nav_flow_rtk_mode() == 'replace':
+            self.get_logger().info('Localization assist sweep not started because current nav_flow uses RTK replace mode')
+            self._stop_loc_assist()
+            return
         if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
             self.get_logger().info('Localization assist sweep already running')
             return
