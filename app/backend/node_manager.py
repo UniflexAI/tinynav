@@ -143,6 +143,7 @@ class BackendNode(Ros2NodeManager):
         self._odom_pose_at_kf: dict | None = None  # odom pose snapshotted at last mapPose update
         self._map_pose: dict | None = None
         self._localized: bool = False
+        self._reloc_seq: int = 0   # monotonic count of accepted relocalization fixes
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
@@ -161,6 +162,10 @@ class BackendNode(Ros2NodeManager):
         # by map_node, unlike current_pose_in_map which requires POIs to be set).
         self.create_subscription(
             Odometry, '/map/relocalization', self._on_relocalization, 10
+        )
+        # Fires on every accepted fix; the frontend flashes a badge when the count moves.
+        self.create_subscription(
+            Odometry, '/map/relocalization_fix', self._on_relocalization_fix, 10
         )
         self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
         self.create_subscription(
@@ -297,6 +302,13 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._map_pose = pose
             self._localized = True
+
+    def _on_relocalization_fix(self, msg: Odometry):
+        pose = self._odom_to_dict(msg, source='map')
+        with self._lock:
+            self._map_pose = pose
+            self._localized = True
+            self._reloc_seq += 1
 
     def _on_on_stairs(self, msg: Bool):
         with self._lock:
@@ -609,6 +621,7 @@ class BackendNode(Ros2NodeManager):
             path_snapshot = list(self._global_path)
             snapshot = {
                 'localized': self._localized,
+                'reloc_seq': self._reloc_seq,
                 'odom_pose': self._odom_pose,
                 'odom_pose_at_kf': self._odom_pose_at_kf,
                 'map_pose': self._map_pose,

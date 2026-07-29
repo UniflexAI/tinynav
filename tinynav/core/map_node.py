@@ -206,6 +206,10 @@ class MapNode(Node):
         # pubs
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
+        # Every accepted fix, not just the first. /map/relocalization is deliberately
+        # first-fix-only (see update_transform_from_map_to_odom), but the app wants to
+        # show that relocalization is still landing.
+        self.relocation_fix_pub = self.create_publisher(Odometry, '/map/relocalization_fix', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
         # Stair hint: label the robot's pose-in-map climbing/flat off the offline
         # capture-path labels (path_climb.npy). Folded in here (not a separate node)
@@ -678,7 +682,8 @@ class MapNode(Node):
 
         /map/relocalization fires once, on the first accepted fix -- consumers
         (relocalize.py's sweep, node_manager's localized latch) want to know the instant
-        nav can plan a path, not every subsequent refinement.
+        nav can plan a path, not every subsequent refinement. /map/relocalization_fix
+        fires on every accepted fix, for consumers that want the liveness signal.
         """
         if timestamp not in self.pose_graph_used_pose:
             return
@@ -728,6 +733,7 @@ class MapNode(Node):
         """Admit an observation into the fused set and refresh the estimate."""
         self._accepted_reloc_timestamps.append(timestamp)
         self.compute_transform_from_map_to_odom()
+        self.relocation_fix_pub.publish(np2msg(camera_in_map_world, stamp, "world", "camera"))
         if not self._reloc_first_fix_published:
             self.relocation_pub.publish(np2msg(camera_in_map_world, stamp, "world", "camera"))
             self._reloc_first_fix_published = True
