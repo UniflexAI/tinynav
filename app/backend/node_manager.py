@@ -1394,15 +1394,23 @@ class BackendNode(Ros2NodeManager):
     def _launch_sensor_procs(self, env: dict):
         """Start sensor procs based on current _sensor_mode."""
         if self._sensor_mode == 'looper':
+            # looper_bridge_node / planning_node talk to the Hesai lidar driver, which runs
+            # under CycloneDDS on a separate host -- cross-vendor RTPS with FastDDS's default
+            # multi-interface locator advertisement doesn't reliably reach it on this robot's
+            # network. Run both under CycloneDDS too, restricted to the interfaces that
+            # actually reach the lidar host and the Looper module (see cyclonedds_jetson.xml).
+            cyclone_env = env.copy()
+            cyclone_env['RMW_IMPLEMENTATION'] = 'rmw_cyclonedds_cpp'
+            cyclone_env['CYCLONEDDS_URI'] = '/tinynav/cyclonedds_jetson.xml'
             self._looper_bridge_proc = self._launch_proc(
                 'looper_bridge',
                 ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
-                env=env,
+                env=cyclone_env,
             )
             self._planning_proc = self._launch_proc(
                 'planning',
                 ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-                env=env,
+                env=cyclone_env,
             )
         elif self._sensor_mode == 'realsense':
             self._realsense_proc = self._launch_proc(
