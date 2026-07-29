@@ -522,6 +522,10 @@ class PlanningNode(Node):
         ]
         T_body_to_cam = np.linalg.inv(T_cam_to_body)
         self.T_lidar_to_cam = T_body_to_cam @ T_lidar_to_body
+        # Translation replaced with a direct on-robot measurement (lidar relative to
+        # camera, in the camera-optical frame: x=right, y=down, z=forward) -- the
+        # rotation above is kept as derived/validated, only the offset is overridden.
+        self.T_lidar_to_cam[:3, 3] = [0.0, 0.07, -0.02]
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
         self.lidar_min_range = 0.2  # metres; drop closer returns as sensor blind-zone noise
         self.lidar_min_votes = 3  # a voxel needs this many same-frame point hits to count as occupied
