@@ -823,14 +823,19 @@ class MapNode(Node):
         # still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
         # Measuring from the camera declares arrival early; that is the point.
         if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
-            if self._leg_initial_length is not None:
-                self.nav_progress_pub.publish(String(data=json.dumps({
-                    "poi_index": self.poi_index,
-                    "percent": 100.0,
-                    "path_remaining_m": 0.0,
-                    "path_total_m": round(self._leg_initial_length, 2),
-                    "estimated_remaining_s": 0.0,
-                })))
+            # Unconditional: this message is the only arrival edge consumers get, so
+            # gating it on _leg_initial_length (i.e. "this leg published progress at
+            # least once") silently loses the arrival for a POI the robot is ALREADY
+            # standing at when the batch lands — no path is ever planned, so the
+            # length stays None. The agent-side handoff/mission then waits out its
+            # whole leg timeout on a leg that is already done.
+            self.nav_progress_pub.publish(String(data=json.dumps({
+                "poi_index": self.poi_index,
+                "percent": 100.0,
+                "path_remaining_m": 0.0,
+                "path_total_m": round(self._leg_initial_length or 0.0, 2),
+                "estimated_remaining_s": 0.0,
+            })))
             self.poi_index += 1
             self._leg_initial_length = None
             self._leg_start_time = None
