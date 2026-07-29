@@ -188,6 +188,11 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       _LocalizationChip(localized: localized),
+                      const SizedBox(width: 6),
+                      _PlanningSourceControl(
+                        source: status?.planningOccupancySource ?? 'depth',
+                        onChanged: _setPlanningOccupancySource,
+                      ),
                       if (localized) ...[
                         const SizedBox(width: 6),
                         _MapToggleButton(
@@ -286,6 +291,22 @@ class _OperateTabState extends ConsumerState<OperateTab> {
         ),
       ],
     );
+  }
+
+  Future<void> _setPlanningOccupancySource(String source) async {
+    try {
+      await ref.read(dioProvider).post(
+        '/nav/planning-occupancy-source',
+        data: {'source': source},
+      );
+      ref.invalidate(deviceStatusProvider);
+    } on DioException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.response?.data?['detail'] ?? e.message ?? 'Failed to switch planning source'),
+        backgroundColor: Colors.red,
+      ));
+    }
   }
 }
 
@@ -1064,6 +1085,86 @@ class _LocalizationChip extends StatelessWidget {
             style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _PlanningSourceControl extends StatelessWidget {
+  final String source;
+  final ValueChanged<String> onChanged;
+  const _PlanningSourceControl({required this.source, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = source.toLowerCase();
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.65),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _PlanningSourceButton(
+            label: 'Depth',
+            icon: Icons.blur_on,
+            selected: normalized == 'depth',
+            onTap: () => onChanged('depth'),
+          ),
+          _PlanningSourceButton(
+            label: 'Lidar',
+            icon: Icons.radar,
+            selected: normalized == 'lidar',
+            onTap: () => onChanged('lidar'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PlanningSourceButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _PlanningSourceButton({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: selected ? null : onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFF1976D2).withOpacity(0.95) : Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13, color: selected ? Colors.white : Colors.white60),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected ? Colors.white : Colors.white60,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -128,3 +128,13 @@ def nav_loc_assist_status():
     with node._lock:
         enabled = node._loc_assist_enabled
     return {'enabled': enabled}
+
+
+@router.post('/planning-occupancy-source')
+def nav_planning_occupancy_source(req: dict):
+    node = _require_node()
+    source = req.get('source')
+    if source not in ('depth', 'lidar'):
+        raise HTTPException(400, 'source must be depth or lidar')
+    effective_source = node.cmd_set_planning_occupancy_source(source)
+    return {'ok': True, 'source': effective_source}

@@ -49,6 +49,7 @@ class DeviceStatus {
   final bool navPaused;
   final bool debugRecording;
   final bool locAssistEnabled;
+  final String planningOccupancySource;
 
   const DeviceStatus({
     required this.online,
@@ -64,6 +65,7 @@ class DeviceStatus {
     required this.navPaused,
     required this.debugRecording,
     required this.locAssistEnabled,
+    required this.planningOccupancySource,
   });
 
   factory DeviceStatus.fromJson(Map<String, dynamic> json) => DeviceStatus(
@@ -80,6 +82,7 @@ class DeviceStatus {
         navPaused: json['navPaused'] as bool? ?? false,
         debugRecording: json['debugRecording'] as bool? ?? false,
         locAssistEnabled: json['locAssistEnabled'] as bool? ?? false,
+        planningOccupancySource: json['planningOccupancySource'] as String? ?? 'depth',
       );
 }
 
