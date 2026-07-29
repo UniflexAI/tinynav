@@ -2,8 +2,9 @@
 
 The planner builds a rolling 3D occupancy grid from depth, derives a 2D
 obstacle map + ESDF, samples a trajectory library, and selects the trajectory
-that minimizes a cost of clearance + distance-to-goal (+ smoothness), subject
-to a hard collision filter and a reverse gate.
+that minimizes a cost of clearance + distance-to-goal (+ smoothness, + goal
+heading for turn-in-place candidates), subject to a hard collision filter and a
+reverse gate.
 """
 
 import numpy as np
@@ -161,7 +162,7 @@ class ObstacleConfig:
     robot_z_bottom: float = -0.45
     robot_z_top: float = 0.2
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.2
+    min_wall_span_m: float = 0.1
     ground_band_m: float = 0.3
     dilation_cells: int = 0
 
@@ -374,8 +375,8 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 class PlanningNode(Node):
     """Occupancy-grid + ESDF + trajectory-library planner.
 
-    Cost = clearance + distance-to-goal + smoothness, subject to a hard
-    collision filter and a reverse gate.
+    Cost = clearance + distance-to-goal + smoothness + goal heading (stationary
+    candidates only), subject to a hard collision filter and a reverse gate.
     """
 
     def __init__(self, node_name='planning_node'):
@@ -527,33 +528,6 @@ class PlanningNode(Node):
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
-
-    def _snap_target_to_free(self, target, obstacle_mask, search_cells=4):
-        """If the goal cell is an obstacle, move it to the nearest obstacle-free cell
-        within search_cells (expanding-box search, first free cell wins). Keeps the
-        goal off obstacles so the distance-to-goal term can't pull the footprint into
-        one. Goal already free (or off-grid) -> returned unchanged.
-
-        search_cells caps how far the goal can move: 4 * resolution(0.05) = 0.2 m.
-        Every metre of displacement is a metre of disagreement between where planning
-        drives and where map_node measures arrival from, and that gap is what strands
-        the robot short of a POI, so keep this small even if it means the goal stays
-        on an obstacle (the collision filter still refuses to drive into it)."""
-        rows, cols = obstacle_mask.shape
-        tx = int((target[0] - self.origin[0]) / self.resolution)
-        ty = int((target[1] - self.origin[1]) / self.resolution)
-        if not (0 <= tx < rows and 0 <= ty < cols) or not obstacle_mask[tx, ty]:
-            return target
-        for r in range(1, search_cells + 1):
-            x0, x1 = max(0, tx - r), min(rows - 1, tx + r)
-            y0, y1 = max(0, ty - r), min(cols - 1, ty + r)
-            for x in range(x0, x1 + 1):
-                for y in range(y0, y1 + 1):
-                    if not obstacle_mask[x, y]:
-                        wx = self.origin[0] + (x + 0.5) * self.resolution
-                        wy = self.origin[1] + (y + 0.5) * self.resolution
-                        return np.array([wx, wy, target[2]])
-        return target
 
     def _signal_fresh(self, stamp_ns, window_ns):
         """True if a signal last stamped at stamp_ns is still within window_ns of
@@ -795,8 +769,7 @@ class PlanningNode(Node):
             if self.target_pose is None:
                 return
 
-            # Goal used in the cost function, snapped off any obstacle cell.
-            target = self._snap_target_to_free(self.target_pose, obstacle_mask)
+            target = self.target_pose
 
             # World heading (rad) of a trajectory pose, body +Z-forward convention
             # (same as score_trajectories_by_ESDF and the published Path). Used by the
@@ -804,6 +777,12 @@ class PlanningNode(Node):
             def _world_heading(pose7):
                 qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
                 return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
+
+            def _end_heading_error(pose7, goal):
+                """|wrapped angle| between the pose's heading and the bearing from that
+                pose to the goal."""
+                err = np.arctan2(goal[1] - pose7[1], goal[0] - pose7[0]) - _world_heading(pose7)
+                return abs(np.arctan2(np.sin(err), np.cos(err)))
 
             if all(s == float('inf') for s in scores):
                 # Diagnose WHERE it collides: is the robot's own footprint cell already
@@ -835,6 +814,17 @@ class PlanningNode(Node):
             # filter had to spell out, in one term. Clearance stays soft on purpose:
             # safety_radius is a margin, not a collision boundary, and a corridor
             # narrower than the band forces every forward trajectory to intrude into it.
+            # The heading term exists because the lattice's vx=0 rows all END where they
+            # started: distance-to-goal cannot tell them apart, so smoothness picked
+            # whichever rotation matched last cycle -- omega=0 from a standstill. With a
+            # goal further behind than a 3 s arc can swing around (past ~165 deg, since a
+            # half-turn at the tightest radius only moves the endpoint sideways), standing
+            # still was the cost minimum and stayed it: a permanent freeze. Scoring the
+            # stationary rows by their end heading vs the goal bearing ranks the rotations
+            # and prices standing-still-while-misaligned above turning to face the goal;
+            # the forward arcs take over on their own once the robot has come around. Only
+            # the stationary rows get it -- a moving trajectory's endpoint already says
+            # where the arc went, and penalizing its heading would fight the distance term.
             def cost_function(i):
                 traj, param = trajectories[i], params[i]
                 reverse_gate_penalty = 0.0 if (param[0] < 0.0) == should_reverse else 1e9
@@ -842,9 +832,16 @@ class PlanningNode(Node):
                 target_end = target if target is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
                 smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
+                # Stationary candidates only: skipped once within 0.3 m of the goal, where
+                # the bearing is noise and rotating achieves nothing.
+                if abs(param[0]) <= 1e-3 and dist > 0.3:
+                    heading_penalty = 60 * _end_heading_error(traj[-1], target_end)
+                else:
+                    heading_penalty = 0.0
                 return (scores[i] * 100000
                         + 100 * dist
                         + 10 * smooth
+                        + heading_penalty
                         + reverse_gate_penalty)
 
             top_indices = [min(range(len(trajectories)), key=cost_function)]
@@ -857,6 +854,7 @@ class PlanningNode(Node):
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
+                f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
                 f'should_reverse={should_reverse} '
                 f'on_stairs={on_stairs}'
