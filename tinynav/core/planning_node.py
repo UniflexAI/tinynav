@@ -156,11 +156,18 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 
 @njit(cache=True)
-def run_raycasting_points_loopy(points, T_sensor_to_world, grid_shape, origin, resolution):
+def run_raycasting_points_loopy(points, T_sensor_to_world, grid_shape, origin, resolution, min_votes=2):
     """
     Same free-space carving / hit accumulation scheme as run_raycasting_loopy, but the
     input is already a set of sensor-frame 3D points (e.g. radar returns) instead of a
     depth image, so there is no per-pixel intrinsics projection step.
+
+    A voxel only gets marked occupied if at least min_votes points in this frame land in
+    it -- indoor lidar returns include isolated "fly points" (edge/reflection artifacts)
+    that don't recur at the same voxel, unlike a real surface which gets hit by many
+    points at once. Free-space carving along each ray is applied regardless of the vote
+    count: treating a noisy ray's path as clear is the safer failure mode than treating a
+    real obstacle's path as clear, so it isn't gated the same way.
     """
     occupancy_grid = np.zeros(grid_shape)
     grid_shape_x, grid_shape_y, grid_shape_z = grid_shape
@@ -174,18 +181,35 @@ def run_raycasting_points_loopy(points, T_sensor_to_world, grid_shape, origin, r
     start_voxel_y = int(np.floor((sensor_orig_y - origin_y) / resolution))
     start_voxel_z = int(np.floor((sensor_orig_z - origin_z) / resolution))
 
-    for n in range(points.shape[0]):
+    n_points = points.shape[0]
+    end_voxels = np.empty((n_points, 3), dtype=np.int64)
+    hit_count = np.zeros(grid_shape, dtype=np.int32)
+
+    # Pass 1: transform each point to world, record its end voxel, and tally per-voxel votes.
+    for n in range(n_points):
         px, py, pz = points[n, 0], points[n, 1], points[n, 2]
 
-        # Transform to world coordinates (manual matrix multiplication)
         pw_x = T_sensor_to_world[0, 0] * px + T_sensor_to_world[0, 1] * py + T_sensor_to_world[0, 2] * pz + T_sensor_to_world[0, 3]
         pw_y = T_sensor_to_world[1, 0] * px + T_sensor_to_world[1, 1] * py + T_sensor_to_world[1, 2] * pz + T_sensor_to_world[1, 3]
         pw_z = T_sensor_to_world[2, 0] * px + T_sensor_to_world[2, 1] * py + T_sensor_to_world[2, 2] * pz + T_sensor_to_world[2, 3]
 
-        # Calculate end voxel
         end_voxel_x = int(np.floor((pw_x - origin_x) / resolution))
         end_voxel_y = int(np.floor((pw_y - origin_y) / resolution))
         end_voxel_z = int(np.floor((pw_z - origin_z) / resolution))
+        end_voxels[n, 0] = end_voxel_x
+        end_voxels[n, 1] = end_voxel_y
+        end_voxels[n, 2] = end_voxel_z
+
+        if (0 <= end_voxel_x < grid_shape_x and
+            0 <= end_voxel_y < grid_shape_y and
+            0 <= end_voxel_z < grid_shape_z):
+            hit_count[end_voxel_x, end_voxel_y, end_voxel_z] += 1
+
+    # Pass 2: free-space carving (always) + occupied vote (gated on hit_count).
+    for n in range(n_points):
+        end_voxel_x = end_voxels[n, 0]
+        end_voxel_y = end_voxels[n, 1]
+        end_voxel_z = end_voxels[n, 2]
 
         # Bresenham's line algorithm (simplified)
         diff_x = end_voxel_x - start_voxel_x
@@ -210,7 +234,8 @@ def run_raycasting_points_loopy(points, T_sensor_to_world, grid_shape, origin, r
         if (0 <= end_voxel_x < grid_shape_x and
             0 <= end_voxel_y < grid_shape_y and
             0 <= end_voxel_z < grid_shape_z):
-            occupancy_grid[end_voxel_x, end_voxel_y, end_voxel_z] += 0.2
+            if hit_count[end_voxel_x, end_voxel_y, end_voxel_z] >= min_votes:
+                occupancy_grid[end_voxel_x, end_voxel_y, end_voxel_z] += 0.2
 
     # Explicit clipping loop
     for i in range(grid_shape_x):
@@ -499,6 +524,7 @@ class PlanningNode(Node):
         self.T_lidar_to_cam = T_body_to_cam @ T_lidar_to_body
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
         self.lidar_min_range = 0.2  # metres; drop closer returns as sensor blind-zone noise
+        self.lidar_min_votes = 2  # a voxel needs this many same-frame point hits to count as occupied
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
@@ -823,7 +849,7 @@ class PlanningNode(Node):
 
         with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self._roll_grid_if_needed(T)
-            new_occ = run_raycasting_points_loopy(points_lidar, T_lidar_to_world, self.grid_shape, self.origin, self.resolution)
+            new_occ = run_raycasting_points_loopy(points_lidar, T_lidar_to_world, self.grid_shape, self.origin, self.resolution, self.lidar_min_votes)
             self._integrate_occupancy(new_occ)
 
         init_q = np.array([pose_msg.pose.pose.orientation.x, pose_msg.pose.pose.orientation.y,
