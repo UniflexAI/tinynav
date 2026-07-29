@@ -1810,6 +1810,7 @@ class BackendNode(Ros2NodeManager):
         '/planning/trajectory_path',
         '/planning/occupied_voxels',
         '/planning/footprint',
+        '/lidar_points',
     ]
 
     def cmd_debug_record_start(self):
@@ -1828,7 +1829,13 @@ class BackendNode(Ros2NodeManager):
                  '--max-cache-size', '2147483648']
                 + self._DEBUG_RECORD_TOPICS
             )
-            self._debug_record_proc = self._spawn(cmd)
+            # /lidar_points is published by the Hesai driver under CycloneDDS on a
+            # separate host (see _launch_sensor_procs); this recorder needs the same
+            # RMW to actually reach it.
+            self._debug_record_proc = self._spawn(cmd, extra_env={
+                'RMW_IMPLEMENTATION': 'rmw_cyclonedds_cpp',
+                'CYCLONEDDS_URI': '/tinynav/cyclonedds_jetson.xml',
+            })
             self._debug_record_path = output_dir
             self.get_logger().info(f'Debug recording started → {output_dir}')
 
