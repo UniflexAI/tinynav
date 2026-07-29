@@ -532,7 +532,7 @@ class PlanningNode(Node):
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
-            [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.1)
+            [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.15)
         self.lidar_ts.registerCallback(self.lidar_sync_callback)
 
         self.grid_shape = (80, 80, 40)
