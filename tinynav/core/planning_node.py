@@ -510,7 +510,7 @@ class PlanningNode(Node):
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 5
         self.occupancy_grid = np.zeros(self.grid_shape)
-        self.occupancy_source = 'depth'  # 'depth' or 'lidar' -- exclusive, set live via /planning/config
+        self.occupancy_source = 'lidar'  # 'depth' or 'lidar' -- exclusive, set live via /planning/config
         self.K = None
         self.baseline = None
         self.last_T = None
