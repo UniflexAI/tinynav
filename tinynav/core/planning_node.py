@@ -524,7 +524,7 @@ class PlanningNode(Node):
         self.T_lidar_to_cam = T_body_to_cam @ T_lidar_to_body
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
         self.lidar_min_range = 0.2  # metres; drop closer returns as sensor blind-zone noise
-        self.lidar_min_votes = 2  # a voxel needs this many same-frame point hits to count as occupied
+        self.lidar_min_votes = 3  # a voxel needs this many same-frame point hits to count as occupied
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
