@@ -38,6 +38,7 @@ from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
+from tinynav.core.vlad import train_vocabulary, compute_vlad_batch
 from tinynav.core.vlad_retrieval import compute_vlad, train_vocabulary_streaming
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
@@ -841,6 +842,47 @@ class BuildMapNode(Node):
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
+
+    def rebuild_retrieval_embeddings_from_color(self, db: TinyNavDB) -> None:
+        """Replace the mono/CLS-token retrieval embeddings with color-image DINOv2 patch
+        tokens aggregated via VLAD. Runs once, after mapping finishes, over every keyframe.
+
+        The codebook is fit by streaming every keyframe's patch tokens through online k-means
+        (train_vocabulary_streaming) instead of pooling them into one array for Lloyd's k-means:
+        on a large map, pooling even a bounded keyframe sample (keyframes x 256 patches x 768
+        dims, plus k-means' own working memory) is several GB and OOM-killed this process.
+        Streaming keeps peak memory to a single batch, so the codebook can be fit from every
+        keyframe rather than a capped random sample. The final per-keyframe embedding pass then
+        re-runs inference once per keyframe to encode against the fitted codebook.
+        """
+        timestamps = sorted(self.pose_graph_used_pose.keys())
+        if len(timestamps) == 0:
+            self.get_logger().warning("No keyframes available to fit VLAD codebook, skipping re-embedding")
+            return
+
+        def load_patch_tokens(timestamp):
+            _, _, _, rgb_loader, _ = db.get_depth_embedding_features_images(timestamp)
+            return asyncio.run(self.dinov2_model.infer_patch_tokens(rgb_loader()))
+
+        def patch_token_batches():
+            for timestamp in timestamps:
+                yield load_patch_tokens(timestamp)
+
+        codebook = train_vocabulary_streaming(
+            patch_token_batches,
+            num_clusters=self.vlad_num_clusters,
+            epochs=self.vlad_codebook_epochs,
+        )
+        np.save(f"{self.map_save_path}/vlad_codebook.npy", codebook)
+
+        for timestamp in timestamps:
+            patch_tokens = load_patch_tokens(timestamp)
+            db.embeddings[timestamp] = compute_vlad(patch_tokens, codebook)
+
+        self.get_logger().info(
+            f"Re-embedded {len(timestamps)} keyframes with a {self.vlad_num_clusters}-cluster VLAD "
+            f"codebook streamed over all {len(timestamps)} keyframes ({self.vlad_codebook_epochs} epoch(s))"
+        )
 
     def rebuild_retrieval_embeddings_from_color(self, db: TinyNavDB) -> None:
         """Replace the mono/CLS-token retrieval embeddings with color-image DINOv2 patch

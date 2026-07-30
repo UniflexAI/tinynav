@@ -243,6 +243,15 @@ class EfficientLoFTRTRT:
         cudart.cudaMemcpyAsync(self._d_image0, img0.ctypes.data, img0.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
         cudart.cudaMemcpyAsync(self._d_image1, img1.ctypes.data, img1.nbytes, cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream)
 
+        # Reset before each call: if execution fails internally (observed: an indeterminate-
+        # reshape error in the fine-matching stage when the coarse stage proposes zero
+        # candidates), notify_shape is never invoked for this call, and without this reset
+        # .shape would silently keep the previous call's value instead of reporting the
+        # failure.
+        self._alloc_mkpts0.shape = None
+        self._alloc_mkpts1.shape = None
+        self._alloc_mconf.shape = None
+
         self.context.execute_async_v3(stream_handle=self.stream)
 
         _, event = cudart.cudaEventCreate()
@@ -250,7 +259,10 @@ class EfficientLoFTRTRT:
         while cudart.cudaEventQuery(event)[0] == cudart.cudaError_t.cudaErrorNotReady:
             await asyncio.sleep(0)
 
-        num_matches = self._alloc_mconf.shape[0]
+        # A failed execution leaves .shape at the None set above -- treat that the same as a
+        # genuine zero-match result instead of crashing on .shape[0].
+        mconf_shape = self._alloc_mconf.shape
+        num_matches = mconf_shape[0] if mconf_shape is not None else 0
         mkpts0 = np.empty((num_matches, 2), dtype=np.float32)
         mkpts1 = np.empty((num_matches, 2), dtype=np.float32)
         mconf = np.empty((num_matches,), dtype=np.float32)

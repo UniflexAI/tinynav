@@ -248,8 +248,22 @@ class MapNode(Node):
         # z~8.4 while unrelated keyframes cluster at z~0 by construction, regardless of the
         # absolute similarity scale involved. z_threshold=4 sits comfortably above that noise
         # floor with a wide margin below observed true matches.
-        self.relocalization_z_threshold = 4.0
+        self.relocalization_z_threshold = 3.0
         self.relocalization_loop_top_k = 3
+        self.relocalization_min_inlier_count = 50
+        self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
+        self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
+        self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
+        self.z_disable = self._load_z_disable(tinynav_map_path)
+        self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
+        self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
+        self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
+        self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
+        # Gate added for a "stop auto-relocalizing after the first fix" mode -- no
+        # per-map loader wired it up yet, so default both off: relocalization keeps
+        # retrying every keyframe exactly like before this gate existed.
+        self.enable_first_done = False
+        self.first_done = False
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
@@ -299,6 +313,188 @@ class MapNode(Node):
 
         self._save_completed = False
         self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
+
+    def _load_target_pose_dist_factor(self, tinynav_map_path: str) -> float:
+        default_factor = 4.0
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_factor
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using target_pose_dist_factor={default_factor}")
+            return default_factor
+        if not isinstance(config, dict):
+            return default_factor
+        value = config.get("target_pose_dist_factor", default_factor)
+        try:
+            factor = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid target_pose_dist_factor={value!r}; using {default_factor}")
+            return default_factor
+        if factor <= 0:
+            self.get_logger().warning(f"Invalid target_pose_dist_factor={value!r}; using {default_factor}")
+            return default_factor
+        self.get_logger().info(f"Using target_pose_dist_factor={factor}")
+        return factor
+
+    def _load_select_target_position_on_path_on(self, tinynav_map_path: str) -> bool:
+        default_value = False
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using select_target_position_on_path_on={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        value = config.get("select_target_position_on_path_on", default_value)
+        if isinstance(value, bool):
+            enabled = value
+        elif isinstance(value, str):
+            enabled = value.strip().lower() in {"1", "true", "yes", "on"}
+        elif isinstance(value, (int, float)):
+            enabled = bool(value)
+        else:
+            self.get_logger().warning(f"Invalid select_target_position_on_path_on={value!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using select_target_position_on_path_on={enabled}")
+        return enabled
+
+    def _load_z_disable(self, tinynav_map_path: str) -> bool:
+        default_value = False
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using z_disable={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        value = config.get("z_disable", default_value)
+        if isinstance(value, bool):
+            enabled = value
+        elif isinstance(value, str):
+            enabled = value.strip().lower() in {"1", "true", "yes", "on"}
+        elif isinstance(value, (int, float)):
+            enabled = bool(value)
+        else:
+            self.get_logger().warning(f"Invalid z_disable={value!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using z_disable={enabled}")
+        return enabled
+
+    def _load_planning_dilation_cells(self, tinynav_map_path: str) -> int:
+        default_value = 0
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using planning.dilation_cells={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict):
+            return default_value
+        value = planning_config.get("dilation_cells", default_value)
+        try:
+            dilation_cells = int(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning.dilation_cells={value!r}; using {default_value}")
+            return default_value
+        dilation_cells = max(0, min(20, dilation_cells))
+        self.get_logger().info(f"Using planning.dilation_cells={dilation_cells}")
+        return dilation_cells
+
+    def _load_planning_comfort_radius(self, tinynav_map_path: str) -> float | None:
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; not overriding planning.comfort_radius")
+            return None
+        if not isinstance(config, dict):
+            return None
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict) or "comfort_radius" not in planning_config:
+            return None
+        value = planning_config.get("comfort_radius")
+        try:
+            comfort_radius = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning.comfort_radius={value!r}; not overriding")
+            return None
+        comfort_radius = max(0.0, min(3.0, comfort_radius))
+        self.get_logger().info(f"Using planning.comfort_radius={comfort_radius:.2f}")
+        return comfort_radius
+
+    def _load_planning_reverse_enter_threshold(self, tinynav_map_path: str) -> float | None:
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(
+                f"Failed to read nav_flow.json: {exc}; not overriding planning.reverse_enter_threshold"
+            )
+            return None
+        if not isinstance(config, dict):
+            return None
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict) or "reverse_enter_threshold" not in planning_config:
+            return None
+        value = planning_config.get("reverse_enter_threshold")
+        try:
+            reverse_enter_threshold = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning.reverse_enter_threshold={value!r}; not overriding")
+            return None
+        reverse_enter_threshold = max(0.0, min(2.0, reverse_enter_threshold))
+        self.get_logger().info(f"Using planning.reverse_enter_threshold={reverse_enter_threshold:.2f}")
+        return reverse_enter_threshold
+
+    def _load_rtk_mode(self, tinynav_map_path: str) -> str:
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return "off"
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using rtk.mode=off")
+            return "off"
+        if not isinstance(config, dict):
+            return "off"
+        rtk_config = config.get("rtk", {})
+        if isinstance(rtk_config, bool):
+            mode = "replace" if rtk_config else "off"
+        elif isinstance(rtk_config, str):
+            mode = rtk_config.strip().lower()
+        elif isinstance(rtk_config, dict):
+            mode = str(rtk_config.get("mode", "off")).strip().lower()
+        else:
+            self.get_logger().warning(f"Invalid nav_flow rtk config: {rtk_config!r}; using off")
+            return "off"
+        if mode in {"replace", "on", "true", "1", "yes"}:
+            self.get_logger().info("Using RTK map pose replacement")
+            return "replace"
+        return "off"
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -369,10 +565,11 @@ class MapNode(Node):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
         rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
 
-        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, rgb_image)
-        if success:
-            self.compute_transform_from_map_to_odom()
-
+        if not (self.enable_first_done and self.first_done):
+            success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, rgb_image)
+            if success:
+                self.compute_transform_from_map_to_odom()
+                self.first_done = True
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -491,7 +688,7 @@ class MapNode(Node):
             self.map_rgb_image_shape,
         )
 
-    def relocalize_with_depth(self, rgb_keyframe: np.ndarray, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
+    def relocalize_with_depth(self, rgb_keyframe: np.ndarray, K: np.ndarray | None, current_odom_pose: np.ndarray | None = None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
         patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(rgb_keyframe))
@@ -502,15 +699,27 @@ class MapNode(Node):
         if len(idx_and_similarity_array) == 0:
             print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
             return False, np.eye(4), -np.inf
+        candidate_timestamps = [
+            self.map_embeddings_idx_to_timestamp[idx_in_map]
+            for idx_in_map, _similarity in idx_and_similarity_array
+        ]
 
         pnp_candidates = []
-        for idx_in_map, similarity in idx_and_similarity_array:
-            timestamp_in_map = self.map_embeddings_idx_to_timestamp[idx_in_map]
+        for timestamp_in_map in candidate_timestamps:
+            reference_rgb_pose_in_world = self.map_poses[timestamp_in_map] @ self.map_T_rgb_to_infra1
+
+            # Odom position prior filter: skip candidates too far from predicted position
+            if self.T_from_map_to_odom is not None and current_odom_pose is not None:
+                current_pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ current_odom_pose
+                xy_dist = np.linalg.norm(reference_rgb_pose_in_world[:3, 3][:2] - current_pose_in_map[:2, 3])
+                if xy_dist > self.relocalization_odom_prior_threshold:
+                    print(f"candidate too far from odom prediction: {xy_dist:.2f}m > {self.relocalization_odom_prior_threshold}m, skipping")
+                    continue
+
             reference_rgb_image = self._get_reference_rgb_image(timestamp_in_map)
             if reference_rgb_image is None:
                 print(f"no color image stored for keyframe {timestamp_in_map}, skipping")
                 continue
-            reference_rgb_pose_in_world = self.map_poses[timestamp_in_map] @ self.map_T_rgb_to_infra1
             reference_color_depth = self._get_reference_color_depth(timestamp_in_map)
             # Dense/detector-free match: EfficientLoFTR takes the raw reference+query images
             # directly rather than precomputed SuperPoint keypoints -- see the __init__ comment
@@ -531,9 +740,17 @@ class MapNode(Node):
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
-        success, best_rgb_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, K)
+        success, best_rgb_pose_in_camera, pose_cov_weight, best_candidate_index, best_inlier_count, best_point_count = rerank_by_pnp_inliers(
+            pnp_candidates,
+            K,
+            min_inlier_count=self.relocalization_min_inlier_count,
+        )
         if success:
-            print(f"relocalization pose (rgb camera) : {best_rgb_pose_in_camera}")
+            print(
+                f"relocalization pose (rgb camera): {best_rgb_pose_in_camera}, "
+                f"best_candidate_index: {best_candidate_index}, "
+                f"pnp_inliers: {best_inlier_count}/{best_point_count}"
+            )
             return True, best_rgb_pose_in_camera, pose_cov_weight
 
         print("no valid PnP relocalization candidate found")
@@ -570,7 +787,9 @@ class MapNode(Node):
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def keyframe_relocalization(self, timestamp, rgb_image:np.ndarray) -> tuple[bool, np.ndarray]:
-        res, rgb_pose_in_camera, pose_cov_weight = self.relocalize_with_depth(rgb_image, self.map_rgb_K)
+        timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
+        current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
+        res, rgb_pose_in_camera, pose_cov_weight = self.relocalize_with_depth(rgb_image, self.map_rgb_K, current_odom_pose=current_odom_pose)
         if res:
             # publish the relocalization pose for debug
             # relocalize_with_depth solves for the query RGB camera's pose; convert back to the
