@@ -1,7 +1,7 @@
 #!/bin/bash
 
 POINTCLOUD_MODE=${POINTCLOUD_MODE:-color}
-POSE_TOPIC=${POSE_TOPIC:-/insight/vio_pose}
+POSE_TOPIC=${POSE_TOPIC:-/camera/camera/vio_image}
 
 tmux new-session \; \
   split-window -h \; \

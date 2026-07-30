@@ -607,7 +607,7 @@ Visualization Manager:
             Durability Policy: Volatile
             History Policy: Keep Last
             Reliability Policy: Reliable
-            Value: /camera/camera/color/image_raw
+            Value: /camera/camera/color/image_rect_raw/compressed
           Value: true
       Enabled: true
       Name: Sensors

@@ -284,7 +284,7 @@ class GlobalPointCloudPublisher(Node):
         if self.args.image_mode == "color" and self.color_K is None:
             missing.append("/camera/camera/color/camera_info")
         if self.T_i_depth is None:
-            missing.append(f"imu->{self.depth_frame_id or 'depth'} TF")
+            missing.append(f"camera_camera_imu->{self.depth_frame_id or 'depth'} TF")
         if self.args.image_mode == "color" and self.T_depth_color is None:
             missing.append(f"{self.depth_frame_id or 'depth'}->{self.color_frame_id or 'color'} TF")
         self.get_logger().info(f"Waiting for inputs before publishing {self.args.image_mode} cloud: {', '.join(missing)}")
@@ -315,12 +315,12 @@ class GlobalPointCloudPublisher(Node):
 
     def try_update_frame_transforms(self):
         if self.depth_frame_id is not None:
-            T_pose_depth = self.lookup_transform("imu", self.depth_frame_id)
+            T_pose_depth = self.lookup_transform("camera_camera_imu", self.depth_frame_id)
             if T_pose_depth is not None:
                 self.T_i_depth = T_pose_depth
                 if not self._logged_depth_tf:
                     self._logged_depth_tf = True
-                    self.get_logger().info(f"Resolved imu -> {self.depth_frame_id} transform.")
+                    self.get_logger().info(f"Resolved camera_camera_imu -> {self.depth_frame_id} transform.")
 
         if self.args.image_mode == "color" and self.depth_frame_id and self.color_frame_id:
             T_depth_color = self.lookup_transform(self.depth_frame_id, self.color_frame_id)
@@ -406,7 +406,7 @@ class GlobalPointCloudPublisher(Node):
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
         tf_msg.header.frame_id = parent_frame or "world"
-        tf_msg.child_frame_id = "imu"
+        tf_msg.child_frame_id = "camera_camera_imu"
         tf_msg.transform.translation.x = float(T_world_imu[0, 3])
         tf_msg.transform.translation.y = float(T_world_imu[1, 3])
         tf_msg.transform.translation.z = float(T_world_imu[2, 3])
