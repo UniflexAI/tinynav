@@ -142,3 +142,4 @@ log/
 # Output result
 tinynav_db/
 tinynav_temp/
+.DS_Store
