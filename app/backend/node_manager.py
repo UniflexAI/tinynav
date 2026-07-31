@@ -1484,22 +1484,28 @@ class BackendNode(Ros2NodeManager):
         return env
 
     def _sync_looper_time(self):
-        """Sync the Looper module's clock to this host before VIO starts publishing.
+        """Sync the Looper module clock before starting Looper-dependent nodes.
 
-        The Looper runs standalone with no NTP of its own; if its clock has
-        drifted since the last sync, VIO timestamps can misalign with everything
-        else on this host's clock. Best-effort -- log and continue rather than
-        block sensor startup on it.
+        If this fails, do not continue to start looper_bridge/planning_node;
+        stale Looper timestamps can poison VIO/ROS message timing.
         """
-        try:
-            subprocess.run(
-                ['sshpass', '-p', 'looper@0731', 'python3',
-                 '/tinynav/looper_cli/looper_cli.py', 'time', 'sync', '-y'],
-                check=True, timeout=30,
-            )
-            self.get_logger().info('Looper time sync completed')
-        except Exception as e:
-            self.get_logger().error(f'Looper time sync failed: {e}')
+        max_attempts = 3
+        last_error = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                subprocess.run(
+                    ['sshpass', '-p', 'looper@0731', 'python3',
+                     '/tinynav/looper_cli/looper_cli.py', 'time', 'sync', '-y'],
+                    check=True, timeout=30,
+                )
+                self.get_logger().info(f'Looper time sync completed on attempt {attempt}/{max_attempts}')
+                return
+            except Exception as e:
+                last_error = e
+                self.get_logger().error(f'Looper time sync attempt {attempt}/{max_attempts} failed: {e}')
+                if attempt < max_attempts:
+                    time.sleep(1.0)
+        raise RuntimeError(f'Looper time sync failed after {max_attempts} attempts: {last_error}')
 
     def _launch_sensor_procs(self, env: dict):
         """Start sensor procs based on current _sensor_mode."""
@@ -1563,8 +1569,12 @@ class BackendNode(Ros2NodeManager):
             map_node_cmd,
             env=_env,
         )
+        rtk_mode = self._load_nav_flow_rtk_mode()
         with self._lock:
-            loc_assist = self._loc_assist_enabled
+            loc_assist_requested = self._loc_assist_enabled
+        loc_assist = loc_assist_requested and rtk_mode != 'replace'
+        if loc_assist_requested and rtk_mode == 'replace':
+            self.get_logger().info('Localization assist ignored for RTK map')
         if loc_assist:
             # Don't start cmd_vel_control yet; start localization assist sweep
             self._start_loc_assist(_env)
@@ -1651,6 +1661,9 @@ class BackendNode(Ros2NodeManager):
 
     def _start_loc_assist(self, env: dict):
         """Start the yaw sweep thread (no cmd_vel_control process)."""
+        if self._load_nav_flow_rtk_mode() == 'replace':
+            self.get_logger().info('Localization assist sweep skipped for RTK map')
+            return
         if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
             self.get_logger().info('Localization assist sweep already running')
             return
