@@ -29,9 +29,8 @@ from rclpy.serialization import deserialize_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 from rosidl_runtime_py.utilities import get_message
 
-from tinynav.core.bow_retrieval import BowIndex, build_bow_index
 from tinynav.core.build_map_node import TinyNavDB, find_loop
-from tinynav.core.models_trt import Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import Dinov2TRT
 from tinynav.core.vlad import compute_vlad
 
 
@@ -79,23 +78,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     map_timestamps = sorted(int(t) for t in map_poses.keys())
 
     db = TinyNavDB(str(map_path), is_scratch=False)
-    embed_model = None
-    vlad_centres = None
-    map_vlad_descriptors = None
-    bow_index = None
-    superpoint = None
-
-    if args.retrieval_backend == "dinov2_vlad":
-        vlad_centres = db.metadata["vlad_centres"]
-        map_vlad_descriptors = np.stack([db.vlad_descriptors[t] for t in map_timestamps]).astype(np.float32)
-        embed_model = Dinov2TRT()
-    else:
-        bow_index_path = map_path / "bow_index.npz"
-        if not bow_index_path.exists():
-            print(f"BoW index not found at {bow_index_path}; building it from map features")
-            build_bow_index(db, map_timestamps, bow_index_path)
-        bow_index = BowIndex(bow_index_path)
-        superpoint = SuperPointTRT()
+    vlad_centres = db.metadata["vlad_centres"]
+    map_vlad_descriptors = np.stack([db.vlad_descriptors[t] for t in map_timestamps]).astype(np.float32)
+    embed_model = Dinov2TRT()
 
     keyframe_total: dict[int, int] = defaultdict(int)
     keyframe_bad: dict[int, int] = defaultdict(int)
@@ -111,14 +96,10 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         if args.max_frames > 0 and saved >= args.max_frames:
             break
 
-        if args.retrieval_backend == "dinov2_vlad":
-            patch_tokens = asyncio.run(embed_model.infer_patch_tokens(infra1))
-            query_vec = compute_vlad(patch_tokens, vlad_centres)
-            hits = find_loop(query_vec, map_vlad_descriptors, -1.0, args.topk)
-            hits = [(int(map_timestamps[idx]), float(sim)) for idx, sim in hits]
-        else:
-            query_features = asyncio.run(superpoint.infer(infra1))
-            hits = bow_index.query(query_features, args.topk)
+        patch_tokens = asyncio.run(embed_model.infer_patch_tokens(infra1))
+        query_vec = compute_vlad(patch_tokens, vlad_centres)
+        hits = find_loop(query_vec, map_vlad_descriptors, -1.0, args.topk)
+        hits = [(int(map_timestamps[idx]), float(sim)) for idx, sim in hits]
 
         hits = [(ts, sim) for ts, sim in hits if sim >= args.min_similarity]
         saved += 1
@@ -168,7 +149,6 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     summary = {
         "map_path": str(map_path),
         "eval_bag_path": args.eval_bag_path,
-        "retrieval_backend": args.retrieval_backend,
         "topk": args.topk,
         "min_similarity": args.min_similarity,
         "cluster_radius_m": args.cluster_radius_m,
@@ -200,7 +180,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--map_path", required=True, help="pre-built TinyNav map directory (built from bag1)")
     parser.add_argument("--eval_bag_path", required=True, help="bag2: independent probe bag, read directly (raw frames)")
-    parser.add_argument("--retrieval_backend", choices=["dinov2_vlad", "superpoint_bow"], default="dinov2_vlad")
     parser.add_argument("--topic", default="/camera/camera/infra1/image_rect_raw")
     parser.add_argument("--topk", type=int, default=5, help="candidates per query (default 5: more tolerant than production's top-3, since this is an offline optimization tool)")
     parser.add_argument("--min_similarity", type=float, default=-1.0, help="drop candidates below this similarity before dispersion check")

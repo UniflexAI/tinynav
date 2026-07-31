@@ -25,8 +25,6 @@ After processing the whole probe bag, each map keyframe has:
 
 Keyframes with a high badness ratio (and enough participation to be statistically meaningful, not
 just 1-2 noisy events) are the ones dragging down map precision — they're candidates for removal.
-This mirrors the "stop word" idea in BoW vocabularies: a visual feature/keyframe so generic it
-shows up everywhere isn't helping discriminate between places.
 
 ## Dispersion metric
 
@@ -63,14 +61,11 @@ don't take the defaults as gospel.
 uv run python tool/keyframe_quality/find_confusing_keyframes.py \
   --map_path tinynav_db/maps/map_gt \
   --eval_bag_path tinynav_db/rosbags/bag_1970_01_01_08_09_49 \
-  --retrieval_backend dinov2_vlad \
   --out_json tinynav_temp/confusing_keyframes_gt_day.json
 ```
 
-`--map_path` must already exist (built via `build_map_node.py` from bag1) and, depending on
-`--retrieval_backend`, have `vlad_descriptors.db`+`vlad_centres` (see `tool/build_vlad_index.py`
-to backfill) or a `bow_index.npz` (auto-built on first use if missing, via
-`tool/build_bow_index_for_map.py`'s `build_bow_index`).
+`--map_path` must already exist (built via `build_map_node.py` from bag1) with the DINOv2 patch
+VLAD retrieval index it produces by default (`vlad_descriptors.db` + `vlad_centres`).
 
 ## Output
 
@@ -93,6 +88,5 @@ query's candidates + verdict, for spot-checking specific cases.
 
 This version only **detects and reports** confusing keyframes — it does not yet remove them from
 the map. Actually pruning would mean rewriting `poses.npy` + the `features`/`depths`/
-`vlad_descriptors`/`bow_index` shelves and the `infra1_images_db`/`rgb_images_db` video stores
-consistently, which is a separate follow-up once the detection side has been validated against
-real data.
+`vlad_descriptors` shelves and the `infra1_images_db`/`rgb_images_db` video stores consistently,
+which is a separate follow-up once the detection side has been validated against real data.
