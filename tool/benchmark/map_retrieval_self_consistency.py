@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 
+from tinynav.core.bow_retrieval import BowIndex, make_bow_vector, valid_superpoint_descriptors
 from tinynav.core.build_map_node import TinyNavDB
 
 
@@ -49,6 +50,55 @@ def _load_vlad_embeddings(map_path: Path, timestamps: list[int]) -> np.ndarray:
     finally:
         db.close()
     return _normalize_rows(rows, map_path)
+
+
+def _load_dinov2_global_embeddings(map_path: Path, timestamps: list[int]) -> np.ndarray:
+    """Pre-VLAD baseline: the raw DINOv2 CLS embedding stored in embeddings.db."""
+    db = TinyNavDB(str(map_path), is_scratch=False)
+    rows: list[np.ndarray] = []
+    try:
+        for timestamp in timestamps:
+            rows.append(np.asarray(db.embeddings[int(timestamp)], dtype=np.float32))
+    finally:
+        db.close()
+    return _normalize_rows(rows, map_path)
+
+
+def _load_bow_embeddings_shared_vocab(
+    map_a_path: Path,
+    map_b_path: Path,
+    map_a_timestamps: list[int],
+    map_b_timestamps: list[int],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Encode both maps with Map A's BoW vocabulary.
+
+    BoW histograms only compare across two independently-trained vocabularies (e.g. Map A's
+    own bow_index.npz vs Map B's own, each from a separate cv2.kmeans run) if the visual-word
+    ids happen to line up, which they don't -- k-means has no canonical cluster ordering.
+    This matches how map_node.py actually uses BoW in production: the deployed map's
+    vocabulary (centers + idf) encodes live query frames too, never a second independently
+    trained vocabulary. So Map B's keyframes are re-encoded here from their stored SuperPoint
+    features using Map A's centers/idf, not read from Map B's own bow_index.npz.
+    """
+    bow_index = BowIndex(map_a_path / "bow_index.npz")
+    by_timestamp = {int(t): vec for t, vec in zip(bow_index.timestamps, bow_index.bow_vectors)}
+    map_a_rows: list[np.ndarray] = []
+    for timestamp in map_a_timestamps:
+        if timestamp not in by_timestamp:
+            raise KeyError(f"{map_a_path}/bow_index.npz has no vector for timestamp {timestamp}")
+        map_a_rows.append(np.asarray(by_timestamp[timestamp], dtype=np.float32))
+
+    db_b = TinyNavDB(str(map_b_path), is_scratch=False)
+    map_b_rows: list[np.ndarray] = []
+    try:
+        for timestamp in map_b_timestamps:
+            features = db_b.features[int(timestamp)]
+            descriptors = valid_superpoint_descriptors(features)
+            map_b_rows.append(make_bow_vector(descriptors, bow_index.centers, bow_index.idf))
+    finally:
+        db_b.close()
+
+    return _normalize_rows(map_a_rows, map_a_path), _normalize_rows(map_b_rows, map_b_path)
 
 
 def _fit_se2(src_xy: np.ndarray, dst_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -176,8 +226,16 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     thresholds = _parse_float_list(args.distance_thresholds)
     max_topk = max(topk_values)
 
-    map_a_embeddings = _load_vlad_embeddings(map_a, map_a_timestamps)
-    map_b_embeddings = _load_vlad_embeddings(map_b, map_b_timestamps)
+    if args.retrieval_backend == "superpoint_bow":
+        map_a_embeddings, map_b_embeddings = _load_bow_embeddings_shared_vocab(
+            map_a, map_b, map_a_timestamps, map_b_timestamps
+        )
+    elif args.retrieval_backend == "dinov2_global":
+        map_a_embeddings = _load_dinov2_global_embeddings(map_a, map_a_timestamps)
+        map_b_embeddings = _load_dinov2_global_embeddings(map_b, map_b_timestamps)
+    else:
+        map_a_embeddings = _load_vlad_embeddings(map_a, map_a_timestamps)
+        map_b_embeddings = _load_vlad_embeddings(map_b, map_b_timestamps)
     similarities = map_a_embeddings @ map_b_embeddings.T
     query_rows = _retrieve_rows(similarities, map_a_timestamps, map_a_poses, map_b_timestamps, max_topk)
 
@@ -234,8 +292,9 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
 
     summary = {
         "type": "cross_map_self_consistency",
+        "retrieval_backend": args.retrieval_backend,
         "note": (
-            "T is fitted from VLAD Top1 keyframe matches. "
+            f"T is fitted from {args.retrieval_backend} Top1 keyframe matches. "
             "Metrics are self-consistency signals, not external GT accuracy."
         ),
         "map_a": str(map_a),
@@ -280,6 +339,15 @@ def main() -> None:
     )
     parser.add_argument("--map-a", required=True, help="Reference map directory")
     parser.add_argument("--map-b", required=True, help="Query/eval map directory")
+    parser.add_argument(
+        "--retrieval-backend",
+        choices=["dinov2_vlad", "superpoint_bow", "dinov2_global"],
+        default="dinov2_vlad",
+        help=(
+            "Which per-keyframe descriptor to read: vlad_descriptors.db (default), "
+            "bow_index.npz, or the raw pre-VLAD DINOv2 CLS embedding in embeddings.db"
+        ),
+    )
     parser.add_argument("--output-dir", default="/tinynav/output/map_retrieval_self_consistency")
     parser.add_argument("--topk", default="1,3,5,10")
     parser.add_argument("--distance-thresholds", default="0.5,1.0")

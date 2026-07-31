@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from math import inf
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Literal, Optional
 
 import cv2
 import einops
@@ -34,6 +34,7 @@ from tf2_ros import TransformBroadcaster
 from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
+from tinynav.core.bow_retrieval import build_bow_index
 from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
@@ -54,6 +55,7 @@ class BuildMapArgs:
     # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
+    retrieval_backend: Literal["dinov2_vlad", "superpoint_bow"] = "dinov2_vlad"
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
@@ -402,7 +404,8 @@ class TinyNavDB():
                 return None
             return self.infra1_video_db.read(key_int)
 
-        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
+        embedding = self.embeddings[key] if key in self.embeddings else None
+        return self.depths[key], embedding, self.features[key], rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
         return self.embeddings[key]
@@ -582,12 +585,14 @@ class BuildMapNode(Node):
         map_save_path: str,
         verbose_timer: bool = True,
         global_frames_ratio: float = 1.1,
+        retrieval_backend: Literal["dinov2_vlad", "superpoint_bow"] = "dinov2_vlad",
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
             raise ValueError(f"global_frames_ratio must be >= 1.0, got {global_frames_ratio}")
         self.verbose_timer = verbose_timer
         self.global_frames_ratio = global_frames_ratio
+        self.retrieval_backend = retrieval_backend
         # Keyframe count at the last global refinement (COLMAP: ba_prev_num_reg_frames).
         self._global_prev_num_frames = 0
         self.logger = logging.getLogger(__name__)
@@ -596,7 +601,7 @@ class BuildMapNode(Node):
         )
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
-        self.dinov2_model = Dinov2TRT()
+        self.dinov2_model = Dinov2TRT() if retrieval_backend == "dinov2_vlad" else None
         self.semantic_embedder = SigLIPTRT()
 
         self.bridge = CvBridge()
@@ -747,10 +752,11 @@ class BuildMapNode(Node):
         with self.stage_timer.timed("save_image_and_depth"):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
 
-        with self.stage_timer.timed("get_dinov2_descriptors"):
-            embedding, patch_tokens = asyncio.run(self.dinov2_model.infer_global_and_patch_tokens(infra1_image))
-            embedding = embedding / np.linalg.norm(embedding)
-            self.db.set_entry(keyframe_image_timestamp, embedding = embedding, patch_tokens = patch_tokens)
+        if self.retrieval_backend == "dinov2_vlad":
+            with self.stage_timer.timed("get_dinov2_descriptors"):
+                embedding, patch_tokens = asyncio.run(self.dinov2_model.infer_global_and_patch_tokens(infra1_image))
+                embedding = embedding / np.linalg.norm(embedding)
+                self.db.set_entry(keyframe_image_timestamp, embedding = embedding, patch_tokens = patch_tokens)
         with self.stage_timer.timed("get_semantic_embedding"):
             semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
             self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
@@ -767,7 +773,8 @@ class BuildMapNode(Node):
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
-            self.detect_loop_closure(keyframe_image_timestamp)
+            if self.retrieval_backend == "dinov2_vlad":
+                self.detect_loop_closure(keyframe_image_timestamp)
 
         self.maybe_run_global_refinement()
 
@@ -882,20 +889,25 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
 
-        with self.stage_timer.timed("vlad_save"):
-            timestamps = list(self.pose_graph_used_pose.keys())
-            vlad_train_rng = np.random.default_rng(42)
+        if self.retrieval_backend == "dinov2_vlad":
+            with self.stage_timer.timed("vlad_save"):
+                timestamps = list(self.pose_graph_used_pose.keys())
+                vlad_train_rng = np.random.default_rng(42)
 
-            def vlad_batch_iterator():
-                order = vlad_train_rng.permutation(timestamps)
-                for timestamp in order:
-                    yield self.db.patch_tokens[int(timestamp)]
+                def vlad_batch_iterator():
+                    order = vlad_train_rng.permutation(timestamps)
+                    for timestamp in order:
+                        yield self.db.patch_tokens[int(timestamp)]
 
-            vlad_centres = train_vocabulary_streaming(vlad_batch_iterator)
-            self.db.set_vlad_centres(vlad_centres)
-            for timestamp in timestamps:
-                patch_tokens = self.db.patch_tokens[timestamp]
-                self.db.set_entry(timestamp, vlad_descriptor=compute_vlad(patch_tokens, vlad_centres))
+                vlad_centres = train_vocabulary_streaming(vlad_batch_iterator)
+                self.db.set_vlad_centres(vlad_centres)
+                for timestamp in timestamps:
+                    patch_tokens = self.db.patch_tokens[timestamp]
+                    self.db.set_entry(timestamp, vlad_descriptor=compute_vlad(patch_tokens, vlad_centres))
+        elif self.retrieval_backend == "superpoint_bow":
+            with self.stage_timer.timed("bow_save"):
+                timestamps = sorted(int(t) for t in self.pose_graph_used_pose.keys())
+                build_bow_index(self.db, timestamps, f"{self.map_save_path}/bow_index.npz")
 
         # Flush and close writable DB first, then reopen DB for occupancy generation.
         self.db.close()
@@ -1057,6 +1069,7 @@ if __name__ == '__main__':
         parsed_args.map_save_path,
         verbose_timer=parsed_args.verbose_timer,
         global_frames_ratio=parsed_args.global_frames_ratio,
+        retrieval_backend=parsed_args.retrieval_backend,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)
