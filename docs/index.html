@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TinyNav</title>
+    <meta name="description" content="TinyNav is a lightweight, hackable robot navigation stack for stereo SLAM, mapping, planning, and control.">
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="TinyNav home">
+        <img src="tinynav.png" alt="" width="40" height="40">
+        <span>TinyNav</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#stack">Stack</a>
+        <a href="#maps">Maps</a>
+        <a href="#quickstart">Quickstart</a>
+        <a href="https://github.com/UniflexAI/tinynav">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Stereo SLAM · Mapping · Planning · Control</p>
+          <h1>TinyNav</h1>
+          <p class="lede">A lightweight, hackable system to guide robots through real spaces with GPU-accelerated perception and map-based navigation.</p>
+          <div class="actions">
+            <a class="button primary" href="https://github.com/UniflexAI/tinynav">View Repository</a>
+            <a class="button secondary" href="#quickstart">Run the Demo</a>
+          </div>
+        </div>
+        <figure class="hero-media">
+          <img src="docker_run_rviz.png" alt="TinyNav running in RViz with trajectory planning and map visualization">
+        </figure>
+      </section>
+
+      <section id="stack" class="section">
+        <div class="section-heading">
+          <p class="eyebrow">Runtime Stack</p>
+          <h2>ROS 2 nodes built for real-time robot navigation</h2>
+        </div>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <h3>Perception</h3>
+            <p>Stereo odometry, depth, IMU fusion, TensorRT feature matching, and dense local geometry for closed-loop control.</p>
+          </article>
+          <article class="feature-card">
+            <h3>Mapping</h3>
+            <p>Keyframe maps, loop closure, pose graph optimization, DINO scene retrieval, and persistent map storage.</p>
+          </article>
+          <article class="feature-card">
+            <h3>Planning</h3>
+            <p>Occupancy grids, ESDF maps, trajectory library scoring, and practical command generation for mobile robots.</p>
+          </article>
+          <article class="feature-card">
+            <h3>Platforms</h3>
+            <p>Runs on desktop GPUs and Jetson-class devices, with examples for Unitree GO2, LeKiwi, RealSense, and Looper.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="maps" class="split-section">
+        <div>
+          <p class="eyebrow">Map Workflow</p>
+          <h2>Build, inspect, and reuse maps</h2>
+          <p>TinyNav records keyframes, descriptors, poses, occupancy, and depth products into a reusable map database. The same map can support localization, planning, visualization, and retrieval workflows.</p>
+          <ul class="check-list">
+            <li>Pose graph refinement for long-running maps</li>
+            <li>Global image descriptors for loop and place recognition</li>
+            <li>Map artifacts stored in simple local files</li>
+          </ul>
+        </div>
+        <figure class="image-panel">
+          <img src="map.png" alt="TinyNav generated map visualization">
+        </figure>
+      </section>
+
+      <section class="media-band">
+        <figure>
+          <img src="looper.jpg" alt="Looper stereo camera supported by TinyNav">
+        </figure>
+        <div>
+          <p class="eyebrow">Sensors</p>
+          <h2>Designed around stereo cameras and GPU inference</h2>
+          <p>Looper and RealSense workflows are first-class paths in the repository, with scripts for live sensors, rosbag replay, mapping, and navigation.</p>
+        </div>
+      </section>
+
+      <section id="quickstart" class="section quickstart">
+        <div class="section-heading">
+          <p class="eyebrow">Quickstart</p>
+          <h2>Run the sample rosbag demo</h2>
+        </div>
+        <div class="command-block">
+          <code>git clone https://github.com/UniflexAI/tinynav.git</code>
+          <code>cd tinynav</code>
+          <code>bash scripts/check_env.sh</code>
+          <code>bash scripts/run_rosbag_examples.sh</code>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>Maintained by Uniflex AI</span>
+      <a href="https://discord.gg/gnZKFJ8W9Q">Discord</a>
+      <a href="https://x.com/UniflexAI">X</a>
+      <a href="https://github.com/UniflexAI/tinynav/blob/main/LICENSE">License</a>
+    </footer>
+  </body>
+</html>
