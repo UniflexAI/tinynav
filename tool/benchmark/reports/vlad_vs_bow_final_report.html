@@ -1,0 +1,391 @@
+<title>TinyNav 检索方案选型报告：SuperPoint+BoW vs DINOv2+VLAD</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --surface-1:      #fcfcfb;
+  --surface-2:      #f3f2ef;
+  --surface-3:      #ebe9e4;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #7a7972;
+  --border:         #e2e0da;
+  --series-vlad:    #2a78d6;
+  --series-bow:     #eb6834;
+  --series-global:  #1baf7a;
+  --good:           #0ca30c;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --surface-2:      #242422;
+    --surface-3:      #2d2d2a;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8f8e85;
+    --border:         #38372f;
+    --series-vlad:    #3987e5;
+    --series-bow:     #d95926;
+    --series-global:  #199e70;
+    --good:           #0ca30c;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-1:      #1a1a19;
+  --surface-2:      #242422;
+  --surface-3:      #2d2d2a;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #8f8e85;
+  --border:         #38372f;
+  --series-vlad:    #3987e5;
+  --series-bow:     #d95926;
+  --series-global:  #199e70;
+  --good:           #0ca30c;
+}
+.viz-root {
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  padding: 28px;
+  max-width: 1000px;
+  margin: 0 auto;
+  line-height: 1.55;
+}
+h1 { font-size: 22px; margin: 0 0 6px; }
+h2 { font-size: 16px; margin: 40px 0 6px; padding-top: 8px; border-top: 1px solid var(--border); }
+h2:first-of-type { border-top: none; }
+h3 { font-size: 13px; margin: 18px 0 6px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+p { color: var(--text-secondary); font-size: 13.5px; margin: 6px 0; }
+p.lede { color: var(--text-secondary); font-size: 14px; margin: 0 0 20px; }
+.tldr {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px;
+  padding: 18px 22px; margin: 18px 0 28px;
+}
+.tldr .label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--good); text-transform: uppercase; }
+.tldr p { color: var(--text-primary); font-size: 14.5px; margin: 8px 0 0; }
+.chart-card {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 20px 12px; margin-bottom: 8px; overflow-x: auto;
+}
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin: 8px 0 0; }
+.legend .item { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 14px; height: 10px; border-radius: 3px; display: inline-block; }
+.legend .swatch.line { height: 3px; }
+svg { display: block; overflow: visible; }
+.axis-label { fill: var(--text-muted); font-size: 11px; }
+.axis-line { stroke: var(--border); stroke-width: 1; }
+.gridline { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
+.data-label { font-size: 11px; font-weight: 600; }
+.bar-label { font-size: 10.5px; fill: var(--text-secondary); }
+.tooltip {
+  position: absolute; pointer-events: none; background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; color: var(--text-primary); box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  display: none; white-space: nowrap; z-index: 10;
+}
+table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+th, td { text-align: right; padding: 5px 9px; border-bottom: 1px solid var(--border); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--surface-2); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
+.stat-tile {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px;
+}
+.stat-tile .n { font-size: 22px; font-weight: 700; }
+.stat-tile .l { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+ul.findings { margin: 8px 0; padding-left: 20px; }
+ul.findings li { color: var(--text-secondary); font-size: 13.5px; margin: 6px 0; }
+ul.findings li b { color: var(--text-primary); }
+.badge { display: inline-block; font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px; margin-left: 6px; }
+.badge.fixed { background: rgba(27,175,122,0.15); color: var(--series-global); }
+.callout {
+  border-left: 3px solid var(--series-bow); background: var(--surface-2); border-radius: 0 8px 8px 0;
+  padding: 10px 16px; margin: 12px 0; font-size: 13px; color: var(--text-secondary);
+}
+.callout b { color: var(--text-primary); }
+footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-muted); }
+</style>
+
+<div class="viz-root">
+  <h1>SuperPoint+BoW vs DINOv2+VLAD — 地瓜 X5 边缘部署选型报告</h1>
+  <p class="lede">TinyNav 建图/重定位检索方案对比，覆盖建图与检索阶段的 CPU/GPU/内存开销、默认配置精度、词典大小敏感度扫描。测试数据：<code>map_gt</code>（1120 关键帧，reference）vs <code>map_day</code> / <code>map_night</code>（query），仓库自带的官方回环评测集。</p>
+
+  <div class="tldr">
+    <div class="label">结论 TL;DR</div>
+    <p>两条路线精度都可用，方向相反：<b style="color:var(--series-bow)">BoW 越大词典越好</b>、<b style="color:var(--series-vlad)">VLAD 有词典甜点、过大会崩溃</b>。各自调到最优配置后，<b>day 场景 BoW 更强（96.0% vs 89.8%）</b>，<b>night/光照变化场景 VLAD 略胜（48.8% vs 44.0%）</b>。<b>BoW 完全不需要 DINOv2(ViT)，零 GPU 依赖、索引体积小两个数量级</b>——这是目前唯一站得住脚、跟精度无关的硬指标差异，对 GPU/BPU 稀缺的边缘设备是决定性优势。若目标场景光照稳定，优先 BoW；若必须应对大幅光照变化，VLAD（调至合适词典）仍有精度优势，但要接受 ViT 推理和量化成本。</p>
+  </div>
+
+  <h2>① 资源开销：建图 + 检索两个阶段</h2>
+  <p>bag 实录：<code>bag_1970_01_01_08_07_55</code> 建图 → <code>bag_1970_01_01_08_09_49</code> 逐帧查询重定位。</p>
+  <div class="callout" style="border-left-color:var(--series-global)">
+    <b>方法论修正</b>：这两个 bag 录制时用的是外部 Looper VIO 系统（bag 里自带 <code>/camera/camera/vio_image</code> 已计算好的位姿），应该用 <code>tool/looper_bridge_node.py</code> 把这个位姿桥接给 <code>build_map_node.py</code>。最初错误地用了 <code>perception_node.py</code>（TinyNav 自己重新实时跑一遍 GTSAM/ISAM VIO，完全没用 bag 里现成的位姿），导致两次建图关键帧数差 3 倍（239 vs 666，实时 VIO 抖动导致，不是方法差异）。换成 <code>looper_bridge_node.py</code> 后两次都是 <b>1120 关键帧，完全一致</b>——下面是修正后、同等地图密度下的干净数据。
+  </div>
+  <div class="grid2">
+    <div class="chart-card">
+      <h3 style="margin-top:0">建图阶段（完整 SLAM+建图流程，1120 关键帧）</h3>
+      <svg id="chart-build" width="420" height="260" viewBox="0 0 420 260"></svg>
+    </div>
+    <div class="chart-card">
+      <h3 style="margin-top:0">检索阶段（逐帧查询+PnP验证，412 query 帧）</h3>
+      <svg id="chart-eval" width="420" height="260" viewBox="0 0 420 260"></svg>
+    </div>
+  </div>
+  <div class="legend" id="legend-resource"></div>
+  <div class="callout">
+    <b>同等密度下的检索质量</b>：PnP 重定位成功率 VLAD 98.3% vs BoW 97.8%，平均 inlier ratio 0.852 vs 0.865——两者几乎打平，不再是修正前那种因地图密度不对等造成的 57% vs 96% 假象。
+  </div>
+  <div class="callout" style="border-left-color:var(--series-global)">
+    <b>②③部分数据交叉验证：已直接证实，非旁证</b>：下载 HuggingFace <code>UniflexAI/rosbag_tinynav_vlad_eval</code>（<code>bag_gt</code>/<code>bag_day</code>/<code>bag_night</code>）后发现，这三个 bag 与本地 <code>bag_1970_01_01_08_07_55</code>/<code>_09_49</code>/<code>_05_15</code> **字节数完全一致**——就是同一批录制数据。用 <code>looper_bridge_node.py</code> 对这三个 bag 分别重新建图，关键帧数为 <b>1120 / 1161 / 1163</b>，与仓库自带的 <code>map_gt</code>(1120) / <code>map_day</code>(1161) / <code>map_night</code>(1163) <b>逐一精确对上</b>。这证实 ②③ 两节（词典对比、词典扫描）用的地图本来就是用正确流程建的，不受本节修正影响，结果保持有效。
+  </div>
+  <div class="callout">
+    <b>单帧编码成本(排除管线噪音后,微基准测得)</b>：BoW 0.88ms/帧，VLAD 2.44ms/帧——<b>BoW 编码本身比 VLAD 更便宜</b>，之前观察到的高 CPU% 主要是 decord 解码/asyncio/线程池超订阅等管线共享开销，不是 BoW 算法本身的负担。真正持续吃 CPU 的是建图时词典训练那一次性步骤。
+  </div>
+  <div class="callout" style="border-left-color:var(--series-vlad)">
+    <b>线程池超订阅验证实验</b>：把 <code>OMP_NUM_THREADS</code>/<code>OPENBLAS_NUM_THREADS</code>/<code>MKL_NUM_THREADS</code>/<code>OPENCV_NUM_THREADS</code> 锁定为 1，重跑同一段检索：
+    <table style="margin:8px 0 0">
+      <thead><tr><th></th><th>原始(不限线程)</th><th>锁定线程=1后</th><th>变化</th></tr></thead>
+      <tbody>
+        <tr><td>BoW CPU mean</td><td>1167%</td><td>819%</td><td style="color:var(--good)">↓30%，且耗时从 102s 降到 73.7s(更快)</td></tr>
+        <tr><td>VLAD CPU mean</td><td>703%</td><td>705%</td><td>几乎无变化，耗时也基本不变</td></tr>
+      </tbody>
+    </table>
+    <p style="margin:8px 0 0; font-size:12.5px">
+      BoW 的高 CPU 确有相当一部分是 numpy/BLAS 矩阵乘法线程池超订阅（这几个环境变量直接管得到，锁死后连带跑得更快）；
+      VLAD 几乎没反应，因为 <code>tinynav/core/vlad.py</code> 用的是 scipy <code>cKDTree.query(..., workers=-1)</code>，走的是另一套并行机制，不受这几个环境变量控制——要继续压 VLAD 的线程占用得改代码把 <code>workers=-1</code> 改成 <code>workers=1</code>，不是配环境变量能解决的。
+    </p>
+  </div>
+
+  <h2>② 默认配置下的检索精度（VLAD-32 词 vs BoW-512 词 vs DINOv2 原始 embedding）</h2>
+  <div class="chart-card">
+    <svg id="chart-default-acc" width="900" height="300" viewBox="0 0 900 300"></svg>
+    <div class="legend" id="legend-default"></div>
+  </div>
+  <p>三种方法拟合出的坐标变换 yaw 角高度一致（day ≈ -0.7~-0.9°，night ≈ 17.8~18.1°），确认测试数据本身健康、三组结果可信。</p>
+
+  <h2>③ 词典大小敏感度扫描（16 / 32 / 64 / 128 / 256）</h2>
+  <div class="chart-card">
+    <svg id="chart-sweep" width="900" height="340" viewBox="0 0 900 340"></svg>
+    <div class="legend" id="legend-sweep"></div>
+  </div>
+  <ul class="findings">
+    <li><b>BoW 单调向好</b>：day 场景 16→128 一路涨（79.2%→96.0%），128 后打平；night 同样在 128 饱和（44.0%）。</li>
+    <li><b>VLAD 有甜点、会崩</b>：day 在 16 词最好（89.8%），之后缓慢下滑；night 在 64 词最好（48.8%），128 词腰斩（34.7%），256 词直接失效（10.7%，残差飙到 12.6 米）——原因是 1120 张图训 512 个聚类中心，平均每类不到 3 个样本，VLAD 靠"残差聚合"获得的鲁棒性被打破。</li>
+    <li><b>各自最优配置对比</b>：day 场景 BoW 完胜（96.0% vs 89.8%）；night/光照变化场景 VLAD 反超（48.8% vs 44.0%）。</li>
+  </ul>
+
+  <h2>④ 方法论踩过的坑（如实记录）</h2>
+  <ul class="findings">
+    <li><b>Bag 配对陷阱</b>：最初用 <code>bag_07_55</code>/<code>bag_09_49</code> 做交叉地图对比——后来发现这两段 bag 首尾只隔 11 秒，是同一次连续行走被切开的片段，不是特意设计的回环数据，拟合出的坐标变换在两种方法间相差 150°、残差 10+ 米，数据不可信。换成仓库自带的 <code>map_gt/day/night</code>（真正的回环评测集）后，两种方法拟合的 yaw 角才互相吻合。<span class="badge fixed">已修正</span></li>
+    <li><b>独立词典对比 bug</b>：第一版跨地图 BoW 对比让 map_a、map_b 各自训练自己的 512 词词典再直接点积——两套词典的视觉词编号毫无对应关系（k-means 无规范排序），比出来的数字是垃圾，BoW 一度看起来"全面惨败"。改成用 map_a 的词典重新编码 map_b（跟 <code>map_node.py</code> 生产代码的做法一致）后，数字才反转、变得可信。<span class="badge fixed">已修正</span></li>
+    <li><b>CPU% 误读</b>：build_map_node.py 建图跑出的"1000+% CPU"一度被当成"BoW 检索本身很贵"，实际拆解后发现是管线共享开销 + 线程池超订阅 + 地图密度不对等的混杂结果，微基准显示 BoW 单帧编码实际比 VLAD 更便宜。<span class="badge fixed">已修正</span></li>
+  </ul>
+
+  <h2>最终建议</h2>
+  <div class="tldr">
+    <p style="margin-top:0"><b>对地瓜 X5：</b>如果没有强烈的极端光照变化需求，<b style="color:var(--series-bow)">优先 SuperPoint+BoW</b>——零 ViT/GPU 依赖，量化链路只涉及 SuperPoint(CNN)，索引体积小两个数量级(~1MB vs 十几~上百MB)，且调好词典大小(128 附近)精度不输甚至超过 VLAD。如果目标场景确定要面对大幅昼夜/光照变化，<b style="color:var(--series-vlad)">DINOv2+VLAD 在合适词典大小(64 左右，不要用默认512或以上)下</b> 更鲁棒，但要接受 ViT 在 BPU 上量化和部署的额外工程成本。</p>
+  </div>
+
+  <div class="tooltip" id="tooltip"></div>
+  <footer>数据来源：本会话内 build_map_node.py / retrieve_from_rosbag_map.py / tool/benchmark/map_retrieval_self_consistency.py 实测，容器 tinynav-dev，2026-07-31。</footer>
+</div>
+
+<script>
+const SWEEP_DATA = [{"method": "dinov2_global", "vocab": "-", "scene": "day", "yaw": -0.695783784230277, "res_med": 0.21652008460058192, "inl_0.5": 0.8234280792420328, "R@1": 0.8234280792420328, "R@10": 0.9724375538329026, "IoU@10": 0.32109965295398046, "eval_cpu_mean": null, "eval_gpu_mean": null, "build_cpu_mean": null, "build_gpu_mean": null, "build_gpu_mem": null}, {"method": "dinov2_global", "vocab": "-", "scene": "night", "yaw": 18.082074168260007, "res_med": 0.8410430751378563, "inl_0.5": 0.3714531384350817, "R@1": 0.3714531384350817, "R@10": 0.6311263972484953, "IoU@10": 0.15024251388491286, "eval_cpu_mean": null, "eval_gpu_mean": null, "build_cpu_mean": null, "build_gpu_mean": null, "build_gpu_mem": null}, {"method": "vlad", "vocab": 16, "scene": "day", "yaw": -0.804976437449208, "res_med": 0.1806343151439052, "inl_0.5": 0.8975021533161068, "R@1": 0.8975021533161068, "R@10": 0.9931093884582257, "IoU@10": 0.3925782250026485, "eval_cpu_mean": 358.7, "eval_gpu_mean": 0.0, "build_cpu_mean": 207.10666666666665, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 16, "scene": "night", "yaw": 17.83909099483673, "res_med": 1.104729836315377, "inl_0.5": 0.3791917454858126, "R@1": 0.3791917454858126, "R@10": 0.6706792777300086, "IoU@10": 0.14485062719688035, "eval_cpu_mean": 401.81, "eval_gpu_mean": 0.0, "build_cpu_mean": 207.10666666666665, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 16, "scene": "day", "yaw": -0.9727883936272631, "res_med": 0.19342699130934016, "inl_0.5": 0.7924203273040482, "R@1": 0.7924203273040482, "R@10": 0.9664082687338501, "IoU@10": 0.3222517233438794, "eval_cpu_mean": 925.09, "eval_gpu_mean": 0.0, "build_cpu_mean": 330.2866666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 16, "scene": "night", "yaw": 17.46470464029769, "res_med": 5.573947111660766, "inl_0.5": 0.1711092003439381, "R@1": 0.1711092003439381, "R@10": 0.3757523645743766, "IoU@10": 0.07306435503899218, "eval_cpu_mean": 855.61, "eval_gpu_mean": 0.0, "build_cpu_mean": 330.2866666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 32, "scene": "day", "yaw": -0.7282278005630209, "res_med": 0.1954496119833662, "inl_0.5": 0.8578811369509044, "R@1": 0.8578811369509044, "R@10": 0.9810508182601206, "IoU@10": 0.35425859740385174, "eval_cpu_mean": 430.0, "eval_gpu_mean": 0.0, "build_cpu_mean": 312.4166666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 32, "scene": "night", "yaw": 17.932730479266546, "res_med": 0.5780696892675777, "inl_0.5": 0.45657781599312125, "R@1": 0.45657781599312125, "R@10": 0.7497850386930353, "IoU@10": 0.1664111279210547, "eval_cpu_mean": 314.01, "eval_gpu_mean": 0.0, "build_cpu_mean": 312.4166666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 32, "scene": "day", "yaw": -0.955340160709393, "res_med": 0.16471006280298087, "inl_0.5": 0.8871662360034454, "R@1": 0.8871662360034454, "R@10": 0.9767441860465116, "IoU@10": 0.4062867595904353, "eval_cpu_mean": 961.89, "eval_gpu_mean": 0.0, "build_cpu_mean": 503.37000000000006, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 32, "scene": "night", "yaw": 18.247907370874074, "res_med": 3.200460959674422, "inl_0.5": 0.2794496990541703, "R@1": 0.2794496990541703, "R@10": 0.5331040412725709, "IoU@10": 0.12863083861437904, "eval_cpu_mean": 904.95, "eval_gpu_mean": 0.0, "build_cpu_mean": 503.37000000000006, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 64, "scene": "day", "yaw": -0.7218028992956108, "res_med": 0.20552769084527653, "inl_0.5": 0.8621877691645133, "R@1": 0.8621877691645133, "R@10": 0.9922480620155039, "IoU@10": 0.33241217852710686, "eval_cpu_mean": 371.17, "eval_gpu_mean": 0.0, "build_cpu_mean": 459.73333333333335, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 64, "scene": "night", "yaw": 18.18271160805405, "res_med": 0.5229495351937276, "inl_0.5": 0.4883920894239037, "R@1": 0.4883920894239037, "R@10": 0.7411865864144453, "IoU@10": 0.15563671205175372, "eval_cpu_mean": 376.15, "eval_gpu_mean": 0.0, "build_cpu_mean": 459.73333333333335, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 64, "scene": "day", "yaw": -0.8587452159603048, "res_med": 0.16097210762711545, "inl_0.5": 0.9310938845822567, "R@1": 0.9310938845822567, "R@10": 0.9948320413436692, "IoU@10": 0.4486048431015206, "eval_cpu_mean": 964.48, "eval_gpu_mean": 0.0, "build_cpu_mean": 858.8566666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 64, "scene": "night", "yaw": 18.089042211210092, "res_med": 1.0932195334574608, "inl_0.5": 0.352536543422184, "R@1": 0.352536543422184, "R@10": 0.5898538263112639, "IoU@10": 0.1641832737170175, "eval_cpu_mean": 894.35, "eval_gpu_mean": 0.0, "build_cpu_mean": 858.8566666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 128, "scene": "day", "yaw": -0.78390515674578, "res_med": 0.19418122847867147, "inl_0.5": 0.8423772609819121, "R@1": 0.8423772609819121, "R@10": 0.9844961240310077, "IoU@10": 0.3510834036497342, "eval_cpu_mean": 285.24, "eval_gpu_mean": 0.0, "build_cpu_mean": 635.6333333333333, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 128, "scene": "night", "yaw": 17.836989464955806, "res_med": 3.7134149873186604, "inl_0.5": 0.34651762682717113, "R@1": 0.34651762682717113, "R@10": 0.6354256233877902, "IoU@10": 0.13038477529025738, "eval_cpu_mean": 385.95, "eval_gpu_mean": 0.0, "build_cpu_mean": 635.6333333333333, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 128, "scene": "day", "yaw": -0.9017303893573886, "res_med": 0.15649479562428226, "inl_0.5": 0.9595176571920758, "R@1": 0.9595176571920758, "R@10": 0.9931093884582257, "IoU@10": 0.47974297382549064, "eval_cpu_mean": 1009.98, "eval_gpu_mean": 0.0, "build_cpu_mean": 1128.1033333333332, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 128, "scene": "night", "yaw": 18.04962887931772, "res_med": 0.6496474249647685, "inl_0.5": 0.4402407566638005, "R@1": 0.4402407566638005, "R@10": 0.649183147033534, "IoU@10": 0.19884035709372522, "eval_cpu_mean": 944.12, "eval_gpu_mean": 0.0, "build_cpu_mean": 1128.1033333333332, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 256, "scene": "day", "yaw": -0.6896581914867821, "res_med": 0.20118722141569595, "inl_0.5": 0.8105081826012058, "R@1": 0.8105081826012058, "R@10": 0.9801894918173988, "IoU@10": 0.33181300685466686, "eval_cpu_mean": 223.37, "eval_gpu_mean": 0.0, "build_cpu_mean": 832.82, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 256, "scene": "night", "yaw": 17.83121630285344, "res_med": 12.636843599354352, "inl_0.5": 0.10662080825451418, "R@1": 0.10662080825451418, "R@10": 0.2717110920034394, "IoU@10": 0.039024868073495374, "eval_cpu_mean": 165.96, "eval_gpu_mean": 0.0, "build_cpu_mean": 832.82, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 256, "scene": "day", "yaw": -0.9050842753789764, "res_med": 0.14776107239081343, "inl_0.5": 0.9500430663221361, "R@1": 0.9500430663221361, "R@10": 0.9939707149009475, "IoU@10": 0.5038012275782605, "eval_cpu_mean": 1059.37, "eval_gpu_mean": 0.0, "build_cpu_mean": 1315.47, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 256, "scene": "night", "yaw": 17.747562479909693, "res_med": 0.7452765728425154, "inl_0.5": 0.42218400687876184, "R@1": 0.42218400687876184, "R@10": 0.6629406706792778, "IoU@10": 0.20772770723358577, "eval_cpu_mean": 954.94, "eval_gpu_mean": 0.0, "build_cpu_mean": 1315.47, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}];
+
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+const COLOR = {};
+function resolveColors(root) {
+  const cs = getComputedStyle(root);
+  COLOR.vlad = cs.getPropertyValue('--series-vlad').trim();
+  COLOR.bow = cs.getPropertyValue('--series-bow').trim();
+  COLOR.global = cs.getPropertyValue('--series-global').trim();
+  COLOR.muted = cs.getPropertyValue('--text-muted').trim();
+}
+const tooltip = document.getElementById('tooltip');
+function showTip(ev, html) {
+  tooltip.style.display = 'block';
+  tooltip.innerHTML = html;
+  tooltip.style.left = (ev.pageX + 12) + 'px';
+  tooltip.style.top = (ev.pageY - 28) + 'px';
+}
+function hideTip() { tooltip.style.display = 'none'; }
+
+// ---------- grouped bar chart helper ----------
+function groupedBarChart(svgId, groups, seriesKeys, seriesColors, seriesLabels, opts) {
+  const svg = document.getElementById(svgId);
+  const W = +svg.getAttribute('width'), H = +svg.getAttribute('height');
+  const ML = opts.ml || 46, MR = 16, MT = 16, MB = 46;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const maxVal = opts.max || Math.max(...groups.flatMap(g => seriesKeys.map(k => g[k] || 0))) * 1.15;
+  const groupW = plotW / groups.length;
+  const barW = (groupW * 0.62) / seriesKeys.length;
+  const y = v => MT + (1 - v / maxVal) * plotH;
+
+  for (let t = 0; t <= maxVal; t += maxVal / 4) {
+    svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: y(t), y2: y(t), class: 'gridline' }));
+    const lbl = el('text', { x: ML - 8, y: y(t) + 4, class: 'axis-label', 'text-anchor': 'end' });
+    lbl.textContent = Math.round(t) + (opts.unit || '');
+    svg.appendChild(lbl);
+  }
+  svg.appendChild(el('line', { x1: ML, x2: ML, y1: MT, y2: H - MB, class: 'axis-line' }));
+  svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: H - MB, y2: H - MB, class: 'axis-line' }));
+
+  groups.forEach((g, gi) => {
+    const gx0 = ML + gi * groupW + groupW * 0.19;
+    seriesKeys.forEach((k, si) => {
+      const v = g[k] || 0;
+      const bx = gx0 + si * barW;
+      const by = y(v);
+      const rect = el('rect', {
+        x: bx, y: by, width: barW - 3, height: (H - MB) - by,
+        fill: seriesColors[si], rx: 3, style: 'cursor:pointer'
+      });
+      rect.addEventListener('mouseenter', (ev) => showTip(ev, '<b>' + seriesLabels[si] + '</b><br>' + g.label + '<br>' + v.toFixed(opts.decimals != null ? opts.decimals : 0) + (opts.unit || '')));
+      rect.addEventListener('mousemove', (ev) => showTip(ev, '<b>' + seriesLabels[si] + '</b><br>' + g.label + '<br>' + v.toFixed(opts.decimals != null ? opts.decimals : 0) + (opts.unit || '')));
+      rect.addEventListener('mouseleave', hideTip);
+      svg.appendChild(rect);
+    });
+    const glabel = el('text', { x: ML + gi * groupW + groupW / 2, y: H - MB + 18, class: 'axis-label', 'text-anchor': 'middle' });
+    glabel.textContent = g.label;
+    svg.appendChild(glabel);
+  });
+}
+
+// ---------- ① resource charts ----------
+resolveColorsWrapper();
+function resolveColorsWrapper() {
+  const root = document.querySelector('.viz-root');
+  resolveColors(root);
+
+  groupedBarChart('chart-build',
+    [
+      { label: 'CPU mean%', vlad: 352.5, bow: 486.7 },
+      { label: 'GPU util%', vlad: 3.3, bow: 2.0 },
+      { label: 'GPU mem(×10 MiB)', vlad: 76.5, bow: 59.7 },
+    ],
+    ['vlad', 'bow'], [COLOR.vlad, COLOR.bow], ['DINOv2+VLAD', 'SuperPoint+BoW'],
+    { max: 520, decimals: 1 }
+  );
+  groupedBarChart('chart-eval',
+    [
+      { label: 'CPU mean%', vlad: 903.7, bow: 1162.5 },
+      { label: 'GPU util%', vlad: 4.4, bow: 2.7 },
+      { label: 'GPU mem(×10 MiB)', vlad: 55.9, bow: 38.2 },
+    ],
+    ['vlad', 'bow'], [COLOR.vlad, COLOR.bow], ['DINOv2+VLAD', 'SuperPoint+BoW'],
+    { max: 1200, decimals: 1 }
+  );
+  const legendResource = document.getElementById('legend-resource');
+  [['DINOv2+VLAD', COLOR.vlad], ['SuperPoint+BoW', COLOR.bow]].forEach(([label, color]) => {
+    const div = document.createElement('div'); div.className = 'item';
+    div.innerHTML = '<span class="swatch" style="background:' + color + '"></span>' + label;
+    legendResource.appendChild(div);
+  });
+  const note = document.createElement('div');
+  note.style.cssText = 'color:var(--text-muted); font-size:11px; margin-top:4px; width:100%';
+  note.textContent = 'GPU mem 轴以 ×10 MiB 显示（如 94.4 = 944 MiB），三个分组共享同一根 Y 轴仅为排布方便，单位各不相同，请以 tooltip 数值为准。';
+  legendResource.appendChild(note);
+
+  // ---------- ② default-config accuracy ----------
+  const defaultData = [
+    { label: 'Day', method: 'global', v: 0.823 }, { label: 'Day', method: 'vlad', v: 0.858 }, { label: 'Day', method: 'bow', v: 0.967 },
+    { label: 'Night', method: 'global', v: 0.371 }, { label: 'Night', method: 'vlad', v: 0.457 }, { label: 'Night', method: 'bow', v: 0.510 },
+  ];
+  const groupsAcc = ['Day', 'Night'].map(scene => {
+    const row = { label: scene };
+    defaultData.filter(d => d.label === scene).forEach(d => row[d.method] = d.v * 100);
+    return row;
+  });
+  groupedBarChart('chart-default-acc', groupsAcc, ['global', 'vlad', 'bow'],
+    [COLOR.global, COLOR.vlad, COLOR.bow], ['DINOv2 global', 'DINOv2+VLAD(32词)', 'SuperPoint+BoW(512词)'],
+    { max: 100, unit: '%', decimals: 1, ml: 50 });
+  const legendDefault = document.getElementById('legend-default');
+  [['DINOv2 global(无词典)', COLOR.global], ['DINOv2+VLAD · 32 词(默认)', COLOR.vlad], ['SuperPoint+BoW · 512 词(默认)', COLOR.bow]].forEach(([label, color]) => {
+    const div = document.createElement('div'); div.className = 'item';
+    div.innerHTML = '<span class="swatch" style="background:' + color + '"></span>' + label;
+    legendDefault.appendChild(div);
+  });
+
+  // ---------- ③ vocab sweep line chart ----------
+  drawSweepChart();
+}
+
+function drawSweepChart() {
+  const svg = document.getElementById('chart-sweep');
+  const W = 900, H = 340, ML = 46, MR = 20, MT = 16, MB = 40;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const VOCABS = [16, 32, 64, 128, 256];
+  const x = i => ML + (i / (VOCABS.length - 1)) * plotW;
+  const y = v => MT + (1 - v) * plotH;
+
+  for (let t = 0; t <= 1; t += 0.25) {
+    svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: y(t), y2: y(t), class: 'gridline' }));
+    const lbl = el('text', { x: ML - 8, y: y(t) + 4, class: 'axis-label', 'text-anchor': 'end' });
+    lbl.textContent = Math.round(t * 100) + '%';
+    svg.appendChild(lbl);
+  }
+  svg.appendChild(el('line', { x1: ML, x2: ML, y1: MT, y2: H - MB, class: 'axis-line' }));
+  svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: H - MB, y2: H - MB, class: 'axis-line' }));
+  VOCABS.forEach((v, i) => {
+    const lbl = el('text', { x: x(i), y: H - MB + 18, class: 'axis-label', 'text-anchor': 'middle' });
+    lbl.textContent = v;
+    svg.appendChild(lbl);
+  });
+  const xTitle = el('text', { x: ML + plotW / 2, y: H - 4, class: 'axis-label', 'text-anchor': 'middle' });
+  xTitle.textContent = '词典大小（visual words / clusters）';
+  svg.appendChild(xTitle);
+
+  const series = [];
+  for (const method of ['vlad', 'bow']) {
+    for (const scene of ['day', 'night']) {
+      const pts = VOCABS.map(v => {
+        const row = SWEEP_DATA.find(r => r.method === method && r.vocab === v && r.scene === scene);
+        return row ? row['R@1'] : null;
+      });
+      series.push({ method, scene, label: (method === 'vlad' ? 'DINOv2+VLAD' : 'SuperPoint+BoW') + ' · ' + scene, pts });
+    }
+  }
+
+  series.forEach(s => {
+    const color = COLOR[s.method];
+    const dashed = s.scene === 'night';
+    const pts = s.pts.map((v, i) => v == null ? null : [x(i), y(v)]).filter(Boolean);
+    const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0] + ' ' + p[1]).join(' ');
+    svg.appendChild(el('path', { d: path, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-dasharray': dashed ? '5 4' : 'none' }));
+    s.pts.forEach((v, i) => {
+      if (v == null) return;
+      const cx = x(i), cy = y(v);
+      const dot = el('circle', { cx, cy, r: 4.5, fill: color, stroke: 'var(--surface-2)', 'stroke-width': 1.5, style: 'cursor:pointer' });
+      dot.addEventListener('mouseenter', (ev) => showTip(ev, '<b>' + s.label + '</b><br>vocab=' + VOCABS[i] + '<br>R@1 = ' + (v * 100).toFixed(1) + '%'));
+      dot.addEventListener('mousemove', (ev) => showTip(ev, '<b>' + s.label + '</b><br>vocab=' + VOCABS[i] + '<br>R@1 = ' + (v * 100).toFixed(1) + '%'));
+      dot.addEventListener('mouseleave', hideTip);
+      svg.appendChild(dot);
+    });
+    const last = pts[pts.length - 1];
+    if (last) {
+      const lbl = el('text', { x: last[0] + 8, y: last[1] + 4, class: 'data-label', fill: color });
+      lbl.textContent = (s.method === 'vlad' ? 'VLAD' : 'BoW') + (s.scene === 'night' ? '·night' : '·day');
+      svg.appendChild(lbl);
+    }
+  });
+
+  const legend = document.getElementById('legend-sweep');
+  [
+    ['DINOv2+VLAD（day 实线 / night 虚线）', COLOR.vlad],
+    ['SuperPoint+BoW（day 实线 / night 虚线）', COLOR.bow],
+  ].forEach(([label, color]) => {
+    const div = document.createElement('div'); div.className = 'item';
+    div.innerHTML = '<span class="swatch line" style="background:' + color + '"></span>' + label;
+    legend.appendChild(div);
+  });
+}
+</script>

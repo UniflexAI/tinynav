@@ -1,0 +1,358 @@
+<title>VLAD vs BoW vocab size sweep</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --surface-1:      #fcfcfb;
+  --surface-2:      #f3f2ef;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #7a7972;
+  --border:         #e2e0da;
+  --series-vlad:    #2a78d6;
+  --series-bow:     #eb6834;
+  --series-global:  #1baf7a;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --surface-2:      #242422;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8f8e85;
+    --border:         #38372f;
+    --series-vlad:    #3987e5;
+    --series-bow:     #d95926;
+    --series-global:  #199e70;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-1:      #1a1a19;
+  --surface-2:      #242422;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #8f8e85;
+  --border:         #38372f;
+  --series-vlad:    #3987e5;
+  --series-bow:     #d95926;
+  --series-global:  #199e70;
+}
+.viz-root {
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 24px;
+  max-width: 980px;
+  margin: 0 auto;
+}
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 32px 0 4px; color: var(--text-primary); }
+p.sub { color: var(--text-secondary); font-size: 13px; margin: 0 0 20px; }
+.chart-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px 12px;
+  margin-bottom: 8px;
+  overflow-x: auto;
+}
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin: 8px 0 0; }
+.legend .item { display: flex; align-items: center; gap: 6px; }
+.legend .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.legend .swatch.dashed { background: repeating-linear-gradient(to right, currentColor 0 5px, transparent 5px 8px); height: 2px; }
+svg { display: block; overflow: visible; }
+.axis-label { fill: var(--text-muted); font-size: 11px; }
+.axis-line { stroke: var(--border); stroke-width: 1; }
+.gridline { stroke: var(--border); stroke-width: 1; opacity: 0.6; }
+.data-label { font-size: 11px; font-weight: 600; }
+.tooltip {
+  position: absolute; pointer-events: none; background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; color: var(--text-primary); box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  display: none; white-space: nowrap; z-index: 10;
+}
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--surface-2); }
+tr:hover td { background: var(--surface-2); }
+.note { font-size: 12px; color: var(--text-muted); margin-top: 10px; line-height: 1.5; }
+.callout {
+  border-left: 3px solid var(--series-bow); background: var(--surface-2); border-radius: 0 8px 8px 0;
+  padding: 10px 16px; margin: 8px 0 20px; font-size: 12.5px; color: var(--text-secondary);
+}
+.callout b { color: var(--text-primary); }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.pill.best { background: rgba(27,175,122,0.15); color: var(--series-global); }
+</style>
+
+<div class="viz-root">
+  <h1>DINOv2+VLAD vs SuperPoint+BoW — vocabulary size sweep</h1>
+  <p class="sub">map_gt (1120 关键帧, reference) 对比 map_day / map_night (query)，self-consistency top-1 检索命中率 @0.5m。DINOv2 global 无词典，固定基线（虚线参考）。</p>
+
+  <div class="callout" style="border-left-color:var(--series-global)">
+    <b>数据来源已直接验证，非旁证</b>：下载 HuggingFace <code>UniflexAI/rosbag_tinynav_vlad_eval</code>（<code>bag_gt</code>/<code>bag_day</code>/<code>bag_night</code>）核对后发现，这三个 bag 与本地 <code>bag_1970_01_01_08_07_55</code>/<code>_09_49</code>/<code>_05_15</code> **字节数完全一致**——是同一批录制数据。用 <code>tool/looper_bridge_node.py</code>（bag 录制时用的外部 Looper VIO 位姿桥接节点，正确的建图流程）对这三个 bag 分别重新建图，关键帧数为 <b>1120 / 1161 / 1163</b>，与本报告使用的 <code>map_gt</code>(1120) / <code>map_day</code>(1161) / <code>map_night</code>(1163) <b>逐一精确对上</b>。这确认了本报告的地图数据本来就是用正确流程建的，不存在方法论问题（对比 <code>vlad_vs_bow_final_report.html</code> 里记录的另一处 bug：之前误用 <code>perception_node.py</code> 重跑实时 VIO，导致 <code>bag_07_55</code>/<code>09_49</code> 的建图对比数据一度失真，那个问题跟本报告的数据来源无关，且已修正）。
+  </div>
+
+  <div class="chart-card">
+    <svg id="chart-recall" width="900" height="360" viewBox="0 0 900 360"></svg>
+    <div class="legend" id="legend-recall"></div>
+  </div>
+
+  <h2>建图/补建索引阶段 CPU 占用（3 张图平均，%，单核=100%）</h2>
+  <div class="callout">
+    <b>下图 GPU 全是 0，不是漏测</b>：这批测试复用了之前已经算好并缓存的 DINOv2 patch token（<code>patch_tokens.db</code>），<code>build_vlad_index.py</code> 每次都会先检查 token 是否已存在，存在就跳过 DINOv2 推理，只重跑 k-means 训练+重算描述子——纯 CPU。真正需要 GPU 的"算 patch token"是<b>一次性</b>步骤，在这次词典扫描之前就做完了：GPU 利用率 ~9-32%、显存 ~450-480MB、1100-1160 帧耗时 ~30秒，且与词典大小无关。
+  </div>
+  <div class="chart-card">
+    <svg id="chart-cpu" width="900" height="260" viewBox="0 0 900 260"></svg>
+    <div class="legend" id="legend-cpu"></div>
+  </div>
+  <div class="callout" style="border-left-color:var(--series-vlad)">
+    <b>这里的 CPU% 没有做线程限制，数字偏高</b>：另一轮实验里（对 eval 阶段的检索脚本）把 <code>OMP_NUM_THREADS</code>/<code>OPENBLAS_NUM_THREADS</code> 锁定为 1 后，BoW 的 CPU mean 从 1167% 降到 819%（且跑得更快），VLAD 几乎不受影响（scipy cKDTree 走的是另一套并行机制）。这里的补建索引 CPU 没有重新用锁线程跑一遍验证，但大概率同样存在 BLAS 线程池超订阅的水分——尤其 BoW 那条曲线，真实需要的计算量应该比图上低。详见 <code>vlad_vs_bow_final_report.html</code> 里的线程池实验小节。
+  </div>
+
+  <h2>完整数据表</h2>
+  <div class="chart-card" style="max-height:520px; overflow-y:auto;">
+    <table id="data-table"></table>
+  </div>
+
+  <p class="note">
+    yaw / 残差 用于确认拟合稳定（三种方法在同一对地图上应拟合出同一个物理变换）；R@1 / R@10 / IoU@10 是 threshold=0.5m 下的检索质量指标。
+    build_cpu_mean 是"补建索引"阶段（词典训练+描述子计算，不含一次性的 DINOv2 图像推理，那部分是与词典大小无关的固定成本）。
+    eval 阶段 GPU 全程 0%（self-consistency 是纯读盘+点积，不跑模型）。
+  </p>
+
+  <div class="tooltip" id="tooltip"></div>
+</div>
+
+<script>
+const DATA = [{"method": "dinov2_global", "vocab": "-", "scene": "day", "yaw": -0.695783784230277, "res_med": 0.21652008460058192, "inl_0.5": 0.8234280792420328, "R@1": 0.8234280792420328, "R@10": 0.9724375538329026, "IoU@10": 0.32109965295398046, "eval_cpu_mean": null, "eval_gpu_mean": null, "build_cpu_mean": null, "build_gpu_mean": null, "build_gpu_mem": null}, {"method": "dinov2_global", "vocab": "-", "scene": "night", "yaw": 18.082074168260007, "res_med": 0.8410430751378563, "inl_0.5": 0.3714531384350817, "R@1": 0.3714531384350817, "R@10": 0.6311263972484953, "IoU@10": 0.15024251388491286, "eval_cpu_mean": null, "eval_gpu_mean": null, "build_cpu_mean": null, "build_gpu_mean": null, "build_gpu_mem": null}, {"method": "vlad", "vocab": 16, "scene": "day", "yaw": -0.804976437449208, "res_med": 0.1806343151439052, "inl_0.5": 0.8975021533161068, "R@1": 0.8975021533161068, "R@10": 0.9931093884582257, "IoU@10": 0.3925782250026485, "eval_cpu_mean": 358.7, "eval_gpu_mean": 0.0, "build_cpu_mean": 207.10666666666665, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 16, "scene": "night", "yaw": 17.83909099483673, "res_med": 1.104729836315377, "inl_0.5": 0.3791917454858126, "R@1": 0.3791917454858126, "R@10": 0.6706792777300086, "IoU@10": 0.14485062719688035, "eval_cpu_mean": 401.81, "eval_gpu_mean": 0.0, "build_cpu_mean": 207.10666666666665, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 16, "scene": "day", "yaw": -0.9727883936272631, "res_med": 0.19342699130934016, "inl_0.5": 0.7924203273040482, "R@1": 0.7924203273040482, "R@10": 0.9664082687338501, "IoU@10": 0.3222517233438794, "eval_cpu_mean": 925.09, "eval_gpu_mean": 0.0, "build_cpu_mean": 330.2866666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 16, "scene": "night", "yaw": 17.46470464029769, "res_med": 5.573947111660766, "inl_0.5": 0.1711092003439381, "R@1": 0.1711092003439381, "R@10": 0.3757523645743766, "IoU@10": 0.07306435503899218, "eval_cpu_mean": 855.61, "eval_gpu_mean": 0.0, "build_cpu_mean": 330.2866666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 32, "scene": "day", "yaw": -0.7282278005630209, "res_med": 0.1954496119833662, "inl_0.5": 0.8578811369509044, "R@1": 0.8578811369509044, "R@10": 0.9810508182601206, "IoU@10": 0.35425859740385174, "eval_cpu_mean": 430.0, "eval_gpu_mean": 0.0, "build_cpu_mean": 312.4166666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 32, "scene": "night", "yaw": 17.932730479266546, "res_med": 0.5780696892675777, "inl_0.5": 0.45657781599312125, "R@1": 0.45657781599312125, "R@10": 0.7497850386930353, "IoU@10": 0.1664111279210547, "eval_cpu_mean": 314.01, "eval_gpu_mean": 0.0, "build_cpu_mean": 312.4166666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 32, "scene": "day", "yaw": -0.955340160709393, "res_med": 0.16471006280298087, "inl_0.5": 0.8871662360034454, "R@1": 0.8871662360034454, "R@10": 0.9767441860465116, "IoU@10": 0.4062867595904353, "eval_cpu_mean": 961.89, "eval_gpu_mean": 0.0, "build_cpu_mean": 503.37000000000006, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 32, "scene": "night", "yaw": 18.247907370874074, "res_med": 3.200460959674422, "inl_0.5": 0.2794496990541703, "R@1": 0.2794496990541703, "R@10": 0.5331040412725709, "IoU@10": 0.12863083861437904, "eval_cpu_mean": 904.95, "eval_gpu_mean": 0.0, "build_cpu_mean": 503.37000000000006, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 64, "scene": "day", "yaw": -0.7218028992956108, "res_med": 0.20552769084527653, "inl_0.5": 0.8621877691645133, "R@1": 0.8621877691645133, "R@10": 0.9922480620155039, "IoU@10": 0.33241217852710686, "eval_cpu_mean": 371.17, "eval_gpu_mean": 0.0, "build_cpu_mean": 459.73333333333335, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 64, "scene": "night", "yaw": 18.18271160805405, "res_med": 0.5229495351937276, "inl_0.5": 0.4883920894239037, "R@1": 0.4883920894239037, "R@10": 0.7411865864144453, "IoU@10": 0.15563671205175372, "eval_cpu_mean": 376.15, "eval_gpu_mean": 0.0, "build_cpu_mean": 459.73333333333335, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 64, "scene": "day", "yaw": -0.8587452159603048, "res_med": 0.16097210762711545, "inl_0.5": 0.9310938845822567, "R@1": 0.9310938845822567, "R@10": 0.9948320413436692, "IoU@10": 0.4486048431015206, "eval_cpu_mean": 964.48, "eval_gpu_mean": 0.0, "build_cpu_mean": 858.8566666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 64, "scene": "night", "yaw": 18.089042211210092, "res_med": 1.0932195334574608, "inl_0.5": 0.352536543422184, "R@1": 0.352536543422184, "R@10": 0.5898538263112639, "IoU@10": 0.1641832737170175, "eval_cpu_mean": 894.35, "eval_gpu_mean": 0.0, "build_cpu_mean": 858.8566666666667, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 128, "scene": "day", "yaw": -0.78390515674578, "res_med": 0.19418122847867147, "inl_0.5": 0.8423772609819121, "R@1": 0.8423772609819121, "R@10": 0.9844961240310077, "IoU@10": 0.3510834036497342, "eval_cpu_mean": 285.24, "eval_gpu_mean": 0.0, "build_cpu_mean": 635.6333333333333, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 128, "scene": "night", "yaw": 17.836989464955806, "res_med": 3.7134149873186604, "inl_0.5": 0.34651762682717113, "R@1": 0.34651762682717113, "R@10": 0.6354256233877902, "IoU@10": 0.13038477529025738, "eval_cpu_mean": 385.95, "eval_gpu_mean": 0.0, "build_cpu_mean": 635.6333333333333, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 128, "scene": "day", "yaw": -0.9017303893573886, "res_med": 0.15649479562428226, "inl_0.5": 0.9595176571920758, "R@1": 0.9595176571920758, "R@10": 0.9931093884582257, "IoU@10": 0.47974297382549064, "eval_cpu_mean": 1009.98, "eval_gpu_mean": 0.0, "build_cpu_mean": 1128.1033333333332, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 128, "scene": "night", "yaw": 18.04962887931772, "res_med": 0.6496474249647685, "inl_0.5": 0.4402407566638005, "R@1": 0.4402407566638005, "R@10": 0.649183147033534, "IoU@10": 0.19884035709372522, "eval_cpu_mean": 944.12, "eval_gpu_mean": 0.0, "build_cpu_mean": 1128.1033333333332, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 256, "scene": "day", "yaw": -0.6896581914867821, "res_med": 0.20118722141569595, "inl_0.5": 0.8105081826012058, "R@1": 0.8105081826012058, "R@10": 0.9801894918173988, "IoU@10": 0.33181300685466686, "eval_cpu_mean": 223.37, "eval_gpu_mean": 0.0, "build_cpu_mean": 832.82, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "vlad", "vocab": 256, "scene": "night", "yaw": 17.83121630285344, "res_med": 12.636843599354352, "inl_0.5": 0.10662080825451418, "R@1": 0.10662080825451418, "R@10": 0.2717110920034394, "IoU@10": 0.039024868073495374, "eval_cpu_mean": 165.96, "eval_gpu_mean": 0.0, "build_cpu_mean": 832.82, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 256, "scene": "day", "yaw": -0.9050842753789764, "res_med": 0.14776107239081343, "inl_0.5": 0.9500430663221361, "R@1": 0.9500430663221361, "R@10": 0.9939707149009475, "IoU@10": 0.5038012275782605, "eval_cpu_mean": 1059.37, "eval_gpu_mean": 0.0, "build_cpu_mean": 1315.47, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}, {"method": "bow", "vocab": 256, "scene": "night", "yaw": 17.747562479909693, "res_med": 0.7452765728425154, "inl_0.5": 0.42218400687876184, "R@1": 0.42218400687876184, "R@10": 0.6629406706792778, "IoU@10": 0.20772770723358577, "eval_cpu_mean": 954.94, "eval_gpu_mean": 0.0, "build_cpu_mean": 1315.47, "build_gpu_mean": 0.0, "build_gpu_mem": 170.0}];
+
+const COLOR = { vlad: 'var(--series-vlad)', bow: 'var(--series-bow)', dinov2_global: 'var(--series-global)' };
+const COLOR_RESOLVED = {}; // filled after mount, since CSS vars need computed style
+
+function resolveColors(root) {
+  const cs = getComputedStyle(root);
+  COLOR_RESOLVED.vlad = cs.getPropertyValue('--series-vlad').trim();
+  COLOR_RESOLVED.bow = cs.getPropertyValue('--series-bow').trim();
+  COLOR_RESOLVED.dinov2_global = cs.getPropertyValue('--series-global').trim();
+}
+
+const VOCABS = [16, 32, 64, 128, 256];
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+function buildRecallSeries() {
+  const series = [];
+  for (const method of ['vlad', 'bow']) {
+    for (const scene of ['day', 'night']) {
+      const pts = VOCABS.map(v => {
+        const row = DATA.find(r => r.method === method && r.vocab === v && r.scene === scene);
+        return row ? row['R@1'] : null;
+      });
+      series.push({ key: method + '_' + scene, method, scene, label: (method === 'vlad' ? 'DINOv2+VLAD' : 'SuperPoint+BoW') + ' · ' + (scene === 'day' ? 'day' : 'night'), pts });
+    }
+  }
+  const baselines = ['day', 'night'].map(scene => {
+    const row = DATA.find(r => r.method === 'dinov2_global' && r.scene === scene);
+    return { scene, value: row ? row['R@1'] : null, label: 'DINOv2 global · ' + scene };
+  });
+  return { series, baselines };
+}
+
+function drawRecallChart() {
+  const svg = document.getElementById('chart-recall');
+  const W = 900, H = 360, ML = 46, MR = 20, MT = 16, MB = 40;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const { series, baselines } = buildRecallSeries();
+
+  const x = i => ML + (i / (VOCABS.length - 1)) * plotW;
+  const y = v => MT + (1 - v) * plotH;
+
+  // gridlines + y axis
+  for (let t = 0; t <= 1; t += 0.25) {
+    svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: y(t), y2: y(t), class: 'gridline' }));
+    const lbl = el('text', { x: ML - 8, y: y(t) + 4, class: 'axis-label', 'text-anchor': 'end' });
+    lbl.textContent = Math.round(t * 100) + '%';
+    svg.appendChild(lbl);
+  }
+  svg.appendChild(el('line', { x1: ML, x2: ML, y1: MT, y2: H - MB, class: 'axis-line' }));
+  svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: H - MB, y2: H - MB, class: 'axis-line' }));
+  VOCABS.forEach((v, i) => {
+    const lbl = el('text', { x: x(i), y: H - MB + 18, class: 'axis-label', 'text-anchor': 'middle' });
+    lbl.textContent = v;
+    svg.appendChild(lbl);
+  });
+  const xTitle = el('text', { x: ML + plotW / 2, y: H - 4, class: 'axis-label', 'text-anchor': 'middle' });
+  xTitle.textContent = '词典大小（visual words / clusters）';
+  svg.appendChild(xTitle);
+
+  // baseline reference lines (DINOv2 global — vocab-independent)
+  baselines.forEach(b => {
+    if (b.value == null) return;
+    const line = el('line', {
+      x1: ML, x2: W - MR, y1: y(b.value), y2: y(b.value),
+      stroke: COLOR_RESOLVED.dinov2_global, 'stroke-width': 1.5,
+      'stroke-dasharray': b.scene === 'night' ? '2 4' : 'none', opacity: 0.6
+    });
+    svg.appendChild(line);
+  });
+
+  const tooltip = document.getElementById('tooltip');
+
+  series.forEach(s => {
+    const color = COLOR_RESOLVED[s.method];
+    const dashed = s.scene === 'night';
+    const pts = s.pts.map((v, i) => v == null ? null : [x(i), y(v)]).filter(Boolean);
+    const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0] + ' ' + p[1]).join(' ');
+    svg.appendChild(el('path', {
+      d: path, fill: 'none', stroke: color, 'stroke-width': 2,
+      'stroke-dasharray': dashed ? '5 4' : 'none'
+    }));
+    s.pts.forEach((v, i) => {
+      if (v == null) return;
+      const cx = x(i), cy = y(v);
+      const dot = el('circle', { cx, cy, r: 4.5, fill: color, stroke: 'var(--surface-2)', 'stroke-width': 1.5, style: 'cursor:pointer' });
+      dot.addEventListener('mouseenter', (ev) => {
+        tooltip.style.display = 'block';
+        tooltip.innerHTML = '<b>' + s.label + '</b><br>vocab=' + VOCABS[i] + '<br>R@1 = ' + (v * 100).toFixed(1) + '%';
+      });
+      dot.addEventListener('mousemove', (ev) => {
+        tooltip.style.left = (ev.pageX + 12) + 'px';
+        tooltip.style.top = (ev.pageY - 28) + 'px';
+      });
+      dot.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+      svg.appendChild(dot);
+    });
+    // direct label at last point
+    const last = pts[pts.length - 1];
+    if (last) {
+      const lbl = el('text', { x: last[0] + 8, y: last[1] + 4, class: 'data-label', fill: color });
+      lbl.textContent = (s.method === 'vlad' ? 'VLAD' : 'BoW') + (s.scene === 'night' ? '·night' : '·day');
+      svg.appendChild(lbl);
+    }
+  });
+
+  const legend = document.getElementById('legend-recall');
+  const items = [
+    { label: 'DINOv2+VLAD (day: 实线 / night: 虚线)', color: COLOR_RESOLVED.vlad },
+    { label: 'SuperPoint+BoW (day: 实线 / night: 虚线)', color: COLOR_RESOLVED.bow },
+    { label: 'DINOv2 global 基线 (无词典，水平参考线)', color: COLOR_RESOLVED.dinov2_global },
+  ];
+  items.forEach(it => {
+    const div = document.createElement('div'); div.className = 'item';
+    div.innerHTML = '<span class="swatch" style="background:' + it.color + '"></span>' + it.label;
+    legend.appendChild(div);
+  });
+}
+
+function drawCpuChart() {
+  const svg = document.getElementById('chart-cpu');
+  const W = 900, H = 260, ML = 50, MR = 20, MT = 16, MB = 40;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+
+  const series = ['vlad', 'bow'].map(method => {
+    const pts = VOCABS.map(v => {
+      const row = DATA.find(r => r.method === method && r.vocab === v && r.scene === 'day');
+      return row ? row.build_cpu_mean : null;
+    });
+    return { method, pts, label: method === 'vlad' ? 'DINOv2+VLAD 词典训练 CPU%' : 'SuperPoint+BoW 词典训练 CPU%' };
+  });
+
+  const maxVal = Math.max(...series.flatMap(s => s.pts.filter(v => v != null)), 100);
+  const x = i => ML + (i / (VOCABS.length - 1)) * plotW;
+  const y = v => MT + (1 - v / maxVal) * plotH;
+
+  for (let t = 0; t <= maxVal; t += Math.ceil(maxVal / 4 / 100) * 100) {
+    svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: y(t), y2: y(t), class: 'gridline' }));
+    const lbl = el('text', { x: ML - 8, y: y(t) + 4, class: 'axis-label', 'text-anchor': 'end' });
+    lbl.textContent = Math.round(t) + '%';
+    svg.appendChild(lbl);
+  }
+  svg.appendChild(el('line', { x1: ML, x2: ML, y1: MT, y2: H - MB, class: 'axis-line' }));
+  svg.appendChild(el('line', { x1: ML, x2: W - MR, y1: H - MB, y2: H - MB, class: 'axis-line' }));
+  VOCABS.forEach((v, i) => {
+    const lbl = el('text', { x: x(i), y: H - MB + 18, class: 'axis-label', 'text-anchor': 'middle' });
+    lbl.textContent = v;
+    svg.appendChild(lbl);
+  });
+
+  const tooltip = document.getElementById('tooltip');
+  series.forEach(s => {
+    const color = COLOR_RESOLVED[s.method];
+    const pts = s.pts.map((v, i) => v == null ? null : [x(i), y(v)]).filter(Boolean);
+    const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0] + ' ' + p[1]).join(' ');
+    svg.appendChild(el('path', { d: path, fill: 'none', stroke: color, 'stroke-width': 2 }));
+    s.pts.forEach((v, i) => {
+      if (v == null) return;
+      const cx = x(i), cy = y(v);
+      const dot = el('circle', { cx, cy, r: 4.5, fill: color, stroke: 'var(--surface-2)', 'stroke-width': 1.5, style: 'cursor:pointer' });
+      dot.addEventListener('mouseenter', () => {
+        tooltip.style.display = 'block';
+        tooltip.innerHTML = '<b>' + s.label + '</b><br>vocab=' + VOCABS[i] + '<br>CPU mean = ' + v.toFixed(0) + '%';
+      });
+      dot.addEventListener('mousemove', (ev) => {
+        tooltip.style.left = (ev.pageX + 12) + 'px';
+        tooltip.style.top = (ev.pageY - 28) + 'px';
+      });
+      dot.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+      svg.appendChild(dot);
+    });
+    const last = pts[pts.length - 1];
+    if (last) {
+      const lbl = el('text', { x: last[0] + 8, y: last[1] + 4, class: 'data-label', fill: color });
+      lbl.textContent = s.method === 'vlad' ? 'VLAD' : 'BoW';
+      svg.appendChild(lbl);
+    }
+  });
+
+  const legend = document.getElementById('legend-cpu');
+  series.forEach(s => {
+    const div = document.createElement('div'); div.className = 'item';
+    div.innerHTML = '<span class="swatch" style="background:' + COLOR_RESOLVED[s.method] + '"></span>' + s.label;
+    legend.appendChild(div);
+  });
+}
+
+function buildTable() {
+  const table = document.getElementById('data-table');
+  const cols = [
+    ['method', '方法'], ['vocab', '词典'], ['scene', '场景'], ['yaw', 'yaw°'],
+    ['res_med', '残差median(m)'], ['inl_0.5', 'inlier@0.5m'], ['R@1', 'R@1'], ['R@10', 'R@10'], ['IoU@10', 'IoU@10'],
+    ['build_cpu_mean', 'build CPU%'], ['build_gpu_mean', 'build GPU%'], ['eval_cpu_mean', 'eval CPU%']
+  ];
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  cols.forEach(([k, label]) => { const th = document.createElement('th'); th.textContent = label; trh.appendChild(th); });
+  thead.appendChild(trh); table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  const methodLabel = { vlad: 'DINOv2+VLAD', bow: 'SuperPoint+BoW', dinov2_global: 'DINOv2 global' };
+  DATA.forEach(row => {
+    const tr = document.createElement('tr');
+    cols.forEach(([k]) => {
+      const td = document.createElement('td');
+      let v = row[k];
+      if (k === 'method') v = methodLabel[v] || v;
+      else if (typeof v === 'number') {
+        if (['R@1', 'R@10', 'IoU@10', 'inl_0.5'].includes(k)) v = (v * 100).toFixed(1) + '%';
+        else v = v.toFixed(k === 'yaw' ? 1 : (k.includes('cpu') || k.includes('gpu') ? 0 : 3));
+      } else if (v == null) v = '–';
+      td.textContent = v;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+}
+
+const root = document.querySelector('.viz-root');
+resolveColors(root);
+drawRecallChart();
+drawCpuChart();
+buildTable();
+</script>
