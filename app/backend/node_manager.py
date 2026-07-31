@@ -1466,17 +1466,46 @@ class BackendNode(Ros2NodeManager):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
 
-    def _launch_sensor_procs(self, env: dict):
-        """Start sensor procs based on current _sensor_mode."""
+    def _planning_env(self, env: dict) -> dict:
+        """env for planning_node, matching the RMW the current _sensor_mode needs.
+
+        In 'looper' mode planning_node subscribes to the Hesai lidar driver on a
+        separate host -- cross-vendor RTPS with FastDDS's default multi-interface
+        locator advertisement doesn't reliably reach it on this robot's network.
+        Every planning_node launch site (initial start, restart-after-map-build,
+        emergency-stop restart) must use this so the CycloneDDS override doesn't
+        silently drop out on one of the paths (see cyclonedds_jetson.xml).
+        """
         if self._sensor_mode == 'looper':
-            # looper_bridge_node / planning_node talk to the Hesai lidar driver, which runs
-            # under CycloneDDS on a separate host -- cross-vendor RTPS with FastDDS's default
-            # multi-interface locator advertisement doesn't reliably reach it on this robot's
-            # network. Run both under CycloneDDS too, restricted to the interfaces that
-            # actually reach the lidar host and the Looper module (see cyclonedds_jetson.xml).
             cyclone_env = env.copy()
             cyclone_env['RMW_IMPLEMENTATION'] = 'rmw_cyclonedds_cpp'
             cyclone_env['CYCLONEDDS_URI'] = '/tinynav/cyclonedds_jetson.xml'
+            return cyclone_env
+        return env
+
+    def _sync_looper_time(self):
+        """Sync the Looper module's clock to this host before VIO starts publishing.
+
+        The Looper runs standalone with no NTP of its own; if its clock has
+        drifted since the last sync, VIO timestamps can misalign with everything
+        else on this host's clock. Best-effort -- log and continue rather than
+        block sensor startup on it.
+        """
+        try:
+            subprocess.run(
+                ['sshpass', '-p', 'looper@0731', 'python3',
+                 '/tinynav/looper_cli/looper_cli.py', 'time', 'sync', '-y'],
+                check=True, timeout=30,
+            )
+            self.get_logger().info('Looper time sync completed')
+        except Exception as e:
+            self.get_logger().error(f'Looper time sync failed: {e}')
+
+    def _launch_sensor_procs(self, env: dict):
+        """Start sensor procs based on current _sensor_mode."""
+        if self._sensor_mode == 'looper':
+            self._sync_looper_time()
+            cyclone_env = self._planning_env(env)
             self._looper_bridge_proc = self._launch_proc(
                 'looper_bridge',
                 ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
@@ -1585,7 +1614,7 @@ class BackendNode(Ros2NodeManager):
         self._planning_proc = self._launch_proc(
             'planning',
             ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-            env=_env,
+            env=self._planning_env(_env),
         )
         self._publish_current_map_for_rtk()
         self._map_node_proc = self._launch_proc(
