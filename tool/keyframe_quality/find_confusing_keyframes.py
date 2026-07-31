@@ -205,7 +205,7 @@ def main() -> None:
     parser.add_argument("--topk", type=int, default=5, help="candidates per query (default 5: more tolerant than production's top-3, since this is an offline optimization tool)")
     parser.add_argument("--min_similarity", type=float, default=-1.0, help="drop candidates below this similarity before dispersion check")
     parser.add_argument("--cluster_radius_m", type=float, default=1.0, help="candidates within this radius of each other count as agreeing")
-    parser.add_argument("--dispersion_threshold", type=float, default=0.4, help="retrieval is 'bad' if less than a majority of candidates cluster together (default: reject if largest cluster < 60% of topk)")
+    parser.add_argument("--dispersion_threshold", type=float, default=0.4, help="retrieval is 'bad' if less than a majority of candidates cluster together (default: reject if largest cluster < 60%% of topk)")
     parser.add_argument("--min_participation", type=int, default=3, help="ignore map keyframes retrieved fewer than this many times (avoid noise from rarely-hit keyframes)")
     parser.add_argument("--every_n", type=int, default=5, help="subsample eval bag frames")
     parser.add_argument("--max_frames", type=int, default=0, help="0 = no cap")
