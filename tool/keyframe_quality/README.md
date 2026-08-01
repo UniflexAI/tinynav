@@ -57,15 +57,65 @@ don't take the defaults as gospel.
 
 ## Usage
 
+### 1. Detect
+
 ```bash
 uv run python tool/keyframe_quality/find_confusing_keyframes.py \
   --map_path tinynav_db/maps/map_gt \
   --eval_bag_path tinynav_db/rosbags/bag_1970_01_01_08_09_49 \
-  --out_json tinynav_temp/confusing_keyframes_gt_day.json
+  --out_json tinynav_temp/confusing_keyframes_gt_day.json \
+  --out_per_query_jsonl tinynav_temp/confusing_keyframes_gt_day_per_query.jsonl
 ```
 
 `--map_path` must already exist (built via `build_map_node.py` from bag1) with the DINOv2 patch
 VLAD retrieval index it produces by default (`vlad_descriptors.db` + `vlad_centres`).
+`--out_per_query_jsonl` is optional for this step alone, but required by step 2 below.
+
+### 2. Review (visually, in a browser)
+
+```bash
+uv run python tool/keyframe_quality/generate_review_page.py \
+  --map_path tinynav_db/maps/map_gt \
+  --eval_bag_path tinynav_db/rosbags/bag_1970_01_01_08_09_49 \
+  --flagged_json tinynav_temp/confusing_keyframes_gt_day.json \
+  --per_query_jsonl tinynav_temp/confusing_keyframes_gt_day_per_query.jsonl \
+  --out_html tinynav_temp/confusing_keyframes_gt_day_review.html
+```
+
+Open the resulting HTML file locally (`file://...`) in a browser. It shows every keyframe that
+took part in at least one bad (dispersed) retrieval, worst `badness_ratio` first, with:
+- the keyframe's own thumbnail
+- up to `--max_examples_per_keyframe` (default 4) of its worst example retrievals: the query
+  frame's thumbnail, and every candidate in that top-K set, with a green outline for candidates
+  in the agreeing cluster and red for the outliers (the flagged keyframe's own thumbnail is
+  marked with a gold highlight so you can see whether *it* was the outlier)
+
+Every flagged keyframe starts **checked**, meaning "will be removed". Uncheck any you judge to be
+a false positive after looking at the evidence. Type an output folder name and click "生成裁剪命令"
+to get a ready-to-run `prune_map.py` command line for exactly the keyframes still checked.
+
+The page is fully self-contained (thumbnails are embedded as base64 JPEGs) and never touches the
+map itself or any external server — it only generates a command for you to run.
+
+### 3. Prune (writes a new map, source map untouched)
+
+```bash
+uv run python tool/keyframe_quality/prune_map.py \
+  --map_path tinynav_db/maps/map_gt \
+  --output_path tinynav_db/maps/map_gt_pruned \
+  --exclude_timestamps 449729891255,440779900251,...
+```
+
+Copies the whole map directory to `--output_path`, then removes the given timestamps from
+`poses.npy` and the per-keyframe shelve stores (`features`/`depths`/`vlad_descriptors`/
+`embeddings`/`semantic_embeddings`/`patch_tokens`). The source map is never modified.
+`map_node.py`/`build_map_node.py` derive the keyframe set entirely from `poses.npy`'s keys, so
+this is sufficient — the pruned keyframes stop being used for relocalization.
+
+Video stores (`infra1_images_db`/`rgb_images_db`) are left untouched: nothing reads a keyframe's
+image once its timestamp is gone from `poses.npy`, so the orphaned frames are harmless dead
+weight. Writes `prune_report.json` into the output folder with before/after keyframe counts and
+per-store removal counts.
 
 ## Output
 
@@ -81,12 +131,8 @@ VLAD retrieval index it produces by default (`vlad_descriptors.db` + `vlad_centr
 }
 ```
 Sorted by `badness_ratio` descending (ties broken by higher `total_participation` — more
-confident about keyframes seen more often). Optional `--out_per_query_jsonl` dumps every single
-query's candidates + verdict, for spot-checking specific cases.
-
-## Scope note
-
-This version only **detects and reports** confusing keyframes — it does not yet remove them from
-the map. Actually pruning would mean rewriting `poses.npy` + the `features`/`depths`/
-`vlad_descriptors` shelves and the `infra1_images_db`/`rgb_images_db` video stores consistently,
-which is a separate follow-up once the detection side has been validated against real data.
+confident about keyframes seen more often). Note this list includes *every* keyframe meeting
+`--min_participation`, not just ones that were actually flagged bad — many will have
+`badness_ratio == 0`. `generate_review_page.py` filters to `bad_participation > 0` before
+building the review page. `--out_per_query_jsonl` dumps every single query's candidates +
+verdict, for spot-checking specific cases.
