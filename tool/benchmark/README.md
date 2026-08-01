@@ -169,6 +169,87 @@ Run against the GT/day/night bags above, comparing VLAD (this branch) against th
 
 All three DINOv2 patch VLAD variants clearly outperform the DINOv2 global baseline on both day and night.
 
+## Benchmark Pipeline 3: Map-Fusion Odometry Accuracy
+
+`map_fusion_benchmark.py` evaluates the online fusion/localization odometry
+against an eval mapping run transformed into the GT map frame. This is the
+simpler "absolute pose observation" benchmark:
+
+1. Use `--map-gt`, or build `map_gt` from `--bag-gt`.
+2. Use `--map-eval`, or build `map_eval` from `--bag-eval`.
+3. Replay `bag_eval` with TinyNav using `map_gt`, saving fusion/localization poses.
+4. Fit `T_map_eval_to_gt` from paired eval timestamps.
+5. Compare:
+
+```text
+fusion_odom_in_map_gt  vs  T_map_eval_to_gt * map_eval_pose
+```
+
+This treats the eval mapping trajectory as the reference trajectory after it is
+aligned into `map_gt`. It is still a pseudo-ground-truth / self-consistency
+signal, but it matches the operational question: "when the eval bag runs against
+the GT map, how far is the fused online pose from the aligned eval map
+trajectory?"
+
+When building a map from a bag, the benchmark automatically detects the source:
+
+- If the bag contains `/camera/camera/vio_image`, it starts `tool/looper_bridge_node.py`.
+- Otherwise, it starts `tinynav/core/perception_node.py`.
+
+### Usage
+
+Run the full pipeline from two bags:
+
+```bash
+uv run python tool/benchmark/map_fusion_benchmark.py \
+  --bag-gt /tinynav/tinynav_db/rosbags/bag_gt \
+  --bag-eval /tinynav/tinynav_db/rosbags/bag_eval \
+  --output-root /tinynav/output
+```
+
+Use an existing GT map, build the eval map from a bag, then replay the eval bag:
+
+```bash
+uv run python tool/benchmark/map_fusion_benchmark.py \
+  --map-gt /tinynav/tinynav_db/maps/map_gt \
+  --bag-eval /tinynav/tinynav_db/rosbags/bag_eval \
+  --output-root /tinynav/output
+```
+
+Reuse existing maps/localization outputs and only regenerate the metrics/report:
+
+```bash
+uv run python tool/benchmark/map_fusion_benchmark.py \
+  --map-gt /tinynav/output/20260802_120000_map_gt_benchmark/map_gt \
+  --map-eval /tinynav/output/20260802_120000_map_gt_benchmark/map_eval \
+  --bag-eval /tinynav/tinynav_db/rosbags/bag_eval \
+  --output-dir /tinynav/output/20260802_120000_map_gt_benchmark \
+  --skip-runs
+```
+
+If `--output-dir` is not provided, the tool creates a timestamped folder under
+`--output-root`:
+
+```text
+YYYYmmdd_HHMMSS_<gt_map_or_bag_name>_benchmark/
+```
+
+### Output
+
+- `index.html`: visual report with inputs, metrics, trajectory plot, error curve,
+  `T_map_eval_to_gt`, and largest-error samples.
+- `metrics.json`: machine-readable summary.
+- `per_sample_errors.json`: per-timestamp translation/rotation error.
+- `T_map_eval_to_gt.npy`: fitted transform.
+- `trajectory_xy.png`: top-down `map_eval*T` vs fusion odom.
+- `translation_rotation_error.png`: error over time.
+
+Recommended first-look metrics:
+
+- median / p90 translation error
+- ratio below `0.10m`, `0.20m`, `0.30m`, `0.50m`
+- trajectory plot shape consistency
+
 ## Future Benchmark Pipelines
 
 Additional benchmark pipelines will be added to evaluate:
