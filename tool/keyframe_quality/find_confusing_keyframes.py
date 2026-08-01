@@ -11,6 +11,10 @@ retrieved at all are flagged as non-discriminative ("confusing") and worth pruni
 
 This does not require ground truth for the query frames -- it only uses the map's own poses
 (already known from mapping) and self-consistency of the candidate cluster.
+
+If there's no independent bag2 for a given map, pass --self_query instead of --eval_bag_path:
+every map keyframe queries the map's own descriptor index (its trivial self-match is excluded
+before the dispersion check), so the same detection runs with just one map.
 """
 from __future__ import annotations
 
@@ -72,20 +76,8 @@ def largest_cluster_fraction(positions: np.ndarray, radius_m: float) -> tuple[fl
     return float(in_cluster.sum()) / n, in_cluster
 
 
-def run_eval(args: argparse.Namespace) -> dict[str, Any]:
-    map_path = Path(args.map_path)
-    map_poses = np.load(map_path / "poses.npy", allow_pickle=True).item()
-    map_timestamps = sorted(int(t) for t in map_poses.keys())
-
-    db = TinyNavDB(str(map_path), is_scratch=False)
-    vlad_centres = db.metadata["vlad_centres"]
-    map_vlad_descriptors = np.stack([db.vlad_descriptors[t] for t in map_timestamps]).astype(np.float32)
-    embed_model = Dinov2TRT()
-
-    keyframe_total: dict[int, int] = defaultdict(int)
-    keyframe_bad: dict[int, int] = defaultdict(int)
-    per_query_rows: list[dict[str, Any]] = []
-
+def _iter_bag_queries(args: argparse.Namespace, embed_model: Dinov2TRT, vlad_centres: np.ndarray):
+    """Yields (query_ts, query_vec, exclude_ts) from an independent probe bag (bag2 mode); exclude_ts is always None."""
     frame_idx = 0
     saved = 0
     for ts_ns, infra1 in iter_infra1_images(args.eval_bag_path, args.topic):
@@ -95,14 +87,59 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         frame_idx += 1
         if args.max_frames > 0 and saved >= args.max_frames:
             break
-
+        saved += 1
         patch_tokens = asyncio.run(embed_model.infer_patch_tokens(infra1))
         query_vec = compute_vlad(patch_tokens, vlad_centres)
-        hits = find_loop(query_vec, map_vlad_descriptors, -1.0, args.topk)
+        yield int(ts_ns), query_vec, None
+
+
+def _iter_self_queries(args: argparse.Namespace, map_timestamps: list[int], map_vlad_descriptors: np.ndarray):
+    """Yields (query_ts, query_vec, exclude_ts) using the map's own keyframes as queries.
+
+    exclude_ts tells the caller to drop the trivial self-match (a keyframe's descriptor is always
+    its own nearest neighbor, similarity 1.0) before applying the dispersion check -- otherwise
+    every query would trivially "agree" with itself and nothing would ever look confusing.
+    """
+    ts_to_idx = {ts: i for i, ts in enumerate(map_timestamps)}
+    subsampled = map_timestamps[:: max(1, args.every_n)]
+    if args.max_frames > 0:
+        subsampled = subsampled[: args.max_frames]
+    for ts in subsampled:
+        query_vec = map_vlad_descriptors[ts_to_idx[ts]]
+        yield ts, query_vec, ts
+
+
+def run_eval(args: argparse.Namespace) -> dict[str, Any]:
+    map_path = Path(args.map_path)
+    map_poses = np.load(map_path / "poses.npy", allow_pickle=True).item()
+    map_timestamps = sorted(int(t) for t in map_poses.keys())
+
+    db = TinyNavDB(str(map_path), is_scratch=False)
+    vlad_centres = db.metadata["vlad_centres"]
+    map_vlad_descriptors = np.stack([db.vlad_descriptors[t] for t in map_timestamps]).astype(np.float32)
+
+    if args.self_query:
+        query_source = _iter_self_queries(args, map_timestamps, map_vlad_descriptors)
+    else:
+        embed_model = Dinov2TRT()
+        query_source = _iter_bag_queries(args, embed_model, vlad_centres)
+
+    keyframe_total: dict[int, int] = defaultdict(int)
+    keyframe_bad: dict[int, int] = defaultdict(int)
+    per_query_rows: list[dict[str, Any]] = []
+
+    saved = 0
+    for ts_ns, query_vec, exclude_ts in query_source:
+        saved += 1
+        # request one extra candidate in self-query mode to make room for dropping the trivial
+        # self-match while still ending up with up to --topk real candidates.
+        request_k = args.topk + 1 if exclude_ts is not None else args.topk
+        hits = find_loop(query_vec, map_vlad_descriptors, -1.0, request_k)
         hits = [(int(map_timestamps[idx]), float(sim)) for idx, sim in hits]
 
+        if exclude_ts is not None:
+            hits = [(ts, sim) for ts, sim in hits if ts != exclude_ts][: args.topk]
         hits = [(ts, sim) for ts, sim in hits if sim >= args.min_similarity]
-        saved += 1
         if len(hits) < 2:
             continue
 
@@ -148,7 +185,8 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     n_bad_queries = sum(1 for r in per_query_rows if r["is_bad"])
     summary = {
         "map_path": str(map_path),
-        "eval_bag_path": args.eval_bag_path,
+        "self_query": args.self_query,
+        "eval_bag_path": None if args.self_query else args.eval_bag_path,
         "topk": args.topk,
         "min_similarity": args.min_similarity,
         "cluster_radius_m": args.cluster_radius_m,
@@ -179,18 +217,23 @@ def run_eval(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--map_path", required=True, help="pre-built TinyNav map directory (built from bag1)")
-    parser.add_argument("--eval_bag_path", required=True, help="bag2: independent probe bag, read directly (raw frames)")
+    parser.add_argument("--eval_bag_path", default="", help="bag2: independent probe bag, read directly (raw frames). Required unless --self_query is set")
+    parser.add_argument("--self_query", action="store_true", help="no independent probe bag: query the map's own keyframes against themselves instead (each keyframe's trivial self-match is excluded before the dispersion check). Use when there's no separate probe bag for this map")
     parser.add_argument("--topic", default="/camera/camera/infra1/image_rect_raw")
     parser.add_argument("--topk", type=int, default=5, help="candidates per query (default 5: more tolerant than production's top-3, since this is an offline optimization tool)")
     parser.add_argument("--min_similarity", type=float, default=-1.0, help="drop candidates below this similarity before dispersion check")
     parser.add_argument("--cluster_radius_m", type=float, default=1.0, help="candidates within this radius of each other count as agreeing")
     parser.add_argument("--dispersion_threshold", type=float, default=0.4, help="retrieval is 'bad' if less than a majority of candidates cluster together (default: reject if largest cluster < 60%% of topk)")
     parser.add_argument("--min_participation", type=int, default=3, help="ignore map keyframes retrieved fewer than this many times (avoid noise from rarely-hit keyframes)")
-    parser.add_argument("--every_n", type=int, default=5, help="subsample eval bag frames")
+    parser.add_argument("--every_n", type=int, default=5, help="subsample eval bag frames (or map keyframes, in --self_query mode)")
     parser.add_argument("--max_frames", type=int, default=0, help="0 = no cap")
     parser.add_argument("--out_json", default="tinynav_temp/confusing_keyframes.json")
     parser.add_argument("--out_per_query_jsonl", default="", help="optional: dump every query's candidates+dispersion verdict")
     args = parser.parse_args()
+    if args.self_query and args.eval_bag_path:
+        parser.error("--self_query and --eval_bag_path are mutually exclusive")
+    if not args.self_query and not args.eval_bag_path:
+        parser.error("--eval_bag_path is required unless --self_query is set")
 
     summary = run_eval(args)
 

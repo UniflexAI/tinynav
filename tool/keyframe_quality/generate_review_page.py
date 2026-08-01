@@ -67,11 +67,15 @@ def build_records(args: argparse.Namespace) -> dict[str, Any]:
     flagged_keyframes = [kf for kf in summary["flagged_keyframes"] if kf["bad_participation"] > 0]
     flagged_ts = {int(kf["timestamp_ns"]) for kf in flagged_keyframes}
 
+    if not summary.get("self_query", False) and not args.eval_bag_path:
+        raise ValueError("--eval_bag_path is required: flagged_json was not generated with --self_query")
+
     examples_by_ts = _select_examples(Path(args.per_query_jsonl), flagged_ts, args.max_examples_per_keyframe)
 
     map_poses = np.load(map_path / "poses.npy", allow_pickle=True).item()
     map_poses = {int(ts): np.asarray(pose) for ts, pose in map_poses.items()}
     cluster_radius_m = float(summary["cluster_radius_m"])
+    self_query = bool(summary.get("self_query", False))
 
     needed_map_ts: set[int] = set(flagged_ts)
     needed_query_ts: set[int] = set()
@@ -79,8 +83,11 @@ def build_records(args: argparse.Namespace) -> dict[str, Any]:
         for row in rows:
             needed_query_ts.add(int(row["query_timestamp_ns"]))
             needed_map_ts.update(int(c["timestamp_ns"]) for c in row["candidates"])
+    if self_query:
+        # queries *are* map keyframes here, so their thumbnails come from the same map video DB.
+        needed_map_ts.update(needed_query_ts)
 
-    print(f"extracting {len(needed_map_ts)} map thumbnails, {len(needed_query_ts)} query thumbnails...")
+    print(f"extracting {len(needed_map_ts)} map thumbnails" + ("" if self_query else f", {len(needed_query_ts)} query thumbnails") + "...")
 
     db = TinyNavDB(str(map_path), is_scratch=False)
     map_thumbs: dict[int, str] = {}
@@ -93,13 +100,16 @@ def build_records(args: argparse.Namespace) -> dict[str, Any]:
     finally:
         db.close()
 
-    query_thumbs: dict[int, str] = {}
-    if needed_query_ts:
-        for ts, img in iter_infra1_images(args.eval_bag_path, args.topic):
-            if ts in needed_query_ts and ts not in query_thumbs:
-                query_thumbs[ts] = _encode_thumb(img, args.thumbnail_width, args.jpeg_quality)
-                if len(query_thumbs) == len(needed_query_ts):
-                    break
+    if self_query:
+        query_thumbs = map_thumbs
+    else:
+        query_thumbs = {}
+        if needed_query_ts:
+            for ts, img in iter_infra1_images(args.eval_bag_path, args.topic):
+                if ts in needed_query_ts and ts not in query_thumbs:
+                    query_thumbs[ts] = _encode_thumb(img, args.thumbnail_width, args.jpeg_quality)
+                    if len(query_thumbs) == len(needed_query_ts):
+                        break
 
     records = []
     for kf in flagged_keyframes:
@@ -143,6 +153,7 @@ def build_records(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "map_path": summary["map_path"],
+        "self_query": self_query,
         "eval_bag_path": summary["eval_bag_path"],
         "topk": summary["topk"],
         "cluster_radius_m": summary["cluster_radius_m"],
@@ -210,8 +221,9 @@ function fmtPct(x) { return (x * 100).toFixed(0) + "%"; }
 
 function renderSummary() {
   const s = DATA;
+  const evalLabel = s.self_query ? "self-query (map queried against itself)" : s.eval_bag_path;
   document.getElementById("summary").innerHTML =
-    `map: <b>${s.map_path}</b> &nbsp;|&nbsp; eval bag: <b>${s.eval_bag_path}</b><br>` +
+    `map: <b>${s.map_path}</b> &nbsp;|&nbsp; eval: <b>${evalLabel}</b><br>` +
     `queries=${s.query_count} bad_queries=${s.bad_query_count} (${fmtPct(s.bad_query_ratio)}) &nbsp;|&nbsp; ` +
     `topk=${s.topk} cluster_radius_m=${s.cluster_radius_m} dispersion_threshold=${s.dispersion_threshold} min_participation=${s.min_participation}<br>` +
     `flagged keyframes (bad_participation &gt; 0): <b>${s.flagged_keyframe_count}</b> out of ${s.flagged_keyframe_count_raw} with participation &gt;= min_participation`;
@@ -311,7 +323,7 @@ def write_page(data: dict[str, Any], out_html: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--map_path", required=True, help="same map passed to find_confusing_keyframes.py")
-    parser.add_argument("--eval_bag_path", required=True, help="same eval bag passed to find_confusing_keyframes.py")
+    parser.add_argument("--eval_bag_path", default="", help="same eval bag passed to find_confusing_keyframes.py. Not needed if that run used --self_query")
     parser.add_argument("--topic", default="/camera/camera/infra1/image_rect_raw")
     parser.add_argument("--flagged_json", required=True, help="find_confusing_keyframes.py --out_json output")
     parser.add_argument("--per_query_jsonl", required=True, help="find_confusing_keyframes.py --out_per_query_jsonl output")
