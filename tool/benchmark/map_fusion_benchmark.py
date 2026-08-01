@@ -191,7 +191,6 @@ def _build_map_from_bag(
         )
     )
     _require_file(map_dir / "poses.npy", "map build")
-    _require_file(map_dir / "mapping_continuous_odom.npy", "map build")
 
 
 def _localize_eval_bag_in_gt_map(
@@ -217,7 +216,6 @@ def _localize_eval_bag_in_gt_map(
         )
     )
     _require_file(localization_dir / "relocalization_poses.npy", "localization")
-    _require_file(localization_dir / "localization_continuous_odom.npy", "localization")
 
 
 def _require_file(path: Path, step_name: str):
@@ -281,37 +279,49 @@ def _query_eval_reference_and_fusion(
     map_eval_keyframe_poses = _load_pose_dict(map_eval_dir / "poses.npy")
     fusion_anchor_poses = _load_pose_dict(localization_dir / "relocalization_poses.npy")
 
+    eval_odom_path = map_eval_dir / "mapping_continuous_odom.npy"
     eval_odom = PoseQueryEngine()
-    if not eval_odom.load_continuous_poses(str(map_eval_dir / "mapping_continuous_odom.npy")):
-        raise RuntimeError(f"Failed to load {map_eval_dir / 'mapping_continuous_odom.npy'}")
+    eval_has_continuous_odom = eval_odom_path.exists() and eval_odom.load_continuous_poses(str(eval_odom_path))
 
+    fusion_odom_path = localization_dir / "localization_continuous_odom.npy"
     fusion_odom = PoseQueryEngine()
-    if not fusion_odom.load_continuous_poses(
-        str(localization_dir / "localization_continuous_odom.npy")
-    ):
-        raise RuntimeError(
-            f"Failed to load {localization_dir / 'localization_continuous_odom.npy'}"
-        )
+    fusion_has_continuous_odom = fusion_odom_path.exists() and fusion_odom.load_continuous_poses(str(fusion_odom_path))
 
     map_eval_reference_poses: PoseDict = {}
     fusion_poses: PoseDict = {}
-    skipped = {"map_eval_reference_missing": 0, "fusion_missing": 0}
+    skipped = {
+        "map_eval_reference_missing": 0,
+        "fusion_missing": 0,
+        "map_eval_pose_source": "continuous_odom" if eval_has_continuous_odom else "keyframe_pose_fallback",
+        "fusion_pose_source": "continuous_odom" if fusion_has_continuous_odom else "keyframe_pose_fallback",
+    }
     for timestamp in timestamps:
         ts = int(timestamp)
-        reference_pose = _query_pose_from_anchor_and_odom(
-            ts,
-            map_eval_keyframe_poses,
-            eval_odom,
-            max_anchor_dt_ns=max_anchor_dt_ns,
-            max_odom_dt_ns=max_odom_dt_ns,
-        )
-        fusion_pose = _query_pose_from_anchor_and_odom(
-            ts,
-            fusion_anchor_poses,
-            fusion_odom,
-            max_anchor_dt_ns=max_anchor_dt_ns,
-            max_odom_dt_ns=max_odom_dt_ns,
-        )
+        if eval_has_continuous_odom:
+            reference_pose = _query_pose_from_anchor_and_odom(
+                ts,
+                map_eval_keyframe_poses,
+                eval_odom,
+                max_anchor_dt_ns=max_anchor_dt_ns,
+                max_odom_dt_ns=max_odom_dt_ns,
+            )
+        else:
+            anchor_ts, reference_pose = find_closest_pose(ts, map_eval_keyframe_poses)
+            if anchor_ts is None or abs(ts - int(anchor_ts)) > max_anchor_dt_ns:
+                reference_pose = None
+
+        if fusion_has_continuous_odom:
+            fusion_pose = _query_pose_from_anchor_and_odom(
+                ts,
+                fusion_anchor_poses,
+                fusion_odom,
+                max_anchor_dt_ns=max_anchor_dt_ns,
+                max_odom_dt_ns=max_odom_dt_ns,
+            )
+        else:
+            anchor_ts, fusion_pose = find_closest_pose(ts, fusion_anchor_poses)
+            if anchor_ts is None or abs(ts - int(anchor_ts)) > max_anchor_dt_ns:
+                fusion_pose = None
         if reference_pose is None:
             skipped["map_eval_reference_missing"] += 1
         else:
