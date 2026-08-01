@@ -94,14 +94,32 @@ Every flagged keyframe starts **checked**, meaning "will be removed". Uncheck an
 a false positive after looking at the evidence. Type an output folder name and click "生成裁剪命令"
 to get a ready-to-run `prune_map.py` command line for exactly the keyframes still checked.
 
-If the map has `occupancy_2d_image.png` + `occupancy_meta.npy` (built by `build_map_node.py`'s
-default occupancy stage), the page also shows a spatial view: every other map keyframe plotted as
-a blue dot on the floor plan (for trajectory context) and every flagged keyframe as a bigger
-red/green dot (red = will be removed, green = kept) that you can click directly to toggle,
-in sync with the checkbox in the list below. Maps without those two files just skip this section.
-
 The page is fully self-contained (thumbnails are embedded as base64 JPEGs) and never touches the
 map itself or any external server — it only generates a command for you to run.
+
+This page is for comparing evidence (query vs. candidates, side by side) — it deliberately has no
+spatial/map view. For browsing flagged keyframes spatially, use step 2b below instead.
+
+### 2b. Review spatially (viser, like `tool/poi_editor.py` / `tool/path_editor.py`)
+
+```bash
+uv run python tool/keyframe_quality/review_keyframes_viser.py \
+  --tinynav-map-path tinynav_db/maps/map_gt \
+  --flagged-json tinynav_temp/confusing_keyframes_gt_day.json \
+  --port 8080
+```
+
+Same occupancy-grid-as-point-cloud + clickable camera-frustum pattern as the other two viser
+editors in this repo, so it feels consistent with them: every other map keyframe is a small amber
+point (trajectory context); every flagged keyframe is a full camera frustum, clickable to toggle
+between excluded (red) and kept (green) -- clicking also loads that keyframe's actual image onto
+the frustum. "Save Exclusion List" writes the current selection to
+`<map>/keyframe_review_selection.json` (or `--out-selection-json`).
+
+This tool and the HTML page are complementary, not merged: viser's GUI sidebar is too narrow for
+wide side-by-side thumbnail comparison, so spatial browsing/selection lives here and evidence
+comparison stays in the HTML page above. Both read the same `--flagged-json` / `--out_json`, so
+you can cross-reference a timestamp between them.
 
 ### 3. Prune (writes a new map, source map untouched)
 

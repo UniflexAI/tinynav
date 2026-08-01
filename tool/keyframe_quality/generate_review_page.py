@@ -40,45 +40,6 @@ def _encode_thumb(img: np.ndarray | None, width: int, quality: int) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf).decode("ascii")
 
 
-def _load_map_background(map_path: Path) -> dict[str, Any] | None:
-    """occupancy_2d_image.png + occupancy_meta.npy ([origin_x, origin_y, origin_z, resolution]).
-
-    Not every map has these (older maps / maps built without depth-based occupancy). Missing
-    either file just means the review page falls back to a plain (unpositioned) list.
-    """
-    img_path = map_path / "occupancy_2d_image.png"
-    meta_path = map_path / "occupancy_meta.npy"
-    if not img_path.exists() or not meta_path.exists():
-        return None
-    meta = np.load(meta_path)
-    origin_x, origin_y = float(meta[0]), float(meta[1])
-    resolution = float(meta[3])
-    img = cv2.imread(str(img_path))
-    if img is None:
-        return None
-    height, width = img.shape[:2]
-    ok, buf = cv2.imencode(".png", img)
-    if not ok:
-        return None
-    return {
-        "image": "data:image/png;base64," + base64.b64encode(buf).decode("ascii"),
-        "width": width,
-        "height": height,
-        "origin_x": origin_x,
-        "origin_y": origin_y,
-        "resolution": resolution,
-    }
-
-
-def _to_grid(x: float, y: float, background: dict[str, Any]) -> list[float]:
-    """World (x, y) -> the same [row, col] indexing generate_occupancy_map() used to build the
-    image (row axis = world x, col axis = world y; see build_map_node.py's x_y_plane), so a
-    marker at [row, col] * display_scale lands on the exact spot in the unrotated PNG."""
-    row = (x - background["origin_x"]) / background["resolution"]
-    col = (y - background["origin_y"]) / background["resolution"]
-    return [row, col]
-
-
 def _select_examples(per_query_path: Path, flagged_ts: set[int], max_per_keyframe: int) -> dict[int, list[dict]]:
     examples: dict[int, list[dict]] = {ts: [] for ts in flagged_ts}
     with per_query_path.open(encoding="utf-8") as f:
@@ -115,14 +76,6 @@ def build_records(args: argparse.Namespace) -> dict[str, Any]:
     map_poses = {int(ts): np.asarray(pose) for ts, pose in map_poses.items()}
     cluster_radius_m = float(summary["cluster_radius_m"])
     self_query = bool(summary.get("self_query", False))
-
-    background = _load_map_background(map_path)
-    context_points: list[list[float]] = []
-    if background is not None:
-        for ts, pose in map_poses.items():
-            if ts in flagged_ts:
-                continue
-            context_points.append(_to_grid(pose[0, 3], pose[1, 3], background))
 
     needed_map_ts: set[int] = set(flagged_ts)
     needed_query_ts: set[int] = set()
@@ -187,17 +140,16 @@ def build_records(args: argparse.Namespace) -> dict[str, Any]:
                     "candidates": cand_payload,
                 }
             )
-        record = {
-            "timestamp_ns": ts,
-            "total_participation": kf["total_participation"],
-            "bad_participation": kf["bad_participation"],
-            "badness_ratio": kf["badness_ratio"],
-            "thumb": map_thumbs.get(ts, ""),
-            "examples": example_payload,
-        }
-        if background is not None:
-            record["grid"] = _to_grid(map_poses[ts][0, 3], map_poses[ts][1, 3], background)
-        records.append(record)
+        records.append(
+            {
+                "timestamp_ns": ts,
+                "total_participation": kf["total_participation"],
+                "bad_participation": kf["bad_participation"],
+                "badness_ratio": kf["badness_ratio"],
+                "thumb": map_thumbs.get(ts, ""),
+                "examples": example_payload,
+            }
+        )
 
     return {
         "map_path": summary["map_path"],
@@ -213,8 +165,6 @@ def build_records(args: argparse.Namespace) -> dict[str, Any]:
         "flagged_keyframe_count": len(records),
         "flagged_keyframe_count_raw": summary["flagged_keyframe_count"],
         "records": records,
-        "background": background,
-        "context_points": context_points,
     }
 
 
@@ -241,24 +191,15 @@ button.secondary { background: transparent; color: inherit; }
 .badness-bar { display: inline-block; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #d2452d, #d2452d); vertical-align: middle; }
 .detail { display: none; padding: 0 14px 14px; border-top: 1px solid rgba(128,128,128,0.2); }
 .example { margin-top: 12px; }
-.example .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; margin-top: 6px; }
-.thumb-box { text-align: center; font-size: 10px; }
+.example .row { display: flex; gap: 8px; flex-wrap: nowrap; align-items: flex-start; margin-top: 6px; }
+.example .candidates-row { display: flex; gap: 8px; flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; min-width: 0; flex: 1 1 auto; }
+.thumb-box { text-align: center; font-size: 10px; flex: 0 0 auto; }
 .thumb-box img { width: 110px; border-radius: 5px; display: block; }
 .thumb-box.in-cluster img { outline: 3px solid #2d9a4e; }
 .thumb-box.out-cluster img { outline: 3px solid #d2452d; }
 .thumb-box.is-self img { outline-offset: 2px; box-shadow: 0 0 0 2px gold; }
-.arrow { align-self: center; font-size: 18px; opacity: 0.5; }
+.arrow { align-self: center; font-size: 18px; opacity: 0.5; flex: 0 0 auto; }
 label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
-.map-controls { display: flex; gap: 10px; align-items: center; font-size: 12px; margin-bottom: 8px; opacity: 0.85; }
-#map-view { position: relative; display: inline-block; border: 1px solid rgba(128,128,128,0.3); border-radius: 8px; overflow: auto; max-height: 70vh; margin-bottom: 20px; }
-#map-view img { display: block; image-rendering: pixelated; }
-.map-dot { position: absolute; border-radius: 50%; transform: translate(-50%, -50%); box-sizing: border-box; }
-.map-dot.context { background: rgba(64,150,230,0.55); pointer-events: none; }
-.map-dot.flagged { cursor: pointer; border: 2px solid rgba(255,255,255,0.9); box-shadow: 0 0 0 1px rgba(0,0,0,0.4); }
-.map-dot.flagged.excluded { background: #d2452d; }
-.map-dot.flagged.kept { background: #2d9a4e; }
-.map-dot.flagged:hover { outline: 2px solid #2d7dd2; z-index: 5; }
-.legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin: 0 4px 0 12px; }
 </style>
 </head>
 <body>
@@ -272,18 +213,6 @@ label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; white
   <button class="secondary" id="copy-btn" style="display:none">复制</button>
 </div>
 <div id="cmd-box"><pre id="cmd-text"></pre></div>
-<div id="map-section">
-  <div class="map-controls">
-    <span>缩放</span>
-    <input type="range" id="zoom-slider" min="1" max="12" step="0.5" value="3">
-    <span id="zoom-label">3x</span>
-    <span><span class="legend-dot" style="background:rgba(64,150,230,0.55)"></span>其他关键帧</span>
-    <span><span class="legend-dot" style="background:#d2452d"></span>待剔除</span>
-    <span><span class="legend-dot" style="background:#2d9a4e"></span>已保留(取消勾选)</span>
-    <span style="opacity:0.7">点击圆点可直接切换该关键帧的勾选状态</span>
-  </div>
-  <div id="map-view"><img id="map-bg"><div id="map-dots"></div></div>
-</div>
 <div id="cards"></div>
 <script>
 const DATA = __DATA_JSON__;
@@ -316,7 +245,7 @@ function exampleBlock(ex) {
     <div class="row">
       <div class="thumb-box"><img src="${ex.query_thumb}">query</div>
       <div class="arrow">&rarr;</div>
-      ${cands}
+      <div class="candidates-row">${cands}</div>
     </div>
   </div>`;
 }
@@ -345,66 +274,7 @@ function toggleDetail(i) {
 
 function toggleExclude(ts, checked) {
   if (checked) excluded.add(ts); else excluded.delete(ts);
-  const dot = document.querySelector(`.map-dot[data-ts="${ts}"]`);
-  if (dot) {
-    dot.classList.toggle("excluded", checked);
-    dot.classList.toggle("kept", !checked);
-  }
 }
-
-let mapScale = 3;
-
-function initMap() {
-  if (!DATA.background) {
-    document.getElementById("map-section").style.display = "none";
-    return;
-  }
-  mapScale = Math.min(10, Math.max(1, Math.round(900 / DATA.background.width * 2) / 2));
-  const slider = document.getElementById("zoom-slider");
-  slider.value = mapScale;
-  document.getElementById("zoom-label").textContent = mapScale + "x";
-  drawMap();
-}
-
-function drawMap() {
-  const bg = DATA.background;
-  if (!bg) return;
-  const img = document.getElementById("map-bg");
-  img.src = bg.image;
-  img.style.width = (bg.width * mapScale) + "px";
-  img.style.height = (bg.height * mapScale) + "px";
-
-  const contextSize = Math.max(2, mapScale * 0.6);
-  let html = DATA.context_points.map(([row, col]) =>
-    `<div class="map-dot context" style="left:${col * mapScale}px; top:${row * mapScale}px; width:${contextSize}px; height:${contextSize}px;"></div>`
-  ).join("");
-
-  const flaggedSize = Math.max(7, mapScale * 1.6);
-  html += DATA.records.filter(r => r.grid).map(r => {
-    const [row, col] = r.grid;
-    const isExcluded = excluded.has(r.timestamp_ns);
-    const cls = isExcluded ? "excluded" : "kept";
-    return `<div class="map-dot flagged ${cls}" data-ts="${r.timestamp_ns}" ` +
-      `style="left:${col * mapScale}px; top:${row * mapScale}px; width:${flaggedSize}px; height:${flaggedSize}px;" ` +
-      `title="ts=${r.timestamp_ns}  badness=${(r.badness_ratio * 100).toFixed(0)}% (${r.bad_participation}/${r.total_participation})" ` +
-      `onclick="onMarkerClick(${r.timestamp_ns})"></div>`;
-  }).join("");
-
-  document.getElementById("map-dots").innerHTML = html;
-}
-
-function onMarkerClick(ts) {
-  const cb = document.querySelector(`.kf-check[data-ts="${ts}"]`);
-  if (!cb) return;
-  cb.checked = !cb.checked;
-  toggleExclude(ts, cb.checked);
-}
-
-document.getElementById("zoom-slider").addEventListener("input", (e) => {
-  mapScale = parseFloat(e.target.value);
-  document.getElementById("zoom-label").textContent = mapScale + "x";
-  drawMap();
-});
 
 document.getElementById("select-all").addEventListener("change", (e) => {
   document.querySelectorAll(".kf-check").forEach(cb => {
@@ -439,7 +309,6 @@ document.getElementById("copy-btn").addEventListener("click", () => {
 
 renderSummary();
 renderCards();
-initMap();
 </script>
 </body></html>
 """
