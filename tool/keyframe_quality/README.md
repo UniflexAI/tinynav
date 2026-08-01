@@ -94,6 +94,12 @@ Every flagged keyframe starts **checked**, meaning "will be removed". Uncheck an
 a false positive after looking at the evidence. Type an output folder name and click "生成裁剪命令"
 to get a ready-to-run `prune_map.py` command line for exactly the keyframes still checked.
 
+If the map has `occupancy_2d_image.png` + `occupancy_meta.npy` (built by `build_map_node.py`'s
+default occupancy stage), the page also shows a spatial view: every other map keyframe plotted as
+a blue dot on the floor plan (for trajectory context) and every flagged keyframe as a bigger
+red/green dot (red = will be removed, green = kept) that you can click directly to toggle,
+in sync with the checkbox in the list below. Maps without those two files just skip this section.
+
 The page is fully self-contained (thumbnails are embedded as base64 JPEGs) and never touches the
 map itself or any external server — it only generates a command for you to run.
 
