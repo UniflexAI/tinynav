@@ -33,6 +33,7 @@ class LooperBridgeNode(Node):
         self.last_pose = None
         self.last_pose_time = None
         self._missing_input_counter = 0
+        self._has_vio_100hz = False
 
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
         self.tf_static_qos = QoSProfile(
@@ -81,6 +82,7 @@ class LooperBridgeNode(Node):
         )
 
     def vio_100hz_callback(self, pose_msg: PoseStamped):
+        self._has_vio_100hz = True
         # /camera/camera/vio_100hz already reports T_world_camera.
         T_world_camera = pose_msg2np(pose_msg)
         odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
@@ -198,6 +200,13 @@ class LooperBridgeNode(Node):
         stamp = pose_msg.header.stamp
 
         odom_msg = self.build_odom(T_world_camera, stamp)
+        if not self._has_vio_100hz:
+            self.odom_pub.publish(odom_msg)
+            self.get_logger().info(
+                "No /camera/camera/vio_100hz received yet; "
+                "falling back to /camera/camera/vio_image for /slam/odometry.",
+                once=True,
+            )
         self.odom_visual_pub.publish(odom_msg)
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
