@@ -312,7 +312,7 @@ class OdomPoseRecorder:
         timestamp_ns = int(odom_msg.header.stamp.sec * 1e9) + int(
             odom_msg.header.stamp.nanosec
         )
-        pose_matrix, _ = msg2np(odom_msg)
+        pose_matrix = msg2np(odom_msg)
         self.poses[timestamp_ns] = pose_matrix
 
     def save_to_disk(self) -> None:
@@ -738,9 +738,6 @@ class BuildMapNode(Node):
             keyframe_depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
             if keyframe_image_timestamp != keyframe_odom_timestamp or keyframe_image_timestamp != keyframe_depth_timestamp:
                 self.get_logger().error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
-            if keyframe_image_timestamp in self.odom:
-                self.get_logger().warn(f"Duplicate keyframe timestamp skipped: {keyframe_image_timestamp}")
-                return
 
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)

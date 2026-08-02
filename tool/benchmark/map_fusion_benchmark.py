@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Cross-map fusion odometry benchmark.
+Cross-map keyframe relocalization benchmark.
 
-This tool evaluates online fusion odometry against an independently built eval
-map trajectory aligned into the GT map frame:
+This tool evaluates keyframe relocalization poses against an independently
+built eval map trajectory aligned into the GT map frame:
 
-    fusion_odom_in_map_gt  vs  T_map_eval_to_gt * map_eval_pose
+    relocalized_pose_in_map_gt  vs  T_map_eval_to_gt * map_eval_keyframe_pose
 
 Inputs:
   - GT source: either --map-gt or --bag-gt. If a bag is given, it is built into
     map_gt first.
   - Eval source: --bag-eval is used to build map_eval unless --map-eval is
-    provided, and is replayed against map_gt to produce fusion/localization
-    poses.
+    provided, and is replayed against map_gt to produce relocalization poses.
 
 The original benchmark_mapping.py is intentionally left untouched. This script
 shares only small utility concepts and produces a standalone HTML report.
@@ -39,7 +38,7 @@ from launch.actions import EmitEvent, ExecuteProcess, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 
-from benchmark_mapping import BagMetadataExtractor, PoseQueryEngine, find_closest_pose
+from benchmark_mapping import BagMetadataExtractor, find_closest_pose
 
 
 PoseDict = Dict[int, np.ndarray]
@@ -244,84 +243,33 @@ def _sample_timestamps_from_bag(
     )
 
 
-def _query_pose_from_anchor_and_odom(
-    target_timestamp: int,
-    anchor_poses: PoseDict,
-    odom_query: PoseQueryEngine,
-    max_anchor_dt_ns: int,
-    max_odom_dt_ns: int,
-) -> Optional[np.ndarray]:
-    anchor_ts, anchor_pose = find_closest_pose(target_timestamp, anchor_poses)
-    if anchor_ts is None or anchor_pose is None:
-        return None
-    if abs(int(target_timestamp) - int(anchor_ts)) > max_anchor_dt_ns:
-        return None
-
-    odom_at_anchor = odom_query.query_pose_at_timestamp(
-        int(anchor_ts), max_time_diff_ns=max_odom_dt_ns
-    )
-    odom_at_target = odom_query.query_pose_at_timestamp(
-        int(target_timestamp), max_time_diff_ns=max_odom_dt_ns
-    )
-    if odom_at_anchor is None or odom_at_target is None:
-        return None
-    return anchor_pose @ (np.linalg.inv(odom_at_anchor) @ odom_at_target)
-
-
 def _query_eval_reference_and_fusion(
     *,
     timestamps: np.ndarray,
     map_eval_dir: Path,
     localization_dir: Path,
     max_anchor_dt_ns: int,
-    max_odom_dt_ns: int,
 ) -> Tuple[PoseDict, PoseDict, dict]:
     map_eval_keyframe_poses = _load_pose_dict(map_eval_dir / "poses.npy")
     fusion_anchor_poses = _load_pose_dict(localization_dir / "relocalization_poses.npy")
-
-    eval_odom_path = map_eval_dir / "mapping_continuous_odom.npy"
-    eval_odom = PoseQueryEngine()
-    eval_has_continuous_odom = eval_odom_path.exists() and eval_odom.load_continuous_poses(str(eval_odom_path))
-
-    fusion_odom_path = localization_dir / "localization_continuous_odom.npy"
-    fusion_odom = PoseQueryEngine()
-    fusion_has_continuous_odom = fusion_odom_path.exists() and fusion_odom.load_continuous_poses(str(fusion_odom_path))
 
     map_eval_reference_poses: PoseDict = {}
     fusion_poses: PoseDict = {}
     skipped = {
         "map_eval_reference_missing": 0,
         "fusion_missing": 0,
-        "map_eval_pose_source": "continuous_odom" if eval_has_continuous_odom else "keyframe_pose_fallback",
-        "fusion_pose_source": "continuous_odom" if fusion_has_continuous_odom else "keyframe_pose_fallback",
+        "map_eval_pose_source": "keyframe_pose",
+        "fusion_pose_source": "relocalization_pose",
     }
     for timestamp in timestamps:
         ts = int(timestamp)
-        if eval_has_continuous_odom:
-            reference_pose = _query_pose_from_anchor_and_odom(
-                ts,
-                map_eval_keyframe_poses,
-                eval_odom,
-                max_anchor_dt_ns=max_anchor_dt_ns,
-                max_odom_dt_ns=max_odom_dt_ns,
-            )
-        else:
-            anchor_ts, reference_pose = find_closest_pose(ts, map_eval_keyframe_poses)
-            if anchor_ts is None or abs(ts - int(anchor_ts)) > max_anchor_dt_ns:
-                reference_pose = None
+        anchor_ts, reference_pose = find_closest_pose(ts, map_eval_keyframe_poses)
+        if anchor_ts is None or abs(ts - int(anchor_ts)) > max_anchor_dt_ns:
+            reference_pose = None
 
-        if fusion_has_continuous_odom:
-            fusion_pose = _query_pose_from_anchor_and_odom(
-                ts,
-                fusion_anchor_poses,
-                fusion_odom,
-                max_anchor_dt_ns=max_anchor_dt_ns,
-                max_odom_dt_ns=max_odom_dt_ns,
-            )
-        else:
-            anchor_ts, fusion_pose = find_closest_pose(ts, fusion_anchor_poses)
-            if anchor_ts is None or abs(ts - int(anchor_ts)) > max_anchor_dt_ns:
-                fusion_pose = None
+        anchor_ts, fusion_pose = find_closest_pose(ts, fusion_anchor_poses)
+        if anchor_ts is None or abs(ts - int(anchor_ts)) > max_anchor_dt_ns:
+            fusion_pose = None
         if reference_pose is None:
             skipped["map_eval_reference_missing"] += 1
         else:
@@ -454,7 +402,7 @@ def _plot_trajectory(errors: list[dict], output_path: Path):
     plt.figure(figsize=(8, 7))
     if len(ref_xy):
         plt.plot(ref_xy[:, 0], ref_xy[:, 1], "-", label="map_eval * T reference", linewidth=2)
-        plt.plot(fusion_xy[:, 0], fusion_xy[:, 1], "-", label="fusion odom in map_gt", linewidth=2)
+        plt.plot(fusion_xy[:, 0], fusion_xy[:, 1], "-", label="relocalization pose in map_gt", linewidth=2)
         plt.scatter(ref_xy[:, 0], ref_xy[:, 1], s=10, alpha=0.45)
         plt.scatter(fusion_xy[:, 0], fusion_xy[:, 1], s=10, alpha=0.45)
     plt.axis("equal")
@@ -483,7 +431,7 @@ def _plot_error_curve(errors: list[dict], output_path: Path):
     ax2.plot(times, rot_errors, color="#f97316", alpha=0.75, label="rotation error [deg]")
     ax2.set_ylabel("rotation error [deg]", color="#f97316")
     ax2.tick_params(axis="y", labelcolor="#f97316")
-    plt.title("Fusion odom vs map_eval*T error over time")
+    plt.title("Relocalization pose vs map_eval*T error over time")
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -528,7 +476,7 @@ def _write_html_report(output_dir: Path, metrics: dict, errors: list[dict]):
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TinyNav Map Fusion Benchmark</title>
+  <title>TinyNav Keyframe Relocalization Benchmark</title>
   <style>
     :root {{ --bg:#0b1020; --panel:rgba(255,255,255,.075); --line:rgba(255,255,255,.14); --text:#f4f7fb; --muted:#aeb9cc; }}
     * {{ box-sizing:border-box; }}
@@ -559,15 +507,15 @@ def _write_html_report(output_dir: Path, metrics: dict, errors: list[dict]):
 </head>
 <body><main>
   <div class="hero">
-    <h1>TinyNav Map Fusion Benchmark</h1>
-    <p>Evaluate online fusion odometry against the eval map trajectory aligned into GT map frame:
-      <code>fusion_odom_map_gt vs T_map_eval_to_gt * map_eval_pose</code>.</p>
+    <h1>TinyNav Keyframe Relocalization Benchmark</h1>
+    <p>Evaluate keyframe relocalization poses against the eval map keyframe trajectory aligned into GT map frame:
+      <code>relocalization_pose_map_gt vs T_map_eval_to_gt * map_eval_keyframe_pose</code>.</p>
     <div class="flow">
       <div class="step">GT source → map_gt</div>
       <div class="step">eval bag → map_eval</div>
-      <div class="step">eval bag + map_gt → fusion odom</div>
+      <div class="step">eval bag + map_gt → relocalization poses</div>
       <div class="step">fit T(map_eval→gt)</div>
-      <div class="step">compare fusion vs map_eval*T</div>
+      <div class="step">compare relocalization vs map_eval*T</div>
     </div>
     <div class="grid">
       <div class="metric"><strong>{metrics['sampled_timestamps']}</strong><span>sampled timestamps</span></div>
@@ -699,7 +647,6 @@ def run(args: argparse.Namespace) -> Path:
         map_eval_dir=map_eval_dir,
         localization_dir=localization_dir,
         max_anchor_dt_ns=int(args.max_anchor_dt_s * 1e9),
-        max_odom_dt_ns=int(args.max_odom_dt_s * 1e9),
     )
     paired_timestamps = sorted(set(map_eval_reference_poses) & set(fusion_poses))
     if len(paired_timestamps) < 3:
@@ -771,7 +718,7 @@ def run(args: argparse.Namespace) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark fusion odom against map_eval trajectory transformed into map_gt."
+        description="Benchmark keyframe relocalization against map_eval trajectory transformed into map_gt."
     )
     gt = parser.add_mutually_exclusive_group(required=True)
     gt.add_argument("--bag-gt", help="ROS2 bag used to build map_gt")
@@ -791,7 +738,6 @@ def main():
     parser.add_argument("--timeout", type=float, default=60.0, help="Data save timeout in seconds")
     parser.add_argument("--verbose-timer", action="store_true", help="Enable verbose node timer logs")
     parser.add_argument("--max-anchor-dt-s", type=float, default=1.0, help="Max timestamp distance to anchor pose")
-    parser.add_argument("--max-odom-dt-s", type=float, default=1.0, help="Max odom interpolation distance")
     parser.add_argument("--ransac-threshold-m", type=float, default=0.20, help="RANSAC inlier threshold")
     parser.add_argument("--ransac-iterations", type=int, default=1000, help="RANSAC iterations")
     parser.add_argument("--seed", type=int, default=7, help="Random seed")
