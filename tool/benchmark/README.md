@@ -169,26 +169,26 @@ Run against the GT/day/night bags above, comparing VLAD (this branch) against th
 
 All three DINOv2 patch VLAD variants clearly outperform the DINOv2 global baseline on both day and night.
 
-## Benchmark Pipeline 3: Map-Fusion Odometry Accuracy
+## Benchmark Pipeline 3: Keyframe Relocalization Accuracy
 
-`map_fusion_benchmark.py` evaluates the online fusion/localization odometry
-against an eval mapping run transformed into the GT map frame. This is the
-simpler "absolute pose observation" benchmark:
+`map_fusion_benchmark.py` evaluates keyframe relocalization poses against an
+eval mapping run transformed into the GT map frame. This is the simpler
+map-to-map self-consistency benchmark:
 
 1. Use `--map-gt`, or build `map_gt` from `--bag-gt`.
 2. Use `--map-eval`, or build `map_eval` from `--bag-eval`.
-3. Replay `bag_eval` with TinyNav using `map_gt`, saving fusion/localization poses.
+3. Replay `bag_eval` with TinyNav using `map_gt`, saving relocalization poses.
 4. Fit `T_map_eval_to_gt` from paired eval timestamps.
 5. Compare:
 
 ```text
-fusion_odom_in_map_gt  vs  T_map_eval_to_gt * map_eval_pose
+relocalization_pose_in_map_gt  vs  T_map_eval_to_gt * map_eval_keyframe_pose
 ```
 
 This treats the eval mapping trajectory as the reference trajectory after it is
 aligned into `map_gt`. It is still a pseudo-ground-truth / self-consistency
 signal, but it matches the operational question: "when the eval bag runs against
-the GT map, how far is the fused online pose from the aligned eval map
+the GT map, how far is the relocalized keyframe pose from the aligned eval map
 trajectory?"
 
 When building a map from a bag, the benchmark automatically detects the source:
@@ -220,10 +220,11 @@ Reuse existing maps/localization outputs and only regenerate the metrics/report:
 
 ```bash
 uv run python tool/benchmark/map_fusion_benchmark.py \
-  --map-gt /tinynav/output/20260802_120000_map_gt_benchmark/map_gt \
-  --map-eval /tinynav/output/20260802_120000_map_gt_benchmark/map_eval \
+  --map-gt /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_gt \
+  --map-eval /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_eval \
   --bag-eval /tinynav/tinynav_db/rosbags/bag_eval \
   --output-dir /tinynav/output/20260802_120000_map_gt_benchmark \
+  --work-dir /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work \
   --skip-runs
 ```
 
@@ -234,14 +235,25 @@ If `--output-dir` is not provided, the tool creates a timestamped folder under
 YYYYmmdd_HHMMSS_<gt_map_or_bag_name>_benchmark/
 ```
 
+Generated maps and localization scratch data are written outside the report
+folder, under `--work-root` by default:
+
+```text
+<output-root>/benchmark_work/YYYYmmdd_HHMMSS_<gt_map_or_bag_name>_benchmark_work/
+```
+
+This keeps the report folder lightweight and easy to copy or share.
+
 ### Output
+
+The report folder contains only lightweight artifacts:
 
 - `index.html`: visual report with inputs, metrics, trajectory plot, error curve,
   `T_map_eval_to_gt`, and largest-error samples.
 - `metrics.json`: machine-readable summary.
 - `per_sample_errors.json`: per-timestamp translation/rotation error.
 - `T_map_eval_to_gt.npy`: fitted transform.
-- `trajectory_xy.png`: top-down `map_eval*T` vs fusion odom.
+- `trajectory_xy.png`: top-down `map_eval*T` vs relocalization pose.
 - `translation_rotation_error.png`: error over time.
 
 Recommended first-look metrics:

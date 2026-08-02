@@ -561,7 +561,7 @@ def _write_html_report(output_dir: Path, metrics: dict, errors: list[dict]):
   </section>
 
   <section><h2>Largest Translation Errors</h2><table>
-    <tr><th>timestamp ns</th><th>trans err [m]</th><th>rot err [deg]</th><th>map_eval*T xyz</th><th>fusion xyz</th></tr>{error_rows}
+    <tr><th>timestamp ns</th><th>trans err [m]</th><th>rot err [deg]</th><th>map_eval*T xyz</th><th>relocalization xyz</th></tr>{error_rows}
   </table></section>
 </main></body></html>
 """
@@ -587,6 +587,17 @@ def _make_run_output_dir(args: argparse.Namespace) -> Path:
     return out
 
 
+def _make_run_work_dir(args: argparse.Namespace, output_dir: Path) -> Path:
+    if args.work_dir:
+        work = Path(args.work_dir).resolve()
+    else:
+        root = Path(args.work_root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        work = root / f"{output_dir.name}_work"
+    work.mkdir(parents=True, exist_ok=True)
+    return work
+
+
 def run(args: argparse.Namespace) -> Path:
     if not args.map_gt and not args.bag_gt:
         raise ValueError("Provide either --map-gt or --bag-gt")
@@ -594,9 +605,10 @@ def run(args: argparse.Namespace) -> Path:
         raise ValueError("--bag-eval is required")
 
     output_dir = _make_run_output_dir(args)
-    map_gt_dir = Path(args.map_gt).resolve() if args.map_gt else output_dir / "map_gt"
-    map_eval_dir = Path(args.map_eval).resolve() if args.map_eval else output_dir / "map_eval"
-    localization_dir = output_dir / "eval_localized_in_map_gt"
+    work_dir = _make_run_work_dir(args, output_dir)
+    map_gt_dir = Path(args.map_gt).resolve() if args.map_gt else work_dir / "map_gt"
+    map_eval_dir = Path(args.map_eval).resolve() if args.map_eval else work_dir / "map_eval"
+    localization_dir = work_dir / "eval_localized_in_map_gt"
 
     if not args.skip_runs:
         if args.bag_gt and not args.map_gt and not args.skip_map_gt:
@@ -689,6 +701,7 @@ def run(args: argparse.Namespace) -> Path:
             "map_eval_dir": str(map_eval_dir),
             "localization_dir": str(localization_dir),
             "output_dir": str(output_dir),
+            "work_dir": str(work_dir),
         },
         "sampled_timestamps": int(len(timestamps)),
         "paired_poses": int(len(paired_timestamps)),
@@ -727,6 +740,8 @@ def main():
     parser.add_argument("--map-eval", help="Existing eval map directory; if omitted, built from --bag-eval")
     parser.add_argument("--output-root", default="output", help="Parent directory for timestamped benchmark folder")
     parser.add_argument("--output-dir", help="Exact output directory; overrides timestamped folder creation")
+    parser.add_argument("--work-root", default="output/benchmark_work", help="Parent directory for generated maps and localization scratch data")
+    parser.add_argument("--work-dir", help="Exact work directory for generated maps and localization scratch data")
     parser.add_argument("--skip-runs", action="store_true", help="Skip map build/localization and only evaluate existing dirs")
     parser.add_argument("--skip-map-gt", action="store_true", help="Do not build map_gt")
     parser.add_argument("--skip-map-eval", action="store_true", help="Do not build map_eval")
