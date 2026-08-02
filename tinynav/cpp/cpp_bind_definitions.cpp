@@ -44,13 +44,14 @@ extern Eigen::MatrixXd run_raycasting_cpp(
 //   - relative_pose_j_i: np.ndarray (4x4)
 //   - translation_weight: np.ndarray (3,)
 //   - rotation_weight: np.ndarray (3,)
+//   - robust_loss_scale: double
 //
 // source: tinynav/cpp/pose_graph_solver.cpp
 // test: tests/test_map_node.py
 //
 extern std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
     std::unordered_map<int64_t, py::array_t<double>> camera_poses,
-    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>>> relative_pose_constraints,
+    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>, double>> relative_pose_constraints,
     std::unordered_map<int64_t, bool> constant_pose_index,
     int64_t max_iteration_num);
 

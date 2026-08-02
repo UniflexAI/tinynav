@@ -1,5 +1,6 @@
 import asyncio
 import glob
+import json
 import logging
 import os
 import shelve
@@ -54,6 +55,41 @@ class BuildMapArgs:
     # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
+    loop_similarity_threshold: float = 0.86
+    loop_top_k: int = 5
+    loop_min_inliers: int = 80
+    loop_min_inlier_ratio: float = 0.25
+    loop_min_grid_coverage: int = 4
+    loop_max_odom_translation_error: float = 5.0
+    loop_max_odom_rotation_error_deg: float = 60.0
+    loop_max_odom_z_error: float = 3.0
+    robust_loss_scale: float = 1.0
+
+
+@dataclass
+class RelativePoseConstraint:
+    curr_timestamp: int
+    prev_timestamp: int
+    T_prev_curr: np.ndarray
+    kind: str = "odom"
+    translation_weight: tuple[float, float, float] = (10.0, 10.0, 10.0)
+    rotation_weight: tuple[float, float, float] = (30.0, 30.0, 30.0)
+    quality: float = 1.0
+    robust_loss_scale: float = 1.0
+
+
+@dataclass
+class LoopClosureStats:
+    attempted_frames: int = 0
+    frames_without_history: int = 0
+    candidate_count: int = 0
+    rejected_no_matches: int = 0
+    rejected_pnp: int = 0
+    rejected_inliers: int = 0
+    rejected_inlier_ratio: int = 0
+    rejected_grid_coverage: int = 0
+    rejected_odom_consistency: int = 0
+    accepted: int = 0
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
@@ -173,10 +209,28 @@ def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, m
     min_timestamp = min(pose_graph_used_pose.keys())
     constant_pose_index_dict = { min_timestamp : True }
 
-    relative_pose_constraint = [
-        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([30.0, 30.0, 30.0]))
-        for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
-    optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
+    packed_constraints = []
+    for constraint in relative_pose_constraint:
+        if isinstance(constraint, RelativePoseConstraint):
+            packed_constraints.append((
+                constraint.curr_timestamp,
+                constraint.prev_timestamp,
+                constraint.T_prev_curr,
+                np.array(constraint.translation_weight, dtype=np.float64),
+                np.array(constraint.rotation_weight, dtype=np.float64),
+                float(constraint.robust_loss_scale),
+            ))
+        else:
+            curr_timestamp, prev_timestamp, T_prev_curr = constraint
+            packed_constraints.append((
+                curr_timestamp,
+                prev_timestamp,
+                T_prev_curr,
+                np.array([10.0, 10.0, 10.0], dtype=np.float64),
+                np.array([30.0, 30.0, 30.0], dtype=np.float64),
+                1.0,
+            ))
+    optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, packed_constraints, constant_pose_index_dict, max_iteration_num)
     return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
 
 def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarity_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
@@ -582,6 +636,15 @@ class BuildMapNode(Node):
         map_save_path: str,
         verbose_timer: bool = True,
         global_frames_ratio: float = 1.1,
+        loop_similarity_threshold: float = 0.86,
+        loop_top_k: int = 5,
+        loop_min_inliers: int = 80,
+        loop_min_inlier_ratio: float = 0.25,
+        loop_min_grid_coverage: int = 4,
+        loop_max_odom_translation_error: float = 5.0,
+        loop_max_odom_rotation_error_deg: float = 60.0,
+        loop_max_odom_z_error: float = 3.0,
+        robust_loss_scale: float = 1.0,
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
@@ -638,8 +701,17 @@ class BuildMapNode(Node):
 
         self.marker_id = 0
 
-        self.loop_similarity_threshold = 0.90
-        self.loop_top_k = 1
+        self.loop_similarity_threshold = loop_similarity_threshold
+        self.loop_top_k = loop_top_k
+        self.loop_min_inliers = loop_min_inliers
+        self.loop_min_inlier_ratio = loop_min_inlier_ratio
+        self.loop_min_grid_coverage = loop_min_grid_coverage
+        self.loop_max_odom_translation_error = loop_max_odom_translation_error
+        self.loop_max_odom_rotation_error = np.deg2rad(loop_max_odom_rotation_error_deg)
+        self.loop_max_odom_z_error = loop_max_odom_z_error
+        self.robust_loss_scale = robust_loss_scale
+        self.loop_stats = LoopClosureStats()
+        self.loop_debug_records = []
 
         self.map_save_path = map_save_path
         self._save_completed = False
@@ -764,7 +836,13 @@ class BuildMapNode(Node):
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
             T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
-            self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+            self.relative_pose_constraint.append(RelativePoseConstraint(
+                keyframe_image_timestamp,
+                self.last_keyframe_timestamp,
+                T_prev_curr,
+                kind="odom",
+                robust_loss_scale=self.robust_loss_scale,
+            ))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
             self.detect_loop_closure(keyframe_image_timestamp)
@@ -784,13 +862,18 @@ class BuildMapNode(Node):
         return asyncio.run(self.dinov2_model.infer(image))
 
     def detect_loop_closure(self, timestamp: int) -> None:
+        self.loop_stats.attempted_frames += 1
         target_embedding = self.db.get_embedding(timestamp)
         valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
+        if not valid_timestamp:
+            self.loop_stats.frames_without_history += 1
+            return
         valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
         idx_to_timestamp = {i: t for i, t in enumerate(valid_timestamp)}
 
         with self.stage_timer.timed("find_loop"):
             loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
+        self.loop_stats.candidate_count += len(loop_list)
         with self.stage_timer.timed("relative_pose_estimation"):
             for idx, _similarity in loop_list:
                 prev_timestamp = idx_to_timestamp[idx]
@@ -798,10 +881,140 @@ class BuildMapNode(Node):
                 prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
                 curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
                 prev_matched_keypoints, curr_matched_keypoints, _matches = self.match_keypoints(prev_features, curr_features)
-                success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
-                if success and len(inliers) >= 100:
-                    self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                    print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                match_count = len(prev_matched_keypoints)
+                if match_count == 0:
+                    self.loop_stats.rejected_no_matches += 1
+                    self._record_loop_debug(curr_timestamp, prev_timestamp, _similarity, "rejected_no_matches")
+                    continue
+
+                success, T_prev_curr, inliers_2d, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
+                if not success:
+                    self.loop_stats.rejected_pnp += 1
+                    self._record_loop_debug(curr_timestamp, prev_timestamp, _similarity, "rejected_pnp", match_count=match_count)
+                    continue
+
+                inlier_count = len(inliers)
+                inlier_ratio = inlier_count / max(match_count, 1)
+                grid_coverage = self._inlier_grid_coverage(inliers_2d, curr_depth.shape)
+                odom_ok, odom_errors = self._check_loop_odom_consistency(curr_timestamp, prev_timestamp, T_prev_curr)
+
+                if inlier_count < self.loop_min_inliers:
+                    self.loop_stats.rejected_inliers += 1
+                    self._record_loop_debug(
+                        curr_timestamp, prev_timestamp, _similarity, "rejected_inliers",
+                        match_count=match_count, inlier_count=inlier_count,
+                        inlier_ratio=inlier_ratio, grid_coverage=grid_coverage,
+                        **odom_errors,
+                    )
+                    continue
+                if inlier_ratio < self.loop_min_inlier_ratio:
+                    self.loop_stats.rejected_inlier_ratio += 1
+                    self._record_loop_debug(
+                        curr_timestamp, prev_timestamp, _similarity, "rejected_inlier_ratio",
+                        match_count=match_count, inlier_count=inlier_count,
+                        inlier_ratio=inlier_ratio, grid_coverage=grid_coverage,
+                        **odom_errors,
+                    )
+                    continue
+                if grid_coverage < self.loop_min_grid_coverage:
+                    self.loop_stats.rejected_grid_coverage += 1
+                    self._record_loop_debug(
+                        curr_timestamp, prev_timestamp, _similarity, "rejected_grid_coverage",
+                        match_count=match_count, inlier_count=inlier_count,
+                        inlier_ratio=inlier_ratio, grid_coverage=grid_coverage,
+                        **odom_errors,
+                    )
+                    continue
+                if not odom_ok:
+                    self.loop_stats.rejected_odom_consistency += 1
+                    self._record_loop_debug(
+                        curr_timestamp, prev_timestamp, _similarity, "rejected_odom_consistency",
+                        match_count=match_count, inlier_count=inlier_count,
+                        inlier_ratio=inlier_ratio, grid_coverage=grid_coverage,
+                        **odom_errors,
+                    )
+                    continue
+
+                quality = self._loop_quality(_similarity, inlier_count, inlier_ratio, grid_coverage)
+                translation_weight, rotation_weight = self._loop_weights(quality)
+                self.relative_pose_constraint.append(RelativePoseConstraint(
+                    curr_timestamp,
+                    prev_timestamp,
+                    T_prev_curr,
+                    kind="loop",
+                    translation_weight=translation_weight,
+                    rotation_weight=rotation_weight,
+                    quality=quality,
+                    robust_loss_scale=self.robust_loss_scale,
+                ))
+                self.loop_stats.accepted += 1
+                self._record_loop_debug(
+                    curr_timestamp, prev_timestamp, _similarity, "accepted",
+                    match_count=match_count, inlier_count=inlier_count,
+                    inlier_ratio=inlier_ratio, grid_coverage=grid_coverage,
+                    quality=quality, **odom_errors,
+                )
+                print(
+                    "Added loop relative pose constraint: "
+                    f"{curr_timestamp} -> {prev_timestamp}, "
+                    f"sim={_similarity:.3f}, inliers={inlier_count}/{match_count}, "
+                    f"ratio={inlier_ratio:.2f}, quality={quality:.2f}"
+                )
+
+    def _inlier_grid_coverage(self, inliers_2d: np.ndarray, image_shape: tuple[int, int], grid_shape: tuple[int, int] = (4, 4)) -> int:
+        if len(inliers_2d) == 0:
+            return 0
+        height, width = image_shape[:2]
+        xs = np.clip((inliers_2d[:, 0] / max(width, 1) * grid_shape[0]).astype(np.int32), 0, grid_shape[0] - 1)
+        ys = np.clip((inliers_2d[:, 1] / max(height, 1) * grid_shape[1]).astype(np.int32), 0, grid_shape[1] - 1)
+        return len(set(zip(xs.tolist(), ys.tolist())))
+
+    def _rotation_error_rad(self, rot_a: np.ndarray, rot_b: np.ndarray) -> float:
+        rot_err = rot_a.T @ rot_b
+        value = np.clip((np.trace(rot_err) - 1.0) * 0.5, -1.0, 1.0)
+        return float(np.arccos(value))
+
+    def _check_loop_odom_consistency(self, curr_timestamp: int, prev_timestamp: int, T_prev_curr: np.ndarray) -> tuple[bool, dict]:
+        odom_prev = self.odom.get(prev_timestamp)
+        odom_curr = self.odom.get(curr_timestamp)
+        if odom_prev is None or odom_curr is None:
+            return True, {}
+        odom_T_prev_curr = np.linalg.inv(odom_prev) @ odom_curr
+        translation_error = float(np.linalg.norm(T_prev_curr[:3, 3] - odom_T_prev_curr[:3, 3]))
+        rotation_error = self._rotation_error_rad(T_prev_curr[:3, :3], odom_T_prev_curr[:3, :3])
+        z_error = float(abs(T_prev_curr[2, 3] - odom_T_prev_curr[2, 3]))
+        ok = (
+            translation_error <= self.loop_max_odom_translation_error
+            and rotation_error <= self.loop_max_odom_rotation_error
+            and z_error <= self.loop_max_odom_z_error
+        )
+        return ok, {
+            "odom_translation_error": translation_error,
+            "odom_rotation_error_deg": float(np.rad2deg(rotation_error)),
+            "odom_z_error": z_error,
+        }
+
+    def _loop_quality(self, similarity: float, inlier_count: int, inlier_ratio: float, grid_coverage: int) -> float:
+        similarity_score = np.clip((similarity - self.loop_similarity_threshold) / max(1.0 - self.loop_similarity_threshold, 1e-6), 0.0, 1.0)
+        inlier_score = np.clip((inlier_count - self.loop_min_inliers) / 220.0, 0.0, 1.0)
+        ratio_score = np.clip((inlier_ratio - self.loop_min_inlier_ratio) / max(1.0 - self.loop_min_inlier_ratio, 1e-6), 0.0, 1.0)
+        coverage_score = np.clip(grid_coverage / 16.0, 0.0, 1.0)
+        return float(np.clip(0.25 + 0.25 * similarity_score + 0.25 * inlier_score + 0.30 * ratio_score + 0.20 * coverage_score, 0.25, 1.25))
+
+    def _loop_weights(self, quality: float) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        translation = float(4.0 + 8.0 * quality)
+        rotation = float(12.0 + 18.0 * quality)
+        return (translation, translation, translation), (rotation, rotation, rotation)
+
+    def _record_loop_debug(self, curr_timestamp: int, prev_timestamp: int, similarity: float, status: str, **extra) -> None:
+        record = {
+            "curr_timestamp": int(curr_timestamp),
+            "prev_timestamp": int(prev_timestamp),
+            "similarity": float(similarity),
+            "status": status,
+        }
+        record.update({k: float(v) if isinstance(v, (np.floating, float)) else int(v) if isinstance(v, (np.integer, int)) else v for k, v in extra.items()})
+        self.loop_debug_records.append(record)
 
     def maybe_run_global_refinement(self) -> None:
         """Run pose-graph optimization and full TF publish when the map has grown enough.
@@ -878,6 +1091,7 @@ class BuildMapNode(Node):
         np.save(f"{self.map_save_path}/poses.npy", self.pose_graph_used_pose, allow_pickle = True)
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
+        self._save_loop_report()
         print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
@@ -924,6 +1138,42 @@ class BuildMapNode(Node):
         self._save_completed = True
         self.get_logger().info("Full mapping data saved successfully")
         self.stage_timer.log_summary(self.get_logger().info)
+
+    def _save_loop_report(self) -> None:
+        constraints_by_kind: Dict[str, int] = {}
+        loop_qualities = []
+        for constraint in self.relative_pose_constraint:
+            if isinstance(constraint, RelativePoseConstraint):
+                constraints_by_kind[constraint.kind] = constraints_by_kind.get(constraint.kind, 0) + 1
+                if constraint.kind == "loop":
+                    loop_qualities.append(float(constraint.quality))
+            else:
+                constraints_by_kind["legacy"] = constraints_by_kind.get("legacy", 0) + 1
+
+        report = {
+            "loop_parameters": {
+                "loop_similarity_threshold": self.loop_similarity_threshold,
+                "loop_top_k": self.loop_top_k,
+                "loop_min_inliers": self.loop_min_inliers,
+                "loop_min_inlier_ratio": self.loop_min_inlier_ratio,
+                "loop_min_grid_coverage": self.loop_min_grid_coverage,
+                "loop_max_odom_translation_error": self.loop_max_odom_translation_error,
+                "loop_max_odom_rotation_error_deg": float(np.rad2deg(self.loop_max_odom_rotation_error)),
+                "loop_max_odom_z_error": self.loop_max_odom_z_error,
+                "robust_loss_scale": self.robust_loss_scale,
+            },
+            "stats": self.loop_stats.__dict__,
+            "constraints_by_kind": constraints_by_kind,
+            "loop_quality": {
+                "count": len(loop_qualities),
+                "mean": float(np.mean(loop_qualities)) if loop_qualities else None,
+                "min": float(np.min(loop_qualities)) if loop_qualities else None,
+                "max": float(np.max(loop_qualities)) if loop_qualities else None,
+            },
+            "records": self.loop_debug_records,
+        }
+        with open(f"{self.map_save_path}/loop_closure_report.json", "w") as f:
+            json.dump(report, f, indent=2)
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
         marker_array = MarkerArray()
@@ -1057,6 +1307,15 @@ if __name__ == '__main__':
         parsed_args.map_save_path,
         verbose_timer=parsed_args.verbose_timer,
         global_frames_ratio=parsed_args.global_frames_ratio,
+        loop_similarity_threshold=parsed_args.loop_similarity_threshold,
+        loop_top_k=parsed_args.loop_top_k,
+        loop_min_inliers=parsed_args.loop_min_inliers,
+        loop_min_inlier_ratio=parsed_args.loop_min_inlier_ratio,
+        loop_min_grid_coverage=parsed_args.loop_min_grid_coverage,
+        loop_max_odom_translation_error=parsed_args.loop_max_odom_translation_error,
+        loop_max_odom_rotation_error_deg=parsed_args.loop_max_odom_rotation_error_deg,
+        loop_max_odom_z_error=parsed_args.loop_max_odom_z_error,
+        robust_loss_scale=parsed_args.robust_loss_scale,
     )
     image_transports_node = ImageTransportsNode()
     exec_.add_node(player_node)

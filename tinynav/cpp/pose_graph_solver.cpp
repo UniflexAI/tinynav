@@ -48,7 +48,7 @@ public:
 
 std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
     std::unordered_map<int64_t, py::array_t<double>> camera_poses,
-    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>>> relative_pose_constraints,
+    std::vector<std::tuple<int64_t, int64_t, py::array_t<double>, py::array_t<double>, py::array_t<double>, double>> relative_pose_constraints,
     std::unordered_map<int64_t, bool> constant_pose_index,
     int64_t max_iteration_num) {
     ceres::Problem problem;
@@ -75,7 +75,7 @@ std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
         camera_parameters[cam_idx] = camera_parameter;
     }
 
-    for (const auto& [cam_idx_i, cam_idx_j, relative_pose_j_i, translation_weight, rotation_weight] : relative_pose_constraints) {
+    for (const auto& [cam_idx_i, cam_idx_j, relative_pose_j_i, translation_weight, rotation_weight, robust_loss_scale] : relative_pose_constraints) {
         auto relative_pose_j_i_buf = relative_pose_j_i.unchecked<2>();
         Eigen::Matrix4d relative_pose_j_i_eigen;
         for (ssize_t i = 0; i < 4; ++i)
@@ -90,7 +90,11 @@ std::unordered_map<int64_t, py::array_t<double>> pose_graph_solve(
         for (ssize_t i = 0; i < 3; ++i)
             rotation_weight_eigen[i] = rotation_weight_buf(i);
         ceres::CostFunction* relative_pose_error = new ceres::AutoDiffCostFunction<RelativePoseError, 6, 6, 6>(new RelativePoseError(relative_pose_j_i_eigen, translation_weight_eigen, rotation_weight_eigen));
-        problem.AddResidualBlock(relative_pose_error, nullptr, camera_parameters.at(cam_idx_i).data(), camera_parameters.at(cam_idx_j).data());
+        ceres::LossFunction* loss_function = nullptr;
+        if (robust_loss_scale > 0.0) {
+            loss_function = new ceres::HuberLoss(robust_loss_scale);
+        }
+        problem.AddResidualBlock(relative_pose_error, loss_function, camera_parameters.at(cam_idx_i).data(), camera_parameters.at(cam_idx_j).data());
     }
 
     for (const auto& [cam_idx, is_constant] : constant_pose_index) {

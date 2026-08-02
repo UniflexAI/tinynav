@@ -41,7 +41,7 @@ def test_pose_graph_solve():
     for i in range(camera_number):
         target_relative_pose = np.linalg.inv(target_pose[i]) @ target_pose[(i + 1) % camera_number]
         relative_pose_constraints.append(
-            ((i + 1) % camera_number, i, target_relative_pose, np.array([1, 1, 1]), np.array([1, 1, 1]))
+            ((i + 1) % camera_number, i, target_relative_pose, np.array([1, 1, 1]), np.array([1, 1, 1]), 1.0)
         )
 
     constant_camera_poses = {0: True}
