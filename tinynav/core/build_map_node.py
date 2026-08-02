@@ -312,7 +312,7 @@ class OdomPoseRecorder:
         timestamp_ns = int(odom_msg.header.stamp.sec * 1e9) + int(
             odom_msg.header.stamp.nanosec
         )
-        pose_matrix = msg2np(odom_msg)
+        pose_matrix, _ = msg2np(odom_msg)
         self.poses[timestamp_ns] = pose_matrix
 
     def save_to_disk(self) -> None:
