@@ -31,6 +31,10 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+try:
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+except Exception:
+    Axes3D = None
 import numpy as np
 import rosbag2_py
 from launch import LaunchDescription, LaunchService
@@ -243,6 +247,26 @@ def _sample_timestamps_from_bag(
     )
 
 
+def _sample_timestamps_from_map(
+    map_dir: Path,
+    num_samples: int,
+    trim_ratio: float,
+) -> np.ndarray:
+    poses = _load_pose_dict(map_dir / "poses.npy")
+    timestamps = np.asarray(sorted(poses), dtype=np.int64)
+    if len(timestamps) == 0:
+        raise RuntimeError(f"No poses found in map: {map_dir}")
+
+    trim_count = int(len(timestamps) * trim_ratio)
+    if trim_count * 2 < len(timestamps):
+        timestamps = timestamps[trim_count : len(timestamps) - trim_count]
+    if num_samples <= 0 or num_samples >= len(timestamps):
+        return timestamps
+
+    indices = np.linspace(0, len(timestamps) - 1, num_samples)
+    return timestamps[np.round(indices).astype(np.int64)]
+
+
 def _query_eval_reference_and_fusion(
     *,
     timestamps: np.ndarray,
@@ -300,6 +324,30 @@ def _estimate_rigid_transform(points_src: np.ndarray, points_dst: np.ndarray) ->
     return transform
 
 
+def _estimate_se2_z_transform(points_src: np.ndarray, points_dst: np.ndarray) -> np.ndarray:
+    if len(points_src) != len(points_dst) or len(points_src) < 2:
+        raise ValueError("Need at least 2 paired points")
+
+    src_xy = points_src[:, :2]
+    dst_xy = points_dst[:, :2]
+    centroid_src = np.mean(src_xy, axis=0)
+    centroid_dst = np.mean(dst_xy, axis=0)
+    src_centered = src_xy - centroid_src
+    dst_centered = dst_xy - centroid_dst
+    u, _, vt = np.linalg.svd(src_centered.T @ dst_centered)
+    rot_2d = vt.T @ u.T
+    if np.linalg.det(rot_2d) < 0:
+        vt[-1, :] *= -1
+        rot_2d = vt.T @ u.T
+
+    transform = np.eye(4)
+    transform[:2, :2] = rot_2d
+    transform[:2, 3] = centroid_dst - rot_2d @ centroid_src
+    transformed_z = points_src[:, 2]
+    transform[2, 3] = float(np.median(points_dst[:, 2] - transformed_z))
+    return transform
+
+
 def _ransac_transform(
     *,
     source_poses: PoseDict,
@@ -307,6 +355,7 @@ def _ransac_transform(
     inlier_threshold_m: float,
     iterations: int,
     seed: int,
+    alignment_mode: str,
 ) -> Tuple[np.ndarray, list[int], dict]:
     timestamps = sorted(set(source_poses) & set(target_poses))
     if len(timestamps) < 3:
@@ -317,10 +366,12 @@ def _ransac_transform(
     rng = np.random.default_rng(seed)
     best_mask = np.zeros(len(timestamps), dtype=bool)
     best_transform = np.eye(4)
+    estimator = _estimate_se2_z_transform if alignment_mode == "se2_z" else _estimate_rigid_transform
+    sample_size = 2 if alignment_mode == "se2_z" else 3
 
     for _ in range(max(iterations, 1)):
-        sample_idx = rng.choice(len(timestamps), size=3, replace=False)
-        candidate = _estimate_rigid_transform(src[sample_idx], dst[sample_idx])
+        sample_idx = rng.choice(len(timestamps), size=sample_size, replace=False)
+        candidate = estimator(src[sample_idx], dst[sample_idx])
         transformed = (candidate @ np.c_[src, np.ones(len(src))].T).T[:, :3]
         distances = np.linalg.norm(transformed - dst, axis=1)
         mask = distances <= inlier_threshold_m
@@ -328,8 +379,8 @@ def _ransac_transform(
             best_mask = mask
             best_transform = candidate
 
-    if best_mask.sum() >= 3:
-        best_transform = _estimate_rigid_transform(src[best_mask], dst[best_mask])
+    if best_mask.sum() >= sample_size:
+        best_transform = estimator(src[best_mask], dst[best_mask])
         transformed = (best_transform @ np.c_[src, np.ones(len(src))].T).T[:, :3]
         distances = np.linalg.norm(transformed - dst, axis=1)
         best_mask = distances <= inlier_threshold_m
@@ -341,6 +392,7 @@ def _ransac_transform(
         "inlier_ratio": len(inlier_timestamps) / max(len(timestamps), 1),
         "inlier_threshold_m": inlier_threshold_m,
         "ransac_iterations": iterations,
+        "alignment_mode": alignment_mode,
     }
 
 
@@ -397,23 +449,141 @@ def _threshold_stats(errors: list[dict], thresholds_m: list[float]) -> dict:
 
 
 def _plot_trajectory(errors: list[dict], output_path: Path):
-    ref_xy = np.array([row["map_eval_in_gt_xyz"][:2] for row in errors], dtype=float)
-    fusion_xy = np.array([row["fusion_xyz"][:2] for row in errors], dtype=float)
-    plt.figure(figsize=(8, 7))
-    if len(ref_xy):
-        plt.plot(ref_xy[:, 0], ref_xy[:, 1], "-", label="map_eval * T reference", linewidth=2)
-        plt.plot(fusion_xy[:, 0], fusion_xy[:, 1], "-", label="relocalization pose in map_gt", linewidth=2)
-        plt.scatter(ref_xy[:, 0], ref_xy[:, 1], s=10, alpha=0.45)
-        plt.scatter(fusion_xy[:, 0], fusion_xy[:, 1], s=10, alpha=0.45)
+    ref_xyz = np.array([row["map_eval_in_gt_xyz"] for row in errors], dtype=float)
+    fusion_xyz = np.array([row["fusion_xyz"] for row in errors], dtype=float)
+    plt.figure(figsize=(12, 10))
+    if len(ref_xyz):
+        plt.plot(ref_xyz[:, 0], ref_xyz[:, 1], "-", label="map_eval * T reference", linewidth=2)
+        plt.plot(fusion_xyz[:, 0], fusion_xyz[:, 1], "-", label="relocalization pose in map_gt", linewidth=2)
+        plt.scatter(ref_xyz[:, 0], ref_xyz[:, 1], s=10, alpha=0.45)
+        plt.scatter(fusion_xyz[:, 0], fusion_xyz[:, 1], s=10, alpha=0.45)
     plt.axis("equal")
     plt.grid(True, alpha=0.25)
     plt.xlabel("x [m]")
     plt.ylabel("y [m]")
-    plt.title("Trajectory comparison in map_gt frame")
+    plt.title("Trajectory comparison in map_gt frame (XY projection)")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(output_path, dpi=160)
+    plt.savefig(output_path, dpi=220)
     plt.close()
+
+
+def _set_axes_equal_3d(ax):
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+    x_range = abs(x_limits[1] - x_limits[0])
+    y_range = abs(y_limits[1] - y_limits[0])
+    z_range = abs(z_limits[1] - z_limits[0])
+    max_range = max(x_range, y_range, z_range)
+    if max_range <= 1e-9:
+        return
+    x_middle = np.mean(x_limits)
+    y_middle = np.mean(y_limits)
+    z_middle = np.mean(z_limits)
+    ax.set_xlim3d([x_middle - max_range / 2, x_middle + max_range / 2])
+    ax.set_ylim3d([y_middle - max_range / 2, y_middle + max_range / 2])
+    ax.set_zlim3d([z_middle - max_range / 2, z_middle + max_range / 2])
+
+
+def _plot_trajectory_3d(errors: list[dict], output_path: Path):
+    ref_xyz = np.array([row["map_eval_in_gt_xyz"] for row in errors], dtype=float)
+    fusion_xyz = np.array([row["fusion_xyz"] for row in errors], dtype=float)
+    if Axes3D is None:
+        _plot_trajectory_triptych(errors, output_path)
+        return
+    fig = plt.figure(figsize=(13, 10))
+    try:
+        ax = fig.add_subplot(111, projection="3d")
+    except Exception:
+        plt.close(fig)
+        _plot_trajectory_triptych(errors, output_path)
+        return
+    if len(ref_xyz):
+        ax.plot(
+            ref_xyz[:, 0],
+            ref_xyz[:, 1],
+            ref_xyz[:, 2],
+            label="map_eval * T reference",
+            linewidth=2,
+            color="#2563eb",
+        )
+        ax.plot(
+            fusion_xyz[:, 0],
+            fusion_xyz[:, 1],
+            fusion_xyz[:, 2],
+            label="relocalization pose in map_gt",
+            linewidth=2,
+            color="#f97316",
+        )
+        ax.scatter(ref_xyz[:, 0], ref_xyz[:, 1], ref_xyz[:, 2], s=10, alpha=0.45, color="#2563eb")
+        ax.scatter(fusion_xyz[:, 0], fusion_xyz[:, 1], fusion_xyz[:, 2], s=10, alpha=0.45, color="#f97316")
+        _set_axes_equal_3d(ax)
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_zlabel("z [m]")
+    ax.set_title("3D trajectory comparison in map_gt frame")
+    ax.legend()
+    ax.grid(True, alpha=0.25)
+    ax.view_init(elev=24, azim=-62)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def _plot_trajectory_triptych(errors: list[dict], output_path: Path):
+    ref_xyz = np.array([row["map_eval_in_gt_xyz"] for row in errors], dtype=float)
+    fusion_xyz = np.array([row["fusion_xyz"] for row in errors], dtype=float)
+    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
+    views = [
+        ("XY projection", 0, 1, "x [m]", "y [m]"),
+        ("XZ projection", 0, 2, "x [m]", "z [m]"),
+        ("YZ projection", 1, 2, "y [m]", "z [m]"),
+    ]
+    for ax, (title, i, j, xlabel, ylabel) in zip(axes, views):
+        if len(ref_xyz):
+            ax.plot(ref_xyz[:, i], ref_xyz[:, j], "-", label="map_eval * T reference", linewidth=2, color="#2563eb")
+            ax.plot(fusion_xyz[:, i], fusion_xyz[:, j], "-", label="relocalization pose in map_gt", linewidth=2, color="#f97316")
+            ax.scatter(ref_xyz[:, i], ref_xyz[:, j], s=10, alpha=0.35, color="#2563eb")
+            ax.scatter(fusion_xyz[:, i], fusion_xyz[:, j], s=10, alpha=0.35, color="#f97316")
+            ax.axis("equal")
+        ax.grid(True, alpha=0.25)
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+    axes[0].legend(fontsize=8)
+    fig.suptitle("Trajectory comparison in map_gt frame (3-axis projections)")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def _plot_trajectory_projection(
+    errors: list[dict],
+    output_path: Path,
+    *,
+    axes: tuple[int, int],
+    labels: tuple[str, str],
+    title: str,
+):
+    ref_xyz = np.array([row["map_eval_in_gt_xyz"] for row in errors], dtype=float)
+    fusion_xyz = np.array([row["fusion_xyz"] for row in errors], dtype=float)
+    i, j = axes
+    fig, ax = plt.subplots(figsize=(13, 8))
+    if len(ref_xyz):
+        ax.plot(ref_xyz[:, i], ref_xyz[:, j], "-", label="map_eval * T reference", linewidth=2.2, color="#2563eb")
+        ax.plot(fusion_xyz[:, i], fusion_xyz[:, j], "-", label="relocalization pose in map_gt", linewidth=2.2, color="#f97316")
+        ax.scatter(ref_xyz[:, i], ref_xyz[:, j], s=18, alpha=0.4, color="#2563eb")
+        ax.scatter(fusion_xyz[:, i], fusion_xyz[:, j], s=18, alpha=0.4, color="#f97316")
+        ax.axis("equal")
+    ax.grid(True, alpha=0.25)
+    ax.set_xlabel(labels[0])
+    ax.set_ylabel(labels[1])
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
 
 
 def _plot_error_curve(errors: list[dict], output_path: Path):
@@ -450,7 +620,10 @@ def _fmt(value: object, precision: int = 4) -> str:
 
 
 def _write_html_report(output_dir: Path, metrics: dict, errors: list[dict]):
+    trajectory_3d_uri = _img_data_uri(output_dir / "trajectory_3d.png")
     trajectory_uri = _img_data_uri(output_dir / "trajectory_xy.png")
+    trajectory_xz_uri = _img_data_uri(output_dir / "trajectory_xz.png")
+    trajectory_yz_uri = _img_data_uri(output_dir / "trajectory_yz.png")
     error_uri = _img_data_uri(output_dir / "translation_rotation_error.png")
     trans = metrics["translation_error_m"]
     rot = metrics["rotation_error_deg"]
@@ -550,9 +723,16 @@ def _write_html_report(output_dir: Path, metrics: dict, errors: list[dict]):
   </table></section>
 
   <section><h2>Trajectory and Error Curves</h2><div class="cols">
-    <div><img src="{trajectory_uri}" alt="Trajectory comparison" /></div>
+    <div><img src="{trajectory_3d_uri}" alt="3D trajectory comparison" /></div>
     <div><img src="{error_uri}" alt="Error curve" /></div>
-  </div></section>
+  </div>
+  <p>For stairs and multi-floor motion, inspect XZ / YZ projections as separate large plots. They expose vertical floor drift better than the top-down XY view.</p>
+  <div class="cols">
+    <div><img src="{trajectory_xz_uri}" alt="XZ trajectory comparison" /></div>
+    <div><img src="{trajectory_yz_uri}" alt="YZ trajectory comparison" /></div>
+  </div>
+  <p>XY projection is kept below for quick top-down inspection.</p>
+  <div><img src="{trajectory_uri}" alt="XY trajectory comparison" /></div></section>
 
   <section><h2>Estimated Transform: T_map_eval_to_gt</h2>
     <p>RANSAC inliers: {metrics['transform_fit']['inlier_count']} / {metrics['transform_fit']['candidate_pairs']}
@@ -650,6 +830,8 @@ def run(args: argparse.Namespace) -> Path:
 
     if args.timestamps_file:
         timestamps = np.loadtxt(args.timestamps_file, dtype=np.int64)
+    elif args.map_eval:
+        timestamps = _sample_timestamps_from_map(map_eval_dir, args.num_samples, args.trim_ratio)
     else:
         timestamps = _sample_timestamps_from_bag(args.bag_eval, args.num_samples, args.trim_ratio)
 
@@ -673,6 +855,7 @@ def run(args: argparse.Namespace) -> Path:
         inlier_threshold_m=args.ransac_threshold_m,
         iterations=args.ransac_iterations,
         seed=args.seed,
+        alignment_mode=args.alignment_mode,
     )
 
     fit_source = "ransac_all_pairs"
@@ -720,7 +903,22 @@ def run(args: argparse.Namespace) -> Path:
     np.save(output_dir / "T_map_eval_to_gt.npy", transform_map_eval_to_gt)
     np.savetxt(output_dir / "sampled_timestamps_ns.txt", np.array(timestamps, dtype=np.int64), fmt="%d")
 
+    _plot_trajectory_3d(errors, output_dir / "trajectory_3d.png")
     _plot_trajectory(errors, output_dir / "trajectory_xy.png")
+    _plot_trajectory_projection(
+        errors,
+        output_dir / "trajectory_xz.png",
+        axes=(0, 2),
+        labels=("x [m]", "z [m]"),
+        title="Trajectory comparison in map_gt frame (XZ projection)",
+    )
+    _plot_trajectory_projection(
+        errors,
+        output_dir / "trajectory_yz.png",
+        axes=(1, 2),
+        labels=("y [m]", "z [m]"),
+        title="Trajectory comparison in map_gt frame (YZ projection)",
+    )
     _plot_error_curve(errors, output_dir / "translation_rotation_error.png")
     _write_html_report(output_dir, metrics, errors)
 
@@ -755,6 +953,12 @@ def main():
     parser.add_argument("--max-anchor-dt-s", type=float, default=1.0, help="Max timestamp distance to anchor pose")
     parser.add_argument("--ransac-threshold-m", type=float, default=0.20, help="RANSAC inlier threshold")
     parser.add_argument("--ransac-iterations", type=int, default=1000, help="RANSAC iterations")
+    parser.add_argument(
+        "--alignment-mode",
+        choices=["se2_z", "se3"],
+        default="se2_z",
+        help="Map alignment model. se2_z estimates planar yaw/xy plus z offset; se3 estimates full 3D rigid transform.",
+    )
     parser.add_argument("--seed", type=int, default=7, help="Random seed")
     parser.add_argument("--evaluate-inliers-only", action="store_true", help="Only evaluate RANSAC inliers")
     parser.add_argument(
