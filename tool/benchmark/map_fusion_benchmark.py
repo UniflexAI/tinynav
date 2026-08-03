@@ -32,10 +32,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-try:
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-except Exception:
-    Axes3D = None
 import cv2
 import numpy as np
 import rosbag2_py
@@ -482,96 +478,6 @@ def _plot_trajectory(errors: list[dict], output_path: Path):
     plt.tight_layout()
     plt.savefig(output_path, dpi=220)
     plt.close()
-
-
-def _set_axes_equal_3d(ax):
-    x_limits = ax.get_xlim3d()
-    y_limits = ax.get_ylim3d()
-    z_limits = ax.get_zlim3d()
-    x_range = abs(x_limits[1] - x_limits[0])
-    y_range = abs(y_limits[1] - y_limits[0])
-    z_range = abs(z_limits[1] - z_limits[0])
-    max_range = max(x_range, y_range, z_range)
-    if max_range <= 1e-9:
-        return
-    x_middle = np.mean(x_limits)
-    y_middle = np.mean(y_limits)
-    z_middle = np.mean(z_limits)
-    ax.set_xlim3d([x_middle - max_range / 2, x_middle + max_range / 2])
-    ax.set_ylim3d([y_middle - max_range / 2, y_middle + max_range / 2])
-    ax.set_zlim3d([z_middle - max_range / 2, z_middle + max_range / 2])
-
-
-def _plot_trajectory_3d(errors: list[dict], output_path: Path):
-    ref_xyz = np.array([row["map_eval_in_gt_xyz"] for row in errors], dtype=float)
-    fusion_xyz = np.array([row["fusion_xyz"] for row in errors], dtype=float)
-    if Axes3D is None:
-        _plot_trajectory_triptych(errors, output_path)
-        return
-    fig = plt.figure(figsize=(13, 10))
-    try:
-        ax = fig.add_subplot(111, projection="3d")
-    except Exception:
-        plt.close(fig)
-        _plot_trajectory_triptych(errors, output_path)
-        return
-    if len(ref_xyz):
-        ax.plot(
-            ref_xyz[:, 0],
-            ref_xyz[:, 1],
-            ref_xyz[:, 2],
-            label="map_eval * T reference",
-            linewidth=2,
-            color="#2563eb",
-        )
-        ax.plot(
-            fusion_xyz[:, 0],
-            fusion_xyz[:, 1],
-            fusion_xyz[:, 2],
-            label="relocalization pose in map_gt",
-            linewidth=2,
-            color="#f97316",
-        )
-        ax.scatter(ref_xyz[:, 0], ref_xyz[:, 1], ref_xyz[:, 2], s=10, alpha=0.45, color="#2563eb")
-        ax.scatter(fusion_xyz[:, 0], fusion_xyz[:, 1], fusion_xyz[:, 2], s=10, alpha=0.45, color="#f97316")
-        _set_axes_equal_3d(ax)
-    ax.set_xlabel("x [m]")
-    ax.set_ylabel("y [m]")
-    ax.set_zlabel("z [m]")
-    ax.set_title("3D trajectory comparison in map_gt frame")
-    ax.legend()
-    ax.grid(True, alpha=0.25)
-    ax.view_init(elev=24, azim=-62)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=220)
-    plt.close(fig)
-
-
-def _plot_trajectory_triptych(errors: list[dict], output_path: Path):
-    ref_xyz = np.array([row["map_eval_in_gt_xyz"] for row in errors], dtype=float)
-    fusion_xyz = np.array([row["fusion_xyz"] for row in errors], dtype=float)
-    fig, axes = plt.subplots(1, 3, figsize=(21, 7))
-    views = [
-        ("XY projection", 0, 1, "x [m]", "y [m]"),
-        ("XZ projection", 0, 2, "x [m]", "z [m]"),
-        ("YZ projection", 1, 2, "y [m]", "z [m]"),
-    ]
-    for ax, (title, i, j, xlabel, ylabel) in zip(axes, views):
-        if len(ref_xyz):
-            ax.plot(ref_xyz[:, i], ref_xyz[:, j], "-", label="map_eval * T reference", linewidth=2, color="#2563eb")
-            ax.plot(fusion_xyz[:, i], fusion_xyz[:, j], "-", label="relocalization pose in map_gt", linewidth=2, color="#f97316")
-            ax.scatter(ref_xyz[:, i], ref_xyz[:, j], s=10, alpha=0.35, color="#2563eb")
-            ax.scatter(fusion_xyz[:, i], fusion_xyz[:, j], s=10, alpha=0.35, color="#f97316")
-            ax.axis("equal")
-        ax.grid(True, alpha=0.25)
-        ax.set_title(title)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-    axes[0].legend(fontsize=8)
-    fig.suptitle("Trajectory comparison in map_gt frame (3-axis projections)")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=220)
-    plt.close(fig)
 
 
 def _plot_trajectory_projection(
@@ -1023,7 +929,6 @@ def _write_html_report(
     errors: list[dict],
     retrieval_diagnostics: Optional[list[dict]] = None,
 ):
-    trajectory_3d_uri = _img_data_uri(output_dir / "trajectory_3d.png")
     trajectory_uri = _img_data_uri(output_dir / "trajectory_xy.png")
     trajectory_xz_uri = _img_data_uri(output_dir / "trajectory_xz.png")
     trajectory_yz_uri = _img_data_uri(output_dir / "trajectory_yz.png")
@@ -1193,10 +1098,8 @@ def _write_html_report(
     <tr><th>Threshold</th><th>Count</th><th>Ratio</th></tr>{threshold_rows}
   </table></section>
 
-  <section><h2>Trajectory and Error Curves</h2><div class="cols">
-    <div><img src="{trajectory_3d_uri}" alt="3D trajectory comparison" /></div>
-    <div><img src="{error_uri}" alt="Error curve" /></div>
-  </div>
+  <section><h2>Trajectory and Error Curves</h2>
+  <div><img src="{error_uri}" alt="Error curve" /></div>
   <div><img src="{xyz_error_uri}" alt="XYZ residual curve" /></div>
   <p>For stairs and multi-floor motion, inspect XZ / YZ projections as separate large plots. They expose vertical floor drift better than the top-down XY view.</p>
   <div class="cols">
@@ -1378,7 +1281,6 @@ def run(args: argparse.Namespace) -> Path:
     np.save(output_dir / "T_map_eval_to_gt.npy", transform_map_eval_to_gt)
     np.savetxt(output_dir / "sampled_timestamps_ns.txt", np.array(timestamps, dtype=np.int64), fmt="%d")
 
-    _plot_trajectory_3d(errors, output_dir / "trajectory_3d.png")
     _plot_trajectory(errors, output_dir / "trajectory_xy.png")
     _plot_trajectory_projection(
         errors,
