@@ -719,6 +719,17 @@ def _keypoints_to_world(
     return points_world, valid
 
 
+def _depth_values_for_keypoints(keypoints: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    values = []
+    height, width = depth.shape[:2]
+    for kp in keypoints:
+        u = int(round(float(kp[0])))
+        v = int(round(float(kp[1])))
+        z = float(depth[v, u]) if 0 <= u < width and 0 <= v < height else 0.0
+        values.append(z if 0.0 < z < 50.0 else np.nan)
+    return np.asarray(values, dtype=np.float32)
+
+
 def _pnp_pose(
     points_world: np.ndarray,
     points_2d: np.ndarray,
@@ -747,6 +758,9 @@ def _inlier_distribution(
             "median_y_norm": None,
             "lower_half_ratio": 0.0,
             "bottom_third_ratio": 0.0,
+            "x_span_norm": 0.0,
+            "y_span_norm": 0.0,
+            "bbox_area_norm": 0.0,
             "grid_coverage_4x4": 0,
         }
     h, w = image_shape[:2]
@@ -759,8 +773,79 @@ def _inlier_distribution(
         "median_y_norm": float(np.median(y_norm)),
         "lower_half_ratio": float(np.mean(y_norm >= 0.5)),
         "bottom_third_ratio": float(np.mean(y_norm >= 2.0 / 3.0)),
+        "x_span_norm": float(np.max(x_norm) - np.min(x_norm)),
+        "y_span_norm": float(np.max(y_norm) - np.min(y_norm)),
+        "bbox_area_norm": float((np.max(x_norm) - np.min(x_norm)) * (np.max(y_norm) - np.min(y_norm))),
         "grid_coverage_4x4": int(len(set(zip(xs.tolist(), ys.tolist())))),
     }
+
+
+def _depth_distribution(depth_values: np.ndarray) -> dict:
+    values = depth_values[np.isfinite(depth_values)]
+    if len(values) == 0:
+        return {
+            "depth_median_m": None,
+            "depth_p10_m": None,
+            "depth_p90_m": None,
+            "depth_iqr_m": None,
+            "depth_rel_iqr": None,
+        }
+    p10, p25, p50, p75, p90 = np.percentile(values, [10, 25, 50, 75, 90])
+    return {
+        "depth_median_m": float(p50),
+        "depth_p10_m": float(p10),
+        "depth_p90_m": float(p90),
+        "depth_iqr_m": float(p75 - p25),
+        "depth_rel_iqr": float((p75 - p25) / max(p50, 1e-6)),
+    }
+
+
+def _landmark_geometry(points_world: np.ndarray) -> dict:
+    if len(points_world) < 4:
+        return {
+            "landmark_span_m": None,
+            "landmark_z_span_m": None,
+            "landmark_planarity": None,
+            "landmark_linearity": None,
+            "landmark_spatiality": None,
+        }
+    centered = points_world - np.mean(points_world, axis=0, keepdims=True)
+    cov = centered.T @ centered / max(len(centered) - 1, 1)
+    eigvals = np.sort(np.linalg.eigvalsh(cov))[::-1]
+    eigvals = np.maximum(eigvals, 0.0)
+    l0 = float(max(eigvals[0], 1e-9))
+    l1 = float(eigvals[1])
+    l2 = float(eigvals[2])
+    mins = np.min(points_world, axis=0)
+    maxs = np.max(points_world, axis=0)
+    return {
+        "landmark_span_m": float(np.linalg.norm(maxs - mins)),
+        "landmark_z_span_m": float(maxs[2] - mins[2]),
+        "landmark_planarity": float((l1 - l2) / l0),
+        "landmark_linearity": float((l0 - l1) / l0),
+        "landmark_spatiality": float(l2 / l0),
+    }
+
+
+def _clamp01(value: float) -> float:
+    return float(np.clip(value, 0.0, 1.0))
+
+
+def _trial_loop_quality(candidate: dict) -> float:
+    if not candidate["pnp_success"]:
+        return 0.0
+    similarity_score = _clamp01((candidate["similarity"] - 0.20) / 0.18)
+    inlier_score = _clamp01(candidate["pnp_inlier_count"] / 150.0) * _clamp01(candidate["pnp_inlier_ratio"])
+    image_score = 0.5 * _clamp01(candidate["grid_coverage_4x4"] / 12.0) + 0.5 * _clamp01(candidate["bbox_area_norm"] / 0.35)
+    depth_score = _clamp01((candidate["depth_rel_iqr"] or 0.0) / 0.35)
+    spatiality_score = _clamp01(((candidate["landmark_spatiality"] or 0.0) / 0.015) ** 0.5)
+    return float(
+        0.15 * similarity_score
+        + 0.30 * inlier_score
+        + 0.25 * image_score
+        + 0.15 * depth_score
+        + 0.15 * spatiality_score
+    )
 
 
 def _draw_match_image(
@@ -838,12 +923,15 @@ def _compute_retrieval_diagnostics(
 
             candidate_rows = []
             for rank, (gt_idx, sim) in enumerate(candidates, start=1):
+                next_sim = candidates[rank][1] if rank < len(candidates) else None
                 gt_ts = gt_timestamps[int(gt_idx)]
                 gt_depth, _, gt_features, _, gt_image_loader = gt_db.get_depth_embedding_features_images(gt_ts)
                 gt_image = gt_image_loader()
                 ref_kpts_all, query_kpts_all = _match_keypoints(matcher, gt_features, eval_features)
                 points_world, depth_valid = _keypoints_to_world(ref_kpts_all, gt_depth, gt_poses[gt_ts], gt_K)
+                depth_values_all = _depth_values_for_keypoints(ref_kpts_all, gt_depth)
                 points_world_valid = points_world[depth_valid].astype(np.float32)
+                depth_values_valid = depth_values_all[depth_valid]
                 query_valid = query_kpts_all[depth_valid].astype(np.float32)
                 success, pose_camera_to_world, pnp_inliers = _pnp_pose(
                     points_world_valid,
@@ -863,6 +951,10 @@ def _compute_retrieval_diagnostics(
                     expected_delta = pose_camera_to_world[:3, 3] - expected_pose[:3, 3]
                     fusion_delta = pose_camera_to_world[:3, 3] - fusion_pose[:3, 3]
                 dist = _inlier_distribution(query_kpts_all, original_inliers, eval_image.shape[:2])
+                inlier_depths = depth_values_valid[pnp_inliers] if success else np.empty((0,), dtype=np.float32)
+                inlier_points = points_world_valid[pnp_inliers] if success else np.empty((0, 3), dtype=np.float32)
+                depth_stats = _depth_distribution(inlier_depths)
+                geometry_stats = _landmark_geometry(inlier_points)
                 image_name = f"sample_{sample_index:03d}_rank_{rank}_{eval_ts}_{gt_ts}.jpg"
                 cv2.imwrite(
                     str(image_dir / image_name),
@@ -875,32 +967,36 @@ def _compute_retrieval_diagnostics(
                         max_lines,
                     ),
                 )
-                candidate_rows.append(
-                    {
-                        "rank": rank,
-                        "gt_timestamp_ns": int(gt_ts),
-                        "similarity": float(sim),
-                        "match_count": int(len(query_kpts_all)),
-                        "landmark_count": int(len(query_valid)),
-                        "pnp_success": bool(success),
-                        "pnp_inlier_count": int(len(original_inliers)),
-                        "pnp_inlier_ratio": float(len(original_inliers) / max(len(query_valid), 1)),
-                        "pnp_error_to_eval_pose_m": (
-                            float(np.linalg.norm(expected_delta)) if expected_delta is not None else None
-                        ),
-                        "pnp_dz_to_eval_pose_m": (
-                            float(expected_delta[2]) if expected_delta is not None else None
-                        ),
-                        "pnp_error_to_relocalization_m": (
-                            float(np.linalg.norm(fusion_delta)) if fusion_delta is not None else None
-                        ),
-                        "pnp_dz_to_relocalization_m": (
-                            float(fusion_delta[2]) if fusion_delta is not None else None
-                        ),
-                        "image": str(Path("retrieval_diagnostics") / image_name),
-                        **dist,
-                    }
-                )
+                candidate_row = {
+                    "rank": rank,
+                    "gt_timestamp_ns": int(gt_ts),
+                    "raw_similarity": float(sim),
+                    "similarity": float(sim),
+                    "rank_margin_to_next": float(sim - next_sim) if next_sim is not None else None,
+                    "match_count": int(len(query_kpts_all)),
+                    "landmark_count": int(len(query_valid)),
+                    "pnp_success": bool(success),
+                    "pnp_inlier_count": int(len(original_inliers)),
+                    "pnp_inlier_ratio": float(len(original_inliers) / max(len(query_valid), 1)),
+                    "pnp_error_to_eval_pose_m": (
+                        float(np.linalg.norm(expected_delta)) if expected_delta is not None else None
+                    ),
+                    "pnp_dz_to_eval_pose_m": (
+                        float(expected_delta[2]) if expected_delta is not None else None
+                    ),
+                    "pnp_error_to_relocalization_m": (
+                        float(np.linalg.norm(fusion_delta)) if fusion_delta is not None else None
+                    ),
+                    "pnp_dz_to_relocalization_m": (
+                        float(fusion_delta[2]) if fusion_delta is not None else None
+                    ),
+                    "image": str(Path("retrieval_diagnostics") / image_name),
+                    **dist,
+                    **depth_stats,
+                    **geometry_stats,
+                }
+                candidate_row["trial_loop_quality"] = _trial_loop_quality(candidate_row)
+                candidate_rows.append(candidate_row)
 
             rows.append(
                 {
@@ -965,13 +1061,14 @@ def _write_html_report(
                 candidate_cards.append(
                     f"""
                     <div class="candidate">
-                      <h3>top {c['rank']} · sim={c['similarity']:.4f} · PnP={'ok' if c['pnp_success'] else 'fail'}</h3>
+                      <h3>top {c['rank']} · raw sim={c['raw_similarity']:.4f} · margin→next={_fmt(c['rank_margin_to_next'], 4)} · PnP={'ok' if c['pnp_success'] else 'fail'}</h3>
                       <table>
-                        <tr><th>matches</th><th>landmarks</th><th>inliers</th><th>ratio</th><th>PnP→eval [m]</th><th>dz→eval [m]</th><th>PnP→relocal [m]</th><th>lower half</th><th>bottom 1/3</th><th>grid</th></tr>
+                        <tr><th>raw sim</th><th>margin→next</th><th>quality</th><th>matches</th><th>landmarks</th><th>inliers</th><th>ratio</th><th>PnP→eval [m]</th><th>dz→eval [m]</th><th>PnP→relocal [m]</th><th>lower half</th><th>bottom 1/3</th><th>x/y span</th><th>depth med/IQR [m]</th><th>3D spatiality</th><th>3D planarity</th><th>grid</th></tr>
                         <tr>
-                          <td>{c['match_count']}</td><td>{c['landmark_count']}</td><td>{c['pnp_inlier_count']}</td><td>{_fmt(c['pnp_inlier_ratio'], 3)}</td>
+                          <td>{_fmt(c['raw_similarity'], 4)}</td><td>{_fmt(c['rank_margin_to_next'], 4)}</td><td>{_fmt(c['trial_loop_quality'], 3)}</td><td>{c['match_count']}</td><td>{c['landmark_count']}</td><td>{c['pnp_inlier_count']}</td><td>{_fmt(c['pnp_inlier_ratio'], 3)}</td>
                           <td>{_fmt(c['pnp_error_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_dz_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_error_to_relocalization_m'], 3)}</td>
-                          <td>{_fmt(c['lower_half_ratio'], 3)}</td><td>{_fmt(c['bottom_third_ratio'], 3)}</td><td>{c['grid_coverage_4x4']}</td>
+                          <td>{_fmt(c['lower_half_ratio'], 3)}</td><td>{_fmt(c['bottom_third_ratio'], 3)}</td><td>{_fmt(c['x_span_norm'], 2)} / {_fmt(c['y_span_norm'], 2)}</td>
+                          <td>{_fmt(c['depth_median_m'], 2)} / {_fmt(c['depth_iqr_m'], 2)}</td><td>{_fmt(c['landmark_spatiality'], 4)}</td><td>{_fmt(c['landmark_planarity'], 3)}</td><td>{c['grid_coverage_4x4']}</td>
                         </tr>
                       </table>
                       <img src="{image_uri}" alt="top {c['rank']} retrieval candidate" />
