@@ -834,7 +834,7 @@ def _clamp01(value: float) -> float:
 def _trial_loop_quality(candidate: dict) -> float:
     if not candidate["pnp_success"]:
         return 0.0
-    similarity_score = _clamp01((candidate["similarity"] - 0.20) / 0.18)
+    similarity_score = _clamp01((candidate["dino_vlad_similarity"] - 0.20) / 0.18)
     inlier_score = _clamp01(candidate["pnp_inlier_count"] / 150.0) * _clamp01(candidate["pnp_inlier_ratio"])
     image_score = 0.5 * _clamp01(candidate["grid_coverage_4x4"] / 12.0) + 0.5 * _clamp01(candidate["bbox_area_norm"] / 0.35)
     depth_score = _clamp01((candidate["depth_rel_iqr"] or 0.0) / 0.35)
@@ -970,9 +970,8 @@ def _compute_retrieval_diagnostics(
                 candidate_row = {
                     "rank": rank,
                     "gt_timestamp_ns": int(gt_ts),
-                    "raw_similarity": float(sim),
-                    "similarity": float(sim),
-                    "rank_margin_to_next": float(sim - next_sim) if next_sim is not None else None,
+                    "dino_vlad_similarity": float(sim),
+                    "dino_vlad_margin_to_next": float(sim - next_sim) if next_sim is not None else None,
                     "match_count": int(len(query_kpts_all)),
                     "landmark_count": int(len(query_valid)),
                     "pnp_success": bool(success),
@@ -1061,11 +1060,11 @@ def _write_html_report(
                 candidate_cards.append(
                     f"""
                     <div class="candidate">
-                      <h3>top {c['rank']} · raw sim={c['raw_similarity']:.4f} · margin→next={_fmt(c['rank_margin_to_next'], 4)} · PnP={'ok' if c['pnp_success'] else 'fail'}</h3>
+                      <h3>top {c['rank']} · DINO-VLAD sim={c['dino_vlad_similarity']:.4f} · DINO-VLAD margin→next={_fmt(c['dino_vlad_margin_to_next'], 4)} · PnP={'ok' if c['pnp_success'] else 'fail'}</h3>
                       <table>
-                        <tr><th>raw sim</th><th>margin→next</th><th>quality</th><th>matches</th><th>landmarks</th><th>inliers</th><th>ratio</th><th>PnP→eval [m]</th><th>dz→eval [m]</th><th>PnP→relocal [m]</th><th>lower half</th><th>bottom 1/3</th><th>x/y span</th><th>depth med/IQR [m]</th><th>3D spatiality</th><th>3D planarity</th><th>grid</th></tr>
+                        <tr><th>DINO-VLAD sim</th><th>DINO-VLAD margin</th><th>quality</th><th>matches</th><th>landmarks</th><th>inliers</th><th>ratio</th><th>PnP→eval [m]</th><th>dz→eval [m]</th><th>PnP→relocal [m]</th><th>lower half</th><th>bottom 1/3</th><th>x/y span</th><th>depth med/IQR [m]</th><th>3D spatiality</th><th>3D planarity</th><th>grid</th></tr>
                         <tr>
-                          <td>{_fmt(c['raw_similarity'], 4)}</td><td>{_fmt(c['rank_margin_to_next'], 4)}</td><td>{_fmt(c['trial_loop_quality'], 3)}</td><td>{c['match_count']}</td><td>{c['landmark_count']}</td><td>{c['pnp_inlier_count']}</td><td>{_fmt(c['pnp_inlier_ratio'], 3)}</td>
+                          <td>{_fmt(c['dino_vlad_similarity'], 4)}</td><td>{_fmt(c['dino_vlad_margin_to_next'], 4)}</td><td>{_fmt(c['trial_loop_quality'], 3)}</td><td>{c['match_count']}</td><td>{c['landmark_count']}</td><td>{c['pnp_inlier_count']}</td><td>{_fmt(c['pnp_inlier_ratio'], 3)}</td>
                           <td>{_fmt(c['pnp_error_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_dz_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_error_to_relocalization_m'], 3)}</td>
                           <td>{_fmt(c['lower_half_ratio'], 3)}</td><td>{_fmt(c['bottom_third_ratio'], 3)}</td><td>{_fmt(c['x_span_norm'], 2)} / {_fmt(c['y_span_norm'], 2)}</td>
                           <td>{_fmt(c['depth_median_m'], 2)} / {_fmt(c['depth_iqr_m'], 2)}</td><td>{_fmt(c['landmark_spatiality'], 4)}</td><td>{_fmt(c['landmark_planarity'], 3)}</td><td>{c['grid_coverage_4x4']}</td>
