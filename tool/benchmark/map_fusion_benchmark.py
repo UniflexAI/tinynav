@@ -1061,15 +1061,15 @@ def _write_html_report(
                     f"""
                     <div class="candidate">
                       <h3>top {c['rank']} · DINO-VLAD sim={c['dino_vlad_similarity']:.4f} · DINO-VLAD margin→next={_fmt(c['dino_vlad_margin_to_next'], 4)} · PnP={'ok' if c['pnp_success'] else 'fail'}</h3>
-                      <table>
-                        <tr><th>DINO-VLAD sim</th><th>DINO-VLAD margin</th><th>quality</th><th>matches</th><th>landmarks</th><th>inliers</th><th>ratio</th><th>PnP→eval [m]</th><th>dz→eval [m]</th><th>PnP→relocal [m]</th><th>lower half</th><th>bottom 1/3</th><th>x/y span</th><th>depth med/IQR [m]</th><th>3D spatiality</th><th>3D planarity</th><th>grid</th></tr>
-                        <tr>
-                          <td>{_fmt(c['dino_vlad_similarity'], 4)}</td><td>{_fmt(c['dino_vlad_margin_to_next'], 4)}</td><td>{_fmt(c['trial_loop_quality'], 3)}</td><td>{c['match_count']}</td><td>{c['landmark_count']}</td><td>{c['pnp_inlier_count']}</td><td>{_fmt(c['pnp_inlier_ratio'], 3)}</td>
-                          <td>{_fmt(c['pnp_error_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_dz_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_error_to_relocalization_m'], 3)}</td>
-                          <td>{_fmt(c['lower_half_ratio'], 3)}</td><td>{_fmt(c['bottom_third_ratio'], 3)}</td><td>{_fmt(c['x_span_norm'], 2)} / {_fmt(c['y_span_norm'], 2)}</td>
-                          <td>{_fmt(c['depth_median_m'], 2)} / {_fmt(c['depth_iqr_m'], 2)}</td><td>{_fmt(c['landmark_spatiality'], 4)}</td><td>{_fmt(c['landmark_planarity'], 3)}</td><td>{c['grid_coverage_4x4']}</td>
-                        </tr>
-                      </table>
+                      <div class="table-scroll"><table class="diagnostic-table">
+                          <tr><th>DINO-VLAD sim</th><th>DINO-VLAD margin</th><th>quality</th><th>matches</th><th>landmarks</th><th>inliers</th><th>ratio</th><th>PnP→eval [m]</th><th>dz→eval [m]</th><th>PnP→relocal [m]</th><th>lower half</th><th>bottom 1/3</th><th>x/y span</th><th>depth med/IQR [m]</th><th>3D spatiality</th><th>3D planarity</th><th>grid</th></tr>
+                          <tr>
+                            <td>{_fmt(c['dino_vlad_similarity'], 4)}</td><td>{_fmt(c['dino_vlad_margin_to_next'], 4)}</td><td>{_fmt(c['trial_loop_quality'], 3)}</td><td>{c['match_count']}</td><td>{c['landmark_count']}</td><td>{c['pnp_inlier_count']}</td><td>{_fmt(c['pnp_inlier_ratio'], 3)}</td>
+                            <td>{_fmt(c['pnp_error_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_dz_to_eval_pose_m'], 3)}</td><td>{_fmt(c['pnp_error_to_relocalization_m'], 3)}</td>
+                            <td>{_fmt(c['lower_half_ratio'], 3)}</td><td>{_fmt(c['bottom_third_ratio'], 3)}</td><td>{_fmt(c['x_span_norm'], 2)} / {_fmt(c['y_span_norm'], 2)}</td>
+                            <td>{_fmt(c['depth_median_m'], 2)} / {_fmt(c['depth_iqr_m'], 2)}</td><td>{_fmt(c['landmark_spatiality'], 4)}</td><td>{_fmt(c['landmark_planarity'], 3)}</td><td>{c['grid_coverage_4x4']}</td>
+                          </tr>
+                        </table></div>
                       <img src="{image_uri}" alt="top {c['rank']} retrieval candidate" />
                     </div>
                     """
@@ -1120,6 +1120,10 @@ def _write_html_report(
     table {{ width:100%; border-collapse:collapse; overflow:hidden; border-radius:16px; }}
     th,td {{ padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; }}
     th {{ color:#dbeafe; background:rgba(96,165,250,.12); }}
+    .table-scroll {{ max-width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:16px; }}
+    .table-scroll table {{ border-radius:0; }}
+    .diagnostic-table {{ min-width:1320px; font-size:12px; }}
+    .diagnostic-table th,.diagnostic-table td {{ padding:8px 10px; white-space:nowrap; }}
     h3 {{ margin:14px 0 10px; font-size:18px; }}
     .candidate {{ margin-top:18px; padding-top:14px; border-top:1px solid var(--line); }}
     .candidate img {{ margin-top:12px; }}
