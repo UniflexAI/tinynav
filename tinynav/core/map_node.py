@@ -290,18 +290,28 @@ class MapNode(Node):
         # Retrieval can still match a wrong-but-similar place, and one confident-but-
         # wrong observation would drag the whole graph, so observations are gated before
         # they are fused:
-        #   bootstrap (no estimate yet) -- require a burst of `reloc_burst_window` recent
+        #   bootstrap (no estimate yet) -- require `reloc_bootstrap_window` recent
         #     observations agreeing within `reloc_burst_tol` before trusting any of them.
         #   steady state -- accept an observation within `reloc_accept_tol` of the current
         #     estimate. The tolerance is deliberately loose: a *correct* observation is
         #     supposed to disagree with a drifted estimate, and that disagreement is the
         #     signal we want to fuse, not reject.
-        #   kidnap -- if a full burst mutually agrees yet all of it disagrees with the
-        #     current estimate, we were wrong (or the robot was moved): re-bootstrap onto
-        #     the burst rather than reject it forever.
+        #   kidnap -- if a full `reloc_burst_window` burst mutually agrees yet all of it
+        #     disagrees with the current estimate, we were wrong (or the robot was moved):
+        #     re-bootstrap onto the burst rather than reject it forever.
         # Sliding window (not fill-then-clear) so a stray bad observation can't keep
         # resetting the count.
-        self.reloc_burst_window = 3         # recent observations that must agree
+        #
+        # The bootstrap window is separate from the kidnap one, and 1 by default, because
+        # it dominates how long a map switch takes: observations arrive one per keyframe,
+        # and a stationary robot only produces a keyframe every 3s, so requiring 3 of them
+        # put ~6s of pure waiting between "the first keyframe already relocalized" and
+        # "/map/relocalization fires" -- measured on device, with the three observations
+        # agreeing to 0.09m. The relocalization itself takes ~100ms.
+        # Kidnap keeps 3: there, a mutually-agreeing burst is what licenses THROWING AWAY
+        # a working estimate, so a single outlier observation must not be enough.
+        self.reloc_bootstrap_window = int(os.environ.get('TINYNAV_RELOC_BOOTSTRAP_WINDOW', '1'))
+        self.reloc_burst_window = 3         # recent observations that must agree (kidnap)
         self.reloc_burst_tol = 0.3          # meters; max pairwise translation spread
         self.reloc_accept_tol = 1.5         # meters; max |t| delta vs the current estimate
         self._reloc_obs_window = []         # recent observation_T_from_map_to_odom (4x4)
@@ -660,12 +670,17 @@ class MapNode(Node):
             pass
 
 
-    def _burst_spread(self) -> float | None:
-        """Max pairwise translation spread of the recent observation window, or None
-        until the window is full."""
-        if len(self._reloc_obs_window) < self.reloc_burst_window:
+    def _burst_spread(self, window: int | None = None) -> float | None:
+        """Max pairwise translation spread over the last `window` observations
+        (default `reloc_burst_window`), or None until that many have arrived. A
+        single observation trivially agrees with itself -> 0.0; without that case
+        the pairwise reduction below is over an empty list and raises."""
+        n = self.reloc_burst_window if window is None else window
+        if len(self._reloc_obs_window) < n:
             return None
-        translations = np.array([T[:3, 3] for T in self._reloc_obs_window])
+        translations = np.array([T[:3, 3] for T in self._reloc_obs_window[-n:]])
+        if len(translations) < 2:
+            return 0.0
         return float(np.max([
             np.linalg.norm(translations[i] - translations[j])
             for i in range(len(translations))
@@ -697,15 +712,18 @@ class MapNode(Node):
         burst_agrees = spread is not None and spread <= self.reloc_burst_tol
 
         if self.T_from_map_to_odom is None:
-            # Bootstrap: trust nothing until a full burst agrees with itself.
-            if not burst_agrees:
+            # Bootstrap: trust nothing until reloc_bootstrap_window observations agree.
+            boot_spread = self._burst_spread(self.reloc_bootstrap_window)
+            if boot_spread is None or boot_spread > self.reloc_burst_tol:
                 self.get_logger().info(
                     f"[reloc] bootstrapping, {len(self._reloc_obs_window)} obs not consistent yet"
-                    + (f", spread={spread:.2f}m > tol={self.reloc_burst_tol}m" if spread is not None else ""))
+                    + (f", spread={boot_spread:.2f}m > tol={self.reloc_burst_tol}m"
+                       if boot_spread is not None else ""))
                 return
             self._accept(timestamp, camera_in_map_world, stamp)
             self.get_logger().info(
-                f"[reloc] first fix (spread={spread:.2f}m over {self.reloc_burst_window} obs)")
+                f"[reloc] first fix (spread={boot_spread:.2f}m over "
+                f"{self.reloc_bootstrap_window} obs)")
             return
 
         delta = float(np.linalg.norm(
