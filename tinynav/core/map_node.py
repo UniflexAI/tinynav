@@ -312,13 +312,15 @@ class MapNode(Node):
         if self.reloc_lock_window == 1:
             # Supervised mode: the operator vouches for the start position, so no
             # agreement check is wanted -- freeze the first PnP and stop paying for
-            # relocalization. Logged because it is a standing property of the run, and
-            # because it must not be read as the bootstrap-window 1 it replaced, where
-            # a wrong first fix was still correctable by later observations.
-            self.get_logger().warning(
-                "[reloc] TINYNAV_RELOC_LOCK_WINDOW=1: freezing map->odom on the "
-                "first relocalization, from a single PnP, with no cross-check and no "
-                "further relocalization this run. Accuracy is the operator's to "
+            # relocalization. info, not warning: it is a chosen mode, and a warning on
+            # every map_node spawn only teaches people to ignore warnings. Logged at
+            # all because it is a standing property of the run, and because it must not
+            # be read as the bootstrap-window 1 it replaced, where a wrong first fix
+            # was still correctable by later observations.
+            self.get_logger().info(
+                "[reloc] TINYNAV_RELOC_LOCK_WINDOW=1 (supervised): freezing map->odom "
+                "on the first relocalization, from a single PnP, with no cross-check "
+                "and no further relocalization this run. Accuracy is the operator's to "
                 "vouch for.")
         elif self.reloc_lock_window > 0:
             self.get_logger().info(
