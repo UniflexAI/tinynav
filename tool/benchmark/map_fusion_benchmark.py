@@ -80,7 +80,6 @@ def _generate_mapping_launch(
     bag_path: str,
     map_dir: Path,
     rate: float,
-    timeout: float,
     verbose_timer: bool,
 ) -> LaunchDescription:
     source_name, source_cmd = _source_node_for_bag(bag_path)
@@ -176,7 +175,6 @@ def _build_map_from_bag(
     bag_path: str,
     map_dir: Path,
     rate: float,
-    timeout: float,
     verbose_timer: bool,
 ):
     map_dir.mkdir(parents=True, exist_ok=True)
@@ -187,7 +185,6 @@ def _build_map_from_bag(
             bag_path=bag_path,
             map_dir=map_dir,
             rate=rate,
-            timeout=timeout,
             verbose_timer=verbose_timer,
         )
     )
@@ -1060,7 +1057,7 @@ def _write_html_report(
   <section><h2>Inputs</h2><table>
     <tr><th>Item</th><th>Value</th></tr>
     <tr><td>GT source</td><td>{html.escape(metrics['inputs']['gt_source'])}</td></tr>
-    <tr><td>Eval bag</td><td>{html.escape(metrics['inputs']['bag_eval'])}</td></tr>
+    <tr><td>Eval source</td><td>{html.escape(metrics['inputs']['eval_source'])}</td></tr>
     <tr><td>map_gt dir</td><td>{html.escape(metrics['inputs']['map_gt_dir'])}</td></tr>
     <tr><td>map_eval dir</td><td>{html.escape(metrics['inputs']['map_eval_dir'])}</td></tr>
     <tr><td>localization dir</td><td>{html.escape(metrics['inputs']['localization_dir'])}</td></tr>
@@ -1168,7 +1165,6 @@ def run(args: argparse.Namespace) -> Path:
                 bag_path=args.bag_gt,
                 map_dir=map_gt_dir,
                 rate=args.rate,
-                timeout=args.timeout,
                 verbose_timer=args.verbose_timer,
             )
         else:
@@ -1180,7 +1176,6 @@ def run(args: argparse.Namespace) -> Path:
                 bag_path=args.bag_eval,
                 map_dir=map_eval_dir,
                 rate=args.rate,
-                timeout=args.timeout,
                 verbose_timer=args.verbose_timer,
             )
             print("\nStep 3/6: replaying bag_eval against map_gt")
