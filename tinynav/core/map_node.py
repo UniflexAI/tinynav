@@ -288,32 +288,38 @@ class MapNode(Node):
         # tracks the black-box VIO's drift.
         #
         # N > 0 restores lock-once: freeze T_from_map_to_odom as soon as N recent
-        # observations agree within reloc_lock_tol, then stop relocalizing and ride
-        # odom for the rest of the run. One parameter, not two, because the agreement
-        # check only exists to serve the freeze -- locking is permanent for the route,
-        # so locking on a single unverified observation is the one combination worth
-        # refusing outright (this map produced observations ~5.7m off in ~18% of
-        # attempts; at N=1 roughly one switch in five would freeze onto one). N=3 is
-        # the historical setting.
+        # observations agree within reloc_lock_tol, then stop relocalizing and ride odom
+        # for the rest of the run. One parameter, not two, because the agreement check
+        # only exists to serve the freeze.
         #
-        # The cost of locking is that VIO drift then goes uncorrected all route, which
-        # is why upstream moved off it. The gain is that after the lock nothing can
-        # drag the estimate and no keyframe pays for VLAD+LightGlue+PnP again.
+        # N picks who vouches for the fix:
+        #   1 -- nobody but the operator. The first PnP is frozen as-is. For a
+        #        supervised start where the position is known good and the point is to
+        #        stop spending on relocalization, not to cross-check it.
+        #   3 -- the historical setting: three observations must agree first. Worth it
+        #        unattended, because a lock is permanent for the route and this map
+        #        produced observations ~5.7m off in ~18% of attempts.
+        #
+        # Note N=1 is not FASTER to localize than N=0: both fuse and publish the first
+        # successful relocalization, so the first fix lands at the same instant. What
+        # locking buys is that nothing afterwards can move the estimate, and that no
+        # keyframe pays for VLAD+LightGlue+PnP (~100ms) again. What it costs is that
+        # VIO drift then goes uncorrected all route, which is why upstream moved off it.
         self.reloc_lock_window = int(os.environ.get('TINYNAV_RELOC_LOCK_WINDOW', '0'))
         self.reloc_lock_tol = float(os.environ.get('TINYNAV_RELOC_LOCK_TOL_M', '0.3'))
         self._reloc_obs_window = []   # (timestamp, observation_T_from_map_to_odom)
         self._reloc_locked = False
         if self.reloc_lock_window == 1:
-            # A window of 1 has no agreement to check: the first relocalization to
-            # succeed is frozen for the route, from a single PnP, and nothing
-            # relocalizes again to correct it. Not refused -- it is a legitimate
-            # experiment -- but it must not be mistaken for the bootstrap-window 1
-            # this replaced, where a wrong first fix was still correctable.
+            # Supervised mode: the operator vouches for the start position, so no
+            # agreement check is wanted -- freeze the first PnP and stop paying for
+            # relocalization. Logged because it is a standing property of the run, and
+            # because it must not be read as the bootstrap-window 1 it replaced, where
+            # a wrong first fix was still correctable by later observations.
             self.get_logger().warning(
-                "[reloc] TINYNAV_RELOC_LOCK_WINDOW=1: locking on the FIRST "
-                "relocalization, unverified and permanent for this run. Use 0 "
-                "(continuous re-fusion) or >=2 (agreeing burst) unless this is "
-                "deliberate.")
+                "[reloc] TINYNAV_RELOC_LOCK_WINDOW=1: freezing map->odom on the "
+                "first relocalization, from a single PnP, with no cross-check and no "
+                "further relocalization this run. Accuracy is the operator's to "
+                "vouch for.")
         elif self.reloc_lock_window > 0:
             self.get_logger().info(
                 f"[reloc] lock-once enabled: freezing map->odom once "

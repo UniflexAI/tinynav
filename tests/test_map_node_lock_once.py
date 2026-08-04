@@ -44,7 +44,9 @@ def test_a_lone_outlier_in_the_window_blocks_the_lock():
     assert MapNode._obs_spread(stub) > 0.3
 
 
-def test_a_window_of_one_locks_on_whatever_arrives():
-    # Documented, not recommended: nothing to disagree with.
+def test_a_window_of_one_locks_on_the_first_observation():
+    # Supervised mode: nothing to disagree with, so the first PnP is what gets frozen.
+    # (Without the single-observation case this returns 0.0 for, the pairwise reduction
+    # is over an empty list and raises on every keyframe.)
     stub = _Stub([(5.7, 0.0, 0.0)], lock_window=1)
     assert MapNode._obs_spread(stub) == 0.0
