@@ -573,19 +573,28 @@ def _match_keypoints(
     feats0: dict,
     feats1: dict,
     image_shape: np.ndarray = np.array([848, 480], dtype=np.int64),
+    *,
+    loop: asyncio.AbstractEventLoop | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    result = asyncio.run(
-        matcher.infer(
-            feats0["kpts"],
-            feats1["kpts"],
-            feats0["descps"],
-            feats1["descps"],
-            feats0["mask"],
-            feats1["mask"],
-            image_shape,
-            image_shape,
+    own_loop = loop is None
+    if own_loop:
+        loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            matcher.infer(
+                feats0["kpts"],
+                feats1["kpts"],
+                feats0["descps"],
+                feats1["descps"],
+                feats0["mask"],
+                feats1["mask"],
+                image_shape,
+                image_shape,
+            )
         )
-    )
+    finally:
+        if own_loop:
+            loop.close()
     match_indices = result["match_indices"][0]
     valid_mask = match_indices != -1
     keypoints0 = feats0["kpts"][0][valid_mask]
@@ -810,6 +819,7 @@ def _compute_retrieval_diagnostics(
     gt_descriptors = np.stack([gt_db.vlad_descriptors[t] for t in gt_timestamps])
 
     rows = []
+    loop = asyncio.new_event_loop()
     try:
         for sample_index, error_row in enumerate(selected):
             eval_ts = int(error_row["timestamp_ns"])
@@ -830,7 +840,7 @@ def _compute_retrieval_diagnostics(
                 gt_ts = gt_timestamps[int(gt_idx)]
                 gt_depth, _, gt_features, _, gt_image_loader = gt_db.get_depth_embedding_features_images(gt_ts)
                 gt_image = gt_image_loader()
-                ref_kpts_all, query_kpts_all = _match_keypoints(matcher, gt_features, eval_features)
+                ref_kpts_all, query_kpts_all = _match_keypoints(matcher, gt_features, eval_features, loop=loop)
                 points_world, depth_valid = _keypoints_to_world(ref_kpts_all, gt_depth, gt_poses[gt_ts], gt_K)
                 depth_values_all = _depth_values_for_keypoints(ref_kpts_all, gt_depth)
                 points_world_valid = points_world[depth_valid].astype(np.float32)
@@ -913,6 +923,7 @@ def _compute_retrieval_diagnostics(
                 }
             )
     finally:
+        loop.close()
         gt_db.close()
         eval_db.close()
 
