@@ -16,7 +16,7 @@ from tinynav.core.map_node import MapNode
 class _Stub:
     """Just the attributes _burst_spread touches."""
 
-    def __init__(self, translations, burst_window=3, bootstrap_window=2):
+    def __init__(self, translations, burst_window=3, bootstrap_window=1):
         self._reloc_obs_window = []
         for t in translations:
             T = np.eye(4)
@@ -53,24 +53,20 @@ def test_only_the_last_n_observations_count():
     assert MapNode._burst_spread(stub, 3) == 9.0
 
 
-def test_bootstrap_of_two_rejects_a_lone_outlier():
-    # The case this window exists for: an observation ~5.8m off a good one, which this
-    # map produces several times an hour. At a window of 1 it would have become the
-    # first fix and nav would plan from it.
-    stub = _Stub([(0.0, 0.0, 0.0), (5.8, 0.0, 0.0)])
-    assert MapNode._burst_spread(stub, stub.reloc_bootstrap_window) > 0.3
-
-
-def test_bootstrap_of_two_accepts_two_agreeing_observations():
-    stub = _Stub([(0.0, 0.0, 0.0), (0.05, 0.0, 0.0)])
-    assert MapNode._burst_spread(stub, stub.reloc_bootstrap_window) <= 0.3
+def test_bootstrap_takes_the_first_observation():
+    # Bootstrap is a window of 1: one observation, nothing to disagree with. What a
+    # burst of any size could not have caught anyway is a persistently mis-matched
+    # place — observations of it agree with each other, tightly.
+    stub = _Stub([(5.8, 0.0, 0.0), (5.82, 0.0, 0.0)])
+    assert MapNode._burst_spread(stub, 1) <= 0.3
+    assert MapNode._burst_spread(stub, 2) <= 0.3     # a 2-burst would accept it too
 
 
 def test_bootstrap_and_kidnap_windows_are_independent():
-    # Two agreeing observations after an old outlier: bootstrap (2) looks only at the
-    # recent pair and is satisfied, while the kidnap check (3) still sees the wide
-    # spread and so cannot license throwing away a working estimate.
-    stub = _Stub([(5.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.05, 0.0, 0.0)])
+    # bootstrap (1) trusts the newest observation on its own, while the kidnap check
+    # (3) still sees a wide spread and so cannot license throwing away a working
+    # estimate on the strength of one outlier.
+    stub = _Stub([(0.0, 0.0, 0.0), (0.05, 0.0, 0.0), (5.0, 0.0, 0.0)])
     tol = 0.3
     assert MapNode._burst_spread(stub, stub.reloc_bootstrap_window) <= tol
     assert MapNode._burst_spread(stub, stub.reloc_burst_window) > tol

@@ -302,22 +302,33 @@ class MapNode(Node):
         # Sliding window (not fill-then-clear) so a stray bad observation can't keep
         # resetting the count.
         #
-        # The bootstrap window is separate from the kidnap one, and smaller, because it
-        # dominates how long a map switch takes: observations arrive one per keyframe, and
-        # a stationary robot only produces a keyframe every 3s, so requiring 3 of them put
-        # ~6s of pure waiting between "the first keyframe already relocalized" and
-        # "/map/relocalization fires" -- measured on device, with the three observations
-        # agreeing to 0.09m. The relocalization itself takes ~100ms.
+        # Bootstrap takes ONE observation (its own window, separate from kidnap below).
         #
-        # 2, not 1: this map produces observations ~5.8m off (a similar-looking place)
-        # several times an hour -- logged as "rejected outlier: 5.78m" once an estimate
-        # exists. At a window of 1 such an observation, arriving first after a switch,
-        # becomes the fix, and nav then plans from it. Two agreeing observations cost one
-        # keyframe, which is ~0.1s while the robot is moving (and the caller should keep
-        # it moving -- see core_runtime/topology/relocalize.py's nudge).
-        # Kidnap keeps 3: there, a mutually-agreeing burst is what licenses THROWING AWAY
-        # a working estimate, so the bar belongs higher than for the first fix.
-        self.reloc_bootstrap_window = int(os.environ.get('TINYNAV_RELOC_BOOTSTRAP_WINDOW', '2'))
+        # The 3-observation burst it used to need was inherited from the lock-once design
+        # this replaced (`reloc_lock_window`, pre-DINOv2-patch-VLAD): back then a burst
+        # froze T_from_map_to_odom for the whole route, so a wrong one was permanent and
+        # worth three keyframes of caution. Under continuous fusion it is not permanent --
+        # every later accepted observation re-solves the graph, and a genuinely wrong fix
+        # is recovered by the kidnap branch. Upstream main goes further and gates nothing
+        # at all: relocalize -> fuse, diluted across the last 100 weighted constraints,
+        # which makes its bootstrap a window of 1 too.
+        #
+        # And the cost was the dominant term in a map switch: observations arrive one per
+        # keyframe, a stationary robot only produces a keyframe every 3s, so three of them
+        # put ~6s of pure waiting between "the first keyframe already relocalized" and
+        # "/map/relocalization fires" -- measured on device, with the three observations
+        # agreeing to 0.09m against a 0.30m tolerance. The relocalization itself is ~100ms.
+        #
+        # What the burst never did is stop the failure that actually happens here: 41 of
+        # 225 relocalizations in one run landed on the same place ~5.7m away, and pairs of
+        # them arrived on consecutive keyframes agreeing with each other to ~2cm -- a burst
+        # of any size accepts that. Rejecting it needs information from outside this
+        # pipeline (odometry consistency, occupancy, a cross-check against the caller's own
+        # PnP), which is where core_runtime/mission/map_probe.py does it.
+        #
+        # Kidnap still wants 3: there, a mutually-agreeing burst is what licenses THROWING
+        # AWAY a working estimate, and being wrong about that strands the robot.
+        self.reloc_bootstrap_window = int(os.environ.get('TINYNAV_RELOC_BOOTSTRAP_WINDOW', '1'))
         self.reloc_burst_window = 3         # recent observations that must agree (kidnap)
         self.reloc_burst_tol = 0.3          # meters; max pairwise translation spread
         self.reloc_accept_tol = 1.5         # meters; max |t| delta vs the current estimate
