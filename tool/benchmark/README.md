@@ -175,9 +175,9 @@ All three DINOv2 patch VLAD variants clearly outperform the DINOv2 global baseli
 eval mapping run transformed into the GT map frame. This is the simpler
 map-to-map self-consistency benchmark:
 
-1. Use `--map-gt`, or build `map_gt` from `--bag-gt`.
-2. Use `--map-eval`, or build `map_eval` from `--bag-eval`.
-3. Replay `bag_eval` with TinyNav using `map_gt`, saving relocalization poses.
+1. Use `--map-gt` (existing map) or `--bag-gt` (build from bag).
+2. Use `--map-eval` (existing map) or `--bag-eval` (build from bag and replay for localization).
+3. When `--bag-eval` is used, replay the bag with TinyNav against `map_gt`, saving relocalization poses.
 4. Fit `T_map_eval_to_gt` from paired eval timestamps.
 5. Compare:
 
@@ -198,6 +198,16 @@ When building a map from a bag, the benchmark automatically detects the source:
 
 ### Usage
 
+Both GT and eval sources accept either a map directory or a bag (mutually exclusive):
+
+- `--map-gt` / `--bag-gt`: existing GT map or bag to build from.
+- `--map-eval` / `--bag-eval`: existing eval map or bag to build from.
+
+When `--bag-eval` is provided, the tool builds `map_eval` and replays the bag
+against `map_gt` to produce relocalization poses. When `--map-eval` is provided
+instead, map build and localization are skipped (use `--skip-runs` to reuse
+existing GT map as well).
+
 Run the full pipeline from two bags:
 
 ```bash
@@ -207,7 +217,7 @@ uv run python tool/benchmark/map_fusion_benchmark.py \
   --output-root /tinynav/output
 ```
 
-Use an existing GT map, build the eval map from a bag, then replay the eval bag:
+Use an existing GT map, build the eval map from a bag:
 
 ```bash
 uv run python tool/benchmark/map_fusion_benchmark.py \
@@ -216,13 +226,12 @@ uv run python tool/benchmark/map_fusion_benchmark.py \
   --output-root /tinynav/output
 ```
 
-Reuse existing maps/localization outputs and only regenerate the metrics/report:
+Reuse existing maps and only regenerate the metrics/report:
 
 ```bash
 uv run python tool/benchmark/map_fusion_benchmark.py \
   --map-gt /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_gt \
   --map-eval /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_eval \
-  --bag-eval /tinynav/tinynav_db/rosbags/bag_eval \
   --output-dir /tinynav/output/20260802_120000_map_gt_benchmark \
   --work-dir /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work \
   --skip-runs

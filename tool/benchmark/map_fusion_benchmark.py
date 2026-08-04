@@ -1155,11 +1155,6 @@ def _make_run_work_dir(args: argparse.Namespace, output_dir: Path) -> Path:
 
 
 def run(args: argparse.Namespace) -> Path:
-    if not args.map_gt and not args.bag_gt:
-        raise ValueError("Provide either --map-gt or --bag-gt")
-    if not args.bag_eval:
-        raise ValueError("--bag-eval is required")
-
     output_dir = _make_run_output_dir(args)
     work_dir = _make_run_work_dir(args, output_dir)
     map_gt_dir = Path(args.map_gt).resolve() if args.map_gt else work_dir / "map_gt"
@@ -1167,7 +1162,7 @@ def run(args: argparse.Namespace) -> Path:
     localization_dir = work_dir / "eval_localized_in_map_gt"
 
     if not args.skip_runs:
-        if args.bag_gt and not args.map_gt and not args.skip_map_gt:
+        if args.bag_gt:
             print("\nStep 1/6: building map_gt from bag_gt")
             _build_map_from_bag(
                 bag_path=args.bag_gt,
@@ -1179,7 +1174,7 @@ def run(args: argparse.Namespace) -> Path:
         else:
             print(f"\nStep 1/6: using existing map_gt: {map_gt_dir}")
 
-        if not args.map_eval and not args.skip_map_eval:
+        if args.bag_eval:
             print("\nStep 2/6: building map_eval from bag_eval")
             _build_map_from_bag(
                 bag_path=args.bag_eval,
@@ -1188,10 +1183,6 @@ def run(args: argparse.Namespace) -> Path:
                 timeout=args.timeout,
                 verbose_timer=args.verbose_timer,
             )
-        else:
-            print(f"\nStep 2/6: using existing map_eval: {map_eval_dir}")
-
-        if not args.skip_localization:
             print("\nStep 3/6: replaying bag_eval against map_gt")
             _localize_eval_bag_in_gt_map(
                 bag_eval=args.bag_eval,
@@ -1201,6 +1192,9 @@ def run(args: argparse.Namespace) -> Path:
                 timeout=args.timeout,
                 verbose_timer=args.verbose_timer,
             )
+        else:
+            print(f"\nStep 2/6: using existing map_eval: {map_eval_dir}")
+            print("Step 3/6: skipping localization (no bag_eval)")
     else:
         print("\nSkipping ROS runs and using existing directories")
 
@@ -1208,8 +1202,10 @@ def run(args: argparse.Namespace) -> Path:
         timestamps = np.loadtxt(args.timestamps_file, dtype=np.int64)
     elif args.map_eval:
         timestamps = _sample_timestamps_from_map(map_eval_dir, args.num_samples, args.trim_ratio)
-    else:
+    elif args.bag_eval:
         timestamps = _sample_timestamps_from_bag(args.bag_eval, args.num_samples, args.trim_ratio)
+    else:
+        timestamps = _sample_timestamps_from_map(map_eval_dir, args.num_samples, args.trim_ratio)
 
     print("\nStep 4/6: querying map_eval reference poses and fusion poses")
     map_eval_reference_poses, fusion_poses, skipped = _query_eval_reference_and_fusion(
@@ -1255,6 +1251,7 @@ def run(args: argparse.Namespace) -> Path:
         "inputs": {
             "gt_source": args.map_gt or args.bag_gt,
             "bag_gt": args.bag_gt,
+            "eval_source": args.map_eval or args.bag_eval,
             "bag_eval": args.bag_eval,
             "map_gt_dir": str(map_gt_dir),
             "map_eval_dir": str(map_eval_dir),
@@ -1326,16 +1323,14 @@ def main():
     gt = parser.add_mutually_exclusive_group(required=True)
     gt.add_argument("--bag-gt", help="ROS2 bag used to build map_gt")
     gt.add_argument("--map-gt", help="Existing GT/reference map directory")
-    parser.add_argument("--bag-eval", required=True, help="ROS2 bag used for eval map and replay")
-    parser.add_argument("--map-eval", help="Existing eval map directory; if omitted, built from --bag-eval")
+    ev = parser.add_mutually_exclusive_group(required=True)
+    ev.add_argument("--bag-eval", help="ROS2 bag used to build map_eval and replay against map_gt")
+    ev.add_argument("--map-eval", help="Existing eval map directory; skips map build and localization")
     parser.add_argument("--output-root", default="output", help="Parent directory for timestamped benchmark folder")
     parser.add_argument("--output-dir", help="Exact output directory; overrides timestamped folder creation")
     parser.add_argument("--work-root", default="output/benchmark_work", help="Parent directory for generated maps and localization scratch data")
     parser.add_argument("--work-dir", help="Exact work directory for generated maps and localization scratch data")
     parser.add_argument("--skip-runs", action="store_true", help="Skip map build/localization and only evaluate existing dirs")
-    parser.add_argument("--skip-map-gt", action="store_true", help="Do not build map_gt")
-    parser.add_argument("--skip-map-eval", action="store_true", help="Do not build map_eval")
-    parser.add_argument("--skip-localization", action="store_true", help="Do not replay bag_eval against map_gt")
     parser.add_argument("--num-samples", type=int, default=100, help="Number of sampled timestamps")
     parser.add_argument("--trim-ratio", type=float, default=0.05, help="Trim this fraction from bag start/end")
     parser.add_argument("--timestamps-file", help="Optional text file containing timestamps in ns")
