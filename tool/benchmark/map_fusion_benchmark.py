@@ -8,10 +8,12 @@ built eval map trajectory aligned into the GT map frame:
     relocalized_pose_in_map_gt  vs  T_map_eval_to_gt * map_eval_keyframe_pose
 
 Inputs:
-  - GT source: either --map-gt or --bag-gt. If a bag is given, it is built into
-    map_gt first.
-  - Eval source: --bag-eval is used to build map_eval unless --map-eval is
-    provided, and is replayed against map_gt to produce relocalization poses.
+  - GT source: `--map-gt` (existing map) or `--bag-gt` (build from bag).
+  - Eval source: `--map-eval` (existing map) or `--bag-eval` (build from bag
+    and replay against map_gt for localization).
+
+When `--map-eval` is used, map build and localization are skipped; the tool
+expects existing localization results in the work directory.
 
 The original benchmark_mapping.py is intentionally left untouched. This script
 shares only small utility concepts and produces a standalone HTML report.
@@ -608,38 +610,36 @@ def _keypoints_to_world(
     pose_camera_to_world: np.ndarray,
     K: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    points_camera = []
-    valid = []
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
     height, width = depth.shape[:2]
-    for kp in keypoints:
-        u = int(round(float(kp[0])))
-        v = int(round(float(kp[1])))
-        z = float(depth[v, u]) if 0 <= u < width and 0 <= v < height else 0.0
-        if 0.0 < z < 50.0:
-            x = (u - cx) * z / fx
-            y = (v - cy) * z / fy
-            points_camera.append([x, y, z])
-            valid.append(True)
-        else:
-            points_camera.append([0.0, 0.0, 0.0])
-            valid.append(False)
-    points_camera = np.asarray(points_camera, dtype=np.float32)
-    valid = np.asarray(valid, dtype=bool)
+
+    us = np.round(keypoints[:, 0]).astype(int)
+    vs = np.round(keypoints[:, 1]).astype(int)
+    us = np.clip(us, 0, width - 1)
+    vs = np.clip(vs, 0, height - 1)
+
+    zs = depth[vs, us].astype(np.float32)
+    valid = (zs > 0.0) & (zs < 50.0)
+
+    xs = (us - cx) * zs / fx
+    ys = (vs - cy) * zs / fy
+    points_camera = np.stack([xs, ys, zs], axis=-1)
+    points_camera[~valid] = 0.0
+
     points_world = points_camera @ pose_camera_to_world[:3, :3].T + pose_camera_to_world[:3, 3]
-    return points_world, valid
+    return points_world.astype(np.float32), valid
 
 
 def _depth_values_for_keypoints(keypoints: np.ndarray, depth: np.ndarray) -> np.ndarray:
-    values = []
     height, width = depth.shape[:2]
-    for kp in keypoints:
-        u = int(round(float(kp[0])))
-        v = int(round(float(kp[1])))
-        z = float(depth[v, u]) if 0 <= u < width and 0 <= v < height else 0.0
-        values.append(z if 0.0 < z < 50.0 else np.nan)
-    return np.asarray(values, dtype=np.float32)
+    us = np.round(keypoints[:, 0]).astype(int)
+    vs = np.round(keypoints[:, 1]).astype(int)
+    us = np.clip(us, 0, width - 1)
+    vs = np.clip(vs, 0, height - 1)
+    values = depth[vs, us].astype(np.float32)
+    values = np.where((values > 0.0) & (values < 50.0), values, np.nan)
+    return values
 
 
 def _pnp_pose(
@@ -1211,6 +1211,13 @@ def run(args: argparse.Namespace) -> Path:
         timestamps = _sample_timestamps_from_map(map_eval_dir, args.num_samples, args.trim_ratio)
 
     print("\nStep 4/6: querying map_eval reference poses and fusion poses")
+    relocalization_path = localization_dir / "relocalization_poses.npy"
+    if not relocalization_path.exists():
+        raise FileNotFoundError(
+            f"Localization results not found: {relocalization_path}\n"
+            f"--map-eval skips localization. Either use --bag-eval to run localization, "
+            f"or ensure localization results exist in the work directory."
+        )
     map_eval_reference_poses, fusion_poses, skipped = _query_eval_reference_and_fusion(
         timestamps=timestamps,
         map_eval_dir=map_eval_dir,
