@@ -205,8 +205,9 @@ Both GT and eval sources accept either a map directory or a bag (mutually exclus
 
 When `--bag-eval` is provided, the tool builds `map_eval` and replays the bag
 against `map_gt` to produce relocalization poses. When `--map-eval` is provided
-instead, map build and localization are skipped (use `--skip-runs` to reuse
-existing GT map as well).
+instead, map build and localization are skipped and the existing
+`relocalization_poses.npy` under `--work-dir` is reused. The same applies to
+`--map-gt` vs `--bag-gt` for the GT side.
 
 Run the full pipeline from two bags:
 
@@ -233,8 +234,7 @@ uv run python tool/benchmark/map_fusion_benchmark.py \
   --map-gt /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_gt \
   --map-eval /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_eval \
   --output-dir /tinynav/output/20260802_120000_map_gt_benchmark \
-  --work-dir /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work \
-  --skip-runs
+  --work-dir /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work
 ```
 
 If `--output-dir` is not provided, the tool creates a timestamped folder under

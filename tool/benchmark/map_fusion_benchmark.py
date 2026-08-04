@@ -1169,40 +1169,37 @@ def run(args: argparse.Namespace) -> Path:
     map_eval_dir = Path(args.map_eval).resolve() if args.map_eval else work_dir / "map_eval"
     localization_dir = work_dir / "eval_localized_in_map_gt"
 
-    if not args.skip_runs:
-        if args.bag_gt:
-            print("\nStep 1/6: building map_gt from bag_gt")
-            _build_map_from_bag(
-                bag_path=args.bag_gt,
-                map_dir=map_gt_dir,
-                rate=args.rate,
-                verbose_timer=args.verbose_timer,
-            )
-        else:
-            print(f"\nStep 1/6: using existing map_gt: {map_gt_dir}")
-
-        if args.bag_eval:
-            print("\nStep 2/6: building map_eval from bag_eval")
-            _build_map_from_bag(
-                bag_path=args.bag_eval,
-                map_dir=map_eval_dir,
-                rate=args.rate,
-                verbose_timer=args.verbose_timer,
-            )
-            print("\nStep 3/6: replaying bag_eval against map_gt")
-            _localize_eval_bag_in_gt_map(
-                bag_eval=args.bag_eval,
-                map_gt_dir=map_gt_dir,
-                localization_dir=localization_dir,
-                rate=args.rate,
-                timeout=args.timeout,
-                verbose_timer=args.verbose_timer,
-            )
-        else:
-            print(f"\nStep 2/6: using existing map_eval: {map_eval_dir}")
-            print("Step 3/6: skipping localization (no bag_eval)")
+    if args.bag_gt:
+        print("\nStep 1/6: building map_gt from bag_gt")
+        _build_map_from_bag(
+            bag_path=args.bag_gt,
+            map_dir=map_gt_dir,
+            rate=args.rate,
+            verbose_timer=args.verbose_timer,
+        )
     else:
-        print("\nSkipping ROS runs and using existing directories")
+        print(f"\nStep 1/6: using existing map_gt: {map_gt_dir}")
+
+    if args.bag_eval:
+        print("\nStep 2/6: building map_eval from bag_eval")
+        _build_map_from_bag(
+            bag_path=args.bag_eval,
+            map_dir=map_eval_dir,
+            rate=args.rate,
+            verbose_timer=args.verbose_timer,
+        )
+        print("\nStep 3/6: replaying bag_eval against map_gt")
+        _localize_eval_bag_in_gt_map(
+            bag_eval=args.bag_eval,
+            map_gt_dir=map_gt_dir,
+            localization_dir=localization_dir,
+            rate=args.rate,
+            timeout=args.timeout,
+            verbose_timer=args.verbose_timer,
+        )
+    else:
+        print(f"\nStep 2/6: using existing map_eval: {map_eval_dir}")
+        print("Step 3/6: skipping localization (no bag_eval)")
 
     if args.timestamps_file:
         timestamps = np.loadtxt(args.timestamps_file, dtype=np.int64)
@@ -1336,7 +1333,6 @@ def main():
     parser.add_argument("--output-dir", help="Exact output directory; overrides timestamped folder creation")
     parser.add_argument("--work-root", default="output/benchmark_work", help="Parent directory for generated maps and localization scratch data")
     parser.add_argument("--work-dir", help="Exact work directory for generated maps and localization scratch data")
-    parser.add_argument("--skip-runs", action="store_true", help="Skip map build/localization and only evaluate existing dirs")
     parser.add_argument("--num-samples", type=int, default=100, help="Number of sampled timestamps")
     parser.add_argument("--trim-ratio", type=float, default=0.05, help="Trim this fraction from bag start/end")
     parser.add_argument("--timestamps-file", help="Optional text file containing timestamps in ns")
