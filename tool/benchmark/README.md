@@ -227,7 +227,8 @@ uv run python tool/benchmark/map_fusion_benchmark.py \
   --output-root /tinynav/output
 ```
 
-Reuse existing maps and only regenerate the metrics/report:
+Reuse existing maps and only regenerate the metrics/report (requires existing
+localization results in `--work-dir`):
 
 ```bash
 uv run python tool/benchmark/map_fusion_benchmark.py \
@@ -257,13 +258,16 @@ This keeps the report folder lightweight and easy to copy or share.
 
 The report folder contains only lightweight artifacts:
 
-- `index.html`: visual report with inputs, metrics, trajectory plot, error curve,
+- `index.html`: visual report with inputs, metrics, trajectory plots, error curves,
   `T_map_eval_to_gt`, and largest-error samples.
 - `metrics.json`: machine-readable summary.
 - `per_sample_errors.json`: per-timestamp translation/rotation error.
 - `T_map_eval_to_gt.npy`: fitted transform.
-- `trajectory_xy.png`: top-down `map_eval*T` vs relocalization pose.
+- `sampled_timestamps_ns.txt`: sampled timestamps.
+- `trajectory_xy.png`, `trajectory_xz.png`, `trajectory_yz.png`: top-down and side projections of `map_eval*T` vs relocalization pose.
 - `translation_rotation_error.png`: error over time.
+- `xyz_error.png`: per-axis position residual over time.
+- `retrieval_diagnostics/`: per-sample match images and `retrieval_diagnostics.json` (unless `--disable-retrieval-diagnostics`).
 
 Recommended first-look metrics:
 
