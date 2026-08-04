@@ -42,7 +42,7 @@ from launch.actions import EmitEvent, ExecuteProcess, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 
-from benchmark_mapping import BagMetadataExtractor, find_closest_pose
+from benchmark_mapping import find_closest_pose
 
 
 PoseDict = Dict[int, np.ndarray]
@@ -221,27 +221,6 @@ def _localize_eval_bag_in_gt_map(
 def _require_file(path: Path, step_name: str):
     if not path.exists():
         raise RuntimeError(f"{step_name} did not produce required file: {path}")
-
-
-def _sample_timestamps_from_bag(
-    bag_path: str,
-    num_samples: int,
-    trim_ratio: float,
-) -> np.ndarray:
-    start_ns, end_ns = BagMetadataExtractor.get_bag_time_range(bag_path)
-    if start_ns is None or end_ns is None:
-        raise RuntimeError(f"Failed to read bag time range: {bag_path}")
-    duration = end_ns - start_ns
-    trim_ns = int(duration * trim_ratio)
-    sample_start = start_ns + trim_ns
-    sample_end = end_ns - trim_ns
-    if sample_start >= sample_end:
-        sample_start, sample_end = start_ns, end_ns
-    return BagMetadataExtractor.sample_timestamps_evenly(
-        sample_start,
-        sample_end,
-        num_samples,
-    )
 
 
 def _sample_timestamps_from_map(
@@ -570,11 +549,18 @@ def _to_bgr(image: np.ndarray | None) -> np.ndarray:
     return image.copy()
 
 
+def _image_shape_wh(image: np.ndarray) -> np.ndarray:
+    """(width, height), the axis order LightGlueTRT expects for keypoint normalization."""
+    height, width = image.shape[:2]
+    return np.array([width, height], dtype=np.int64)
+
+
 def _match_keypoints(
     matcher,
     feats0: dict,
     feats1: dict,
-    image_shape: np.ndarray = np.array([848, 480], dtype=np.int64),
+    image_shape0: np.ndarray,
+    image_shape1: np.ndarray,
     *,
     loop: asyncio.AbstractEventLoop | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -590,8 +576,8 @@ def _match_keypoints(
                 feats1["descps"],
                 feats0["mask"],
                 feats1["mask"],
-                image_shape,
-                image_shape,
+                image_shape0,
+                image_shape1,
             )
         )
     finally:
@@ -650,7 +636,12 @@ def _pnp_pose(
 ) -> tuple[bool, np.ndarray, np.ndarray]:
     if len(points_2d) <= 4:
         return False, np.eye(4), np.empty((0,), dtype=np.int32)
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(points_world, points_2d, K, None)
+    # Match production's tinynav.core.math_utils.estimate_pose so diagnostic inlier counts are
+    # comparable to what relocalization would actually see, not an unrelated OpenCV default.
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(
+        points_world, points_2d, K, None,
+        reprojectionError=2.0, confidence=0.999, flags=cv2.SOLVEPNP_EPNP,
+    )
     if not success or inliers is None or len(inliers) < min_inliers:
         return False, np.eye(4), np.empty((0,), dtype=np.int32)
     T_world_to_camera = np.eye(4)
@@ -830,6 +821,7 @@ def _compute_retrieval_diagnostics(
             eval_depth, _, eval_features, _, eval_image_loader = eval_db.get_depth_embedding_features_images(eval_ts)
             del eval_depth
             eval_image = eval_image_loader()
+            eval_image_shape = _image_shape_wh(eval_image)
             expected_pose = transform_map_eval_to_gt @ eval_poses[eval_ts]
             fusion_pose = np.eye(4)
             fusion_pose[:3, 3] = np.asarray(error_row["fusion_xyz"], dtype=float)
@@ -840,7 +832,10 @@ def _compute_retrieval_diagnostics(
                 gt_ts = gt_timestamps[int(gt_idx)]
                 gt_depth, _, gt_features, _, gt_image_loader = gt_db.get_depth_embedding_features_images(gt_ts)
                 gt_image = gt_image_loader()
-                ref_kpts_all, query_kpts_all = _match_keypoints(matcher, gt_features, eval_features, loop=loop)
+                gt_image_shape = _image_shape_wh(gt_image)
+                ref_kpts_all, query_kpts_all = _match_keypoints(
+                    matcher, gt_features, eval_features, gt_image_shape, eval_image_shape, loop=loop
+                )
                 points_world, depth_valid = _keypoints_to_world(ref_kpts_all, gt_depth, gt_poses[gt_ts], gt_K)
                 depth_values_all = _depth_values_for_keypoints(ref_kpts_all, gt_depth)
                 points_world_valid = points_world[depth_valid].astype(np.float32)
@@ -1203,11 +1198,11 @@ def run(args: argparse.Namespace) -> Path:
 
     if args.timestamps_file:
         timestamps = np.loadtxt(args.timestamps_file, dtype=np.int64)
-    elif args.map_eval:
-        timestamps = _sample_timestamps_from_map(map_eval_dir, args.num_samples, args.trim_ratio)
-    elif args.bag_eval:
-        timestamps = _sample_timestamps_from_bag(args.bag_eval, args.num_samples, args.trim_ratio)
     else:
+        # Sample from map_eval's own keyframe timestamps rather than the bag's recording-time
+        # metadata: message header stamps aren't always epoch time (e.g. Looper bags use a
+        # relative/device clock), so bag-metadata-based sampling can't be reliably matched back
+        # against map_eval/localization poses, which are keyed by header stamp.
         timestamps = _sample_timestamps_from_map(map_eval_dir, args.num_samples, args.trim_ratio)
 
     print("\nStep 4/6: querying map_eval reference poses and fusion poses")
@@ -1341,7 +1336,7 @@ def main():
     parser.add_argument("--work-root", default="output/benchmark_work", help="Parent directory for generated maps and localization scratch data")
     parser.add_argument("--work-dir", help="Exact work directory for generated maps and localization scratch data")
     parser.add_argument("--num-samples", type=int, default=100, help="Number of sampled timestamps")
-    parser.add_argument("--trim-ratio", type=float, default=0.05, help="Trim this fraction from bag start/end")
+    parser.add_argument("--trim-ratio", type=float, default=0.05, help="Trim this fraction of map_eval keyframes from the start/end before sampling")
     parser.add_argument("--timestamps-file", help="Optional text file containing timestamps in ns")
     parser.add_argument("--rate", type=float, default=1.0, help="Replay/build rate")
     parser.add_argument("--timeout", type=float, default=60.0, help="Data save timeout in seconds")
