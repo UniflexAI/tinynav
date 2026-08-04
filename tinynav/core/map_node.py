@@ -206,10 +206,6 @@ class MapNode(Node):
         # pubs
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
-        # Every accepted fix, not just the first. /map/relocalization is deliberately
-        # first-fix-only (see update_transform_from_map_to_odom), but the app wants to
-        # show that relocalization is still landing.
-        self.relocation_fix_pub = self.create_publisher(Odometry, '/map/relocalization_fix', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
         # Stair hint: label the robot's pose-in-map climbing/flat off the offline
         # capture-path labels (path_climb.npy). Folded in here (not a separate node)
@@ -282,67 +278,9 @@ class MapNode(Node):
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
 
-        # Continuous relocalization. Every successful relocalization is one observation
-        # of map->odom; they are fused by compute_transform_from_map_to_odom() as a
-        # weighted pose graph, so the estimate keeps tracking the black-box VIO's drift
-        # instead of being frozen at the first fix.
-        #
-        # Retrieval can still match a wrong-but-similar place, and one confident-but-
-        # wrong observation would drag the whole graph, so observations are gated before
-        # they are fused:
-        #   bootstrap (no estimate yet) -- require `reloc_bootstrap_window` recent
-        #     observations agreeing within `reloc_burst_tol` before trusting any of them.
-        #   steady state -- accept an observation within `reloc_accept_tol` of the current
-        #     estimate. The tolerance is deliberately loose: a *correct* observation is
-        #     supposed to disagree with a drifted estimate, and that disagreement is the
-        #     signal we want to fuse, not reject.
-        #   kidnap -- if a full `reloc_burst_window` burst mutually agrees yet all of it
-        #     disagrees with the current estimate, we were wrong (or the robot was moved):
-        #     re-bootstrap onto the burst rather than reject it forever.
-        # Sliding window (not fill-then-clear) so a stray bad observation can't keep
-        # resetting the count.
-        #
-        # Bootstrap takes ONE observation (its own window, separate from kidnap below).
-        #
-        # The 3-observation burst it used to need was inherited from the lock-once design
-        # this replaced (`reloc_lock_window`, pre-DINOv2-patch-VLAD): back then a burst
-        # froze T_from_map_to_odom for the whole route, so a wrong one was permanent and
-        # worth three keyframes of caution. Under continuous fusion it is not permanent --
-        # every later accepted observation re-solves the graph, and a genuinely wrong fix
-        # is recovered by the kidnap branch. Upstream main goes further and gates nothing
-        # at all: relocalize -> fuse, diluted across the last 100 weighted constraints,
-        # which makes its bootstrap a window of 1 too.
-        #
-        # And the cost was the dominant term in a map switch: observations arrive one per
-        # keyframe, a stationary robot only produces a keyframe every 3s, so three of them
-        # put ~6s of pure waiting between "the first keyframe already relocalized" and
-        # "/map/relocalization fires" -- measured on device, with the three observations
-        # agreeing to 0.09m against a 0.30m tolerance. The relocalization itself is ~100ms.
-        #
-        # What the burst never did is stop the failure that actually happens here: 41 of
-        # 225 relocalizations in one run landed on the same place ~5.7m away, and pairs of
-        # them arrived on consecutive keyframes agreeing with each other to ~2cm -- a burst
-        # of any size accepts that. Rejecting it needs information from outside this
-        # pipeline (odometry consistency, occupancy, a cross-check against the caller's own
-        # PnP), which is where core_runtime/mission/map_probe.py does it.
-        #
-        # Kidnap still wants 3: there, a mutually-agreeing burst is what licenses THROWING
-        # AWAY a working estimate, and being wrong about that strands the robot.
-        self.reloc_bootstrap_window = int(os.environ.get('TINYNAV_RELOC_BOOTSTRAP_WINDOW', '1'))
-        self.reloc_burst_window = 3         # recent observations that must agree (kidnap)
-        self.reloc_burst_tol = 0.3          # meters; max pairwise translation spread
-        self.reloc_accept_tol = 1.5         # meters; max |t| delta vs the current estimate
-        self._reloc_obs_window = []         # recent observation_T_from_map_to_odom (4x4)
-        self._accepted_reloc_timestamps = []   # timestamps that passed the gate -> fused
-        self._reloc_first_fix_published = False
-
-        # Relocalization costs VLAD + SuperPoint + LightGlue x top_k + PnP per attempt,
-        # while looper_bridge emits keyframes every 3 cm / 1 deg -- far faster than that
-        # pipeline can run. Rate-limit attempts once we have a fix; before the first fix
-        # go flat out, because relocalize.py's turn-in-place sweep is blocked waiting on
-        # /map/relocalization.
-        self.reloc_min_interval_s = 1.0
-        self._last_reloc_attempt_s = None
+        # SuperPoint features for the current keyframe, extracted once by
+        # keyframe_mapping and reused by the relocalization that follows on the same
+        # image rather than paying for a second pass.
         self._latest_keyframe_features = (None, None)
 
         self.T_from_map_to_odom = None
@@ -439,26 +377,9 @@ class MapNode(Node):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        if not self._should_attempt_relocalization():
-            return
-        timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
-            self.update_transform_from_map_to_odom(timestamp_ns, keyframe_image_msg.header.stamp)
-
-    def _should_attempt_relocalization(self) -> bool:
-        """Flat out until the first fix (the nav sweep is blocked on it), then capped at
-        one attempt per reloc_min_interval_s -- keyframes arrive far faster than the
-        VLAD/match/PnP pipeline can run."""
-        now = time.monotonic()
-        if self.T_from_map_to_odom is None:
-            self._last_reloc_attempt_s = now
-            return True
-        if (self._last_reloc_attempt_s is not None
-                and now - self._last_reloc_attempt_s < self.reloc_min_interval_s):
-            return False
-        self._last_reloc_attempt_s = now
-        return True
+            self.compute_transform_from_map_to_odom()
 
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
@@ -647,7 +568,9 @@ class MapNode(Node):
             features = asyncio.run(self.super_point_extractor.infer(image))
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
+            # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
+            self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
             return True, pose_in_world
@@ -688,126 +611,26 @@ class MapNode(Node):
             pass
 
 
-    def _burst_spread(self, window: int | None = None) -> float | None:
-        """Max pairwise translation spread over the last `window` observations
-        (default `reloc_burst_window`), or None until that many have arrived. A
-        single observation trivially agrees with itself -> 0.0; without that case
-        the pairwise reduction below is over an empty list and raises."""
-        n = self.reloc_burst_window if window is None else window
-        if len(self._reloc_obs_window) < n:
-            return None
-        translations = np.array([T[:3, 3] for T in self._reloc_obs_window[-n:]])
-        if len(translations) < 2:
-            return 0.0
-        return float(np.max([
-            np.linalg.norm(translations[i] - translations[j])
-            for i in range(len(translations))
-            for j in range(i + 1, len(translations))
-        ]))
-
-    def update_transform_from_map_to_odom(self, timestamp: int, stamp):
-        """Gate one relocalization observation, then refuse or fuse it.
-
-        Each successful relocalization gives one observation of map->odom. Retrieval can
-        match a wrong-but-similar place, and a confident-but-wrong observation would drag
-        the pose graph, so an observation is fused only if it survives the gate described
-        where reloc_burst_window is defined.
-
-        /map/relocalization fires once, on the first accepted fix -- consumers
-        (relocalize.py's sweep, node_manager's localized latch) want to know the instant
-        nav can plan a path, not every subsequent refinement. /map/relocalization_fix
-        fires on every accepted fix, for consumers that want the liveness signal.
-        """
-        if timestamp not in self.pose_graph_used_pose:
-            return
-        camera_in_map_world = self.relocalization_poses[timestamp]
-        camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-        observation_T_from_map_to_odom = camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
-
-        self._reloc_obs_window.append(observation_T_from_map_to_odom)
-        self._reloc_obs_window = self._reloc_obs_window[-self.reloc_burst_window:]
-        spread = self._burst_spread()
-        burst_agrees = spread is not None and spread <= self.reloc_burst_tol
-
-        if self.T_from_map_to_odom is None:
-            # Bootstrap: trust nothing until reloc_bootstrap_window observations agree.
-            boot_spread = self._burst_spread(self.reloc_bootstrap_window)
-            if boot_spread is None or boot_spread > self.reloc_burst_tol:
-                self.get_logger().info(
-                    f"[reloc] bootstrapping, {len(self._reloc_obs_window)} obs not consistent yet"
-                    + (f", spread={boot_spread:.2f}m > tol={self.reloc_burst_tol}m"
-                       if boot_spread is not None else ""))
-                return
-            self._accept(timestamp, camera_in_map_world, stamp)
-            self.get_logger().info(
-                f"[reloc] first fix (spread={boot_spread:.2f}m over "
-                f"{self.reloc_bootstrap_window} obs)")
-            return
-
-        delta = float(np.linalg.norm(
-            observation_T_from_map_to_odom[:3, 3] - self.T_from_map_to_odom[:3, 3]))
-        if delta <= self.reloc_accept_tol:
-            self._accept(timestamp, camera_in_map_world, stamp)
-            return
-
-        # Disagrees with the current estimate. If the whole burst mutually agrees, the
-        # estimate is what's wrong (bad lock, or the robot was picked up) -- re-bootstrap
-        # onto the burst instead of rejecting correct observations forever.
-        if burst_agrees:
-            self.get_logger().warning(
-                f"[reloc] {self.reloc_burst_window} consistent obs disagree with the current "
-                f"estimate by {delta:.2f}m -- re-bootstrapping onto them")
-            self._accepted_reloc_timestamps.clear()
-            self.T_from_map_to_odom = None
-            self._accept(timestamp, camera_in_map_world, stamp)
-            return
-
-        self.get_logger().info(
-            f"[reloc] rejected outlier: {delta:.2f}m > tol={self.reloc_accept_tol}m from estimate")
-
-    def _accept(self, timestamp: int, camera_in_map_world: np.ndarray, stamp):
-        """Admit an observation into the fused set and refresh the estimate."""
-        self._accepted_reloc_timestamps.append(timestamp)
-        self.compute_transform_from_map_to_odom()
-        self.relocation_fix_pub.publish(np2msg(camera_in_map_world, stamp, "world", "camera"))
-        if not self._reloc_first_fix_published:
-            self.relocation_pub.publish(np2msg(camera_in_map_world, stamp, "world", "camera"))
-            self._reloc_first_fix_published = True
-
     def compute_transform_from_map_to_odom(self):
-        """Fuse the accepted relocalization observations into T_from_map_to_odom.
-
-        Each accepted relocalization is one observation of the map->odom transform,
-        weighted by its PnP inlier ratio. Solving over a sliding window (rather than
-        taking the newest) averages out per-fix noise; keeping the window short is what
-        lets the estimate follow the black-box VIO's drift instead of being anchored to
-        stale observations.
+        """
+        Solve the optmization problem.
         """
         relative_pose_constraint = []
         optimized_parameters = {
-            0: np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
-            1: np.eye(4),
+            0 : np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
+            1 : np.eye(4),
         }
-        constant_pose_index_dict = {1: True}
-        for timestamp in self._accepted_reloc_timestamps:
-            if timestamp not in self.pose_graph_used_pose:
-                continue
-            camera_in_map_world = self.relocalization_poses[timestamp]
-            camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-            observation_T_from_map_to_odom = camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
-            weight = self.relocalization_pose_weights[timestamp]
-            relative_pose_constraint.append((
-                0, 1, observation_T_from_map_to_odom,
-                weight * np.array([10.0, 10.0, 10.0]),
-                weight * np.array([10.0, 10.0, 10.0]),
-            ))
-        if len(relative_pose_constraint) == 0:
-            return
+        constant_pose_index_dict = { 1: True }
+        for timestamp, pose in self.relocalization_poses.items():
+            if timestamp in self.pose_graph_used_pose:
+                camera_in_map_world = pose
+                camera_in_odom_world = self.pose_graph_used_pose[timestamp]
+                observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
+                weight = self.relocalization_pose_weights[timestamp]
+
+                relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
         relative_pose_constraint = relative_pose_constraint[-100:]
-        self._accepted_reloc_timestamps = self._accepted_reloc_timestamps[-100:]
-        optimized_parameters = pose_graph_solve(
-            optimized_parameters, relative_pose_constraint, constant_pose_index_dict,
-            max_iteration_num=1000)
+        optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
     def _publish_global_plan(self, paths_in_map: np.ndarray):

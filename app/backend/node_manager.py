@@ -163,10 +163,6 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             Odometry, '/map/relocalization', self._on_relocalization, 10
         )
-        # Fires on every accepted fix; the frontend flashes a badge when the count moves.
-        self.create_subscription(
-            Odometry, '/map/relocalization_fix', self._on_relocalization_fix, 10
-        )
         self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
         self.create_subscription(
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
@@ -298,12 +294,8 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def _on_relocalization(self, msg: Odometry):
-        pose = self._odom_to_dict(msg, source='map')
-        with self._lock:
-            self._map_pose = pose
-            self._localized = True
-
-    def _on_relocalization_fix(self, msg: Odometry):
+        # map_node publishes this on EVERY successful relocalization, so it doubles as
+        # the liveness count the frontend flashes a badge on (_reloc_seq).
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
             self._map_pose = pose
