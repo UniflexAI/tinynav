@@ -303,6 +303,22 @@ class MapNode(Node):
         self.reloc_lock_tol = float(os.environ.get('TINYNAV_RELOC_LOCK_TOL_M', '0.3'))
         self._reloc_obs_window = []   # (timestamp, observation_T_from_map_to_odom)
         self._reloc_locked = False
+        if self.reloc_lock_window == 1:
+            # A window of 1 has no agreement to check: the first relocalization to
+            # succeed is frozen for the route, from a single PnP, and nothing
+            # relocalizes again to correct it. Not refused -- it is a legitimate
+            # experiment -- but it must not be mistaken for the bootstrap-window 1
+            # this replaced, where a wrong first fix was still correctable.
+            self.get_logger().warning(
+                "[reloc] TINYNAV_RELOC_LOCK_WINDOW=1: locking on the FIRST "
+                "relocalization, unverified and permanent for this run. Use 0 "
+                "(continuous re-fusion) or >=2 (agreeing burst) unless this is "
+                "deliberate.")
+        elif self.reloc_lock_window > 0:
+            self.get_logger().info(
+                f"[reloc] lock-once enabled: freezing map->odom once "
+                f"{self.reloc_lock_window} observations agree within "
+                f"{self.reloc_lock_tol}m, then riding odom")
 
         self.T_from_map_to_odom = None
 
