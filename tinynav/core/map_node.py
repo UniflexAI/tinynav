@@ -302,15 +302,22 @@ class MapNode(Node):
         # Sliding window (not fill-then-clear) so a stray bad observation can't keep
         # resetting the count.
         #
-        # The bootstrap window is separate from the kidnap one, and 1 by default, because
-        # it dominates how long a map switch takes: observations arrive one per keyframe,
-        # and a stationary robot only produces a keyframe every 3s, so requiring 3 of them
-        # put ~6s of pure waiting between "the first keyframe already relocalized" and
+        # The bootstrap window is separate from the kidnap one, and smaller, because it
+        # dominates how long a map switch takes: observations arrive one per keyframe, and
+        # a stationary robot only produces a keyframe every 3s, so requiring 3 of them put
+        # ~6s of pure waiting between "the first keyframe already relocalized" and
         # "/map/relocalization fires" -- measured on device, with the three observations
         # agreeing to 0.09m. The relocalization itself takes ~100ms.
+        #
+        # 2, not 1: this map produces observations ~5.8m off (a similar-looking place)
+        # several times an hour -- logged as "rejected outlier: 5.78m" once an estimate
+        # exists. At a window of 1 such an observation, arriving first after a switch,
+        # becomes the fix, and nav then plans from it. Two agreeing observations cost one
+        # keyframe, which is ~0.1s while the robot is moving (and the caller should keep
+        # it moving -- see core_runtime/topology/relocalize.py's nudge).
         # Kidnap keeps 3: there, a mutually-agreeing burst is what licenses THROWING AWAY
-        # a working estimate, so a single outlier observation must not be enough.
-        self.reloc_bootstrap_window = int(os.environ.get('TINYNAV_RELOC_BOOTSTRAP_WINDOW', '1'))
+        # a working estimate, so the bar belongs higher than for the first fix.
+        self.reloc_bootstrap_window = int(os.environ.get('TINYNAV_RELOC_BOOTSTRAP_WINDOW', '2'))
         self.reloc_burst_window = 3         # recent observations that must agree (kidnap)
         self.reloc_burst_tol = 0.3          # meters; max pairwise translation spread
         self.reloc_accept_tol = 1.5         # meters; max |t| delta vs the current estimate
