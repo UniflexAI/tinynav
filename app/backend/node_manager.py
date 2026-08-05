@@ -623,6 +623,16 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().warn(f'Invalid nav_flow enable_first_done value: {value!r}')
         return False
 
+    @staticmethod
+    def _rtk_time_gate_open() -> bool:
+        # Must match MapNode._rtk_time_gate_open in tinynav/core/map_node.py:
+        # Oct-Mar effective after 18:00, Apr-Sep effective after 19:00.
+        from datetime import datetime
+        now = datetime.now()
+        if now.month in (10, 11, 12, 1, 2, 3):
+            return now.hour >= 18
+        return now.hour >= 19
+
     def _load_nav_flow_rtk_mode(self) -> str:
         config_path = os.path.join(self.map_path, 'nav_flow.json')
         if not os.path.exists(config_path):
@@ -637,8 +647,8 @@ class BackendNode(Ros2NodeManager):
             return 'off'
         rtk_config = config.get('rtk', {})
         if isinstance(rtk_config, bool):
-            return 'replace' if rtk_config else 'off'
-        if isinstance(rtk_config, str):
+            mode = 'replace' if rtk_config else 'off'
+        elif isinstance(rtk_config, str):
             mode = rtk_config.strip().lower()
         elif isinstance(rtk_config, dict):
             mode = str(rtk_config.get('mode', 'off')).strip().lower()
@@ -646,7 +656,7 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warn(f'Invalid nav_flow rtk config: {rtk_config!r}; using off')
             return 'off'
         if mode in {'replace', 'on', 'true', '1', 'yes'}:
-            return 'replace'
+            return 'replace' if self._rtk_time_gate_open() else 'off'
         if mode in {'off', 'false', '0', 'no', ''}:
             return 'off'
         self.get_logger().warn(f'Invalid nav_flow rtk.mode={mode!r}; using off')
