@@ -760,12 +760,15 @@ class MapNode(Node):
         })))
 
         max_speed = 0.5
-
-        # local target = furthest point on the path reachable from the robot before
-        # the heading turns past turn_thresh (a corner) or lookahead_max arc length is
-        # reached. Drives to corners instead of slicing across them.
-        local_i = self._local_target_index(paths, closest_idx, lookahead_max=max_speed * 5)
-        target_position = paths[local_i]
+        accumulated_distance = 0.0
+        start_point = pos[:3]
+        target_position = paths[-1]
+        for i in range(closest_idx, len(paths) - 1):
+            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
+            if accumulated_distance > max_speed * 5:
+                target_position = paths[i]
+                break
+            start_point = paths[i]
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
@@ -774,41 +777,6 @@ class MapNode(Node):
         self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
 
         self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
-
-    def _local_target_index(self, path, start_i, lookahead_max, min_lookahead=1.0,
-                            turn_thresh=np.deg2rad(60.0), smooth_m=0.4):
-        """Index of the local target: walk forward from start_i, stop at the first
-        point (beyond min_lookahead) whose smoothed heading has turned >= turn_thresh
-        from the entry heading (a corner), or when lookahead_max arc length is reached.
-        Never returns a point closer than min_lookahead in arc length."""
-        pxy = [np.asarray(p[:2], dtype=np.float64) for p in path]
-        n = len(pxy)
-        cum = [0.0] * n
-        for i in range(start_i + 1, n):
-            cum[i] = cum[i - 1] + float(np.linalg.norm(pxy[i] - pxy[i - 1]))
-
-        def sdir(i):
-            j = i
-            while j < n - 1 and (cum[j] - cum[i]) < smooth_m:
-                j += 1
-            d = pxy[j] - pxy[i]
-            L = float(np.linalg.norm(d))
-            return d / L if L > 1e-6 else None
-
-        entry = sdir(start_i)
-        li = start_i
-        for k in range(start_i + 1, n):
-            if cum[k] - cum[start_i] >= lookahead_max:
-                li = k
-                break
-            dk = sdir(k)
-            if (cum[k] - cum[start_i]) >= min_lookahead and entry is not None and dk is not None:
-                turn = abs(np.arctan2(dk[0] * entry[1] - dk[1] * entry[0], float(dk @ entry)))
-                if turn >= turn_thresh:
-                    li = k
-                    break
-            li = k
-        return li
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)
