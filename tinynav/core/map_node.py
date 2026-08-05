@@ -283,51 +283,6 @@ class MapNode(Node):
         # image rather than paying for a second pass.
         self._latest_keyframe_features = (None, None)
 
-        # Optional lock-once relocalization. 0 (default) is upstream's behaviour:
-        # relocalize on every keyframe forever and keep re-fusing, so the estimate
-        # tracks the black-box VIO's drift.
-        #
-        # N > 0 restores lock-once: freeze T_from_map_to_odom as soon as N recent
-        # observations agree within reloc_lock_tol, then stop relocalizing and ride odom
-        # for the rest of the run. One parameter, not two, because the agreement check
-        # only exists to serve the freeze.
-        #
-        # N picks who vouches for the fix:
-        #   1 -- nobody but the operator. The first PnP is frozen as-is. For a
-        #        supervised start where the position is known good and the point is to
-        #        stop spending on relocalization, not to cross-check it.
-        #   3 -- the historical setting: three observations must agree first. Worth it
-        #        unattended, because a lock is permanent for the route and this map
-        #        produced observations ~5.7m off in ~18% of attempts.
-        #
-        # Note N=1 is not FASTER to localize than N=0: both fuse and publish the first
-        # successful relocalization, so the first fix lands at the same instant. What
-        # locking buys is that nothing afterwards can move the estimate, and that no
-        # keyframe pays for VLAD+LightGlue+PnP (~100ms) again. What it costs is that
-        # VIO drift then goes uncorrected all route, which is why upstream moved off it.
-        self.reloc_lock_window = int(os.environ.get('TINYNAV_RELOC_LOCK_WINDOW', '0'))
-        self.reloc_lock_tol = float(os.environ.get('TINYNAV_RELOC_LOCK_TOL_M', '0.3'))
-        self._reloc_obs_window = []   # (timestamp, observation_T_from_map_to_odom)
-        self._reloc_locked = False
-        if self.reloc_lock_window == 1:
-            # Supervised mode: the operator vouches for the start position, so no
-            # agreement check is wanted -- freeze the first PnP and stop paying for
-            # relocalization. info, not warning: it is a chosen mode, and a warning on
-            # every map_node spawn only teaches people to ignore warnings. Logged at
-            # all because it is a standing property of the run, and because it must not
-            # be read as the bootstrap-window 1 it replaced, where a wrong first fix
-            # was still correctable by later observations.
-            self.get_logger().info(
-                "[reloc] TINYNAV_RELOC_LOCK_WINDOW=1 (supervised): freezing map->odom "
-                "on the first relocalization, from a single PnP, with no cross-check "
-                "and no further relocalization this run. Accuracy is the operator's to "
-                "vouch for.")
-        elif self.reloc_lock_window > 0:
-            self.get_logger().info(
-                f"[reloc] lock-once enabled: freezing map->odom once "
-                f"{self.reloc_lock_window} observations agree within "
-                f"{self.reloc_lock_tol}m, then riding odom")
-
         self.T_from_map_to_odom = None
 
         self.pois = {}
@@ -422,61 +377,9 @@ class MapNode(Node):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        if self._reloc_locked:
-            return          # frozen on a locked fix -- ride odom (reloc_lock_window)
         success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
-        if not success:
-            return
-        if self.reloc_lock_window <= 0:
+        if success:
             self.compute_transform_from_map_to_odom()
-            return
-        timestamp_ns = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
-        self._try_lock(timestamp_ns)
-
-    def _try_lock(self, timestamp: int) -> None:
-        """Lock-once path: fuse and freeze only once reloc_lock_window recent
-        observations agree spatially. Nothing is fused before that -- a lock is
-        permanent for the route, so an unverified observation must not set the
-        estimate that nav then plans from."""
-        if timestamp not in self.pose_graph_used_pose:
-            return
-        camera_in_map_world = self.relocalization_poses[timestamp]
-        camera_in_odom_world = self.pose_graph_used_pose[timestamp]
-        observation = camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
-        self._reloc_obs_window.append((timestamp, observation))
-        self._reloc_obs_window = self._reloc_obs_window[-self.reloc_lock_window:]
-
-        spread = self._obs_spread()
-        if spread is None or spread > self.reloc_lock_tol:
-            self.get_logger().info(
-                f"[reloc] lock pending, {len(self._reloc_obs_window)} obs not consistent yet"
-                + (f", spread={spread:.2f}m > tol={self.reloc_lock_tol}m"
-                   if spread is not None else ""))
-            return
-        # Fuse ONLY the agreeing burst: earlier observations that failed to agree are
-        # still in relocalization_poses (it records every success, for the saved
-        # diagnostics) and must not drag the estimate we are about to freeze.
-        self.compute_transform_from_map_to_odom(
-            only={ts for ts, _ in self._reloc_obs_window})
-        self._reloc_locked = True
-        self.get_logger().info(
-            f"[reloc] locked (spread={spread:.2f}m over {self.reloc_lock_window} obs) "
-            "-- riding odom from here")
-
-    def _obs_spread(self) -> float | None:
-        """Max pairwise translation spread of the recent observation window, or None
-        until it is full. A single observation trivially agrees with itself (0.0);
-        without that case the pairwise reduction is over an empty list and raises."""
-        if len(self._reloc_obs_window) < self.reloc_lock_window:
-            return None
-        translations = np.array([T[:3, 3] for _, T in self._reloc_obs_window])
-        if len(translations) < 2:
-            return 0.0
-        return float(np.max([
-            np.linalg.norm(translations[i] - translations[j])
-            for i in range(len(translations))
-            for j in range(i + 1, len(translations))
-        ]))
 
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
@@ -708,10 +611,9 @@ class MapNode(Node):
             pass
 
 
-    def compute_transform_from_map_to_odom(self, only: set | None = None):
+    def compute_transform_from_map_to_odom(self):
         """
-        Solve the optmization problem. `only` restricts the fused observations to
-        those timestamps (the lock-once path passes its agreeing burst).
+        Solve the optmization problem.
         """
         relative_pose_constraint = []
         optimized_parameters = {
@@ -720,8 +622,6 @@ class MapNode(Node):
         }
         constant_pose_index_dict = { 1: True }
         for timestamp, pose in self.relocalization_poses.items():
-            if only is not None and timestamp not in only:
-                continue
             if timestamp in self.pose_graph_used_pose:
                 camera_in_map_world = pose
                 camera_in_odom_world = self.pose_graph_used_pose[timestamp]
