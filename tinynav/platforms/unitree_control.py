@@ -28,12 +28,6 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client.Init()
         time.sleep(1.0)
 
-        self.sport_client.StandUp()
-        time.sleep(2.0)
-
-        self.sport_client.BalanceStand()
-        time.sleep(1.0)
-
         self.sport_client.StopMove()
         time.sleep(0.5)
 
