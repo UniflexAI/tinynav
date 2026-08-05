@@ -252,6 +252,43 @@ def generate_predefined_trajectory_vocabularies(
     trajectories.append(traj)
     params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
 
+    # right-angle turn trajectories: forward -> pivot 90 deg in place -> forward
+    # for staircases / narrow spaces where a continuous-curvature turn doesn't fit
+    turn_forward_speed = 0.15
+    seg1_steps = num_steps // 3
+    seg2_steps = num_steps // 3
+    seg3_steps = num_steps - seg1_steps - seg2_steps
+    for turn_sign in (1.0, -1.0):
+        turn_omega = turn_sign * (np.pi / 2) / (seg2_steps * dt)
+        p = init_p.copy()
+        q = quat_to_matrix(init_q)
+        traj = np.empty((num_steps, 7), dtype=np.float64)
+
+        idx = 0
+        for _ in range(seg1_steps):
+            v_world = q @ np.array([0.0, 0.0, turn_forward_speed])
+            p = p + v_world * dt
+            traj[idx, :3] = p
+            traj[idx, 3:] = matrix_to_quat(q)
+            idx += 1
+        for _ in range(seg2_steps):
+            dq = rotvec_to_matrix(np.array([0.0, turn_omega * dt, 0.0]))
+            q = q @ dq
+            traj[idx, :3] = p
+            traj[idx, 3:] = matrix_to_quat(q)
+            idx += 1
+        for _ in range(seg3_steps):
+            v_world = q @ np.array([0.0, 0.0, turn_forward_speed])
+            p = p + v_world * dt
+            traj[idx, :3] = p
+            traj[idx, 3:] = matrix_to_quat(q)
+            idx += 1
+
+        for i in range(num_steps):
+            traj[i, 2] = traj[0, 2]
+        trajectories.append(traj)
+        params.append(np.array([turn_forward_speed, turn_omega], dtype=np.float64))
+
     return np.asarray(trajectories), np.asarray(params)
 
 @njit(cache=True)
