@@ -479,7 +479,7 @@ class MapNode(Node):
         self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
-        self._rtk_configured_mode = self._load_rtk_mode(tinynav_map_path)
+        self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
         self.vlad_centres = None
@@ -557,7 +557,7 @@ class MapNode(Node):
         # RTK replace mode only: stateless xy -> map-frame z lookup over the map keyframes.
         self._rtk_kf_xy = None
         self._rtk_kf_z = None
-        if self._rtk_configured_mode == "replace":
+        if self.rtk_mode == "replace":
             self._build_rtk_ground_z_lookup()
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
@@ -796,6 +796,9 @@ class MapNode(Node):
             self.get_logger().warning(f"Invalid nav_flow rtk config: {rtk_config!r}; using off")
             return "off"
         if mode in {"replace", "on", "true", "1", "yes"}:
+            if not self._rtk_time_gate_open(datetime.now()):
+                self.get_logger().info("RTK configured on but outside the time window at startup; using off")
+                return "off"
             self.get_logger().info("Using RTK map pose replacement")
             return "replace"
         return "off"
@@ -806,14 +809,6 @@ class MapNode(Node):
         if now.month in (10, 11, 12, 1, 2, 3):
             return now.hour >= 18
         return now.hour >= 19
-
-    @property
-    def rtk_mode(self) -> str:
-        if self._rtk_configured_mode != "replace":
-            return "off"
-        if not self._rtk_time_gate_open(datetime.now()):
-            return "off"
-        return "replace"
 
     def _publish_planning_config(self):
         msg = String()

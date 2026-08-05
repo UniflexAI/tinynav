@@ -190,6 +190,9 @@ class BackendNode(Ros2NodeManager):
         self._rtk_yaw_init_thread: threading.Thread | None = None
         self._rtk_yaw_init_stop_event = threading.Event()
         self._rtk_yaw_init_active: bool = False
+        # Decided once when nav nodes start (matches MapNode.rtk_mode, which is
+        # also fixed at its own startup) -- not re-evaluated while nav is running.
+        self._nav_rtk_mode: str = 'off'
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -379,7 +382,7 @@ class BackendNode(Ros2NodeManager):
         if not needs_yaw_init:
             self._rtk_yaw_init_stop_event.set()
             return
-        if self._load_nav_flow_rtk_mode() != 'replace':
+        if self._nav_rtk_mode != 'replace':
             return
         with self._lock:
             already_running = (
@@ -663,7 +666,9 @@ class BackendNode(Ros2NodeManager):
         return 'off'
 
     def _publish_current_map_for_rtk(self):
-        mode = self._load_nav_flow_rtk_mode()
+        # Uses the value cached at nav start (self._nav_rtk_mode), not a live
+        # re-read -- must be refreshed by the caller before this runs.
+        mode = self._nav_rtk_mode
         msg = String()
         if mode == 'replace':
             msg.data = self.map_path
@@ -1573,13 +1578,16 @@ class BackendNode(Ros2NodeManager):
         ]
         if self._load_nav_flow_enable_first_done():
             map_node_cmd.append('--enable_first_done')
+        # Decide RTK mode once here, matching MapNode which also decides once at
+        # its own startup -- neither side re-checks this while nav is running.
+        self._nav_rtk_mode = self._load_nav_flow_rtk_mode()
         self._publish_current_map_for_rtk()
         self._map_node_proc = self._launch_proc(
             'map_node',
             map_node_cmd,
             env=_env,
         )
-        rtk_mode = self._load_nav_flow_rtk_mode()
+        rtk_mode = self._nav_rtk_mode
         with self._lock:
             loc_assist_requested = self._loc_assist_enabled
         loc_assist = loc_assist_requested and rtk_mode != 'replace'
@@ -1636,6 +1644,7 @@ class BackendNode(Ros2NodeManager):
             ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
             env=self._planning_env(_env),
         )
+        self._nav_rtk_mode = self._load_nav_flow_rtk_mode()
         self._publish_current_map_for_rtk()
         self._map_node_proc = self._launch_proc(
             'map_node',
@@ -1671,7 +1680,7 @@ class BackendNode(Ros2NodeManager):
 
     def _start_loc_assist(self, env: dict):
         """Start the yaw sweep thread (no cmd_vel_control process)."""
-        if self._load_nav_flow_rtk_mode() == 'replace':
+        if self._nav_rtk_mode == 'replace':
             self.get_logger().info('Localization assist sweep skipped for RTK map')
             return
         if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
