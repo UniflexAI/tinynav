@@ -1349,6 +1349,10 @@ class BackendNode(Ros2NodeManager):
             vio_status = self._vio_status if vio_guard_enabled else None
             vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
             active_map = self._active_map_name()
+            rtk_mode = self._nav_rtk_mode
+            rtk_bridge_status = self._rtk_bridge_status
+            rtk_map_status = self._rtk_map_status
+        rtk_yaw_init_active = self._rtk_yaw_init_active
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -1369,6 +1373,20 @@ class BackendNode(Ros2NodeManager):
             'vioGuardEnabled': vio_guard_enabled,
             'vioStatus': vio_status,
             'vioGuardStopped': vio_guard_stopped,
+            'rtkMode': rtk_mode,
+            # Receiver fix quality (NO_FIX/SINGLE/DGNSS/RTK_FLOAT/RTK_FIXED/...) —
+            # comes from rtk_bridge_node, which runs standalone (scripts/run_rtk.sh)
+            # regardless of nav state, so this is available even when nav is off.
+            'rtkBridgeOnline': rtk_bridge_status is not None,
+            'rtkReceiverStage': (rtk_bridge_status or {}).get('receiver_stage'),
+            'rtkBridgeAccepted': (rtk_bridge_status or {}).get('accepted'),
+            'rtkCalculateStatusName': (rtk_bridge_status or {}).get('rtk_calculate_status_name'),
+            # Map-alignment state (rtk_map_pose_node) — only meaningful once nav
+            # has decided to run in 'replace' mode and published /map/current_map.
+            'rtkMapState': (rtk_map_status or {}).get('state'),
+            'rtkFixOk': (rtk_map_status or {}).get('fix_ok'),
+            'rtkYawReady': (rtk_map_status or {}).get('yaw_ready'),
+            'rtkYawInitActive': rtk_yaw_init_active,
         }
 
     @staticmethod

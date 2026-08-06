@@ -188,6 +188,10 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       _LocalizationChip(localized: localized),
+                      if (status != null && (status.rtkBridgeOnline || status.rtkNavActive)) ...[
+                        const SizedBox(width: 6),
+                        _RtkStatusChip(status: status),
+                      ],
                       const SizedBox(width: 6),
                       _PlanningSourceControl(
                         source: status?.planningOccupancySource ?? 'depth',
@@ -1085,6 +1089,87 @@ class _LocalizationChip extends StatelessWidget {
             style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Receiver fix quality (from rtk_bridge_node, always running independent of
+/// nav) plus, when nav is actually using RTK for localization, the map
+/// alignment state from rtk_map_pose_node. The bridge quality is shown
+/// whenever the bridge is publishing, even while nav is off.
+class _RtkStatusChip extends StatelessWidget {
+  final DeviceStatus status;
+  const _RtkStatusChip({required this.status});
+
+  static const _stageInfo = {
+    'RTK_FIXED': (Color(0xFF69F0AE), 'RTK Fixed'),
+    'RTK_FLOAT': (Colors.orangeAccent, 'RTK Float'),
+    'DGNSS': (Colors.amberAccent, 'DGNSS'),
+    'SINGLE': (Colors.yellowAccent, 'GPS Single'),
+    'INS': (Colors.cyanAccent, 'INS'),
+    'PPP': (Colors.lightBlueAccent, 'PPP'),
+    'NO_FIX': (Colors.redAccent, 'No Fix'),
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    if (!status.rtkBridgeOnline && !status.rtkNavActive) {
+      return const SizedBox.shrink();
+    }
+
+    final stage = status.rtkReceiverStage;
+    final (dotColor, quality) = status.rtkBridgeOnline
+        ? (_stageInfo[stage] ?? (Colors.white38, stage ?? 'Unknown'))
+        : (Colors.white38, 'No Bridge');
+
+    String? navSuffix;
+    if (status.rtkNavActive) {
+      switch (status.rtkMapState) {
+        case 'ACTIVE':
+          navSuffix = 'Localizing';
+          break;
+        case 'NEED_YAW_INIT':
+          navSuffix = status.rtkYawInitActive ? 'Yaw Init…' : 'Needs Yaw Init';
+          break;
+        case 'WAIT_FIX':
+          navSuffix = 'Waiting Fix';
+          break;
+        case 'NO_MAP':
+          navSuffix = 'No Map';
+          break;
+        default:
+          navSuffix = 'Nav: Replace';
+      }
+    }
+
+    final label = navSuffix == null ? quality : '$quality · $navSuffix';
+    final details = [
+      'quality: $quality',
+      if (status.rtkCalculateStatusName != null) 'calc: ${status.rtkCalculateStatusName}',
+      if (status.rtkBridgeAccepted != null) 'bridge: ${status.rtkBridgeAccepted! ? 'ok' : 'rejected'}',
+      'nav: ${status.rtkNavActive ? 'replace' : 'off'}',
+    ].join('  •  ');
+
+    return Tooltip(
+      message: details,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.65),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 7, height: 7,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
+            ),
+            const SizedBox(width: 6),
+            Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
+          ],
+        ),
       ),
     );
   }

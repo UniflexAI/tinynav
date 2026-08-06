@@ -50,6 +50,15 @@ class DeviceStatus {
   final bool debugRecording;
   final bool locAssistEnabled;
   final String planningOccupancySource;
+  final String rtkMode;
+  final bool rtkBridgeOnline;
+  final String? rtkReceiverStage;
+  final bool? rtkBridgeAccepted;
+  final String? rtkCalculateStatusName;
+  final String? rtkMapState;
+  final bool? rtkFixOk;
+  final bool? rtkYawReady;
+  final bool rtkYawInitActive;
 
   const DeviceStatus({
     required this.online,
@@ -66,7 +75,20 @@ class DeviceStatus {
     required this.debugRecording,
     required this.locAssistEnabled,
     required this.planningOccupancySource,
+    required this.rtkMode,
+    required this.rtkBridgeOnline,
+    this.rtkReceiverStage,
+    this.rtkBridgeAccepted,
+    this.rtkCalculateStatusName,
+    this.rtkMapState,
+    this.rtkFixOk,
+    this.rtkYawReady,
+    required this.rtkYawInitActive,
   });
+
+  /// Whether nav is currently running with RTK replacing SLAM localization
+  /// (decided once at nav start — not a live reading of RTK fix quality).
+  bool get rtkNavActive => rtkMode == 'replace';
 
   factory DeviceStatus.fromJson(Map<String, dynamic> json) => DeviceStatus(
         online: json['online'] as bool? ?? false,
@@ -83,6 +105,15 @@ class DeviceStatus {
         debugRecording: json['debugRecording'] as bool? ?? false,
         locAssistEnabled: json['locAssistEnabled'] as bool? ?? false,
         planningOccupancySource: json['planningOccupancySource'] as String? ?? 'depth',
+        rtkMode: json['rtkMode'] as String? ?? 'off',
+        rtkBridgeOnline: json['rtkBridgeOnline'] as bool? ?? false,
+        rtkReceiverStage: json['rtkReceiverStage'] as String?,
+        rtkBridgeAccepted: json['rtkBridgeAccepted'] as bool?,
+        rtkCalculateStatusName: json['rtkCalculateStatusName'] as String?,
+        rtkMapState: json['rtkMapState'] as String?,
+        rtkFixOk: json['rtkFixOk'] as bool?,
+        rtkYawReady: json['rtkYawReady'] as bool?,
+        rtkYawInitActive: json['rtkYawInitActive'] as bool? ?? false,
       );
 }
 
