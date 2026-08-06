@@ -292,8 +292,8 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def _on_relocalization(self, msg: Odometry):
-        # map_node publishes this on EVERY successful relocalization, so it doubles as
-        # the liveness count the frontend flashes a badge on (_reloc_seq).
+        # Fires on EVERY successful relocalization, so _reloc_seq doubles as the
+        # liveness count the frontend flashes a badge on.
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
             self._map_pose = pose
@@ -852,11 +852,8 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
-        # Re-latch resume on /nav/paused: the freshly spawned cmd_vel_control is a
-        # TRANSIENT_LOCAL subscriber and would otherwise inherit a stale 'paused'
-        # latched before this restart and silently freeze — a POI sent after
-        # relocalize would be swallowed. _set_nav_paused resets the flag and
-        # re-latches together (mirrors cmd_stop_nav_nodes resetting _nav_paused).
+        # The freshly spawned cmd_vel_control is a TRANSIENT_LOCAL subscriber and would
+        # otherwise inherit a stale latched 'paused' and silently swallow the next POI.
         self._set_nav_paused(False)
         self.state = 'idle'
         self._pub_state()
@@ -1134,9 +1131,7 @@ class BackendNode(Ros2NodeManager):
             self._stop_all()
 
     def _set_nav_paused(self, paused: bool):
-        """Set the pause flag and re-latch /nav/paused together, so the in-memory
-        flag and the latched topic (which a freshly spawned cmd_vel_control reads
-        on startup) can never diverge. Single source for pause/resume/restart."""
+        """Flag and latched topic set together, so they cannot diverge."""
         with self._lock:
             self._nav_paused = paused
         self._pause_pub.publish(Bool(data=paused))

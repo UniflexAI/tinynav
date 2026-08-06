@@ -264,9 +264,8 @@ class MapNode(Node):
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
 
-        # SuperPoint features for the current keyframe, extracted once by
-        # keyframe_mapping and reused by the relocalization that follows on the same
-        # image rather than paying for a second pass.
+        # SuperPoint features of the current keyframe, so the relocalization that
+        # follows on the same image does not pay for a second pass.
         self._latest_keyframe_features = (None, None)
 
         self.T_from_map_to_odom = None
@@ -390,8 +389,6 @@ class MapNode(Node):
         self.nav_temp_db.set_entry(keyframe_image_timestamp, embedding = embedding)
         features = asyncio.run(self.super_point_extractor.infer(image))
         self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
-        # Relocalization runs on this same keyframe right after; hand it these features
-        # rather than paying for a second SuperPoint pass over the same image.
         self._latest_keyframe_features = (keyframe_image_timestamp, features)
 
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
@@ -653,20 +650,11 @@ class MapNode(Node):
 
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
-        # Arrival is measured from the CAMERA pose, not the control center. Shifting it
-        # back to the control center is more literally correct ("did the body reach the
-        # POI") but it costs cam_offset (0.30 m) of extra approach before arrival fires,
-        # and that margin is what keeps the robot out of the planner's near-goal dead
-        # zone: with a camera reference, arrival triggers while the control center is
-        # still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
-        # Measuring from the camera declares arrival early; that is the point.
+
         if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
-            # Unconditional: this message is the only arrival edge consumers get, so
-            # gating it on _leg_initial_length (i.e. "this leg published progress at
-            # least once") silently loses the arrival for a POI the robot is ALREADY
-            # standing at when the batch lands — no path is ever planned, so the
-            # length stays None. The agent-side handoff/mission then waits out its
-            # whole leg timeout on a leg that is already done.
+            # Unconditional: this is the only arrival edge consumers get, and gating it
+            # on _leg_initial_length loses it for a POI the robot already stands at (no
+            # path planned -> length stays None), stranding the leg until it times out.
             self.nav_progress_pub.publish(String(data=json.dumps({
                 "poi_index": self.poi_index,
                 "percent": 100.0,
@@ -754,7 +742,6 @@ class MapNode(Node):
         dummy_pose = np.eye(4)
         dummy_pose[:3, 3] = target_position_in_odom
         self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-
         self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:

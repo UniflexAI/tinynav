@@ -1,27 +1,20 @@
-"""Occupancy-grid + ESDF + trajectory-library planner.
-
-The planner builds a rolling 3D occupancy grid from depth, derives a 2D
-obstacle map + ESDF, samples a trajectory library, and selects the trajectory
-that minimizes a cost of clearance + distance-to-goal (+ smoothness, + goal
-heading for turn-in-place candidates), subject to a hard collision filter and a
-reverse gate.
-"""
-
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image, CameraInfo, PointField
+from nav_msgs.msg import Path, Odometry, OccupancyGrid
+from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
 from dataclasses import dataclass
 from numba import njit
-import cv2
-import rclpy
 import message_filters
-from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
-from nav_msgs.msg import Path, Odometry, OccupancyGrid
+from rclpy.time import Time
+from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
-from std_msgs.msg import Header
-from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
+from std_msgs.msg import Header
 from codetiming import Timer
+import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 
@@ -71,7 +64,6 @@ B2_CONFIG = RobotConfig(
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
 )
-
 
 # === Helper functions ===
 @njit(cache=True)
@@ -205,7 +197,6 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
         obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
     return obstacle
 
-
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
@@ -278,7 +269,6 @@ def generate_predefined_trajectory_vocabularies(
 
     return np.asarray(trajectories), np.asarray(params)
 
-
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
@@ -348,7 +338,6 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         occ_points.append(closest_step_for_traj)
     return scores, occ_points
 
-
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -374,14 +363,8 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 
 # === PlanningNode class ===
 class PlanningNode(Node):
-    """Occupancy-grid + ESDF + trajectory-library planner.
-
-    Cost = clearance + distance-to-goal + smoothness + goal heading (stationary
-    candidates only), subject to a hard collision filter and a reverse gate.
-    """
-
-    def __init__(self, node_name='planning_node'):
-        super().__init__(node_name)
+    def __init__(self):
+        super().__init__('planning_node')
         self.robot = GO2_CONFIG
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
@@ -413,24 +396,21 @@ class PlanningNode(Node):
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
-
-        # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
-        # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
-        # so a distant wall could not veto a trajectory whose near segment is clear --
-        # but it let the planner commit to trajectories it had not fully vetted, and the
-        # freeze it was meant to prevent turned out to have other causes.
-
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
-        self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
+        self.last_T = None
+        self.last_param = (0.0, 0.0) # acc and gyro
+        self.stamp = None
+        self.current_pose = None  # Store the latest pose from odometry
+
+        self.smoothed_velocity = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
-    # --- callbacks ---------------------------------------------------------
     def poi_change_callback(self, msg):
         self.target_pose = None
 
@@ -587,7 +567,15 @@ class PlanningNode(Node):
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+            stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T,_ = msg2np(odom_msg)
+            if self.last_T is None:
+                self.last_T = T.copy()
+                self.smoothed_velocity = 0.0
+                self.last_stamp = 0
+                self.smoothed_velocity = 0.0
+            velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
+            self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
@@ -624,41 +612,72 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
+            self.last_T = T
+            self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
-            safety_radius = self.robot.safety_radius
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, safety_radius, front_len, rear_len, half_w)
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
+            top_k = 100
+            top_indices = np.argsort(scores, kind='stable')[:top_k]
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
-            should_reverse = front_clearance <= enter_threshold
 
-            if self.target_pose is None:
-                return
-
-            target = self.target_pose
-
-            # World heading (rad) of a trajectory pose, body +Z-forward convention
-            # (same as score_trajectories_by_ESDF and the published Path).
+            # World heading (rad) of a trajectory pose, body +Z-forward convention (same
+            # as score_trajectories_by_ESDF and the published Path), and the |wrapped
+            # angle| between that heading and the bearing from the pose to the goal.
             def _world_heading(pose7):
                 qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
                 return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
 
             def _end_heading_error(pose7, goal):
-                """|wrapped angle| between the pose's heading and the bearing from that
-                pose to the goal."""
                 err = np.arctan2(goal[1] - pose7[1], goal[0] - pose7[0]) - _world_heading(pose7)
                 return abs(np.arctan2(np.sin(err), np.cos(err)))
 
+            def cost_function(traj, param, score, target_pose):
+                # predefined backward trajectory penalty
+                is_backward_traj = param[0] < 0.0
+                should_reverse = front_clearance <= enter_threshold
+                reverse_gate_penalty = 0.0
+                if should_reverse and not is_backward_traj:
+                        reverse_gate_penalty = 1e9
+                elif not should_reverse and is_backward_traj:
+                        reverse_gate_penalty = 1e9
+
+                # regular trajectory penalty
+                traj_end = np.array(traj[-1,:3])
+                target_end = target_pose if target_pose is not None else traj_end
+                dist = np.linalg.norm(traj_end - target_end)
+
+                # The vx=0 rows all END where they started, so dist cannot rank them and a
+                # goal behind the robot (past ~165 deg) makes standing still the permanent
+                # minimum. Skipped within 0.3 m, where the bearing is noise.
+                heading_penalty = (60 * _end_heading_error(traj[-1], target_end)
+                                   if abs(param[0]) <= 1e-3 and dist > 0.3 else 0.0)
+
+                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + heading_penalty + reverse_gate_penalty
+
+            top_k = 1
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            self.last_param = params[top_indices[0]]
+
+            # path
+            path = Path()
+            path.header = depth_msg.header
+            path.header.frame_id = "world"
+
+            if self.target_pose is None:
+                return
+
             if all(s == float('inf') for s in scores):
-                # Diagnose WHERE it collides: is the robot's own footprint cell already
-                # an obstacle (phantom ground/self), or is it genuinely walled in?
+                # Is the footprint cell itself an obstacle (phantom ground/self), or is
+                # the robot genuinely walled in?
                 center = self.camera_to_robot_center(T)
                 cxi = int((center[0] - self.origin[0]) / self.resolution)
                 cyi = int((center[1] - self.origin[1]) / self.resolution)
@@ -667,67 +686,9 @@ class PlanningNode(Node):
                 self.get_logger().warn(
                     f'All trajectories in collision. obst_cells={int(obstacle_mask.sum())} '
                     f'center_cell_obstacle={center_obst} front_clearance={front_clearance:.2f} '
-                    f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
-                    f'should_reverse={should_reverse}'
+                    f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f}'
                 )
-                # Nothing to command: control drives off the published Path, and there
-                # is no non-colliding trajectory to publish. Stop and re-plan next cycle.
                 return
-
-            # Single cost, as upstream: clearance + distance-to-goal + smoothness + the
-            # reverse gate. The gate penalty degrades gracefully on its own -- a colliding
-            # trajectory costs scores[i]*100000 == inf, which loses to any non-colliding
-            # gate violator -- so it never stalls outright. Clearance stays soft on purpose:
-            # safety_radius is a margin, not a collision boundary, and a corridor
-            # narrower than the band forces every forward trajectory to intrude into it.
-            # The heading term exists because the lattice's vx=0 rows all END where they
-            # started: distance-to-goal cannot tell them apart, so smoothness picked
-            # whichever rotation matched last cycle -- omega=0 from a standstill. With a
-            # goal further behind than a 3 s arc can swing around (past ~165 deg, since a
-            # half-turn at the tightest radius only moves the endpoint sideways), standing
-            # still was the cost minimum and stayed it: a permanent freeze. Scoring the
-            # stationary rows by their end heading vs the goal bearing ranks the rotations
-            # and prices standing-still-while-misaligned above turning to face the goal;
-            # the forward arcs take over on their own once the robot has come around. Only
-            # the stationary rows get it -- a moving trajectory's endpoint already says
-            # where the arc went, and penalizing its heading would fight the distance term.
-            def cost_function(i):
-                traj, param = trajectories[i], params[i]
-                reverse_gate_penalty = 0.0 if (param[0] < 0.0) == should_reverse else 1e9
-                traj_end = np.array(traj[-1, :3])
-                target_end = target if target is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
-                smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
-                # Stationary candidates only: skipped once within 0.3 m of the goal, where
-                # the bearing is noise and rotating achieves nothing.
-                if abs(param[0]) <= 1e-3 and dist > 0.3:
-                    heading_penalty = 60 * _end_heading_error(traj[-1], target_end)
-                else:
-                    heading_penalty = 0.0
-                return (scores[i] * 100000
-                        + 100 * dist
-                        + 10 * smooth
-                        + heading_penalty
-                        + reverse_gate_penalty)
-
-            top_indices = [min(range(len(trajectories)), key=cost_function)]
-            self.last_param = params[top_indices[0]]
-
-            # Confirm what actually got selected: if vx≈0 while non-colliding forward
-            # trajectories exist, the robot is "stuck by cost", not by collision.
-            n_fwd_ok = sum(1 for i in range(len(trajectories))
-                           if params[i][0] > 1e-3 and scores[i] != float('inf'))
-            self.get_logger().info(
-                f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
-                f'fwd_ok={n_fwd_ok} '
-                f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
-                f'front_clr={front_clearance:.2f} should_reverse={should_reverse}'
-            )
-
-            # path
-            path = Path()
-            path.header = depth_msg.header
-            path.header.frame_id = "world"
 
             for i in top_indices:
                 for j in range(0, len(trajectories[i]), 10):
@@ -744,7 +705,6 @@ class PlanningNode(Node):
                     path.poses.append(pose)
             self.path_pub.publish(path)
 
-
 def main(args=None):
     rclpy.init(args=args)
     node = PlanningNode()
@@ -755,7 +715,6 @@ def main(args=None):
         rclpy.shutdown()
     except KeyboardInterrupt:
         pass
-
 
 if __name__ == '__main__':
     main()
