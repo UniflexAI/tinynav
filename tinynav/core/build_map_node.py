@@ -197,6 +197,11 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
             1 : Free
             2 : Occupied
     """
+    if not poses:
+        raise ValueError(
+            "generate_occupancy_map: no poses recorded during mapping — "
+            "check that the sensor/VIO pipeline was actually publishing before save_mapping was called."
+        )
     raycast_shape = (100, 100, 20)
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     odom_pose_min_position = np.array([np.inf, np.inf, np.inf], dtype=np.float32)

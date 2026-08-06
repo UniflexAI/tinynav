@@ -38,6 +38,8 @@ ros2 bag record \
     /camera/camera/color/camera_info \
     /camera/camera/color/image_rect_raw/compressed \
     /camera/camera/vio_image \
+    /camera/camera/vio_100hz \
+    /camera/camera/depth/image_rect_raw \
     /lidar_points \
     /lidar_imu \
     /tf_static
