@@ -1471,7 +1471,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.75 and (self.z_disable or diff_position_norm_z < 2.0):
+            if diff_position_norm_xy < 0.5 and (self.z_disable or diff_position_norm_z < 2.0):
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
@@ -1898,7 +1898,7 @@ class MapNode(Node):
                 remaining_path,
                 pose_in_map_position,  #closest_position,
                 lookahead_distance=lookahead_distance,
-                turn_angle_threshold_rad=np.deg2rad(55.0),
+                turn_angle_threshold_rad=np.deg2rad(35.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
                 turn_stop_margin=0.25,
                 min_turn_distance=0.3,
