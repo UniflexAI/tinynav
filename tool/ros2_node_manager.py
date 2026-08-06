@@ -72,8 +72,8 @@ class Ros2NodeManager(Node):
         if not os.path.exists(bag_file):
             self.get_logger().warn(f'Bag file not found: {bag_file}')
             return
-        cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
-        self.processes['perception'] = self._spawn(cmd_perception)
+        cmd_looper_bridge = ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py']
+        self.processes['looper_bridge'] = self._spawn(cmd_looper_bridge)
 
         cmd_build = [
             'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
