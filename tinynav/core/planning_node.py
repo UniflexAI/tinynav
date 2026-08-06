@@ -9,7 +9,7 @@ reverse gate.
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from numba import njit
 import cv2
 import rclpy
@@ -17,8 +17,8 @@ import message_filters
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
-from geometry_msgs.msg import PoseStamped, Point32, Twist
-from std_msgs.msg import Header, Bool, Float32
+from geometry_msgs.msg import PoseStamped, Point32
+from std_msgs.msg import Header
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
@@ -209,11 +209,12 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]), vx_max=0.5
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
     """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
+    vx_max = 0.5
     n_vx = max(3, int(num_samples / 2))
     vx_samples = np.linspace(0.0, vx_max, n_vx)
     omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
@@ -390,13 +391,6 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
-        # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
-        # consumes this directly instead of reverse-engineering it from path poses.
-        # angular.x is a backward-segment flag (fixed-speed reverse vocabulary).
-        self.velocity_ff_pub = self.create_publisher(Twist, '/planning/velocity_ff', 10)
-        # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
-        # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
-        self.forward_speed_cap_pub = self.create_publisher(Float32, '/planning/forward_speed_cap', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
@@ -419,41 +413,12 @@ class PlanningNode(Node):
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
-        self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
-
-        # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
-        # Peak forward speed is modulated per cycle by the free space ahead: the open-space
-        # TARGET in tight spots creeps to vx_min (this also subsumes the old openness prior).
-        # The open target itself is the capture-speed prior (see _open_target_speed) when
-        # available, else vx_max -- so vx_max is the no-capture fallback, NOT the ceiling;
-        # the prior may raise the target above it, up to vx_hard_max (hardware absolute).
-        # Depth latency (~100ms) + raycast makes the effective clearance smaller than
-        # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
-        self.declare_parameter('vx_max', 0.6)        # open-space target when NO capture prior (fallback)
-        self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (hardware)
-        self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
-        self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
-        self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
-        self.declare_parameter('clear_scan_m', 2.0)  # forward clearance scan cap (m)
-        self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
-        self._vx_max = float(self.get_parameter('vx_max').value)
-        self._vx_hard_max = float(self.get_parameter('vx_hard_max').value)
-        self._vx_min = float(self.get_parameter('vx_min').value)
-        self._clear_c0_m = float(self.get_parameter('clear_c0_m').value)
-        self._clear_open_m = float(self.get_parameter('clear_open_m').value)
-        self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
-        self._t_react_s = float(self.get_parameter('t_react_s').value)
 
         # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
         # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
         # so a distant wall could not veto a trajectory whose near segment is clear --
         # but it let the planner commit to trajectories it had not fully vetted, and the
         # freeze it was meant to prevent turned out to have other causes.
-
-        # Fixed-speed reverse fallback: driven when every trajectory is in collision
-        # but the blockage is ahead (not already under the footprint).
-        self.declare_parameter('reverse_speed_fallback', 0.2)
-        self._reverse_speed_fallback = float(self.get_parameter('reverse_speed_fallback').value)
 
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
@@ -465,96 +430,12 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
-        # Stair hint from map_node's /planning/on_stairs: when active, relax the obstacle z-span
-        # filter (raise min_wall_span_m above the strict default) so the ascending
-        # staircase stops reading as a wall while taller verticals still block.
-        # GLOBAL span switch, not spatial -> low obstacles ON the stair region are
-        # intentionally not caught while climbing (de-scoped). Enter is immediate
-        # (the offline window bakes look-ahead); exit is debounced by stair_hold_s
-        # and self-heals to the strict default when the stream stops or goes stale.
-        self.declare_parameter('stair_min_wall_span_m', 0.3)
-        self._stair_min_wall_span_m = float(self.get_parameter('stair_min_wall_span_m').value)
-        self.declare_parameter('stair_hold_s', 1.5)
-        self._stair_hold_ns = int(float(self.get_parameter('stair_hold_s').value) * 1e9)
-        self._on_stairs_true_stamp_ns = None
-        self.create_subscription(Bool, '/planning/on_stairs', self.on_stairs_callback, 10)
-
-        # Capture-speed prior from map_node's /planning/speed_cap: the operator's
-        # local speed (m/s) near the robot. It IS the open-space target speed (scaled
-        # by capture_speed_gain), clamped to [vx_min, vx_hard_max] -- so it may raise
-        # the target above vx_max where the operator went fast, never past the hardware
-        # ceiling. NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
-        # Gain 1.0: replay the capture speed as driven. It was >1 on the theory that
-        # capture is deliberately slow for mapping stability and replay can afford to
-        # be quicker, but the operator's speed is already the best evidence of what
-        # this stretch tolerates, so scaling it up just overdrives the tight parts.
-        self.declare_parameter('capture_speed_gain', 1.0)
-        self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
-        self.declare_parameter('speed_cap_ttl_s', 2.0)
-        self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)
-        self._speed_cap = None
-        self._speed_cap_stamp_ns = None
-        self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
-
     # --- callbacks ---------------------------------------------------------
-    def on_stairs_callback(self, msg):
-        # Latch only the True edge; _on_stairs_active's hold window gives the exit
-        # debounce and staleness fallback.
-        if msg.data:
-            self._on_stairs_true_stamp_ns = self.get_clock().now().nanoseconds
-
-    def _on_stairs_active(self):
-        return self._signal_fresh(self._on_stairs_true_stamp_ns, self._stair_hold_ns)
-
-    def speed_cap_callback(self, msg):
-        self._speed_cap = float(msg.data)
-        self._speed_cap_stamp_ns = self.get_clock().now().nanoseconds
-
-    def _open_target_speed(self):
-        """Open-space target forward speed: the capture-speed prior (scaled by
-        capture_speed_gain) when a fresh, finite value is available, else vx_max
-        (the no-capture fallback). Clamped to [vx_min, vx_hard_max] -- the prior may
-        raise the target above vx_max but never past the hardware ceiling."""
-        # _signal_fresh short-circuits on a never-received (None) stamp, so a fresh
-        # stamp implies _speed_cap was set -> the isfinite guard is safe.
-        if (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
-                and np.isfinite(self._speed_cap)):
-            return float(np.clip(self._speed_cap * self._capture_speed_gain,
-                                 self._vx_min, self._vx_hard_max))
-        return self._vx_max
-
     def poi_change_callback(self, msg):
         self.target_pose = None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
-
-    def _signal_fresh(self, stamp_ns, window_ns):
-        """True if a signal last stamped at stamp_ns is still within window_ns of
-        now. Never-received (stamp_ns None) -> stale, the safe default."""
-        if stamp_ns is None:
-            return False
-        return self.get_clock().now().nanoseconds - stamp_ns <= window_ns
-
-    def _speed_from_clearance(self, clearance_m, v_prev, v_open):
-        """Linear peak-speed schedule from forward clearance, discounted for reaction
-        latency (the robot travels ~v_prev*t_react before a new command takes effect).
-        net clearance <= clear_c0_m -> vx_min; >= clear_open_m -> v_open; linear between.
-        v_open is the open-space target (capture-speed prior or vx_max fallback)."""
-        c_eff = max(0.0, clearance_m - v_prev * self._t_react_s)
-        # np.interp saturates to the endpoints outside [clear_c0_m, clear_open_m].
-        return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
-                               [self._vx_min, v_open]))
-
-    def _publish_velocity_ff(self, vx, omega):
-        """Publish a (vx, omega) feedforward on /planning/velocity_ff. angular.x
-        carries the fixed-speed reverse flag, derived from the sign of vx here so the
-        reverse-vocabulary convention cmd_vel_control consumes lives in one place."""
-        ff = Twist()
-        ff.linear.x = vx
-        ff.angular.z = omega
-        ff.angular.x = 1.0 if vx < 0.0 else 0.0
-        self.velocity_ff_pub.publish(ff)
 
     def info_callback(self, msg):
         if self.K is None:
@@ -727,12 +608,9 @@ class PlanningNode(Node):
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            on_stairs = self._on_stairs_active()
-            obstacle_config = (replace(self.obstacle_config, min_wall_span_m=self._stair_min_wall_span_m)
-                               if on_stairs else self.obstacle_config)
             obstacle_mask = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
-                robot_z=T[2, 3], config=obstacle_config,
+                robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
@@ -746,13 +624,8 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            # Forward clearance drives both the peak-speed schedule and the reverse gate.
-            front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
-            v_open = self._open_target_speed()
-            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
-            # Publish the prior-driven open target so cmd_vel caps to the same ceiling.
-            self.forward_speed_cap_pub.publish(Float32(data=float(v_open)))
-            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q, vx_max=v_allow)
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
+            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
@@ -772,8 +645,7 @@ class PlanningNode(Node):
             target = self.target_pose
 
             # World heading (rad) of a trajectory pose, body +Z-forward convention
-            # (same as score_trajectories_by_ESDF and the published Path). Used by the
-            # velocity feedforward to derive omega from the trajectory's own poses.
+            # (same as score_trajectories_by_ESDF and the published Path).
             def _world_heading(pose7):
                 qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
                 return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
@@ -798,20 +670,14 @@ class PlanningNode(Node):
                     f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
                     f'should_reverse={should_reverse}'
                 )
-                # Fallback: if the blockage is ahead (not already under the footprint),
-                # back out slowly instead of freezing so the next cycle can re-plan.
-                # When the footprint cell is itself an obstacle (phantom ground/self)
-                # we stay put rather than reversing blindly into noise.
-                if should_reverse and not center_obst:
-                    self._publish_velocity_ff(-self._reverse_speed_fallback, 0.0)
+                # Nothing to command: control drives off the published Path, and there
+                # is no non-colliding trajectory to publish. Stop and re-plan next cycle.
                 return
 
-            # Single cost, as upstream: clearance + distance-to-goal + smoothness, with
-            # the reverse gate as a large additive penalty rather than a hard filter.
-            # The penalty degrades gracefully on its own -- a colliding trajectory costs
-            # scores[i]*100000 == inf, which loses to any non-colliding gate violator --
-            # so it already gives the "never stall outright" fallback that a two-stage
-            # filter had to spell out, in one term. Clearance stays soft on purpose:
+            # Single cost, as upstream: clearance + distance-to-goal + smoothness + the
+            # reverse gate. The gate penalty degrades gracefully on its own -- a colliding
+            # trajectory costs scores[i]*100000 == inf, which loses to any non-colliding
+            # gate violator -- so it never stalls outright. Clearance stays soft on purpose:
             # safety_radius is a margin, not a collision boundary, and a corridor
             # narrower than the band forces every forward trajectory to intrude into it.
             # The heading term exists because the lattice's vx=0 rows all END where they
@@ -855,28 +721,8 @@ class PlanningNode(Node):
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
-                f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} '
-                f'on_stairs={on_stairs}'
+                f'front_clr={front_clearance:.2f} should_reverse={should_reverse}'
             )
-
-            # velocity feedforward for cmd_vel_control: (vx, omega) of the selected
-            # trajectory. vx is the commanded body-forward speed (lattice param; its
-            # sign flags the fixed-speed reverse vocabulary via angular.x). omega is
-            # NOT taken from the lattice param -- that omega is about the camera optical
-            # axis and would need a hand-maintained sign/frame correction. Instead we
-            # derive the yaw rate straight from the trajectory's own world poses, using
-            # the same body-+z-forward convention as score_trajectories_by_ESDF and the
-            # published Path: angular.z = d(world heading)/dt over the first step. This
-            # stays consistent with the path by construction and is correct even if the
-            # camera pitches (where -omega_y would be subtly wrong).
-            sel_traj = trajectories[top_indices[0]]
-            sel_vx = float(params[top_indices[0]][0])
-
-            dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
-            sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
-
-            self._publish_velocity_ff(sel_vx, sel_omega)
 
             # path
             path = Path()

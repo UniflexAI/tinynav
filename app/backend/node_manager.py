@@ -167,7 +167,6 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
         )
-        self.create_subscription(Bool, '/planning/on_stairs', self._on_on_stairs, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
         self.create_subscription(
@@ -223,7 +222,6 @@ class BackendNode(Ros2NodeManager):
         self._nav_nodes_running: bool = False
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
-        self._on_stairs: bool = False
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
@@ -301,10 +299,6 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = pose
             self._localized = True
             self._reloc_seq += 1
-
-    def _on_on_stairs(self, msg: Bool):
-        with self._lock:
-            self._on_stairs = bool(msg.data)
 
     def _on_nav_target_pose(self, msg: Odometry):
         with self._lock:
@@ -682,7 +676,6 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             nav_active = self._nav_active
-            on_stairs = self._on_stairs
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -696,7 +689,6 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
-            'onStairs': on_stairs,
         }
 
     @staticmethod
@@ -824,7 +816,6 @@ class BackendNode(Ros2NodeManager):
             self._global_path = []
             self._nav_target_pose = None
             self._nav_paused = False
-            self._on_stairs = False
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
