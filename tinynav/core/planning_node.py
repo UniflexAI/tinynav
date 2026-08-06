@@ -7,9 +7,10 @@ heading for turn-in-place candidates), subject to a hard collision filter and a
 reverse gate.
 """
 
+import json
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from numba import njit
 import cv2
 import rclpy
@@ -18,26 +19,42 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32, Twist
-from std_msgs.msg import Header, Float32
+from std_msgs.msg import Header, Float32, String
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 
+ROBOT_CONFIG_TOPIC = '/robot/config'
+
+
 @dataclass
 class RobotConfig:
-    """Robot geometry. Body frame: +x forward, +y left."""
+    """Robot geometry. Body frame: +x forward, +y left.
+
+    The per-robot values are published by the chassis bridge
+    (platforms/unitree_control.py, selected by TINYNAV_ROBOT) on
+    ROBOT_CONFIG_TOPIC. PlanningNode refuses to plan until that message
+    arrives; the defaults below (go2) only serve non-planning consumers.
+    """
     name: str = 'go2'
     shape: str = 'square'
-    length: float = 0.7
+    length: float = 0.6
     width: float = 0.3
     radius: float = 0.3
     camera_x: float = 0.35
     camera_y: float = 0.0
-    control_x: float = 0.0
+    control_x: float = 0.05
     control_y: float = 0.0
-    safety_radius: float = 0.1
+    safety_radius: float = 0.2
+
+    @classmethod
+    def from_json(cls, payload: str) -> 'RobotConfig':
+        """Build from a ROBOT_CONFIG_TOPIC message, ignoring unknown fields."""
+        fields = {f.name for f in dataclass_fields(cls)}
+        return cls(**{k: v for k, v in json.loads(payload).items() if k in fields})
 
     @property
     def cam_offset_3d(self):
@@ -54,23 +71,6 @@ class RobotConfig:
         """Returns (front_len, rear_len, half_w) relative to control center."""
         hl, hw = self.half_size
         return float(hl - self.control_x), float(hl + self.control_x), float(hw)
-
-
-GO2_CONFIG = RobotConfig(
-    name='go2', shape='square',
-    length=0.6, width=0.3,
-    camera_x=0.35, camera_y=0.0,
-    control_x=0.05, control_y=0.0,
-    safety_radius=0.2,
-)
-
-B2_CONFIG = RobotConfig(
-    name='b2', shape='square',
-    length=0.8, width=0.3,
-    camera_x=0.5, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
-    safety_radius=0.1,
-)
 
 
 # === Helper functions ===
@@ -388,13 +388,15 @@ class PlanningNode(Node):
 
     def __init__(self, node_name='planning_node'):
         super().__init__(node_name)
-        self.robot = GO2_CONFIG
-        self.get_logger().info(
-            f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
-            f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
-            f"ctrl=({self.robot.control_x},{self.robot.control_y}), "
-            f"safety_r={self.robot.safety_radius}m)"
-        )
+        # Geometry comes from the chassis bridge (latched, so it lands as soon as
+        # we subscribe if it is already up). No fallback on purpose: planning on
+        # guessed footprint/offsets is a collision risk, so sync_callback stays
+        # inert until the real config arrives.
+        self.robot = None
+        self.get_logger().info(f"Waiting for robot config on {ROBOT_CONFIG_TOPIC} before planning")
+        self.create_subscription(
+            String, ROBOT_CONFIG_TOPIC, self._robot_config_callback,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
@@ -506,7 +508,28 @@ class PlanningNode(Node):
         self._speed_cap_stamp_ns = None
         self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
 
+    def _log_robot_config(self, source):
+        self.get_logger().info(
+            f"Robot ({source}): {self.robot.name} ({self.robot.shape} "
+            f"{self.robot.length}x{self.robot.width}m, "
+            f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
+            f"ctrl=({self.robot.control_x},{self.robot.control_y}), "
+            f"safety_r={self.robot.safety_radius}m)"
+        )
+
     # --- callbacks ---------------------------------------------------------
+    def _robot_config_callback(self, msg):
+        """Adopt the geometry published by the chassis bridge. Every consumer of
+        self.robot reads it per-cycle, so a swap takes effect on the next plan."""
+        try:
+            robot = RobotConfig.from_json(msg.data)
+        except (ValueError, TypeError) as e:
+            kept = self.robot.name if self.robot is not None else 'none (still not planning)'
+            self.get_logger().error(f"Bad {ROBOT_CONFIG_TOPIC} payload ({e}); keeping {kept}")
+            return
+        self.robot = robot
+        self._log_robot_config(ROBOT_CONFIG_TOPIC)
+
     def climb_region_callback(self, msg):
         # An empty cloud is a real answer ("no region here"), not a missed message:
         # only the stamp decides freshness.
@@ -736,6 +759,13 @@ class PlanningNode(Node):
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
+            return
+        # Footprint, camera offset and safety radius all come from self.robot;
+        # without it there is nothing safe to plan against.
+        if self.robot is None:
+            self.get_logger().warn(
+                f"No robot config on {ROBOT_CONFIG_TOPIC} yet — not planning",
+                throttle_duration_sec=5.0)
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')

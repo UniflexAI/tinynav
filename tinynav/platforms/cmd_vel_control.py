@@ -3,13 +3,13 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, String
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
-from tinynav.core.planning_node import GO2_CONFIG
+from tinynav.core.planning_node import ROBOT_CONFIG_TOPIC, RobotConfig
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -27,12 +27,12 @@ class CmdVelControlNode(Node):
             [0, 0, 0, 1]]
         )
         # Camera sits this far ahead of the control center; heading must be referenced
-        # at the control center or the short path lies behind the camera. Derived from
-        # the shared GO2_CONFIG so it can't drift out of sync with the planner's
+        # at the control center or the short path lies behind the camera. Same
+        # RobotConfig the planner uses, published by the chassis bridge on
+        # ROBOT_CONFIG_TOPIC, so it can't drift out of sync with the planner's
         # footprint geometry (cam_offset_3d forward component = camera_x - control_x).
-        self.cam_forward_offset = float(GO2_CONFIG.cam_offset_3d[2])
         self.T_camera_to_control = self.T_robot_to_camera.copy()
-        self.T_camera_to_control[2, 3] = -self.cam_forward_offset  # back along camera +z (=forward)
+        self._apply_robot_config(RobotConfig())  # fallback until the bridge publishes
         self.pose = None
         self.path = None
         self._path_xy = None          # (N,2) cached path XY, updated in path_callback
@@ -115,7 +115,23 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
+        self.create_subscription(String, ROBOT_CONFIG_TOPIC, self._on_robot_config, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
+
+    def _apply_robot_config(self, robot: RobotConfig):
+        self.robot = robot
+        self.cam_forward_offset = float(robot.cam_offset_3d[2])
+        self.T_camera_to_control[2, 3] = -self.cam_forward_offset  # back along camera +z (=forward)
+
+    def _on_robot_config(self, msg: String):
+        try:
+            robot = RobotConfig.from_json(msg.data)
+        except (ValueError, TypeError) as e:
+            self.logger.error(f"Bad {ROBOT_CONFIG_TOPIC} payload ({e}); keeping {self.robot.name}")
+            return
+        self._apply_robot_config(robot)
+        self.logger.info(f"Robot ({ROBOT_CONFIG_TOPIC}): {robot.name}, "
+                         f"cam_forward_offset={self.cam_forward_offset:.3f}m")
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
