@@ -186,12 +186,19 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                   left: 8,
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      _LocalizationChip(localized: localized),
-                      if (status != null && (status.rtkBridgeOnline || status.rtkNavActive)) ...[
-                        const SizedBox(width: 6),
-                        _RtkStatusChip(status: status),
-                      ],
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _LocalizationChip(localized: localized),
+                          if (status != null && (status.rtkBridgeOnline || status.rtkNavActive)) ...[
+                            const SizedBox(height: 6),
+                            _RtkStatusChip(status: status),
+                          ],
+                        ],
+                      ),
                       const SizedBox(width: 6),
                       _PlanningSourceControl(
                         source: status?.planningOccupancySource ?? 'depth',
