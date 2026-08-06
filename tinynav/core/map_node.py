@@ -130,10 +130,10 @@ def select_target_position_on_path(
     path_points: np.ndarray,
     current_position: np.ndarray,
     lookahead_distance: float,
-    turn_angle_threshold_rad: float = np.deg2rad(60.0),
+    turn_angle_threshold_rad: float = np.deg2rad(55.0),
     reversal_angle_threshold_rad: float = np.deg2rad(120.0),
-    turn_stop_margin: float = 0.15,
-    min_turn_distance: float = 0.5,
+    turn_stop_margin: float = 0.25,
+    min_turn_distance: float = 0.3,
     turn_window_distance: float = 0.4,
 ) -> np.ndarray:
     """Pick a local-planner target on the global path without looking past sharp turns.
@@ -1890,10 +1890,10 @@ class MapNode(Node):
                 remaining_path,
                 pose_in_map_position,  #closest_position,
                 lookahead_distance=lookahead_distance,
-                turn_angle_threshold_rad=np.deg2rad(70.0),
+                turn_angle_threshold_rad=np.deg2rad(55.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
-                turn_stop_margin=0.15,
-                min_turn_distance=0.5,
+                turn_stop_margin=0.25,
+                min_turn_distance=0.3,
                 turn_window_distance=0.4,
             )
 
