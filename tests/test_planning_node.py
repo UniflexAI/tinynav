@@ -145,3 +145,46 @@ def test_run_raycasting_comparison():
 
 if __name__ == "__main__":
     test_run_raycasting_comparison()
+
+
+# --- climb region: per-cell relaxation of the obstacle span filter -----------
+
+def _riser_grid(height_m, config, resolution=0.05):
+    """3x3 cells; the centre one holds occupancy from the ground up to height_m."""
+    z_layers = int(round((config.robot_z_top - config.robot_z_bottom) / resolution))
+    grid = np.zeros((3, 3, z_layers))
+    grid[1, 1, :int(round(height_m / resolution))] = 0.2
+    return grid, np.array([0.0, 0.0, config.robot_z_bottom])
+
+
+def test_climb_mask_relaxes_only_the_cells_it_covers():
+    from planning_node import ObstacleConfig, build_obstacle_map
+    config = ObstacleConfig()
+    grid, origin = _riser_grid(0.15, config)
+    here = np.zeros((3, 3), dtype=bool); here[1, 1] = True
+    elsewhere = np.zeros((3, 3), dtype=bool); elsewhere[0, 0] = True
+
+    args = (grid, origin, 0.05)
+    assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
+    assert not build_obstacle_map(*args, robot_z=0.0, config=config, climb_mask=here)[1, 1]
+    # a region somewhere else must not relax this cell -- the whole point of going
+    # per-cell instead of switching the threshold globally
+    assert build_obstacle_map(*args, robot_z=0.0, config=config, climb_mask=elsewhere)[1, 1]
+
+
+def test_climb_mask_still_blocks_taller_verticals():
+    from planning_node import ObstacleConfig, build_obstacle_map
+    config = ObstacleConfig()
+    here = np.zeros((3, 3), dtype=bool); here[1, 1] = True
+    grid, origin = _riser_grid(0.35, config)   # above climb_min_wall_span_m
+    assert build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
+                              climb_mask=here)[1, 1]
+
+
+def test_no_climb_mask_is_the_strict_default():
+    from planning_node import ObstacleConfig, build_obstacle_map
+    config = ObstacleConfig()
+    grid, origin = _riser_grid(0.15, config)
+    assert np.array_equal(
+        build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config),
+        build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config, climb_mask=None))

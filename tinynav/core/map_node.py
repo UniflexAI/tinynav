@@ -28,7 +28,6 @@ from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
-from tinynav.core.stair_hint import PathClimbIndex
 from tinynav.core.path_speed import PathSpeedIndex
 logger = logging.getLogger(__name__)
 
@@ -207,11 +206,6 @@ class MapNode(Node):
         self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
-        # Stair hint: label the robot's pose-in-map climbing/flat off the offline
-        # capture-path labels (path_climb.npy). Folded in here (not a separate node)
-        # because map_node already owns pose-in-map and the map dir. Consumers:
-        # planning_node (relax z-span) and the app backend (frontend indicator).
-        self.on_stairs_pub = self.create_publisher(Bool, "/planning/on_stairs", 10)
         # Capture-speed prior: the operator's local speed (path_speed.npy) at the
         # robot's pose-in-map. planning_node caps peak forward speed by it.
         self.speed_cap_pub = self.create_publisher(Float32, "/planning/speed_cap", 10)
@@ -242,8 +236,6 @@ class MapNode(Node):
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
-        stair_path = f"{tinynav_map_path}/path_climb.npy"
-        self.stair_index = PathClimbIndex.load(stair_path) if os.path.exists(stair_path) else None
         speed_path = f"{tinynav_map_path}/path_speed.npy"
         self.speed_index = PathSpeedIndex.load(speed_path) if os.path.exists(speed_path) else None
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
@@ -664,8 +656,6 @@ class MapNode(Node):
 
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
-        on_stairs = bool(self.stair_index.on_stairs(pose_in_map[:3, 3])) if self.stair_index else False
-        self.on_stairs_pub.publish(Bool(data=on_stairs))
         # Capture speed (m/s) near the robot; +inf when off-path/unknown (speed_cap's
         # own "no cap" sentinel) -> planning's isfinite guard treats it as no data and
         # falls back to vx_max, so publish it straight through.

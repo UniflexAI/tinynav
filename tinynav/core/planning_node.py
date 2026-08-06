@@ -9,7 +9,7 @@ reverse gate.
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from numba import njit
 import cv2
 import rclpy
@@ -18,7 +18,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32, Twist
-from std_msgs.msg import Header, Bool, Float32
+from std_msgs.msg import Header, Float32
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
@@ -163,18 +163,26 @@ class ObstacleConfig:
     robot_z_top: float = 0.2
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.1
+    # Inside the climb region only (see build_obstacle_map's climb_mask).
+    climb_min_wall_span_m: float = 0.3
     ground_band_m: float = 0.3
     dilation_cells: int = 0
 
 
-def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
+def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
+                       climb_mask=None):
     """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
     The span filter only applies to cells whose lowest occupied voxel sits near
     the ground (within ground_band_m of robot_z_bottom): walls have large z-span
     while stair risers / ground bumps have small span. Cells whose occupancy
     starts above that ground band (floating / mid-height obstacles) use a
     single-voxel span threshold (resolution) just to reject single-voxel
-    noise, so real low-profile obstacles are still kept."""
+    noise, so real low-profile obstacles are still kept.
+
+    `climb_mask` is an (h,w) bool of cells the map says the capture path climbed
+    through; those use climb_min_wall_span_m instead, so a riser reads as a step
+    there and as a wall everywhere else. Per cell, not a global switch: low
+    obstacles BESIDE a staircase keep blocking while it is being climbed."""
     config = config or ObstacleConfig()
     h, w, z_dim = occupancy_grid.shape
     z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
@@ -194,10 +202,13 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
         # relative height of the lowest occupied voxel in each cell
         low_z_rel = z_rel_band[np.clip(occ_low, 0, n_z - 1).astype(np.int64)]
         near_ground = low_z_rel <= config.robot_z_bottom + config.ground_band_m
+        min_span = np.full(has_occ.shape, config.min_wall_span_m)
+        if climb_mask is not None:
+            min_span = np.where(climb_mask, config.climb_min_wall_span_m, min_span)
         # ground-anchored cells: full span filter (wall vs stair/bump);
         # floating cells: single-voxel span filter just to reject noise
         span_ok = np.where(near_ground,
-                           z_span >= config.min_wall_span_m,
+                           z_span >= min_span,
                            z_span >= resolution)
         obstacle = has_occ & span_ok
 
@@ -465,19 +476,19 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
-        # Stair hint from map_node's /planning/on_stairs: when active, relax the obstacle z-span
-        # filter (raise min_wall_span_m above the strict default) so the ascending
-        # staircase stops reading as a wall while taller verticals still block.
-        # GLOBAL span switch, not spatial -> low obstacles ON the stair region are
-        # intentionally not caught while climbing (de-scoped). Enter is immediate
-        # (the offline window bakes look-ahead); exit is debounced by stair_hold_s
-        # and self-heals to the strict default when the stream stops or goes stale.
-        self.declare_parameter('stair_min_wall_span_m', 0.3)
-        self._stair_min_wall_span_m = float(self.get_parameter('stair_min_wall_span_m').value)
-        self.declare_parameter('stair_hold_s', 1.5)
-        self._stair_hold_ns = int(float(self.get_parameter('stair_hold_s').value) * 1e9)
-        self._on_stairs_true_stamp_ns = None
-        self.create_subscription(Bool, '/planning/on_stairs', self.on_stairs_callback, 10)
+        # Climb region: the capture-path points, in this grid's frame, that the map
+        # says were climbed through. Cells near them relax the obstacle z-span filter
+        # so a riser reads as a step, and only those cells do -- everything beside the
+        # staircase keeps the strict default. Producer: core_runtime's PilotMapNode.
+        # No message, or a stale stream, means no region, i.e. strict everywhere.
+        self.declare_parameter('climb_region_radius_m', 0.5)
+        self._climb_region_radius_m = float(self.get_parameter('climb_region_radius_m').value)
+        self.declare_parameter('climb_region_ttl_s', 3.0)
+        self._climb_region_ttl_ns = int(float(self.get_parameter('climb_region_ttl_s').value) * 1e9)
+        self._climb_points = None
+        self._climb_stamp_ns = None
+        self.create_subscription(PointCloud, '/planning/climb_region',
+                                 self.climb_region_callback, 10)
 
         # Capture-speed prior from map_node's /planning/speed_cap: the operator's
         # local speed (m/s) near the robot. It IS the open-space target speed (scaled
@@ -497,14 +508,35 @@ class PlanningNode(Node):
         self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
 
     # --- callbacks ---------------------------------------------------------
-    def on_stairs_callback(self, msg):
-        # Latch only the True edge; _on_stairs_active's hold window gives the exit
-        # debounce and staleness fallback.
-        if msg.data:
-            self._on_stairs_true_stamp_ns = self.get_clock().now().nanoseconds
+    def climb_region_callback(self, msg):
+        # An empty cloud is a real answer ("no region here"), not a missed message:
+        # only the stamp decides freshness.
+        self._climb_points = np.array([[p.x, p.y] for p in msg.points], dtype=np.float64) \
+            if msg.points else np.empty((0, 2))
+        self._climb_stamp_ns = self.get_clock().now().nanoseconds
 
-    def _on_stairs_active(self):
-        return self._signal_fresh(self._on_stairs_true_stamp_ns, self._stair_hold_ns)
+    def _climb_mask(self, origin, resolution, shape):
+        """(h,w) bool of cells within climb_region_radius_m of a climb point, or None
+        when there is no fresh region -- which build_obstacle_map reads as strict
+        everywhere, the behaviour without a map.
+
+        The radius is what turns a line of capture samples into an area, and it is
+        also the whole of the look-ahead: the labelling window already extends the
+        region ~1m back along the path, so the robot meets it before the riser."""
+        if not self._signal_fresh(self._climb_stamp_ns, self._climb_region_ttl_ns):
+            return None
+        pts = self._climb_points
+        if pts is None or len(pts) == 0:
+            return None
+        h, w = shape
+        # Cell centres, so a point sitting on a cell boundary cannot round away.
+        xs = origin[0] + (np.arange(h) + 0.5) * resolution
+        ys = origin[1] + (np.arange(w) + 0.5) * resolution
+        near_x = np.abs(xs[:, None] - pts[None, :, 0]) <= self._climb_region_radius_m
+        near_y = np.abs(ys[:, None] - pts[None, :, 1]) <= self._climb_region_radius_m
+        # Chebyshev rather than Euclidean: a square around each sample, which costs one
+        # matmul over (cells x points) instead of a distance per pair.
+        return (near_x.astype(np.float32) @ near_y.astype(np.float32).T) > 0
 
     def speed_cap_callback(self, msg):
         self._speed_cap = float(msg.data)
@@ -727,12 +759,11 @@ class PlanningNode(Node):
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            on_stairs = self._on_stairs_active()
-            obstacle_config = (replace(self.obstacle_config, min_wall_span_m=self._stair_min_wall_span_m)
-                               if on_stairs else self.obstacle_config)
+            climb_mask = self._climb_mask(self.origin, self.resolution,
+                                          self.occupancy_grid.shape[:2])
             obstacle_mask = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
-                robot_z=T[2, 3], config=obstacle_config,
+                robot_z=T[2, 3], config=self.obstacle_config, climb_mask=climb_mask,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
@@ -857,7 +888,7 @@ class PlanningNode(Node):
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
                 f'should_reverse={should_reverse} '
-                f'on_stairs={on_stairs}'
+                f'climb_cells={0 if climb_mask is None else int(climb_mask.sum())}'
             )
 
             # velocity feedforward for cmd_vel_control: (vx, omega) of the selected
