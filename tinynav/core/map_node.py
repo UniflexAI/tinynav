@@ -503,8 +503,16 @@ class MapNode(Node):
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
-        self.map_embeddings_idx_to_timestamp = {idx: timestamp for idx, timestamp in enumerate(self.map_poses.keys())}
-        self.map_embeddings = np.stack([self.db.get_embedding(timestamp) for idx, timestamp in self.map_embeddings_idx_to_timestamp.items()])
+        map_embeddings_list = []
+        self.map_embeddings_idx_to_timestamp = {}
+        for timestamp in self.map_poses.keys():
+            embedding = self.db.get_embedding(timestamp)
+            if embedding is None:
+                self.get_logger().warning(f'Missing embedding for keyframe {timestamp}, skipping')
+                continue
+            self.map_embeddings_idx_to_timestamp[len(map_embeddings_list)] = timestamp
+            map_embeddings_list.append(embedding)
+        self.map_embeddings = np.stack(map_embeddings_list)
         self.relocalization_bow: SuperPointBoWRetriever | None = None
         bow_index_path = os.path.join(tinynav_map_path, SUPERPOINT_BOW_INDEX_FILENAME)
         if os.path.exists(bow_index_path):

@@ -411,7 +411,7 @@ class TinyNavDB():
         return self.depths.get(key_int), self.embeddings.get(key_int), self.features.get(key_int), rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
-        return self.embeddings[key]
+        return self.embeddings.get(int(key))
 
     def set_semantic_embedding(self, key:int, embedding:np.ndarray):
         self.semantic_embeddings[key] = embedding
