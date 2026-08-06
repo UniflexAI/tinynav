@@ -291,6 +291,9 @@ class IntKeyShelf:
     def __contains__(self, key: int):
         return str(key) in self.db
 
+    def get(self, key: int, default=None):
+        return self.db.get(str(key), default)
+
     def keys(self):
         return [int(k) for k in self.db.keys()]
 
@@ -405,7 +408,7 @@ class TinyNavDB():
                 return None
             return self.infra1_video_db.read(key_int)
 
-        return self.depths[key], self.embeddings[key], self.features[key], rgb_loader, infra1_loader
+        return self.depths.get(key_int), self.embeddings.get(key_int), self.features.get(key_int), rgb_loader, infra1_loader
 
     def get_embedding(self, key:int):
         return self.embeddings[key]
