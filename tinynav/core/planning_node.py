@@ -15,6 +15,8 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
+import heapq
+from collections import deque
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 
 
@@ -346,6 +348,99 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def astar_2d(obstacle_mask, start_xy, goal_xy, origin, resolution):
+    """A* path planning on 2D obstacle mask.
+
+    Args:
+        obstacle_mask: 2D boolean array, True = obstacle.
+        start_xy, goal_xy: world (x, y) coordinates.
+        origin: world origin of the grid (x, y).
+        resolution: meters per cell.
+
+    Returns:
+        List of (x, y) world coordinates from start to goal, or None if no path.
+    """
+    rows, cols = obstacle_mask.shape
+
+    def world_to_grid(wx, wy):
+        return (int((wx - origin[0]) / resolution), int((wy - origin[1]) / resolution))
+
+    def grid_to_world(gx, gy):
+        return (gx * resolution + origin[0] + resolution * 0.5,
+                gy * resolution + origin[1] + resolution * 0.5)
+
+    start = world_to_grid(start_xy[0], start_xy[1])
+    goal = world_to_grid(goal_xy[0], goal_xy[1])
+
+    if not (0 <= start[0] < rows and 0 <= start[1] < cols):
+        return None
+    if not (0 <= goal[0] < rows and 0 <= goal[1] < cols):
+        return None
+
+    def nearest_free(cell):
+        if not obstacle_mask[cell]:
+            return cell
+        queue = deque([cell])
+        visited = {cell}
+        while queue:
+            c = queue.popleft()
+            if not obstacle_mask[c]:
+                return c
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                n = (c[0] + dx, c[1] + dy)
+                if 0 <= n[0] < rows and 0 <= n[1] < cols and n not in visited:
+                    visited.add(n)
+                    queue.append(n)
+        return None
+
+    start = nearest_free(start)
+    goal = nearest_free(goal)
+    if start is None or goal is None:
+        return None
+
+    def heuristic(a, b):
+        dx, dy = abs(a[0] - b[0]), abs(a[1] - b[1])
+        return (dx + dy) + (1.41421356 - 2) * min(dx, dy)
+
+    open_heap = [(0.0, start)]
+    came_from = {start: None}
+    g_score = {start: 0.0}
+    neighbors_8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+    while open_heap:
+        _, current = heapq.heappop(open_heap)
+
+        if current == goal:
+            path = []
+            c = current
+            while c is not None:
+                path.append(grid_to_world(c[0], c[1]))
+                c = came_from[c]
+            return path[::-1]
+
+        for dx, dy in neighbors_8:
+            nb = (current[0] + dx, current[1] + dy)
+            if not (0 <= nb[0] < rows and 0 <= nb[1] < cols):
+                continue
+            if obstacle_mask[nb]:
+                continue
+            # No corner cutting
+            if dx != 0 and dy != 0:
+                if obstacle_mask[(current[0] + dx, current[1])] or obstacle_mask[(current[0], current[1] + dy)]:
+                    continue
+
+            step_cost = 1.41421356 if (dx != 0 and dy != 0) else 1.0
+            tentative_g = g_score[current] + step_cost
+
+            if nb not in g_score or tentative_g < g_score[nb]:
+                g_score[nb] = tentative_g
+                f = tentative_g + heuristic(nb, goal)
+                heapq.heappush(open_heap, (f, nb))
+                came_from[nb] = current
+
+    return None
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -391,6 +486,9 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
+
+        self.local_plan_pub = self.create_publisher(Path, '/planning/local_plan', 10)
+        self.local_target_pose = None
 
     def poi_change_callback(self, msg):
         self.target_pose = None
@@ -582,6 +680,45 @@ class PlanningNode(Node):
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
+        with Timer(name='local astar', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            if self.target_pose is not None:
+                robot_center = self.camera_to_robot_center(T)
+                local_path = astar_2d(
+                    obstacle_mask, robot_center[:2], self.target_pose[:2],
+                    self.origin, self.resolution,
+                )
+                if local_path is not None and len(local_path) > 1:
+                    # Take a point at lookahead distance on the A* path
+                    lookahead = 1.5  # meters
+                    accumulated = 0.0
+                    local_target = local_path[-1]
+                    for i in range(1, len(local_path)):
+                        accumulated += np.linalg.norm(
+                            np.array(local_path[i]) - np.array(local_path[i - 1])
+                        )
+                        if accumulated >= lookahead:
+                            local_target = local_path[i]
+                            break
+                    self.local_target_pose = np.array([
+                        local_target[0], local_target[1], self.target_pose[2]
+                    ])
+                    # Publish local plan for debugging
+                    plan_msg = Path()
+                    plan_msg.header = depth_msg.header
+                    plan_msg.header.frame_id = "world"
+                    for px, py in local_path:
+                        pose = PoseStamped()
+                        pose.header = depth_msg.header
+                        pose.pose.position.x = px
+                        pose.pose.position.y = py
+                        pose.pose.position.z = T[2, 3]
+                        plan_msg.poses.append(pose)
+                    self.local_plan_pub.publish(plan_msg)
+                else:
+                    self.local_target_pose = self.target_pose
+            else:
+                self.local_target_pose = None
+
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
@@ -627,7 +764,7 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.local_target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path
