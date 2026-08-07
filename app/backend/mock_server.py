@@ -139,6 +139,7 @@ def map_current():
         raise HTTPException(404, 'No map available')
     return {
         'imageUrl': '/map/image',
+        'name': _state.get('active_map'),
         'origin_x': -5.0,
         'origin_y': -5.0,
         'resolution': 0.05,
