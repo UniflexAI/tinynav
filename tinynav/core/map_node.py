@@ -1927,10 +1927,10 @@ class MapNode(Node):
                 remaining_path,
                 pose_in_map_position,  #closest_position,
                 lookahead_distance=lookahead_distance,
-                turn_angle_threshold_rad=np.deg2rad(35.0),
+                turn_angle_threshold_rad=np.deg2rad(50.0),
                 reversal_angle_threshold_rad=np.deg2rad(120.0),
-                turn_stop_margin=0.25,
-                min_turn_distance=0.3,
+                turn_stop_margin=0.3,
+                min_turn_distance=0.5,
                 turn_window_distance=0.4,
             )
 
