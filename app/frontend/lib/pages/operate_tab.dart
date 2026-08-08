@@ -197,6 +197,13 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                             const SizedBox(height: 6),
                             _RtkStatusChip(status: status),
                           ],
+                          if (localized) ...[
+                            const SizedBox(height: 6),
+                            _MapToggleButton(
+                              showGlobalMap: _showGlobalMap,
+                              onTap: () => setState(() => _showGlobalMap = !_showGlobalMap),
+                            ),
+                          ],
                         ],
                       ),
                       const SizedBox(width: 6),
@@ -204,13 +211,6 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         source: status?.planningOccupancySource ?? 'depth',
                         onChanged: _setPlanningOccupancySource,
                       ),
-                      if (localized) ...[
-                        const SizedBox(width: 6),
-                        _MapToggleButton(
-                          showGlobalMap: _showGlobalMap,
-                          onTap: () => setState(() => _showGlobalMap = !_showGlobalMap),
-                        ),
-                      ],
                     ],
                   ),
                 ),
