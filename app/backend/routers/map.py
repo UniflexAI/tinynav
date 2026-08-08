@@ -14,6 +14,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from ..map_renderer import render_map
+from ..rtk_tmux import current_active_map_name, maybe_restart_rtk_on_map_switch
 from ..state import runner
 
 router = APIRouter(tags=['map'])
@@ -94,13 +95,33 @@ def map_set_active(map_name: str):
     src = os.path.join(root, 'maps', map_name)
     if not os.path.isdir(src):
         raise HTTPException(404, f'Map {map_name!r} not found')
+    previous = current_active_map_name(root)
     link = os.path.join(root, 'map')
     if os.path.islink(link) or os.path.isfile(link):
         os.remove(link)
     elif os.path.isdir(link):
         shutil.rmtree(link)
     os.symlink(src, link)
-    return {'ok': True, 'active': map_name}
+
+    rtk_restarted = False
+    rtk_restart_error = None
+    try:
+        rtk_restarted = maybe_restart_rtk_on_map_switch(
+            previous_map=previous,
+            new_map=map_name,
+            new_map_dir=src,
+        )
+    except RuntimeError as exc:
+        # Map switch succeeded; RTK restart is best-effort.
+        rtk_restart_error = str(exc)
+
+    return {
+        'ok': True,
+        'active': map_name,
+        'previous': previous,
+        'rtkRestarted': rtk_restarted,
+        'rtkRestartError': rtk_restart_error,
+    }
 
 
 def _resolve_map_path(map_name: str) -> str:
