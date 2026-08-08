@@ -47,7 +47,8 @@ class CmdVelControlNode(Node):
         self.path_filter_tau = 0.30
         self.lookahead_steps = 1
         # Static-friction compensation: very small vx often cannot move the robot.
-        self.min_effective_linear_speed = 0.1
+        # Stairs need a higher floor; 0.1 was leaving the robot crawling / slipping.
+        self.min_effective_linear_speed = 0.2
         self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.3
@@ -152,9 +153,10 @@ class CmdVelControlNode(Node):
         out.angular.z = target_cmd.angular.z
 
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
-        # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
+        # Any still-forward request below the floor snaps up to min; only a true
+        # stop request (target <= 0) is allowed to decay to 0.
         if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
+            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x > 0.0 else 0.0
         elif abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
 
