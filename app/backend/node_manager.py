@@ -659,7 +659,9 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warn(f'Invalid nav_flow rtk config: {rtk_config!r}; using off')
             return 'off'
         if mode in {'replace', 'on', 'true', '1', 'yes'}:
-            return 'replace' if self._rtk_time_gate_open() else 'off'
+            # rtk comment out
+            # return 'replace' if self._rtk_time_gate_open() else 'off'
+            return 'replace'
         if mode in {'off', 'false', '0', 'no', ''}:
             return 'off'
         self.get_logger().warn(f'Invalid nav_flow rtk.mode={mode!r}; using off')

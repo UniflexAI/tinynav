@@ -832,9 +832,10 @@ class MapNode(Node):
             self.get_logger().warning(f"Invalid nav_flow rtk config: {rtk_config!r}; using off")
             return "off"
         if mode in {"replace", "on", "true", "1", "yes"}:
-            if not self._rtk_time_gate_open(datetime.now()):
-                self.get_logger().info("RTK configured on but outside the time window at startup; using off")
-                return "off"
+            # rtk comment out
+            # if not self._rtk_time_gate_open(datetime.now()):
+            #     self.get_logger().info("RTK configured on but outside the time window at startup; using off")
+            #     return "off"
             self.get_logger().info("Using RTK map pose replacement")
             return "replace"
         return "off"
