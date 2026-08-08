@@ -1,7 +1,9 @@
+import os
 import socket
+import subprocess
 
 import psutil
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from ..state import runner
 
@@ -45,6 +47,30 @@ def device_sysinfo():
         'disk_total_gb': round(disk.total / 1024 ** 3, 1),
         'gpu_percent': _jetson_gpu_percent(),
     }
+
+
+@router.post('/rtk/restart')
+def restart_rtk():
+    """Kill and re-launch scripts/run_rtk.sh in the app tmux RTK pane.
+
+    Matches start_app.sh pane layout: session `app`, window 0, pane 2.
+    Override with TINYNAV_RTK_TMUX_PANE if the layout changes.
+    """
+    pane = os.environ.get('TINYNAV_RTK_TMUX_PANE', 'app:0.2')
+    cmd = [
+        'tmux', 'respawn-pane', '-k', '-t', pane, '--',
+        'bash', '-lc', 'cd /tinynav && /tinynav/scripts/run_rtk.sh',
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except FileNotFoundError as exc:
+        raise HTTPException(500, f'tmux not available: {exc}') from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, f'tmux respawn timed out for pane {pane}') from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or 'tmux respawn failed').strip()
+        raise HTTPException(500, f'Failed to restart RTK on {pane}: {detail}')
+    return {'ok': True, 'pane': pane}
 
 
 def _jetson_gpu_percent() -> float | None:

@@ -51,6 +51,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   bool _showFootprint = true;
   bool _localMapFill = false;
   bool _showLocal3d = false;
+  bool _rtkRestarting = false;
 
   @override
   void initState() {
@@ -193,9 +194,13 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           _LocalizationChip(localized: localized),
-                          if (status != null && (status.rtkBridgeOnline || status.rtkNavActive)) ...[
+                          if (status != null) ...[
                             const SizedBox(height: 6),
-                            _RtkStatusChip(status: status),
+                            _RtkStatusChip(
+                              status: status,
+                              busy: _rtkRestarting,
+                              onTap: _restartRtkBridge,
+                            ),
                           ],
                           if (localized) ...[
                             const SizedBox(height: 6),
@@ -317,6 +322,42 @@ class _OperateTabState extends ConsumerState<OperateTab> {
         content: Text(e.response?.data?['detail'] ?? e.message ?? 'Failed to switch planning source'),
         backgroundColor: Colors.red,
       ));
+    }
+  }
+
+  Future<void> _restartRtkBridge() async {
+    if (_rtkRestarting) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Restart RTK?'),
+        content: const Text(
+          'This kills the RTK bridge in tmux pane 2 and relaunches run_rtk.sh.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Restart')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    setState(() => _rtkRestarting = true);
+    try {
+      await ref.read(dioProvider).post('/device/rtk/restart');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('RTK bridge restarting…')),
+      );
+      ref.invalidate(deviceStatusProvider);
+    } on DioException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.response?.data?['detail'] ?? e.message ?? 'Failed to restart RTK'),
+        backgroundColor: Colors.red,
+      ));
+    } finally {
+      if (mounted) setState(() => _rtkRestarting = false);
     }
   }
 }
@@ -1105,9 +1146,12 @@ class _LocalizationChip extends StatelessWidget {
 /// nav) plus, when nav is actually using RTK for localization, the map
 /// alignment state from rtk_map_pose_node. The bridge quality is shown
 /// whenever the bridge is publishing, even while nav is off.
+/// Tap asks the backend to respawn the RTK tmux pane (run_rtk.sh).
 class _RtkStatusChip extends StatelessWidget {
   final DeviceStatus status;
-  const _RtkStatusChip({required this.status});
+  final VoidCallback? onTap;
+  final bool busy;
+  const _RtkStatusChip({required this.status, this.onTap, this.busy = false});
 
   static const _stageInfo = {
     'RTK_FIXED': (Color(0xFF69F0AE), 'RTK Fixed'),
@@ -1121,10 +1165,6 @@ class _RtkStatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!status.rtkBridgeOnline && !status.rtkNavActive) {
-      return const SizedBox.shrink();
-    }
-
     final stage = status.rtkReceiverStage;
     final (dotColor, quality) = status.rtkBridgeOnline
         ? (_stageInfo[stage] ?? (Colors.white38, stage ?? 'Unknown'))
@@ -1150,8 +1190,11 @@ class _RtkStatusChip extends StatelessWidget {
       }
     }
 
-    final label = navSuffix == null ? quality : '$quality · $navSuffix';
+    final label = busy
+        ? 'Restarting…'
+        : (navSuffix == null ? quality : '$quality · $navSuffix');
     final details = [
+      'Tap to restart RTK bridge (tmux pane 2)',
       'quality: $quality',
       if (status.rtkCalculateStatusName != null) 'calc: ${status.rtkCalculateStatusName}',
       if (status.rtkBridgeAccepted != null) 'bridge: ${status.rtkBridgeAccepted! ? 'ok' : 'rejected'}',
@@ -1160,22 +1203,36 @@ class _RtkStatusChip extends StatelessWidget {
 
     return Tooltip(
       message: details,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.65),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
           borderRadius: BorderRadius.circular(20),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 7, height: 7,
-              decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
+          onTap: busy ? null : onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.65),
+              borderRadius: BorderRadius.circular(20),
             ),
-            const SizedBox(width: 6),
-            Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
-          ],
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (busy)
+                  const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white70),
+                  )
+                else
+                  Container(
+                    width: 7, height: 7,
+                    decoration: BoxDecoration(shape: BoxShape.circle, color: dotColor),
+                  ),
+                const SizedBox(width: 6),
+                Text(label, style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500)),
+              ],
+            ),
+          ),
         ),
       ),
     );
