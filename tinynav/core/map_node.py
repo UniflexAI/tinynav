@@ -475,6 +475,7 @@ class MapNode(Node):
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
+        self.poi_distance = self._load_poi_distance(tinynav_map_path)
         self.z_disable = self._load_z_disable(tinynav_map_path)
         self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
@@ -676,6 +677,33 @@ class MapNode(Node):
             return default_value
         self.get_logger().info(f"Using select_target_position_on_path_on={enabled}")
         return enabled
+
+    def _load_poi_distance(self, tinynav_map_path: str) -> float:
+        default_value = 0.5
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using poi_distance={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        if "poi_distance" not in config:
+            return default_value
+        value = config.get("poi_distance", default_value)
+        try:
+            poi_distance = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid poi_distance={value!r}; using {default_value}")
+            return default_value
+        if poi_distance <= 0:
+            self.get_logger().warning(f"Invalid poi_distance={value!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using poi_distance={poi_distance}")
+        return poi_distance
 
     def _load_z_disable(self, tinynav_map_path: str) -> bool:
         default_value = False
@@ -1471,7 +1499,7 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
-            if diff_position_norm_xy < 0.5 and (self.z_disable or diff_position_norm_z < 2.0):
+            if diff_position_norm_xy < self.poi_distance and (self.z_disable or diff_position_norm_z < 2.0):
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
                     percent=100.0,
