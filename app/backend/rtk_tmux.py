@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 
@@ -31,55 +30,3 @@ def restart_rtk_bridge() -> str:
         detail = (result.stderr or result.stdout or 'tmux respawn failed').strip()
         raise RuntimeError(f'Failed to restart RTK on {pane}: {detail}')
     return pane
-
-
-def current_active_map_name(db_root: str) -> str | None:
-    link = os.path.join(db_root, 'map')
-    if not (os.path.islink(link) or os.path.exists(link)):
-        return None
-    try:
-        return os.path.basename(os.path.realpath(link))
-    except OSError:
-        return None
-
-
-def map_rtk_enabled(map_dir: str) -> bool:
-    """True when maps/<name>/nav_flow.json enables RTK (bool true or mode replace/on/...)."""
-    config_path = os.path.join(map_dir, 'nav_flow.json')
-    if not os.path.exists(config_path):
-        return False
-    try:
-        with open(config_path) as f:
-            config = json.load(f)
-    except Exception:
-        return False
-    if not isinstance(config, dict):
-        return False
-    rtk_config = config.get('rtk', False)
-    if isinstance(rtk_config, bool):
-        return rtk_config
-    if isinstance(rtk_config, str):
-        mode = rtk_config.strip().lower()
-    elif isinstance(rtk_config, dict):
-        mode = str(rtk_config.get('mode', 'off')).strip().lower()
-    else:
-        return False
-    return mode in {'replace', 'on', 'true', '1', 'yes'}
-
-
-def maybe_restart_rtk_on_map_switch(
-    *,
-    previous_map: str | None,
-    new_map: str,
-    new_map_dir: str,
-) -> bool:
-    """Restart RTK when switching onto a different map that has RTK enabled.
-
-    Returns True if a restart was attempted and succeeded.
-    """
-    if previous_map == new_map:
-        return False
-    if not map_rtk_enabled(new_map_dir):
-        return False
-    restart_rtk_bridge()
-    return True

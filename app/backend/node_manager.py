@@ -737,32 +737,16 @@ class BackendNode(Ros2NodeManager):
 
     def _set_active_map_link(self, map_name: str):
         import shutil
-        from app.backend.rtk_tmux import current_active_map_name, maybe_restart_rtk_on_map_switch
-
         root = self.tinynav_db_path
         src = os.path.join(root, 'maps', map_name)
         if not os.path.isdir(src):
             raise FileNotFoundError(f'Map {map_name!r} not found')
-        previous = current_active_map_name(root)
         link = self.map_path
         if os.path.islink(link) or os.path.isfile(link):
             os.remove(link)
         elif os.path.isdir(link):
             shutil.rmtree(link)
         os.symlink(src, link)
-        try:
-            if maybe_restart_rtk_on_map_switch(
-                previous_map=previous,
-                new_map=map_name,
-                new_map_dir=src,
-            ):
-                self.get_logger().info(
-                    f'Restarted RTK bridge after switching to RTK map {map_name!r}'
-                )
-        except RuntimeError as exc:
-            self.get_logger().error(
-                f'Failed to restart RTK after switching to map {map_name!r}: {exc}'
-            )
 
     def _wait_for_map_handoff_localization(self, target_map: str) -> bool:
         """Wait until the target map is localized before continuing nav_flow.
