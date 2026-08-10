@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 _RTK_MAP_POSE_MAX_AGE_S = float(os.environ.get("TINYNAV_RTK_MAP_POSE_MAX_AGE_S", "1.0"))
 
+# RTK antenna (tail) forward to camera (head) along the body: 0.30 + 0.35 m. In
+# MAP units, ~6% larger than metres under the calibration Sim3, hence 0.70.
+_RTK_ANTENNA_TO_CAMERA = float(os.environ.get("TINYNAV_RTK_ANTENNA_TO_CAMERA", "0.70"))
+
 
 def draw_image_match_origin(prev_image: np.ndarray, curr_image: np.ndarray, prev_keypoints: np.ndarray, curr_keypoints: np.ndarray, matches: np.ndarray):
     cv_matches = [cv2.DMatch(_queryIdx=matches[index, 0].item(), _trainIdx=matches[index, 1].item(), _imgIdx=0, _distance=0) for index in range(matches.shape[0])]
@@ -1014,6 +1018,7 @@ class MapNode(Node):
         # headings and anchor the translation to the current position match.
         odom_pose = self.latest_odom_pose
         rtk_pose = self.latest_rtk_map_pose
+        psi_map = np.arctan2(rtk_pose[1, 0], rtk_pose[0, 0])
         if self._rtk_yaw_offset is None:
             # The map-world -> odom-world yaw offset is a physical constant: File
             # B's heading (psi_map) and this heading_odom both derive from the SAME
@@ -1024,14 +1029,19 @@ class MapNode(Node):
             # rotated and the global yaw/path jittered at the fix rate.
             fwd = odom_pose[:3, :3] @ np.array([0.0, 0.0, 1.0])   # camera forward, odom world
             heading_odom = np.arctan2(fwd[1], fwd[0])
-            psi_map = np.arctan2(rtk_pose[1, 0], rtk_pose[0, 0])
             self._rtk_yaw_offset = heading_odom - psi_map
         phi = self._rtk_yaw_offset
         c, s = np.cos(phi), np.sin(phi)
         Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        # odom_pose is the CAMERA, rtk_pose the ANTENNA: equating them shifted
+        # every target 0.65 m along the heading, so near a waypoint the goal
+        # orbited the real one. Does not fix the separate psi_map heading error.
+        rtk_xyz = rtk_pose[:3, 3].copy()
+        rtk_xyz[0] += _RTK_ANTENNA_TO_CAMERA * np.cos(psi_map)
+        rtk_xyz[1] += _RTK_ANTENNA_TO_CAMERA * np.sin(psi_map)
         T = np.eye(4)
         T[:3, :3] = Rz
-        T[:3, 3] = odom_pose[:3, 3] - Rz @ rtk_pose[:3, 3]   # translation still tracks RTK each fix
+        T[:3, 3] = odom_pose[:3, 3] - Rz @ rtk_xyz   # translation still tracks RTK each fix
         self.T_from_map_to_odom = T
         self.latest_rtk_transform_received_at = time.monotonic()
         self.first_done = True
