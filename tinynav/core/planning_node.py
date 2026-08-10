@@ -33,6 +33,7 @@ class RobotConfig:
     control_x: float = 0.0
     control_y: float = 0.0
     safety_radius: float = 0.1
+    comfort_radius: float = 0.5
 
     @property
     def cam_offset_3d(self):
@@ -348,34 +349,68 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def astar_2d(obstacle_mask, start_xy, goal_xy, origin, resolution):
+def astar_2d(
+    obstacle_mask,
+    start_xy,
+    goal_xy,
+    origin,
+    resolution,
+    ESDF_map=None,
+    comfort_radius=0.5,
+    clearance_weight=4.0,
+):
     """A* path planning on 2D obstacle mask.
 
     Args:
-        obstacle_mask: 2D boolean array, True = obstacle.
+        obstacle_mask: 2D boolean array, True = observed obstacle.
         start_xy, goal_xy: world (x, y) coordinates.
         origin: world origin of the grid (x, y).
         resolution: meters per cell.
+        ESDF_map: optional 2D distance-to-obstacle map in meters.
+        comfort_radius: cells closer than this receive extra cost.
 
     Returns:
-        List of (x, y) world coordinates from start to goal, or None if no path.
+        List of (x, y) world coordinates from start to the local planning
+        horizon, or None if no path around observed obstacles is available.
     """
     rows, cols = obstacle_mask.shape
 
     def world_to_grid(wx, wy):
-        return (int((wx - origin[0]) / resolution), int((wy - origin[1]) / resolution))
+        return (
+            int(np.floor((wx - origin[0]) / resolution)),
+            int(np.floor((wy - origin[1]) / resolution)),
+        )
 
     def grid_to_world(gx, gy):
         return (gx * resolution + origin[0] + resolution * 0.5,
                 gy * resolution + origin[1] + resolution * 0.5)
 
+    def in_grid(cell):
+        return 0 <= cell[0] < rows and 0 <= cell[1] < cols
+
+    def clamp_goal_to_horizon(start_cell, goal_cell):
+        if in_grid(goal_cell):
+            return goal_cell
+
+        start = np.array(start_cell, dtype=np.float64)
+        goal = np.array(goal_cell, dtype=np.float64)
+        delta = goal - start
+        steps = int(max(abs(delta[0]), abs(delta[1]), 1.0))
+        last_in_grid = start_cell
+        for step in range(1, steps + 1):
+            ratio = step / steps
+            cell = tuple(np.floor(start + ratio * delta).astype(np.int32).tolist())
+            if not in_grid(cell):
+                break
+            last_in_grid = cell
+        return last_in_grid
+
     start = world_to_grid(start_xy[0], start_xy[1])
     goal = world_to_grid(goal_xy[0], goal_xy[1])
 
-    if not (0 <= start[0] < rows and 0 <= start[1] < cols):
+    if not in_grid(start):
         return None
-    if not (0 <= goal[0] < rows and 0 <= goal[1] < cols):
-        return None
+    goal = clamp_goal_to_horizon(start, goal)
 
     def nearest_free(cell):
         if not obstacle_mask[cell]:
@@ -401,6 +436,15 @@ def astar_2d(obstacle_mask, start_xy, goal_xy, origin, resolution):
     def heuristic(a, b):
         dx, dy = abs(a[0] - b[0]), abs(a[1] - b[1])
         return (dx + dy) + (1.41421356 - 2) * min(dx, dy)
+
+    def clearance_cost(cell):
+        if ESDF_map is None or comfort_radius <= 0:
+            return 0.0
+        clearance = float(ESDF_map[cell])
+        if clearance >= comfort_radius:
+            return 0.0
+        ratio = (comfort_radius - clearance) / max(comfort_radius, 1e-3)
+        return clearance_weight * ratio * ratio
 
     open_heap = [(0.0, start)]
     came_from = {start: None}
@@ -430,7 +474,7 @@ def astar_2d(obstacle_mask, start_xy, goal_xy, origin, resolution):
                     continue
 
             step_cost = 1.41421356 if (dx != 0 and dy != 0) else 1.0
-            tentative_g = g_score[current] + step_cost
+            tentative_g = g_score[current] + step_cost + clearance_cost(nb)
 
             if nb not in g_score or tentative_g < g_score[nb]:
                 g_score[nb] = tentative_g
@@ -686,6 +730,8 @@ class PlanningNode(Node):
                 local_path = astar_2d(
                     obstacle_mask, robot_center[:2], self.target_pose[:2],
                     self.origin, self.resolution,
+                    ESDF_map=ESDF_map,
+                    comfort_radius=self.robot.comfort_radius,
                 )
                 if local_path is not None and len(local_path) > 1:
                     # Take a point at lookahead distance on the A* path
