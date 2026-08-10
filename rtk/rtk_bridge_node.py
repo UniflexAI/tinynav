@@ -31,6 +31,9 @@ WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 KNOT_TO_MPS = 0.5144444444444445
 
+# Distinct from any crash so run_rtk.sh can name the watchdog in its log.
+NMEA_WATCHDOG_EXIT_CODE = 9
+
 GGA_QUALITY_NAMES = {
     0: "NO_FIX",
     1: "SINGLE",
@@ -415,9 +418,9 @@ class RtkBridgeNode(Node):
         self.declare_parameter("serial_read_only", True)
         self.declare_parameter("serial_init_commands", "")
         self.declare_parameter("rtcm_serial_init_commands", "")
-        # 0 disables. Well above the receiver's 10 Hz output, far below the
-        # minutes of silence a stalled USB read endpoint costs.
-        self.declare_parameter("nmea_stale_restart_s", 15.0)
+        # 0 disables. 50x the receiver's 10 Hz output, and a false trigger only
+        # costs the 2.9 s measured for supervisor relaunch, so bias it short.
+        self.declare_parameter("nmea_stale_restart_s", 5.0)
         self.declare_parameter("raw_pty_enabled", True)
         self.declare_parameter("raw_pty_path", "/tmp/rtk_nmea")
         self.declare_parameter("raw_sentence_types", "GGA")
@@ -520,7 +523,7 @@ class RtkBridgeNode(Node):
                     f"No NMEA for {time.monotonic() - last_rx:.0f}s on {self.serial_port} "
                     f"(USB read endpoint stalled?); exiting so the supervisor reopens it"
                 )
-                os._exit(1)
+                os._exit(NMEA_WATCHDOG_EXIT_CODE)
             try:
                 readable, _, _ = select.select([self.nmea_fd], [], [], 0.2)
                 if not readable:

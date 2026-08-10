@@ -32,13 +32,24 @@ fi
 # Stable serial symlink survives ttyUSB renumbering (CH340 RTK receiver).
 SERIAL="${RTK_SERIAL_PORT:-/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0}"
 
-echo "[RTK] start_rtk_bridge at $(date -Is), serial=$SERIAL"
+# systemd starts this with `docker exec -itd`, which discards stdout, so every
+# restart used to be invisible. Tee to a file that survives the container.
+LOG_FILE="${RTK_LOG_FILE:-/tinynav/rtk_bridge.log}"
+say() { echo "[RTK] $(date -Is) $*" | tee -a "$LOG_FILE"; }
+
+say "start_rtk_bridge, serial=$SERIAL, log=$LOG_FILE"
 while true; do
-  echo "[RTK] launching rtk_bridge_node at $(date -Is)"
+  say "launching rtk_bridge_node"
   uv run python /tinynav/rtk/rtk_bridge_node.py --ros-args \
     -p serial_port:="$SERIAL" \
-    "$@"
-  code=$?
-  echo "[RTK] rtk_bridge_node exited (code=$code), restarting in 2s..."
+    "$@" 2>&1 | tee -a "$LOG_FILE"
+  code=${PIPESTATUS[0]}
+  # 9 is the node's NMEA watchdog (NMEA_WATCHDOG_EXIT_CODE), i.e. the serial
+  # link went one-way; anything else is a crash or a deliberate kill.
+  if [ "$code" -eq 9 ]; then
+    say "*** NMEA WATCHDOG FIRED -- serial went silent, relaunching in 2s ***"
+  else
+    say "rtk_bridge_node exited (code=$code), restarting in 2s..."
+  fi
   sleep 2
 done
