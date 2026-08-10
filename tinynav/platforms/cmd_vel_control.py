@@ -1,9 +1,12 @@
+import argparse
+import json
+import sys
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
@@ -14,12 +17,23 @@ import time
 logger = logging.getLogger(__name__)
 
 class CmdVelControlNode(Node):
-    def __init__(self):
+    def __init__(self, slowdown=False):
         super().__init__('cmd_vel_control_node')
+        # When off, matches "original main" behavior: fixed max speed, no
+        # deceleration near the goal.
+        self.slowdown = slowdown
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
+        # For the final-approach slowdown below: the nav goal map_node is steering
+        # toward (lookahead target, world frame), and whether it's the final POI
+        # (vs. an intermediate lookahead point) — slowdown only kicks in on the
+        # final leg, not at every intermediate waypoint.
+        self.create_subscription(Odometry, '/control/target_pose', self.goal_pose_callback, 10)
+        self.create_subscription(String, '/control/target_pose_meta', self.goal_meta_callback, 10)
+        self.goal_pose = None  # (x, y) in world frame
+        self.goal_is_last = False
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -55,6 +69,13 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
+        self.max_forward_speed = 0.5  # m/s
+        # Final-approach speed shaping (only applied when --slowdown and goal_is_last).
+        self.final_decel_radius = 0.6  # start tapering vx toward 0 within this distance
+        # Hysteresis for the final-approach stop latch: latches stopped at the same
+        # dead-zone floor cmd_timer_callback uses, resumes only clearly above it (no chatter).
+        self.final_stop_resume_speed = self.min_effective_linear_speed * 1.5
+        self._final_stop_latched = False
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -80,12 +101,27 @@ class CmdVelControlNode(Node):
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
             self.last_path_update_time = None
+            self._final_stop_latched = False
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
             self.cmd_pub.publish(Twist())
 
     def pose_callback(self, msg):
         self.pose = msg
+
+    def goal_pose_callback(self, msg):
+        self.goal_pose = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+
+    def goal_meta_callback(self, msg):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self.goal_is_last = bool(data.get('is_last', False))
+
+    def _cur_xy(self):
+        pos = self.pose.pose.pose.position
+        return float(pos.x), float(pos.y)
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
@@ -199,25 +235,52 @@ class CmdVelControlNode(Node):
         if raw_vx < 0.0:
             vx = -self.fixed_reverse_speed
         else:
-            vx = float(np.clip(raw_vx, 0.0, 0.5))
+            vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -self.max_angular_speed, self.max_angular_speed)
         is_backward_segment = raw_vx < 0.0
         if is_backward_segment:
             vyaw = 0.0
 
-        # Hack: if path first segment points >80 deg away from robot heading,
-        # force an in-place turn. Skip explicit backward segments because reverse
-        # naturally has heading_err close to +/-pi.
-        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
-            vx = 0.0
-            vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
-        # Minimal rotate-first gate: apply only for forward motion.
-        elif vx > 0.0 and abs(heading_err) > 0.45:
-            vx = 0.0
-            vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
+        # Final-approach zone (final POI, within final_decel_radius of the goal position):
+        # heading_err above is the path segment's local direction, which gets noisy/
+        # meaningless once basically arrived — trusting it here caused both an orientation
+        # overshoot and vx getting gated to 0 by the rotate-first checks below and then
+        # never released because heading_err never shrank. Inside this radius, skip those
+        # coarse gates entirely and hand vx to the final-approach shaping below instead.
+        dist_to_goal = None
+        in_final_zone = False
+        if self.slowdown and self.goal_is_last and self.goal_pose is not None and self.pose is not None:
+            cur_x, cur_y = self._cur_xy()
+            goal_x, goal_y = self.goal_pose
+            dist_to_goal = float(np.hypot(goal_x - cur_x, goal_y - cur_y))
+            in_final_zone = dist_to_goal < self.final_decel_radius
+
+        if not in_final_zone:
+            # Hack: if path first segment points >80 deg away, force an in-place turn.
+            # Skip backward segments — reverse naturally has heading_err near +/-pi.
+            if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+                vx = 0.0
+                vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
+            # Minimal rotate-first gate: apply only for forward motion.
+            elif vx > 0.0 and abs(heading_err) > 0.45:
+                vx = 0.0
+                vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 
         vyaw = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
+
+        # Final-approach speed shaping (final POI only): taper vx toward 0 within
+        # final_decel_radius of the goal, with hysteresis so it doesn't chatter right
+        # at the dead-zone floor cmd_timer_callback enforces.
+        if vx > 0.0 and dist_to_goal is not None:
+            candidate_vx = self.max_forward_speed * float(
+                np.clip(dist_to_goal / self.final_decel_radius, 0.0, 1.0)
+            )
+            if candidate_vx < self.min_effective_linear_speed:
+                self._final_stop_latched = True
+            elif candidate_vx > self.final_stop_resume_speed:
+                self._final_stop_latched = False
+            vx = 0.0 if self._final_stop_latched else min(vx, candidate_vx)
 
         # Store the latest target command directly. Smoothing is intentionally kept
         # only in cmd_timer_callback via acceleration limiting, so planner/control
@@ -244,7 +307,15 @@ def main(args=None):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     
-    node = CmdVelControlNode()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--slowdown", action="store_true", default=False,
+                         help="On the final approach to a POI, taper vx toward 0 within "
+                              "final_decel_radius of the goal. Off: matches remote main's "
+                              "unconditional rotate-first gates and fixed-max-speed vx "
+                              "(no deceleration near the goal).")
+    parsed_args, _ = parser.parse_known_args(sys.argv[1:])
+
+    node = CmdVelControlNode(slowdown=parsed_args.slowdown)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

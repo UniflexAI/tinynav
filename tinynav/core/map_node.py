@@ -283,6 +283,9 @@ class MapNode(Node):
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        # Side channel for cmd_vel_control's final-approach slowdown: is target_pose
+        # the final POI (vs. an intermediate lookahead point)?
+        self.target_pose_meta_pub = self.create_publisher(String, "/control/target_pose_meta", 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -719,10 +722,12 @@ class MapNode(Node):
         accumulated_distance = 0.0
         start_point = pos[:3]
         target_position = paths[-1]
+        goal_is_last = True  # target_position defaults to the path end (the POI itself)
         for i in range(closest_idx, len(paths) - 1):
             accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
             if accumulated_distance > max_speed * 5:
                 target_position = paths[i]
+                goal_is_last = False  # broke early: this is an intermediate lookahead point
                 break
             start_point = paths[i]
 
@@ -731,6 +736,7 @@ class MapNode(Node):
         dummy_pose = np.eye(4)
         dummy_pose[:3, 3] = target_position_in_odom
         self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+        self.target_pose_meta_pub.publish(String(data=json.dumps({"is_last": goal_is_last})))
         self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:

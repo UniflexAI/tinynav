@@ -60,6 +60,10 @@ _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
 _PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
 _PREVIEW_HIGH_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_HIGH_JPEG_QUALITY', '80'))
+_SLOWDOWN = os.environ.get('TINYNAV_SLOWDOWN', '0') not in ('0', '', 'false', 'False')
+_CMD_VEL_CONTROL_CMD = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
+if _SLOWDOWN:
+    _CMD_VEL_CONTROL_CMD.append('--slowdown')
 _PREVIEW_PROFILES = {
     'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
     'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
@@ -791,7 +795,7 @@ class BackendNode(Ros2NodeManager):
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            _CMD_VEL_CONTROL_CMD,
             env=_env,
         )
         with self._lock:
@@ -838,7 +842,7 @@ class BackendNode(Ros2NodeManager):
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            _CMD_VEL_CONTROL_CMD,
             env=_env,
         )
         with self._lock:
