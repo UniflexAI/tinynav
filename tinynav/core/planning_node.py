@@ -161,7 +161,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 class ObstacleConfig:
     robot_z_bottom: float = -0.45
     robot_z_top: float = 0.2
-    occ_threshold: float = 0.1
+    occ_threshold: float = 0.05
     min_wall_span_m: float = 0.1
     ground_band_m: float = 0.3
     dilation_cells: int = 0
