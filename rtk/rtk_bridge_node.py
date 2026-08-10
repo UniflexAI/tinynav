@@ -414,6 +414,9 @@ class RtkBridgeNode(Node):
         self.declare_parameter("serial_read_only", True)
         self.declare_parameter("serial_init_commands", "")
         self.declare_parameter("rtcm_serial_init_commands", "")
+        # 0 disables. Well above the receiver's 10 Hz output, far below the
+        # minutes of silence a stalled USB read endpoint costs.
+        self.declare_parameter("nmea_stale_restart_s", 15.0)
         self.declare_parameter("raw_pty_enabled", True)
         self.declare_parameter("raw_pty_path", "/tmp/rtk_nmea")
         self.declare_parameter("raw_sentence_types", "GGA")
@@ -500,7 +503,20 @@ class RtkBridgeNode(Node):
     def _serial_loop(self):
         buf = b""
         max_buf_bytes = 65536
+        stale_s = float(self.get_parameter("nmea_stale_restart_s").value)
+        # Armed only after the first sentence: a receiver that never talks is a
+        # different fault, and arming at startup would loop restarts forever.
+        last_rx = None
         while not self.stop_event.is_set():
+            # A stalled USB read endpoint (CH340 "urb stopped: -32") is silent:
+            # select() neither reports readable nor raises. Exit rather than
+            # reopen -- nmea_fd/rtcm_fd share the tty, both must close first.
+            if stale_s > 0 and last_rx is not None and time.monotonic() - last_rx > stale_s:
+                self.get_logger().fatal(
+                    f"No NMEA for {time.monotonic() - last_rx:.0f}s on {self.serial_port} "
+                    f"(USB read endpoint stalled?); exiting so the supervisor reopens it"
+                )
+                os._exit(1)
             try:
                 readable, _, _ = select.select([self.nmea_fd], [], [], 0.2)
                 if not readable:
@@ -508,6 +524,7 @@ class RtkBridgeNode(Node):
                 data = os.read(self.nmea_fd, 4096)
                 if not data:
                     continue
+                last_rx = time.monotonic()
             except OSError as exc:
                 # Only real I/O errors on the serial fd should back off; a bad
                 # NMEA sentence must never stall reading (kernel buffer would
