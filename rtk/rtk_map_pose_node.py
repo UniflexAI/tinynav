@@ -88,6 +88,8 @@ class RtkMapPoseNode(Node):
         # RTK straight-segment heading observation (course-over-ground).
         self.declare_parameter("heading_min_dist_m", 1.0)   # window length
         self.declare_parameter("straight_max_offline_m", 0.15)  # straightness gate
+        # Between RTK fixed's 0.02 m and float's 0.15 m, so only fixed feeds yaw.
+        self.declare_parameter("yaw_max_sigma_m", 0.05)
         # IMU / heading fusion.
         self.declare_parameter("heading_kp", 0.2)           # angle pull per obs
         self.declare_parameter("heading_ki", 0.02)          # bias learn per obs
@@ -108,6 +110,7 @@ class RtkMapPoseNode(Node):
         self.fix_timeout_s = float(self.get_parameter("fix_timeout_s").value)
         self.yaw_base_std_deg = float(self.get_parameter("yaw_base_std_deg").value)
         self.yaw_drift_deg_per_s = float(self.get_parameter("yaw_drift_deg_per_s").value)
+        self.yaw_max_sigma_m = float(self.get_parameter("yaw_max_sigma_m").value)
 
         # Not loaded until a map is resolved. on_fix stays silent until then.
         self.loaded_path = None
@@ -284,9 +287,15 @@ class RtkMapPoseNode(Node):
             xy = rtk_geo.enu_to_map_xy(self.yaw, self.scale, self.t2, enu[:2])
         self.last_xy = (float(xy[0]), float(xy[1]))
         # Straight-segment heading observation -> bootstrap / correct the filter.
-        obs = self.sy.add(self.last_xy[0], self.last_xy[1])
-        if obs is not None:
-            self.hf.rtk_observe(obs[0], self._now_s())
+        # Float gets this far too (the bridge squashes GGA quality 4 and 5 into one
+        # status code), and its 0.15 m sigma is ~12 deg of yaw over the 1 m window,
+        # drifting smoothly enough that the straightness gate still waves it through.
+        if math.sqrt(max(float(msg.position_covariance[0]), 0.0)) > self.yaw_max_sigma_m:
+            self.sy.reset()   # so no window ever straddles the degraded stretch
+        else:
+            obs = self.sy.add(self.last_xy[0], self.last_xy[1])
+            if obs is not None:
+                self.hf.rtk_observe(obs[0], self._now_s())
         # Publish the pose ONCE PER FIX so the position is always fresh: the RTK
         # position only changes at the /fix rate (~1 Hz), so emitting faster would
         # just repeat the same point and mislead a consumer into "not moving".
