@@ -21,7 +21,7 @@ from codetiming import Timer
 import argparse
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
+from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT, EfficientLoFTRTRT
 import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
@@ -432,6 +432,12 @@ class MapNode(Node):
         self.enable_first_done = enable_first_done
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
+        # SuperPoint+LightGlue above stays in use for the mono/infra1 pose-graph loop closure in
+        # find_loop_and_pose_graph. relocalize_with_depth's cross-session map matching below uses
+        # EfficientLoFTR instead: xinghan/live-retrieval-efficientloftr-test's full-bag comparison
+        # on this branch's own calibration data found EfficientLoFTR relocalized ~39% of VLAD-
+        # confident cross-session frames vs SuperPoint+LightGlue's ~13% on the same data.
+        self.efficientloftr_matcher = EfficientLoFTRTRT()
         self.dinov2_model = Dinov2TRT()
         self.tinynav_db_path = tinynav_db_path
 
@@ -1333,10 +1339,21 @@ class MapNode(Node):
                     print(f"candidate too far from odom prediction: {xy_dist:.2f}m > {self.relocalization_odom_prior_threshold}m, skipping")
                     continue
 
-            reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
-            reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
-                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+            reference_depth, _, _, _, reference_infra1_loader = self.db.get_depth_embedding_features_images(timestamp_in_map)
+            reference_infra1_image = reference_infra1_loader()
+            if reference_infra1_image is None:
+                print(f"no infra1 image stored for keyframe {timestamp_in_map}, skipping")
+                continue
+            # Dense/detector-free match: EfficientLoFTR takes the raw reference+query infra1
+            # images directly rather than precomputed SuperPoint keypoints -- see the __init__
+            # comment on why this replaced SuperPoint+LightGlue for this specific matching step.
+            # Both images stay in the infra1 frame (same as reference_depth/reference_keyframe_pose
+            # /self.map_K below), so no depth reprojection is needed.
+            match_result = asyncio.run(self.efficientloftr_matcher.infer(reference_infra1_image, keyframe))
+            reference_matched_keypoints = match_result["mkpts0"]
+            keyframe_matched_keypoints = match_result["mkpts1"]
+            if len(reference_matched_keypoints) < 50:
+                print(f"not enough matched features to relocalize, {len(reference_matched_keypoints)} < 50")
                 continue
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)

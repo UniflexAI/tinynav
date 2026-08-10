@@ -14,6 +14,7 @@ SUPERPOINT_ONNX  := superpoint_fp16_dynamic.onnx
 LIGHTGLUE_ONNX   := lightglue_fp16.onnx
 RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
 FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
+EFFICIENTLOFTR_ONNX := efficientloftr_outdoor_opt_fp16.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -25,10 +26,11 @@ LIGHTGLUE_ENGINE  := $(basename $(LIGHTGLUE_ONNX))_$(ARCH).plan
 SUPERPOINT_ENGINE := $(basename $(SUPERPOINT_ONNX))_$(ARCH).plan
 RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
 FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
+EFFICIENTLOFTR_ENGINE := $(basename $(EFFICIENTLOFTR_ONNX))_$(ARCH).plan
 
-ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE)
+ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(EFFICIENTLOFTR_ENGINE)
 
-.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo clean
+.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo efficientloftr clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -41,6 +43,7 @@ superpoint: $(SUPERPOINT_ENGINE) ## Build SuperPoint engine
 lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
 retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
+efficientloftr: $(EFFICIENTLOFTR_ENGINE) ## Build EfficientLoFTR engine
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -76,6 +79,14 @@ $(RETINIFY_ENGINE): $(RETINIFY_ONNX)
 #   --max_disp 192
 $(FOUNDATION_STEREO_ENGINE): $(FOUNDATION_STEREO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ --builderOptimizationLevel=1
+
+# EfficientLoFTR: input shape (480x640, divisible-by-32 as the model requires) is baked in at
+# ONNX export time (scripts/export_efficientloftr_onnx.py --height/--width), so this is a fully
+# static model -- no --shapes needed (trtexec rejects --shapes on a model with no dynamic axes).
+# Its match-count output stays genuinely dynamic per call; see EfficientLoFTRTRT in
+# tinynav/core/models_trt.py for why that model is deployed without CUDA graph replay.
+$(EFFICIENTLOFTR_ENGINE): $(EFFICIENTLOFTR_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
 
 
 clean: ## Remove generated TensorRT plans for this architecture
