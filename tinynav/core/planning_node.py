@@ -1,3 +1,5 @@
+import argparse
+import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -64,6 +66,20 @@ B2_CONFIG = RobotConfig(
     control_x=-0.5, control_y=0.0,
     safety_radius=0.1,
 )
+
+G1_CONFIG = RobotConfig(
+    name='g1', shape='square',
+    length=0.3, width=0.5,
+    camera_x=0.1, camera_y=0.0,
+    control_x=0.0, control_y=0.0,
+    safety_radius=0.15,
+)
+
+ROBOT_CONFIGS = {
+    GO2_CONFIG.name: GO2_CONFIG,
+    B2_CONFIG.name: B2_CONFIG,
+    G1_CONFIG.name: G1_CONFIG,
+}
 
 # === Helper functions ===
 @njit(cache=True)
@@ -348,9 +364,11 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 
 # === PlanningNode class ===
 class PlanningNode(Node):
-    def __init__(self):
+    def __init__(self, robot_model='go2'):
         super().__init__('planning_node')
-        self.robot = GO2_CONFIG
+        if robot_model not in ROBOT_CONFIGS:
+            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {tuple(ROBOT_CONFIGS)}")
+        self.robot = ROBOT_CONFIGS[robot_model]
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
@@ -659,7 +677,11 @@ class PlanningNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = PlanningNode()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--robot-model", choices=tuple(ROBOT_CONFIGS), default='go2',
+                         help="Robot geometry to use for footprint/collision planning")
+    parsed_args, _ = parser.parse_known_args(sys.argv[1:])
+    node = PlanningNode(robot_model=parsed_args.robot_model)
 
     try:
         rclpy.spin(node)

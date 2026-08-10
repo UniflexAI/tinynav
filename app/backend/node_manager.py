@@ -60,6 +60,12 @@ _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
 _PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
 _PREVIEW_HIGH_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_HIGH_JPEG_QUALITY', '80'))
+_SUPPORTED_ROBOT_MODELS = ('go2', 'b2', 'g1')
+_ROBOT_MODEL = os.environ.get('TINYNAV_ROBOT_MODEL', 'go2').strip().lower()
+if _ROBOT_MODEL not in _SUPPORTED_ROBOT_MODELS:
+    raise ValueError(
+        f"Invalid TINYNAV_ROBOT_MODEL={_ROBOT_MODEL!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
+_PLANNING_NODE_CMD = ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py', '--robot-model', _ROBOT_MODEL]
 _PREVIEW_PROFILES = {
     'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
     'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
@@ -624,10 +630,11 @@ class BackendNode(Ros2NodeManager):
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._unitree_proc = self._launch_proc(
             'unitree',
-            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py',
+             '--robot-model', _ROBOT_MODEL],
             env=_env,
         )
-        self.get_logger().info('unitree_control started')
+        self.get_logger().info(f'unitree_control started (robot_model={_ROBOT_MODEL})')
 
     def get_sensor_mode(self) -> str:
         return self._sensor_mode
@@ -748,7 +755,7 @@ class BackendNode(Ros2NodeManager):
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                _PLANNING_NODE_CMD,
                 env=env,
             )
         elif self._sensor_mode == 'realsense':
@@ -763,7 +770,7 @@ class BackendNode(Ros2NodeManager):
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+                _PLANNING_NODE_CMD,
                 env=env,
             )
 
@@ -827,7 +834,7 @@ class BackendNode(Ros2NodeManager):
 
         self._planning_proc = self._launch_proc(
             'planning',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
+            _PLANNING_NODE_CMD,
             env=_env,
         )
         self._map_node_proc = self._launch_proc(
