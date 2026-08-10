@@ -158,10 +158,11 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
-        # Mark localized as soon as any relocalization succeeds (published unconditionally
-        # by map_node, unlike current_pose_in_map which requires POIs to be set).
+        # Mark localized on the FUSED fix, not on /map/relocalization -- that one fires
+        # on every successful PnP, including the outliers lock-once exists to reject, so
+        # gating on it claims localized while T_from_map_to_odom is still None.
         self.create_subscription(
-            Odometry, '/map/relocalization', self._on_relocalization, 10
+            Odometry, '/map/relocalization_fix', self._on_relocalization, 10
         )
         self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
         self.create_subscription(
@@ -294,8 +295,9 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def _on_relocalization(self, msg: Odometry):
-        # map_node publishes this on EVERY successful relocalization, so it doubles as
-        # the liveness count the frontend flashes a badge on (_reloc_seq).
+        # One message per fusion of map->odom, so it doubles as the liveness count the
+        # frontend flashes a badge on (_reloc_seq). Under lock-once that is a single
+        # message per run.
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
             self._map_pose = pose
