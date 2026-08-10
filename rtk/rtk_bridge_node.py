@@ -313,6 +313,7 @@ class RtkBridgeNode(Node):
         self.latest_sentence = ""
         self.latest_sentence_type = ""
         self.last_gga_time = None
+        self.last_fix_time = None
         self.nmea_checksum_fail_count = 0
         self.nmea_parse_error_count = 0
         self.nmea_sentence_count = 0
@@ -921,6 +922,7 @@ class RtkBridgeNode(Node):
             or position_type_from_gga_quality(quality)
         )
         self.latest_receiver_stage = self._select_receiver_stage()
+        self.last_fix_time = time.monotonic()
         self.latest_num_satellites = num_satellites
         self.latest_hdop = hdop
         self.latest_gga_utc = p[1]
@@ -1063,9 +1065,19 @@ class RtkBridgeNode(Node):
                 self._publish_status(self.latest_fix, accepted=accepted, position=self.latest_enu)
 
     def _fix_is_stale(self) -> bool:
-        if self.last_nmea_time is None:
+        # Age of the last GGA that carried a POSITION, not of the last sentence:
+        # a receiver losing lock keeps emitting empty GGA, which kept this False
+        # while the reported fix was already minutes old.
+        if self.last_fix_time is None:
             return True
-        return time.monotonic() - self.last_nmea_time > float(self.get_parameter("fix_stale_after_s").value)
+        return time.monotonic() - self.last_fix_time > float(self.get_parameter("fix_stale_after_s").value)
+
+    def _reported_fix_state(self):
+        # quality/stage/position_type describe one fix, so they must not outlive
+        # it -- a dead link otherwise reads as a healthy DGNSS fix forever.
+        if self._fix_is_stale():
+            return 0, stage_from_gga_quality(0), None
+        return self.latest_gga_quality, self.latest_receiver_stage, self.latest_receiver_position_type
 
     def _select_receiver_stage(self) -> str:
         for position_type in (
@@ -1080,15 +1092,16 @@ class RtkBridgeNode(Node):
 
     def _receiver_status_payload(self, msg: NavSatFix | None, accepted: bool, position):
         navsat_status = None if msg is None else int(msg.status.status)
+        quality, stage, position_type = self._reported_fix_state()
         return {
             "seq": self.status_seq,
             "accepted": accepted,
-            "receiver_stage": self.latest_receiver_stage,
-            "gga_quality": self.latest_gga_quality,
-            "gga_quality_name": gga_quality_name(self.latest_gga_quality),
+            "receiver_stage": stage,
+            "gga_quality": quality,
+            "gga_quality_name": gga_quality_name(quality),
             "ros_navsat_status": navsat_status,
             "ros_navsat_status_name": navsat_status_name(navsat_status),
-            "receiver_position_type": self.latest_receiver_position_type,
+            "receiver_position_type": position_type,
             "bestnav_solution_status": self.latest_bestnav_solution_status,
             "bestnav_position_type": self.latest_bestnav_position_type,
             "bestnav_std": self.latest_bestnav_std,
@@ -1111,7 +1124,9 @@ class RtkBridgeNode(Node):
         self.status_seq += 1
         nmea_age = None if self.last_nmea_time is None else now - self.last_nmea_time
         gga_age = None if self.last_gga_time is None else now - self.last_gga_time
+        fix_age = None if self.last_fix_time is None else now - self.last_fix_time
         rtcm_age = None if self.last_rtcm_time is None else now - self.last_rtcm_time
+        quality, stage, position_type = self._reported_fix_state()
         io_status = {
             "seq": self.status_seq,
             "ntrip_connected": self.ntrip_connected,
@@ -1132,10 +1147,10 @@ class RtkBridgeNode(Node):
             "rtcm_write_fail_count": self.rtcm_write_fail_count,
             "raw_pty_dropped_lines": self.raw_pty_dropped_lines,
             "ntrip_gga_source": self.latest_ntrip_gga_source,
-            "gga_quality": self.latest_gga_quality,
-            "gga_quality_name": gga_quality_name(self.latest_gga_quality),
-            "receiver_stage": self.latest_receiver_stage,
-            "receiver_position_type": self.latest_receiver_position_type,
+            "gga_quality": quality,
+            "gga_quality_name": gga_quality_name(quality),
+            "receiver_stage": stage,
+            "receiver_position_type": position_type,
             "unicore_log_count": self.unicore_log_count,
             "fix_stale": self._fix_is_stale(),
         }
@@ -1148,11 +1163,13 @@ class RtkBridgeNode(Node):
             "service": None if msg is None else int(msg.status.service),
             "fix_stale": self._fix_is_stale(),
             "last_gga_age_s": gga_age,
+            # Age of the last POSITIONED GGA; last_gga_age_s counts empty ones too.
+            "fix_age_s": fix_age,
             "last_rtcm_age_s": rtcm_age,
-            "gga_quality": self.latest_gga_quality,
-            "gga_quality_name": gga_quality_name(self.latest_gga_quality),
-            "receiver_stage": self.latest_receiver_stage,
-            "receiver_position_type": self.latest_receiver_position_type,
+            "gga_quality": quality,
+            "gga_quality_name": gga_quality_name(quality),
+            "receiver_stage": stage,
+            "receiver_position_type": position_type,
             "bestnav_solution_status": self.latest_bestnav_solution_status,
             "bestnav_position_type": self.latest_bestnav_position_type,
             "bestnav_std": self.latest_bestnav_std,
