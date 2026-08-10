@@ -431,6 +431,9 @@ class RtkBridgeNode(Node):
         self.declare_parameter("ntrip_initial_gga", os.environ.get("TINYNAV_NTRIP_INITIAL_GGA", "$GNGGA,085520.00,2246.89808758,N,11330.83046100,E,1,17,1.1,5.5866,M,-5.5511,M,,*6F"))
         self.declare_parameter("ntrip_gga_period_s", 1.0)
         self.declare_parameter("ntrip_reconnect_s", 3.0)
+        # 0 disables. A caster feeding a 1 Hz mountpoint still sends far more
+        # often than this, so any gap this long means the path is gone.
+        self.declare_parameter("rtcm_stale_reconnect_s", 10.0)
         self.declare_parameter("ntrip_recv_timeout_s", 1.0)
         self.declare_parameter("rtcm_write_timeout_s", 0.25)
         self.declare_parameter("fix_stale_after_s", 2.0)
@@ -583,8 +586,16 @@ class RtkBridgeNode(Node):
                 last_gga = time.monotonic()
                 if initial_data:
                     self._handle_rtcm_data(initial_data)
+                stale_s = float(self.get_parameter("rtcm_stale_reconnect_s").value)
+                last_rx = time.monotonic()
                 while not self.stop_event.is_set():
                     now = time.monotonic()
+                    # Only a peer that closes cleanly reaches the `not data` branch
+                    # below. A 4G NAT dropping the flow leaves both ends believing
+                    # the socket is open, so recv just times out forever and TCP
+                    # needs minutes to notice while the receiver starves.
+                    if stale_s > 0 and now - last_rx > stale_s:
+                        raise ConnectionError(f"no RTCM for {now - last_rx:.0f}s")
                     if now - last_gga >= float(self.get_parameter("ntrip_gga_period_s").value):
                         last_sent_gga_source = self._send_ntrip_gga(sock)
                         last_gga = now
@@ -594,6 +605,7 @@ class RtkBridgeNode(Node):
                         continue
                     if not data:
                         raise ConnectionError("NTRIP socket closed")
+                    last_rx = now
                     self._handle_rtcm_data(data)
 
             except Exception as exc:
@@ -700,6 +712,12 @@ class RtkBridgeNode(Node):
             )
         sock = socket.create_connection((host, port), timeout=10.0)
         sock.settimeout(10.0)
+        # Probes the path itself, so a carrier NAT that drops the flow surfaces as
+        # a closed socket instead of leaning entirely on the staleness watchdog.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for opt, value in (("TCP_KEEPIDLE", 15), ("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
+            if hasattr(socket, opt):
+                sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, opt), value)
         sock.sendall(req.encode("ascii"))
         gga_source = self._send_ntrip_gga(sock)
         self.get_logger().info(
