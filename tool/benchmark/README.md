@@ -169,6 +169,112 @@ Run against the GT/day/night bags above, comparing VLAD (this branch) against th
 
 All three DINOv2 patch VLAD variants clearly outperform the DINOv2 global baseline on both day and night.
 
+## Benchmark Pipeline 3: Keyframe Relocalization Accuracy
+
+`map_fusion_benchmark.py` evaluates keyframe relocalization poses against an
+eval mapping run transformed into the GT map frame. This is the simpler
+map-to-map self-consistency benchmark:
+
+1. Use `--map-gt` (existing map) or `--bag-gt` (build from bag).
+2. Use `--map-eval` (existing map) or `--bag-eval` (build from bag and replay for localization).
+3. When `--bag-eval` is used, replay the bag with TinyNav against `map_gt`, saving relocalization poses.
+4. Fit `T_map_eval_to_gt` from paired eval timestamps.
+5. Compare:
+
+```text
+relocalization_pose_in_map_gt  vs  T_map_eval_to_gt * map_eval_keyframe_pose
+```
+
+This treats the eval mapping trajectory as the reference trajectory after it is
+aligned into `map_gt`. It is still a pseudo-ground-truth / self-consistency
+signal, but it matches the operational question: "when the eval bag runs against
+the GT map, how far is the relocalized keyframe pose from the aligned eval map
+trajectory?"
+
+When building a map from a bag, the benchmark automatically detects the source:
+
+- If the bag contains `/camera/camera/vio_image`, it starts `tool/looper_bridge_node.py`.
+- Otherwise, it starts `tinynav/core/perception_node.py`.
+
+### Usage
+
+Both GT and eval sources accept either a map directory or a bag (mutually exclusive):
+
+- `--map-gt` / `--bag-gt`: existing GT map or bag to build from.
+- `--map-eval` / `--bag-eval`: existing eval map or bag to build from.
+
+When `--bag-eval` is provided, the tool builds `map_eval` and replays the bag
+against `map_gt` to produce relocalization poses. When `--map-eval` is provided
+instead, map build and localization are skipped and the existing
+`relocalization_poses.npy` under `--work-dir` is reused. The same applies to
+`--map-gt` vs `--bag-gt` for the GT side.
+
+Run the full pipeline from two bags:
+
+```bash
+uv run python tool/benchmark/map_fusion_benchmark.py \
+  --bag-gt /tinynav/tinynav_db/rosbags/bag_gt \
+  --bag-eval /tinynav/tinynav_db/rosbags/bag_eval \
+  --output-root /tinynav/output
+```
+
+Use an existing GT map, build the eval map from a bag:
+
+```bash
+uv run python tool/benchmark/map_fusion_benchmark.py \
+  --map-gt /tinynav/tinynav_db/maps/map_gt \
+  --bag-eval /tinynav/tinynav_db/rosbags/bag_eval \
+  --output-root /tinynav/output
+```
+
+Reuse existing maps and only regenerate the metrics/report (requires existing
+localization results in `--work-dir`):
+
+```bash
+uv run python tool/benchmark/map_fusion_benchmark.py \
+  --map-gt /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_gt \
+  --map-eval /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work/map_eval \
+  --output-dir /tinynav/output/20260802_120000_map_gt_benchmark \
+  --work-dir /tinynav/output/benchmark_work/20260802_120000_map_gt_benchmark_work
+```
+
+If `--output-dir` is not provided, the tool creates a timestamped folder under
+`--output-root`:
+
+```text
+YYYYmmdd_HHMMSS_<gt_map_or_bag_name>_benchmark/
+```
+
+Generated maps and localization scratch data are written outside the report
+folder, under `--work-root` by default:
+
+```text
+<output-root>/benchmark_work/YYYYmmdd_HHMMSS_<gt_map_or_bag_name>_benchmark_work/
+```
+
+This keeps the report folder lightweight and easy to copy or share.
+
+### Output
+
+The report folder contains only lightweight artifacts:
+
+- `index.html`: visual report with inputs, metrics, trajectory plots, error curves,
+  `T_map_eval_to_gt`, and largest-error samples.
+- `metrics.json`: machine-readable summary.
+- `per_sample_errors.json`: per-timestamp translation/rotation error.
+- `T_map_eval_to_gt.npy`: fitted transform.
+- `sampled_timestamps_ns.txt`: sampled timestamps.
+- `trajectory_xy.png`, `trajectory_xz.png`, `trajectory_yz.png`: top-down and side projections of `map_eval*T` vs relocalization pose.
+- `translation_rotation_error.png`: error over time.
+- `xyz_error.png`: per-axis position residual over time.
+- `retrieval_diagnostics/`: per-sample match images and `retrieval_diagnostics.json` (unless `--disable-retrieval-diagnostics`).
+
+Recommended first-look metrics:
+
+- median / p90 translation error
+- ratio below `0.10m`, `0.20m`, `0.30m`, `0.50m`
+- trajectory plot shape consistency
+
 ## Future Benchmark Pipelines
 
 Additional benchmark pipelines will be added to evaluate:
