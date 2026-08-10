@@ -733,7 +733,40 @@ class BackendNode(Ros2NodeManager):
         if zupt is not None and not isinstance(zupt, bool):
             self.get_logger().warn(f'Invalid zupt value: {zupt!r}, ignoring')
             zupt = None
-        return {'target_map': target_map, 'poi_list': poi_list, 'zupt': zupt}
+        lookat = rule.get('lookat')
+        if lookat is not None and not isinstance(lookat, (int, str)):
+            self.get_logger().warn(f'Invalid lookat value: {lookat!r}, ignoring')
+            lookat = None
+        lookat_timeout_s = self._float_rule_value(rule, 'lookat_timeout_s', 6.0, minimum=0.5, maximum=30.0)
+        lookat_yaw_tolerance_deg = self._float_rule_value(
+            rule, 'lookat_yaw_tolerance_deg', 10.0, minimum=1.0, maximum=45.0
+        )
+        return {
+            'target_map': target_map,
+            'poi_list': poi_list,
+            'zupt': zupt,
+            'lookat': lookat,
+            'lookat_timeout_s': lookat_timeout_s,
+            'lookat_yaw_tolerance_deg': lookat_yaw_tolerance_deg,
+        }
+
+    def _float_rule_value(
+        self,
+        rule: dict,
+        key: str,
+        default: float,
+        *,
+        minimum: float,
+        maximum: float,
+    ) -> float:
+        if key not in rule:
+            return default
+        try:
+            value = float(rule[key])
+        except (TypeError, ValueError):
+            self.get_logger().warn(f'Invalid {key} value: {rule.get(key)!r}, using {default}')
+            return default
+        return max(minimum, min(maximum, value))
 
     def _set_active_map_link(self, map_name: str):
         import shutil
@@ -784,6 +817,140 @@ class BackendNode(Ros2NodeManager):
                 next_log_time = time.time() + 30.0
             time.sleep(0.2)
 
+    def _load_pois_by_ref(self) -> dict[int | str, np.ndarray]:
+        pois_file = os.path.join(self.map_path, 'pois.json')
+        if not os.path.exists(pois_file):
+            raise FileNotFoundError('No pois.json found for lookat')
+        with open(pois_file) as f:
+            pois = json.load(f)
+        result: dict[int | str, np.ndarray] = {}
+        for key, poi in pois.items():
+            if not isinstance(poi, dict):
+                continue
+            position = poi.get('position')
+            if not isinstance(position, list) or len(position) < 2:
+                continue
+            try:
+                point = np.array(position[:3], dtype=np.float64)
+            except (TypeError, ValueError):
+                continue
+            if len(point) < 3:
+                point = np.pad(point, (0, 3 - len(point)))
+            try:
+                result[int(key)] = point
+            except (TypeError, ValueError):
+                pass
+            result[str(key)] = point
+            name = poi.get('name')
+            if isinstance(name, str):
+                result[name] = point
+        return result
+
+    def _turn_relative_by_odom_for_lookat(
+        self,
+        target_delta: float,
+        *,
+        timeout_s: float,
+        yaw_tolerance: float,
+        angular_speed: float = 0.4,
+        cmd_rate_hz: float = 10.0,
+    ) -> bool:
+        interval = 1.0 / max(cmd_rate_hz, 1.0)
+        start_wait = time.monotonic()
+        start_yaw = self._latest_odom_yaw()
+        while start_yaw is None:
+            self._publish_cmd_vel(0.0, 0.0)
+            if time.monotonic() - start_wait > min(2.0, timeout_s):
+                self.get_logger().warn('Map handoff lookat skipped: no fresh odometry yaw')
+                return False
+            time.sleep(interval)
+            start_yaw = self._latest_odom_yaw()
+
+        if abs(target_delta) <= yaw_tolerance:
+            self._publish_cmd_vel(0.0, 0.0)
+            return True
+
+        angular_z = math.copysign(abs(angular_speed), target_delta)
+        start_time = time.monotonic()
+        previous_yaw = start_yaw
+        accumulated_delta = 0.0
+
+        while True:
+            current_yaw = self._latest_odom_yaw()
+            if current_yaw is None:
+                self._publish_cmd_vel(0.0, 0.0)
+                if time.monotonic() - start_time > timeout_s:
+                    self.get_logger().warn('Map handoff lookat timed out: odometry yaw disappeared')
+                    return False
+                time.sleep(interval)
+                continue
+
+            accumulated_delta += self._wrap_angle(current_yaw - previous_yaw)
+            previous_yaw = current_yaw
+            remaining = target_delta - accumulated_delta
+            if abs(remaining) <= yaw_tolerance:
+                self._publish_cmd_vel(0.0, 0.0)
+                return True
+            if math.copysign(1.0, remaining) != math.copysign(1.0, target_delta):
+                self._publish_cmd_vel(0.0, 0.0)
+                return True
+            if time.monotonic() - start_time > timeout_s:
+                self.get_logger().warn(
+                    f'Map handoff lookat timed out: target_delta={target_delta:.3f} '
+                    f'accumulated_delta={accumulated_delta:.3f} remaining={remaining:.3f}'
+                )
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            self._publish_cmd_vel(0.0, angular_z)
+            time.sleep(interval)
+
+    def _run_map_handoff_lookat(self, lookat: int | str, timeout_s: float, yaw_tolerance_deg: float) -> None:
+        try:
+            pois = self._load_pois_by_ref()
+        except Exception as exc:
+            self.get_logger().warn(f'Map handoff lookat skipped: {exc}')
+            return
+        if lookat not in pois:
+            self.get_logger().warn(f'Map handoff lookat POI {lookat!r} not found in current map')
+            return
+        with self._lock:
+            pose = dict(self._map_pose) if self._map_pose is not None else None
+        if pose is None:
+            self.get_logger().warn('Map handoff lookat skipped: no current map pose')
+            return
+
+        with self._lock:
+            cmd_vel_proc = self._cmd_vel_proc
+            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
+                self._cmd_vel_proc = None
+            else:
+                cmd_vel_proc = None
+        if cmd_vel_proc is not None:
+            self._kill_proc(cmd_vel_proc)
+            self.get_logger().info('Map handoff lookat stopped cmd_vel_control for direct /cmd_vel ownership')
+
+        target = pois[lookat]
+        dx = float(target[0] - pose['x'])
+        dy = float(target[1] - pose['y'])
+        if math.hypot(dx, dy) < 1e-3:
+            self.get_logger().warn(f'Map handoff lookat skipped: POI {lookat!r} is too close')
+            return
+        target_yaw = math.atan2(dy, dx)
+        current_yaw = float(pose.get('yaw', 0.0))
+        target_delta = self._wrap_angle(target_yaw - current_yaw)
+        self.get_logger().info(
+            f'Map handoff lookat started: target={lookat!r}, '
+            f'delta_deg={math.degrees(target_delta):.1f}, timeout_s={timeout_s:.1f}, '
+            f'tolerance_deg={yaw_tolerance_deg:.1f}'
+        )
+        ok = self._turn_relative_by_odom_for_lookat(
+            target_delta,
+            timeout_s=timeout_s,
+            yaw_tolerance=math.radians(yaw_tolerance_deg),
+        )
+        self.get_logger().info(f'Map handoff lookat {"finished" if ok else "continued after timeout"}')
+
     def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
         target_map = rule['target_map']
         poi_list = rule['poi_list']
@@ -791,6 +958,14 @@ class BackendNode(Ros2NodeManager):
             f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
         )
         try:
+            lookat = rule.get('lookat')
+            if lookat is not None:
+                self._run_map_handoff_lookat(
+                    lookat,
+                    timeout_s=float(rule.get('lookat_timeout_s', 6.0)),
+                    yaw_tolerance_deg=float(rule.get('lookat_yaw_tolerance_deg', 10.0)),
+                )
+
             # Stop current map_node/control hard before changing the active map.
             self.cmd_stop_nav_nodes()
             self.state = 'idle'
