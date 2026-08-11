@@ -486,6 +486,19 @@ class MapNode(Node):
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
         self.planning_terrain_mode = self._load_planning_terrain_mode(tinynav_map_path)
         self.planning_max_linear_speed = self._load_planning_max_linear_speed(tinynav_map_path)
+        self.planning_lidar_min_votes = self._load_planning_int(tinynav_map_path, "lidar_min_votes", None, minimum=1, maximum=50)
+        self.planning_lidar_min_obstacle_area_cells = self._load_planning_int(
+            tinynav_map_path, "lidar_min_obstacle_area_cells", None, minimum=0, maximum=200
+        )
+        self.planning_lidar_score_percentile = self._load_planning_float(
+            tinynav_map_path, "lidar_score_percentile", None, minimum=0.0, maximum=50.0
+        )
+        self.planning_lidar_collision_tolerance = self._load_planning_int(
+            tinynav_map_path, "lidar_collision_tolerance", None, minimum=0, maximum=50
+        )
+        self.planning_trajectory_smooth_weight = self._load_planning_float(
+            tinynav_map_path, "trajectory_smooth_weight", None, minimum=0.0, maximum=100.0
+        )
         self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
@@ -864,6 +877,61 @@ class MapNode(Node):
         self.get_logger().info(f"Using planning.max_linear_speed={max_linear_speed:.2f}")
         return max_linear_speed
 
+    def _load_planning_config(self, tinynav_map_path: str) -> dict:
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return {}
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; ignoring optional planning config")
+            return {}
+        if not isinstance(config, dict):
+            return {}
+        planning_config = config.get("planning", {})
+        return planning_config if isinstance(planning_config, dict) else {}
+
+    def _load_planning_float(
+        self,
+        tinynav_map_path: str,
+        key: str,
+        default_value: float | None,
+        *,
+        minimum: float,
+        maximum: float,
+    ) -> float | None:
+        planning_config = self._load_planning_config(tinynav_map_path)
+        if key not in planning_config:
+            return default_value
+        value = planning_config.get(key)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning.{key}={value!r}; using {default_value}")
+            return default_value
+        parsed = max(minimum, min(maximum, parsed))
+        self.get_logger().info(f"Using planning.{key}={parsed}")
+        return parsed
+
+    def _load_planning_int(
+        self,
+        tinynav_map_path: str,
+        key: str,
+        default_value: int | None,
+        *,
+        minimum: int,
+        maximum: int,
+    ) -> int | None:
+        value = self._load_planning_float(
+            tinynav_map_path,
+            key,
+            None if default_value is None else float(default_value),
+            minimum=float(minimum),
+            maximum=float(maximum),
+        )
+        return None if value is None else int(value)
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -913,6 +981,16 @@ class MapNode(Node):
             config["comfort_radius"] = self.planning_comfort_radius
         if self.planning_reverse_enter_threshold is not None:
             config["reverse_enter_threshold"] = self.planning_reverse_enter_threshold
+        if self.planning_lidar_min_votes is not None:
+            config["lidar_min_votes"] = self.planning_lidar_min_votes
+        if self.planning_lidar_min_obstacle_area_cells is not None:
+            config["lidar_min_obstacle_area_cells"] = self.planning_lidar_min_obstacle_area_cells
+        if self.planning_lidar_score_percentile is not None:
+            config["lidar_score_percentile"] = self.planning_lidar_score_percentile
+        if self.planning_lidar_collision_tolerance is not None:
+            config["lidar_collision_tolerance"] = self.planning_lidar_collision_tolerance
+        if self.planning_trajectory_smooth_weight is not None:
+            config["trajectory_smooth_weight"] = self.planning_trajectory_smooth_weight
         msg.data = json.dumps(config)
         self.planning_config_pub.publish(msg)
         self.get_logger().info(f"Published /planning/config: {msg.data}")
