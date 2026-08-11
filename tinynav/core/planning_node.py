@@ -285,12 +285,12 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
+    vx_max=0.5,
 ):
     """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
-    vx_max = 0.5
     n_vx = max(3, int(num_samples / 2))
     vx_samples = np.linspace(0.0, vx_max, n_vx)
     omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
@@ -563,6 +563,7 @@ class PlanningNode(Node):
         self.current_pose = None  # Store the latest pose from odometry
         self.reverse_enter_threshold = 0.30
         self.terrain_mode = "normal"
+        self.max_linear_speed = 0.5
         self.reverse_speed = 0.3
         self.reverse_omegas = (0.0, -0.5, 0.5)
 
@@ -652,6 +653,20 @@ class PlanningNode(Node):
                     self.get_logger().info(
                         f"Updated planning terrain_mode: {old} -> {terrain_mode} "
                         f"(reverse_speed={self.reverse_speed:.2f}, reverse_omegas={list(self.reverse_omegas)})"
+                    )
+
+        if "max_linear_speed" in config:
+            try:
+                max_linear_speed = float(config["max_linear_speed"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning max_linear_speed: {config.get('max_linear_speed')!r}")
+            else:
+                max_linear_speed = max(0.05, min(1.5, max_linear_speed))
+                old = self.max_linear_speed
+                self.max_linear_speed = max_linear_speed
+                if abs(old - max_linear_speed) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning max_linear_speed: {old:.2f} -> {max_linear_speed:.2f}"
                     )
 
     def poi_change_callback(self, msg):
@@ -903,7 +918,11 @@ class PlanningNode(Node):
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
-            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
+            trajectories, params = generate_trajectory_library_3d(
+                init_p=init_p,
+                init_q=init_q,
+                vx_max=self.max_linear_speed,
+            )
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
                 init_p=init_p,
                 init_q=init_q,
