@@ -189,6 +189,31 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
+def find_loop_by_zscore(target_embedding:np.ndarray, embeddings:np.ndarray, z_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
+    """Like find_loop, but accepts a candidate based on how many standard deviations its
+    similarity sits above the mean of *all* candidates for this query, rather than an absolute
+    cosine-similarity cutoff.
+
+    VLAD's absolute similarity scale is compressed by nuisance factors (lighting, compression,
+    pose) that shift the whole distribution together, so a fixed absolute threshold calibrated
+    on one map/session drifts on another. The gap between a true match and the rest of the map
+    (its z-score) stays large and stable across conditions, so thresholding on that instead is
+    robust without per-deployment recalibration.
+    """
+    if len(embeddings) == 0:
+        return []
+    similarity_array = einops.einsum(target_embedding, embeddings, "d, n d -> n")
+    std = similarity_array.std()
+    if std == 0.0:
+        return []
+    z_scores = (similarity_array - similarity_array.mean()) / std
+    top_k_indices = np.argsort(similarity_array, axis = 0)
+    loop_list = []
+    for idx in top_k_indices:
+        if z_scores[idx] > z_threshold:
+            loop_list.append((idx, similarity_array[idx]))
+    return loop_list[-loop_top_k:]
+
 def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100, stage_timer: Optional[StageTimer] = None):
     """
         Generate a occupancy grid map from the depth images.

@@ -26,8 +26,8 @@ import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
-from tinynav.core.build_map_node import find_loop, solve_pose_graph
-from tinynav.core.vlad import compute_vlad, find_loop_vlad
+from tinynav.core.build_map_node import find_loop, find_loop_by_zscore, solve_pose_graph
+from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 from tinynav.core.superpoint_bow import SUPERPOINT_BOW_INDEX_FILENAME, SuperPointBoWRetriever
@@ -480,6 +480,7 @@ class MapNode(Node):
         self.loop_top_k = 1
 
         self.relocalization_threshold = 0.70
+        self.relocalization_z_threshold = 3.0
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 50
         self.night_relocalization_min_match_count = 30
@@ -606,6 +607,9 @@ class MapNode(Node):
         self.latest_rtk_transform_received_at = None
         self._last_rtk_relocalization_pub_at = 0.0
         self._last_rtk_log_at = 0.0
+        self._diag_latest_rtk_xyz = None  # TEMPORARY diagnostic, see rtk_map_pose_callback
+        self._diag_latest_rtk_T = None
+        self._diag_rtk_received_at = None
         self.nav_refresh_timer = None
         self.target_pose_timer = self.create_timer(1.0, self.target_pose_timer_callback)
 
@@ -1136,6 +1140,12 @@ class MapNode(Node):
             self.latest_rtk_state = status.get("state")
 
     def rtk_map_pose_callback(self, msg: Odometry):
+        # TEMPORARY diagnostic (accuracy investigation): capture RTK ground truth for
+        # comparison even while rtk_mode is forced off for this A/B test -- independent of
+        # the "replace" localization logic below, which stays gated as before.
+        self._diag_latest_rtk_xyz = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        self._diag_latest_rtk_T, _ = msg2np(msg)
+        self._diag_rtk_received_at = time.monotonic()
         if self.rtk_mode != "replace":
             return
         # /rtk/map_pose arrives per fix (~10 Hz). A gap much larger than that means
@@ -1410,6 +1420,39 @@ class MapNode(Node):
                 matches.append([i, index])
         return keypoints0, keypoints1, np.array(matches, dtype=np.int64)
 
+    @staticmethod
+    def _filter_matches_by_spatial_distribution(
+        kpts0: np.ndarray, kpts1: np.ndarray, mconf: np.ndarray, image_shape: tuple[int, int],
+        grid_size: int = 8, max_per_cell: int = 10,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Cap how many correspondences any single image region can contribute to PnP.
+
+        EfficientLoFTR is dense/semi-dense: on a scene with one strongly-textured patch (a
+        sign, a tiled floor) it can return hundreds of matches clustered in that one region
+        and almost none elsewhere. PnP solved from a point set concentrated in a small image
+        area is poorly conditioned for rotation/translation components that patch doesn't
+        constrain -- unlike SuperPoint, which spreads a fixed keypoint budget across the whole
+        image by construction. Bucket the QUERY image (kpts1) into a grid_size x grid_size
+        grid and keep only the max_per_cell highest-mconf matches per cell, so a crowded patch
+        can't dominate while still contributing its best correspondences.
+        """
+        if len(kpts1) == 0:
+            return kpts0, kpts1
+        h, w = image_shape[:2]
+        cell_h, cell_w = h / grid_size, w / grid_size
+        cell_x = np.clip((kpts1[:, 0] / cell_w).astype(np.int64), 0, grid_size - 1)
+        cell_y = np.clip((kpts1[:, 1] / cell_h).astype(np.int64), 0, grid_size - 1)
+        cell_id = cell_y * grid_size + cell_x
+        keep = np.zeros(len(kpts1), dtype=bool)
+        for cid in np.unique(cell_id):
+            cell_indices = np.flatnonzero(cell_id == cid)
+            if len(cell_indices) <= max_per_cell:
+                keep[cell_indices] = True
+            else:
+                top = cell_indices[np.argsort(-mconf[cell_indices])[:max_per_cell]]
+                keep[top] = True
+        return kpts0[keep], kpts1[keep]
+
     def pose_graph_trajectory_publish(self, timestamp):
         path_msg = Path()
         path_msg.header.stamp.sec = int(timestamp / 1e9)
@@ -1441,10 +1484,17 @@ class MapNode(Node):
             query_vlad = self.get_vlad_descriptor(keyframe)
             if query_vlad is None:
                 return False, np.eye(4), -np.inf
-            idx_and_similarity_array = find_loop_vlad(
+            # z-score gate, not an absolute similarity cutoff: find_loop_vlad's -1.0
+            # threshold always returned the top-3 candidates regardless of whether any of
+            # them were a genuine match, which fed EfficientLoFTR/PnP an ambiguous-but-
+            # geometrically-plausible-enough keyframe on live-testing this branch (see
+            # ACCURACY_DIAG dist_candidate_to_rtk vs dist_visual_to_candidate breakdown --
+            # the errors traced to "matched the wrong keyframe", not PnP/depth). Ported
+            # from xinghan/build-map-precheck's find_loop_by_zscore.
+            idx_and_similarity_array = find_loop_by_zscore(
                 query_vlad,
                 self.map_vlad_descriptors,
-                -1.0,
+                self.relocalization_z_threshold,
                 self.relocalization_loop_top_k,
             )
             max_similarity = max((s for _, s in idx_and_similarity_array), default=0.0)
@@ -1485,6 +1535,8 @@ class MapNode(Node):
             ]
 
         pnp_candidates = []
+        pnp_candidate_timestamps = []  # TEMPORARY diagnostic: parallel to pnp_candidates, for
+                                        # tracing which reference keyframe the winner matched.
         for timestamp_in_map in candidate_timestamps:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
 
@@ -1515,6 +1567,11 @@ class MapNode(Node):
             if len(reference_matched_keypoints) < min_match_count:
                 print(f"not enough matched features to relocalize, {len(reference_matched_keypoints)} < {min_match_count}")
                 continue
+            raw_match_count = len(reference_matched_keypoints)
+            reference_matched_keypoints, keyframe_matched_keypoints = self._filter_matches_by_spatial_distribution(
+                reference_matched_keypoints, keyframe_matched_keypoints, match_result["mconf"], keyframe.shape,
+            )
+            print(f"spatial distribution filter: {raw_match_count} -> {len(reference_matched_keypoints)} matches")
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
             point_3d_in_world_list = point_3d_in_world[inliers]
@@ -1524,6 +1581,7 @@ class MapNode(Node):
                 print(f"not enough landmarks to relocalize, {point_count} <= {min_landmark_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+            pnp_candidate_timestamps.append(timestamp_in_map)
 
         success, best_pose_in_camera, pose_cov_weight, best_candidate_index, best_inlier_count, best_point_count = rerank_by_pnp_inliers(
             pnp_candidates,
@@ -1536,6 +1594,54 @@ class MapNode(Node):
                 f"best_candidate_index: {best_candidate_index}, "
                 f"pnp_inliers: {best_inlier_count}/{best_point_count}"
             )
+            # TEMPORARY diagnostic (accuracy investigation): break down error into
+            # "wrong place" (winning reference keyframe itself far from RTK ground truth --
+            # retrieval/matching picked the wrong keyframe) vs "right place, wrong pose"
+            # (winning keyframe is near RTK ground truth, but the PnP-solved pose isn't --
+            # points to depth/geometry, not retrieval).
+            try:
+                def camera_optical_yaw_rad(pose):
+                    # Camera-optical convention (forward = +Z), matching how heading_odom is
+                    # derived in _update_transform_from_rtk_map_pose -- NOT the pure-yaw
+                    # convention RTK's own quaternion uses (see that function's comments).
+                    fwd = pose[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                    return np.arctan2(fwd[1], fwd[0])
+
+                def wrap_deg(delta_rad):
+                    return float((np.degrees(delta_rad) + 180.0) % 360.0 - 180.0)
+
+                winning_ts = pnp_candidate_timestamps[best_candidate_index]
+                candidate_pose = self.map_poses[winning_ts]
+                candidate_kf_xyz = candidate_pose[:3, 3]
+                visual_pose_in_world = np.linalg.inv(best_pose_in_camera)
+                visual_xyz = visual_pose_in_world[:3, 3]
+                visual_yaw = camera_optical_yaw_rad(visual_pose_in_world)
+                candidate_yaw = camera_optical_yaw_rad(candidate_pose)
+                gt = self._diag_latest_rtk_xyz
+                gt_T = self._diag_latest_rtk_T
+                gt_age = (time.monotonic() - self._diag_rtk_received_at) if self._diag_rtk_received_at else None
+                if gt is not None and gt_age is not None and gt_age < 1.0:
+                    # RTK's own quaternion is a pure yaw-about-Z (see
+                    # _update_transform_from_rtk_map_pose's psi_map comment), so this
+                    # convention differs from the camera-optical one above -- do not reuse
+                    # camera_optical_yaw_rad for it.
+                    rtk_yaw = np.arctan2(gt_T[1, 0], gt_T[0, 0])
+                    print(
+                        f"ACCURACY_DIAG winning_ts={winning_ts} "
+                        f"visual_xyz={visual_xyz.tolist()} candidate_kf_xyz={candidate_kf_xyz.tolist()} "
+                        f"rtk_xyz={gt.tolist()} "
+                        f"dist_candidate_to_rtk={np.linalg.norm(candidate_kf_xyz[:2] - gt[:2]):.3f}m "
+                        f"dist_visual_to_candidate={np.linalg.norm(visual_xyz[:2] - candidate_kf_xyz[:2]):.3f}m "
+                        f"dist_visual_to_rtk={np.linalg.norm(visual_xyz[:2] - gt[:2]):.3f}m "
+                        f"yaw_candidate_to_rtk_deg={wrap_deg(candidate_yaw - rtk_yaw):.2f} "
+                        f"yaw_visual_to_candidate_deg={wrap_deg(visual_yaw - candidate_yaw):.2f} "
+                        f"yaw_visual_to_rtk_deg={wrap_deg(visual_yaw - rtk_yaw):.2f} "
+                        f"inliers={best_inlier_count}/{best_point_count}"
+                    )
+                else:
+                    print(f"ACCURACY_DIAG winning_ts={winning_ts} no fresh RTK ground truth (age={gt_age})")
+            except Exception as exc:
+                print(f"ACCURACY_DIAG failed: {exc}")
             return True, best_pose_in_camera, pose_cov_weight
 
         print("no valid PnP relocalization candidate found")
