@@ -481,6 +481,7 @@ class MapNode(Node):
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
         self.planning_terrain_mode = self._load_planning_terrain_mode(tinynav_map_path)
+        self.planning_max_linear_speed = self._load_planning_max_linear_speed(tinynav_map_path)
         self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
@@ -833,6 +834,32 @@ class MapNode(Node):
         self.get_logger().info(f"Using planning.terrain_mode={terrain_mode}")
         return terrain_mode
 
+    def _load_planning_max_linear_speed(self, tinynav_map_path: str) -> float:
+        default_value = 0.5
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using planning.max_linear_speed={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict):
+            return default_value
+        value = planning_config.get("max_linear_speed", default_value)
+        try:
+            max_linear_speed = float(value)
+        except (TypeError, ValueError):
+            self.get_logger().warning(f"Invalid planning.max_linear_speed={value!r}; using {default_value}")
+            return default_value
+        max_linear_speed = max(0.05, min(1.5, max_linear_speed))
+        self.get_logger().info(f"Using planning.max_linear_speed={max_linear_speed:.2f}")
+        return max_linear_speed
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -876,6 +903,7 @@ class MapNode(Node):
         config = {
             "dilation_cells": self.planning_dilation_cells,
             "terrain_mode": self.planning_terrain_mode,
+            "max_linear_speed": self.planning_max_linear_speed,
         }
         if self.planning_comfort_radius is not None:
             config["comfort_radius"] = self.planning_comfort_radius
@@ -1974,7 +2002,7 @@ class MapNode(Node):
             pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
         pose_in_map_position = self._nav_position_with_clamped_z(pose_in_map[:3, 3], path=paths_in_map)
         with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-            max_speed = 0.5
+            max_speed = self.planning_max_linear_speed
             lookahead_distance = max_speed * self.target_pose_dist_factor
             target_position = self._select_target_position_in_map(
                 paths_in_map,

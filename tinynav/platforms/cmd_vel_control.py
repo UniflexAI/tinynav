@@ -52,6 +52,7 @@ class CmdVelControlNode(Node):
         self.min_effective_linear_speed = 0.2
         self.min_effective_angular_speed = 0.1
         self.linear_engage_threshold = 0.04
+        self.max_linear_speed = 0.5
         self.fixed_reverse_speed = 0.3
         self.max_reverse_angular_speed = 0.3
         self.terrain_mode = "normal"
@@ -83,26 +84,41 @@ class CmdVelControlNode(Node):
         except json.JSONDecodeError as exc:
             self.logger.warning(f"Failed to parse /planning/config: {exc}")
             return
-        if not isinstance(config, dict) or "terrain_mode" not in config:
+        if not isinstance(config, dict):
             return
-        terrain_mode = str(config["terrain_mode"]).strip().lower()
-        if terrain_mode not in ("normal", "stairs"):
-            self.logger.warning(f"Invalid planning terrain_mode: {config.get('terrain_mode')!r}")
-            return
-        old = self.terrain_mode
-        self.terrain_mode = terrain_mode
-        if terrain_mode == "stairs":
-            self.fixed_reverse_speed = 0.15
-            self.max_reverse_angular_speed = 0.0
-        else:
-            self.fixed_reverse_speed = 0.3
-            self.max_reverse_angular_speed = 0.3
-        if old != terrain_mode:
-            self.logger.info(
-                f"Updated cmd_vel terrain_mode: {old} -> {terrain_mode} "
-                f"(fixed_reverse_speed={self.fixed_reverse_speed:.2f}, "
-                f"max_reverse_angular_speed={self.max_reverse_angular_speed:.2f})"
-            )
+        if "terrain_mode" in config:
+            terrain_mode = str(config["terrain_mode"]).strip().lower()
+            if terrain_mode not in ("normal", "stairs"):
+                self.logger.warning(f"Invalid planning terrain_mode: {config.get('terrain_mode')!r}")
+            else:
+                old = self.terrain_mode
+                self.terrain_mode = terrain_mode
+                if terrain_mode == "stairs":
+                    self.fixed_reverse_speed = 0.15
+                    self.max_reverse_angular_speed = 0.0
+                else:
+                    self.fixed_reverse_speed = 0.3
+                    self.max_reverse_angular_speed = 0.3
+                if old != terrain_mode:
+                    self.logger.info(
+                        f"Updated cmd_vel terrain_mode: {old} -> {terrain_mode} "
+                        f"(fixed_reverse_speed={self.fixed_reverse_speed:.2f}, "
+                        f"max_reverse_angular_speed={self.max_reverse_angular_speed:.2f})"
+                    )
+
+        if "max_linear_speed" in config:
+            try:
+                max_linear_speed = float(config["max_linear_speed"])
+            except (TypeError, ValueError):
+                self.logger.warning(f"Invalid planning max_linear_speed: {config.get('max_linear_speed')!r}")
+            else:
+                max_linear_speed = max(0.05, min(1.5, max_linear_speed))
+                old = self.max_linear_speed
+                self.max_linear_speed = max_linear_speed
+                if abs(old - max_linear_speed) > 1e-6:
+                    self.logger.info(
+                        f"Updated cmd_vel max_linear_speed: {old:.2f} -> {max_linear_speed:.2f}"
+                    )
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
@@ -270,7 +286,7 @@ class CmdVelControlNode(Node):
         if raw_vx < 0.0:
             vx = -self.fixed_reverse_speed
         else:
-            vx = float(np.clip(raw_vx, 0.0, 0.5))
+            vx = float(np.clip(raw_vx, 0.0, self.max_linear_speed))
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -0.8, 0.8)
         is_backward_segment = raw_vx < 0.0
