@@ -1,3 +1,5 @@
+import argparse
+import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -16,54 +18,7 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
-
-
-@dataclass
-class RobotConfig:
-    """Robot geometry. Body frame: +x forward, +y left."""
-    name: str = 'go2'
-    shape: str = 'square'
-    length: float = 0.7
-    width: float = 0.3
-    radius: float = 0.3
-    camera_x: float = 0.35
-    camera_y: float = 0.0
-    control_x: float = 0.0
-    control_y: float = 0.0
-    safety_radius: float = 0.1
-
-    @property
-    def cam_offset_3d(self):
-        """Offset [left, up, forward] from control center to camera in body frame."""
-        return np.array([self.camera_y - self.control_y, 0.0, self.camera_x - self.control_x], dtype=np.float32)
-
-    @property
-    def half_size(self):
-        if self.shape == 'circle':
-            return (self.radius, self.radius)
-        return (self.length / 2.0, self.width / 2.0)
-
-    def footprint_from_control(self):
-        """Returns (front_len, rear_len, half_w) relative to control center."""
-        hl, hw = self.half_size
-        return float(hl - self.control_x), float(hl + self.control_x), float(hw)
-
-
-GO2_CONFIG = RobotConfig(
-    name='go2', shape='square',
-    length=0.4, width=0.3,
-    camera_x=0.2, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
-)
-
-B2_CONFIG = RobotConfig(
-    name='b2', shape='square',
-    length=1.0, width=0.5,
-    camera_x=0.5, camera_y=0.0,
-    control_x=-0.5, control_y=0.0,
-    safety_radius=0.1,
-)
+from tinynav.core.robot_specs import ROBOT_CONFIGS
 
 # === Helper functions ===
 @njit(cache=True)
@@ -185,15 +140,16 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
+    max_linear_vel=0.5, max_angular_vel=np.pi / 3,
 ):
     """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
-    vx_max = 0.5
+    vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
     vx_samples = np.linspace(0.0, vx_max, n_vx)
-    omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
+    omega_y_samples = np.linspace(-max_angular_vel, max_angular_vel, num_samples)
 
     num_samples = len(vx_samples) * len(omega_y_samples)
 
@@ -348,9 +304,11 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 
 # === PlanningNode class ===
 class PlanningNode(Node):
-    def __init__(self):
+    def __init__(self, robot_model='go2'):
         super().__init__('planning_node')
-        self.robot = GO2_CONFIG
+        if robot_model not in ROBOT_CONFIGS:
+            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {tuple(ROBOT_CONFIGS)}")
+        self.robot = ROBOT_CONFIGS[robot_model]
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
@@ -592,7 +550,11 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
+            trajectories, params = generate_trajectory_library_3d(
+                init_p=init_p, init_q=init_q,
+                max_linear_vel=self.robot.max_linear_vel,
+                max_angular_vel=self.robot.max_angular_vel,
+            )
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
@@ -659,7 +621,11 @@ class PlanningNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = PlanningNode()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--robot-model", choices=tuple(ROBOT_CONFIGS), default='go2',
+                         help="Robot geometry to use for footprint/collision planning")
+    parsed_args, _ = parser.parse_known_args(sys.argv[1:])
+    node = PlanningNode(robot_model=parsed_args.robot_model)
 
     try:
         rclpy.spin(node)
