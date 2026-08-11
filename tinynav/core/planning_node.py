@@ -6,7 +6,7 @@ from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
-from scipy.ndimage import distance_transform_edt, binary_dilation
+from scipy.ndimage import distance_transform_edt, binary_dilation, label as connected_components
 from dataclasses import dataclass
 from numba import njit
 import message_filters
@@ -282,6 +282,19 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
         obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
     return obstacle
 
+
+def remove_small_obstacle_components(obstacle_mask, min_area_cells):
+    """Remove tiny 2D obstacle islands, mainly for lidar fly points."""
+    if min_area_cells <= 1 or not np.any(obstacle_mask):
+        return obstacle_mask
+    labeled, component_count = connected_components(obstacle_mask)
+    if component_count == 0:
+        return obstacle_mask
+    counts = np.bincount(labeled.ravel())
+    keep = counts >= min_area_cells
+    keep[0] = False
+    return keep[labeled]
+
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
@@ -360,8 +373,14 @@ def generate_predefined_trajectory_vocabularies(
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1, comfort_radius=0.8,
-                                front_len=0.35, rear_len=0.35, half_w=0.15):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
+                                front_len=0.35, rear_len=0.35, half_w=0.15,
+                                score_percentile=0.0, collision_tolerance=0):
+    """Score trajectories by footprint clearance.
+
+    Default score_percentile=0 and collision_tolerance=0 preserves the old
+    min-clearance behavior. Lidar mode can raise these slightly so isolated
+    occupancy spikes do not kill an otherwise good trajectory.
+    """
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
@@ -370,6 +389,9 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         traj = trajectories[t]
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
+        clearance_values = np.empty(len(traj) * 5, dtype=np.float64)
+        clearance_count = 0
+        collision_count = 0
 
         for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
@@ -408,23 +430,33 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
                 y_img = int((check_ys[k] - origin[1]) / resolution)
                 if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
                     dist = ESDF_map[x_img, y_img]
+                    clearance_values[clearance_count] = dist
+                    clearance_count += 1
+                    if dist < 1e-3:
+                        collision_count += 1
                     if dist < min_dist_for_traj:
                         min_dist_for_traj = dist
                         closest_step_for_traj = i
 
-        if min_dist_for_traj < 1e-3:  # collision
+        effective_dist_for_traj = min_dist_for_traj
+        if clearance_count > 0 and score_percentile > 0.0:
+            sorted_clearance = np.sort(clearance_values[:clearance_count])
+            percentile_index = int((score_percentile / 100.0) * (clearance_count - 1))
+            effective_dist_for_traj = sorted_clearance[percentile_index]
+
+        if collision_count > collision_tolerance:  # collision
             scores.append(float('inf'))
-        elif min_dist_for_traj != float('inf'):
-            if min_dist_for_traj > comfort_radius:
+        elif effective_dist_for_traj != float('inf'):
+            if effective_dist_for_traj > comfort_radius:
                 scores.append(0.0)
             else:
                 max_steps = len(traj)
                 decay_factor = (max_steps - closest_step_for_traj) / max_steps
-                if min_dist_for_traj <= safety_radius:
-                    base_score = 1.0 / (min_dist_for_traj + 1e-3)
+                if effective_dist_for_traj <= safety_radius:
+                    base_score = 1.0 / (effective_dist_for_traj + 1e-3)
                 else:
                     comfort_span = max(comfort_radius - safety_radius, 1e-3)
-                    comfort_ratio = (comfort_radius - min_dist_for_traj) / comfort_span
+                    comfort_ratio = (comfort_radius - effective_dist_for_traj) / comfort_span
                     base_score = 0.05 * comfort_ratio * comfort_ratio
                 scores.append(decay_factor * base_score)
         else:
@@ -530,6 +562,9 @@ class PlanningNode(Node):
         self.lidar_step = 4  # subsample stride; dense Hesai scans are ~115k points/msg
         self.lidar_min_range = 0.2  # metres; drop closer returns as sensor blind-zone noise
         self.lidar_min_votes = 3  # a voxel needs this many same-frame point hits to count as occupied
+        self.lidar_min_obstacle_area_cells = 0
+        self.lidar_score_percentile = 0.0
+        self.lidar_collision_tolerance = 0
         self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
@@ -566,9 +601,11 @@ class PlanningNode(Node):
         self.max_linear_speed = 0.5
         self.reverse_speed = 0.3
         self.reverse_omegas = (0.0, -0.5, 0.5)
+        self.trajectory_smooth_weight = 10.0
 
         self.smoothed_velocity = 0.0
         self._last_avoidance_debug_log_time = 0.0
+        self._last_lidar_filter_log_time = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -667,6 +704,82 @@ class PlanningNode(Node):
                 if abs(old - max_linear_speed) > 1e-6:
                     self.get_logger().info(
                         f"Updated planning max_linear_speed: {old:.2f} -> {max_linear_speed:.2f}"
+                    )
+
+        if "lidar_min_votes" in config:
+            try:
+                lidar_min_votes = int(config["lidar_min_votes"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning lidar_min_votes: {config.get('lidar_min_votes')!r}")
+            else:
+                lidar_min_votes = max(1, min(50, lidar_min_votes))
+                old = self.lidar_min_votes
+                self.lidar_min_votes = lidar_min_votes
+                if old != lidar_min_votes:
+                    self.get_logger().info(f"Updated planning lidar_min_votes: {old} -> {lidar_min_votes}")
+
+        if "lidar_min_obstacle_area_cells" in config:
+            try:
+                min_area = int(config["lidar_min_obstacle_area_cells"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning lidar_min_obstacle_area_cells: {config.get('lidar_min_obstacle_area_cells')!r}"
+                )
+            else:
+                min_area = max(0, min(200, min_area))
+                old = self.lidar_min_obstacle_area_cells
+                self.lidar_min_obstacle_area_cells = min_area
+                if old != min_area:
+                    self.get_logger().info(
+                        f"Updated planning lidar_min_obstacle_area_cells: {old} -> {min_area}"
+                    )
+
+        if "lidar_score_percentile" in config:
+            try:
+                score_percentile = float(config["lidar_score_percentile"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning lidar_score_percentile: {config.get('lidar_score_percentile')!r}"
+                )
+            else:
+                score_percentile = max(0.0, min(50.0, score_percentile))
+                old = self.lidar_score_percentile
+                self.lidar_score_percentile = score_percentile
+                if abs(old - score_percentile) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning lidar_score_percentile: {old:.1f} -> {score_percentile:.1f}"
+                    )
+
+        if "lidar_collision_tolerance" in config:
+            try:
+                collision_tolerance = int(config["lidar_collision_tolerance"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning lidar_collision_tolerance: {config.get('lidar_collision_tolerance')!r}"
+                )
+            else:
+                collision_tolerance = max(0, min(50, collision_tolerance))
+                old = self.lidar_collision_tolerance
+                self.lidar_collision_tolerance = collision_tolerance
+                if old != collision_tolerance:
+                    self.get_logger().info(
+                        f"Updated planning lidar_collision_tolerance: {old} -> {collision_tolerance}"
+                    )
+
+        if "trajectory_smooth_weight" in config:
+            try:
+                smooth_weight = float(config["trajectory_smooth_weight"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning trajectory_smooth_weight: {config.get('trajectory_smooth_weight')!r}"
+                )
+            else:
+                smooth_weight = max(0.0, min(100.0, smooth_weight))
+                old = self.trajectory_smooth_weight
+                self.trajectory_smooth_weight = smooth_weight
+                if abs(old - smooth_weight) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning trajectory_smooth_weight: {old:.1f} -> {smooth_weight:.1f}"
                     )
 
     def poi_change_callback(self, msg):
@@ -907,6 +1020,18 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
+            if self.occupancy_source == 'lidar' and self.lidar_min_obstacle_area_cells > 1:
+                obstacle_count_before = int(np.sum(obstacle_mask))
+                obstacle_mask = remove_small_obstacle_components(obstacle_mask, self.lidar_min_obstacle_area_cells)
+                obstacle_count_after = int(np.sum(obstacle_mask))
+                now_filter_log = time.monotonic()
+                if obstacle_count_before != obstacle_count_after and now_filter_log - self._last_lidar_filter_log_time > 1.0:
+                    self._last_lidar_filter_log_time = now_filter_log
+                    self.get_logger().info(
+                        "lidar_obstacle_filter "
+                        f"min_area_cells={self.lidar_min_obstacle_area_cells} "
+                        f"obstacle_cells={obstacle_count_before}->{obstacle_count_after}"
+                    )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -934,6 +1059,8 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
+            score_percentile = self.lidar_score_percentile if self.occupancy_source == 'lidar' else 0.0
+            collision_tolerance = self.lidar_collision_tolerance if self.occupancy_source == 'lidar' else 0
             scores, occ_points = score_trajectories_by_ESDF(
                 trajectories,
                 ESDF_map,
@@ -944,6 +1071,8 @@ class PlanningNode(Node):
                 front_len,
                 rear_len,
                 half_w,
+                score_percentile,
+                collision_tolerance,
             )
             scores = np.asarray(scores, dtype=np.float64)
             top_k = 100
@@ -979,6 +1108,8 @@ class PlanningNode(Node):
                     front_len,
                     rear_len,
                     half_w,
+                    score_percentile,
+                    collision_tolerance,
                 )
                 delayed_scores = np.asarray(delayed_scores, dtype=np.float64)
                 delayed_finite_mask = np.isfinite(delayed_scores)
@@ -1004,7 +1135,13 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return (
+                    score * 100000
+                    + 100 * dist
+                    + self.trajectory_smooth_weight * abs(self.last_param[0] - param[0])
+                    + self.trajectory_smooth_weight * abs(self.last_param[1] - param[1])
+                    + reverse_gate_penalty
+                )
 
             top_k = 1
             recovery_reason = "normal"
@@ -1043,7 +1180,13 @@ class PlanningNode(Node):
                     f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} "
                     f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
                     f"target_dist={target_dist:.2f} last_vx={self.last_param[0]:.2f} "
-                    f"last_omega={self.last_param[1]:.2f} dilation_cells={self.obstacle_config.dilation_cells}"
+                    f"last_omega={self.last_param[1]:.2f} source={self.occupancy_source} "
+                    f"dilation_cells={self.obstacle_config.dilation_cells} "
+                    f"lidar_min_votes={self.lidar_min_votes} "
+                    f"lidar_min_obstacle_area_cells={self.lidar_min_obstacle_area_cells} "
+                    f"lidar_score_percentile={self.lidar_score_percentile:.1f} "
+                    f"lidar_collision_tolerance={self.lidar_collision_tolerance} "
+                    f"trajectory_smooth_weight={self.trajectory_smooth_weight:.1f}"
                 )
             self.last_param = selected_param
 
