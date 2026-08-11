@@ -479,7 +479,7 @@ class PlanningNode(Node):
         # so a riser reads as a step, and only those cells do -- everything beside the
         # staircase keeps the strict default. Producer: core_runtime's PilotMapNode.
         # No message, or a stale stream, means no region, i.e. strict everywhere.
-        self.declare_parameter('climb_region_radius_m', 0.5)
+        self.declare_parameter('climb_region_radius_m', 1.5)
         self._climb_region_cells = int(round(
             float(self.get_parameter('climb_region_radius_m').value) / self.resolution))
         self.declare_parameter('climb_region_ttl_s', 3.0)
