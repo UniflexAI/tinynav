@@ -199,9 +199,11 @@ class CmdVelControlNode(Node):
         # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
         prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
         out.linear.x = self._clamp_step(target_cmd.linear.x, prev_linear_x, max_dv)
-        # Do not acceleration-limit yaw. The planner/control layer already decides the turn rate,
-        # and forced rotate-in-place should take effect immediately.
-        out.angular.z = target_cmd.angular.z
+        # Low-pass filter yaw: raw path-derived heading rate can spike between
+        # consecutive replans (lookahead/occupancy changes); smooth it here instead
+        # of hard acceleration-limiting so large sustained turns still track quickly.
+        alpha = dt / (self.path_filter_tau + dt)
+        out.angular.z = float(self.prev_cmd.angular.z + alpha * (target_cmd.angular.z - self.prev_cmd.angular.z))
 
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
         # Any still-forward request below the floor snaps up to min; only a true

@@ -15,6 +15,7 @@ from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
 )
+from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 from tf2_msgs.msg import TFMessage
 
@@ -33,6 +34,20 @@ class LooperBridgeNode(Node):
         self.last_pose = None
         self.last_pose_time = None
         self._missing_input_counter = 0
+
+        # The Looper stamps vio_image/depth with its own free-running boot-relative
+        # clock, not wall time (confirmed: neither an NTP-style device time sync nor a
+        # full device reboot changes that -- it's not a transient offset, it's what the
+        # firmware stamps with). planning_node's lidar_sync_callback needs /slam/depth
+        # and /slam/odometry_visual to line up with /lidar_points' real wall-clock stamps
+        # (from the Hesai driver on a separate host, the A2 board), so estimate the
+        # device-clock -> wall-clock offset once at startup (median of the first samples,
+        # to average out per-message reception jitter) and add it to every device stamp,
+        # rather than re-stamping at reception time -- this keeps the device's own
+        # frame-to-frame spacing (precise capture timing) and only shifts the epoch.
+        self._device_clock_offset_ns = None
+        self._device_clock_offset_samples = []
+        self._device_clock_offset_warmup_count = 20
 
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
         self.tf_static_qos = QoSProfile(
@@ -111,6 +126,29 @@ class LooperBridgeNode(Node):
     @staticmethod
     def stamp_to_sec(stamp) -> float:
         return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+    def correct_device_stamp(self, device_stamp):
+        """Map a Looper device timestamp (free-running, boot-relative) onto this
+        host's wall clock, using an offset calibrated from the first samples.
+
+        The offset is (wall_clock_now - device_stamp_now), sampled once per callback
+        during warm-up; each sample also carries this callback's own reception latency
+        as noise, so the median of several samples is used instead of a single reading.
+        """
+        device_ns = device_stamp.sec * 1_000_000_000 + device_stamp.nanosec
+        if self._device_clock_offset_ns is None:
+            wall_ns = self.get_clock().now().nanoseconds
+            self._device_clock_offset_samples.append(wall_ns - device_ns)
+            offset_ns = int(np.median(self._device_clock_offset_samples))
+            if len(self._device_clock_offset_samples) >= self._device_clock_offset_warmup_count:
+                self._device_clock_offset_ns = offset_ns
+                self.get_logger().info(
+                    f"Looper device clock offset calibrated: {offset_ns / 1e9:.3f}s "
+                    f"(median of {len(self._device_clock_offset_samples)} samples)"
+                )
+        else:
+            offset_ns = self._device_clock_offset_ns
+        return Time(nanoseconds=device_ns + offset_ns).to_msg()
 
     def should_add_keyframe(self, T_world_camera: np.ndarray, stamp) -> bool:
         if self.last_keyframe_pose is None or self.last_keyframe_time is None:
@@ -195,7 +233,7 @@ class LooperBridgeNode(Node):
             return
 
         T_world_camera = pose_msg2np(pose_msg)
-        stamp = pose_msg.header.stamp
+        stamp = self.correct_device_stamp(pose_msg.header.stamp)
 
         odom_msg = self.build_odom(T_world_camera, stamp)
         self.odom_visual_pub.publish(odom_msg)
