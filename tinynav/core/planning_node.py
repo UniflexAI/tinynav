@@ -327,7 +327,9 @@ def generate_trajectory_library_3d(
 
 def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
+    reverse_speed=0.3,
+    reverse_omegas=(0.0, -0.5, 0.5),
 ):
     """
     Predefined trajectory vocabularies.
@@ -338,8 +340,7 @@ def generate_predefined_trajectory_vocabularies(
 
     # Recovery reverse trajectories.
     # Keep the speed conservative here; speed tuning is handled separately.
-    reverse_speed = 0.3
-    for omega_y in [0.0, -0.5, 0.5]:
+    for omega_y in reverse_omegas:
         p = init_p.copy()
         q = quat_to_matrix(init_q)
         traj = np.empty((num_steps, 7), dtype=np.float64)
@@ -561,6 +562,9 @@ class PlanningNode(Node):
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
         self.reverse_enter_threshold = 0.30
+        self.terrain_mode = "normal"
+        self.reverse_speed = 0.3
+        self.reverse_omegas = (0.0, -0.5, 0.5)
 
         self.smoothed_velocity = 0.0
         self._last_avoidance_debug_log_time = 0.0
@@ -627,6 +631,27 @@ class PlanningNode(Node):
                 if abs(old - reverse_enter_threshold) > 1e-6:
                     self.get_logger().info(
                         f"Updated planning reverse_enter_threshold: {old:.2f} -> {reverse_enter_threshold:.2f}"
+                    )
+
+        if "terrain_mode" in config:
+            terrain_mode = str(config["terrain_mode"]).strip().lower()
+            if terrain_mode not in ("normal", "stairs"):
+                self.get_logger().warning(
+                    f"Invalid planning terrain_mode: {config.get('terrain_mode')!r} (must be 'normal' or 'stairs')"
+                )
+            else:
+                old = self.terrain_mode
+                self.terrain_mode = terrain_mode
+                if terrain_mode == "stairs":
+                    self.reverse_speed = 0.15
+                    self.reverse_omegas = (0.0,)
+                else:
+                    self.reverse_speed = 0.3
+                    self.reverse_omegas = (0.0, -0.5, 0.5)
+                if old != terrain_mode:
+                    self.get_logger().info(
+                        f"Updated planning terrain_mode: {old} -> {terrain_mode} "
+                        f"(reverse_speed={self.reverse_speed:.2f}, reverse_omegas={list(self.reverse_omegas)})"
                     )
 
     def poi_change_callback(self, msg):
@@ -879,7 +904,12 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q)
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
+                init_p=init_p,
+                init_q=init_q,
+                reverse_speed=self.reverse_speed,
+                reverse_omegas=self.reverse_omegas,
+            )
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
 

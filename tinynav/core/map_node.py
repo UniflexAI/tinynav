@@ -484,6 +484,7 @@ class MapNode(Node):
         self.planning_dilation_cells = self._load_planning_dilation_cells(tinynav_map_path)
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
+        self.planning_terrain_mode = self._load_planning_terrain_mode(tinynav_map_path)
         self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
@@ -813,6 +814,29 @@ class MapNode(Node):
         self.get_logger().info(f"Using planning.reverse_enter_threshold={reverse_enter_threshold:.2f}")
         return reverse_enter_threshold
 
+    def _load_planning_terrain_mode(self, tinynav_map_path: str) -> str:
+        default_value = "normal"
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(f"Failed to read nav_flow.json: {exc}; using planning.terrain_mode={default_value}")
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        planning_config = config.get("planning", {})
+        if not isinstance(planning_config, dict):
+            return default_value
+        terrain_mode = str(planning_config.get("terrain_mode", default_value)).strip().lower()
+        if terrain_mode not in {"normal", "stairs"}:
+            self.get_logger().warning(f"Invalid planning.terrain_mode={terrain_mode!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using planning.terrain_mode={terrain_mode}")
+        return terrain_mode
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -855,6 +879,7 @@ class MapNode(Node):
         msg = String()
         config = {
             "dilation_cells": self.planning_dilation_cells,
+            "terrain_mode": self.planning_terrain_mode,
         }
         if self.planning_comfort_radius is not None:
             config["comfort_radius"] = self.planning_comfort_radius
