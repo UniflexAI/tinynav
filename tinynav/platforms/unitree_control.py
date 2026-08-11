@@ -26,7 +26,7 @@ ROBOT_CONFIGS = {
         length=0.6, width=0.3,
         camera_x=0.35, camera_y=0.0,
         control_x=0.05, control_y=0.0,
-        safety_radius=0.2,
+        safety_radius=0.1,
     ),
     'b2': dict(
         name='b2', shape='square',
