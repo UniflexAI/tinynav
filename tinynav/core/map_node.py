@@ -1158,13 +1158,11 @@ class MapNode(Node):
 
     def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
-        # In RTK replace mode RTK owns localization: never run visual relocalization.
-        # Otherwise it publishes a competing /map/relocalization arrow (frame "camera",
-        # different heading) and, on success, overwrites T_from_map_to_odom -> the web
-        # heading arrow flickers between the RTK heading and the visual one, and the map
-        # rotates. The time-based freshness check alone flickers around the 1 s threshold
-        # when /fix is ~1 Hz, so gate on the mode explicitly.
-        if self.rtk_mode == "replace" or self._has_active_rtk_transform():
+        # RTK replace in nav_flow only means RTK is allowed. While RTK is not ACTIVE
+        # (WAIT_FIX / NEED_YAW_INIT), visual relocalization must still be able to
+        # localize the map and let navigation start. Once /rtk/map_pose is ACTIVE,
+        # RTK owns T_from_map_to_odom and visual relocalization is suppressed.
+        if self._has_active_rtk_transform():
             return
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
@@ -1463,8 +1461,8 @@ class MapNode(Node):
         """
         Solve the optmization problem.
         """
-        if self.rtk_mode == "replace":
-            return  # RTK owns T_from_map_to_odom in replace mode; never let visual reloc overwrite it
+        if self._has_active_rtk_transform():
+            return  # RTK owns T_from_map_to_odom while ACTIVE; never let visual reloc overwrite it
         relative_pose_constraint = []
         optimized_parameters = {
             0 : np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
@@ -1514,7 +1512,7 @@ class MapNode(Node):
                 return
             pose_in_origin_odom = self.pose_graph_used_pose[timestamp]
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
-        if self.rtk_mode == "replace":
+        if self._has_active_rtk_transform():
             pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
         publish_stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, publish_stamp, "world", "map"))
@@ -1972,7 +1970,7 @@ class MapNode(Node):
 
     def _publish_target_pose_from_path(self, paths_in_map: np.ndarray, pose_in_origin_odom: np.ndarray, stamp_msg=None):
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
-        if self.rtk_mode == "replace":
+        if self._has_active_rtk_transform():
             pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
         pose_in_map_position = self._nav_position_with_clamped_z(pose_in_map[:3, 3], path=paths_in_map)
         with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
