@@ -1,10 +1,11 @@
 import rclpy
+import json
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, String
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
@@ -53,6 +54,7 @@ class CmdVelControlNode(Node):
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.3
         self.max_reverse_angular_speed = 0.3
+        self.terrain_mode = "normal"
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(30.0)
@@ -67,7 +69,40 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
+        planning_config_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(String, '/planning/config', self._on_planning_config, planning_config_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
+
+    def _on_planning_config(self, msg: String):
+        try:
+            config = json.loads(msg.data)
+        except json.JSONDecodeError as exc:
+            self.logger.warning(f"Failed to parse /planning/config: {exc}")
+            return
+        if not isinstance(config, dict) or "terrain_mode" not in config:
+            return
+        terrain_mode = str(config["terrain_mode"]).strip().lower()
+        if terrain_mode not in ("normal", "stairs"):
+            self.logger.warning(f"Invalid planning terrain_mode: {config.get('terrain_mode')!r}")
+            return
+        old = self.terrain_mode
+        self.terrain_mode = terrain_mode
+        if terrain_mode == "stairs":
+            self.fixed_reverse_speed = 0.15
+            self.max_reverse_angular_speed = 0.0
+        else:
+            self.fixed_reverse_speed = 0.3
+            self.max_reverse_angular_speed = 0.3
+        if old != terrain_mode:
+            self.logger.info(
+                f"Updated cmd_vel terrain_mode: {old} -> {terrain_mode} "
+                f"(fixed_reverse_speed={self.fixed_reverse_speed:.2f}, "
+                f"max_reverse_angular_speed={self.max_reverse_angular_speed:.2f})"
+            )
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
