@@ -323,6 +323,31 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         occ_points.append(closest_step_for_traj)
     return scores, occ_points
 
+@njit(cache=True)
+def goal_heading_error(traj_end, target):
+    """Absolute yaw error at a trajectory's end: its heading vs the bearing from there to the goal.
+
+    The library is forward-only, so with the goal behind the robot every sample that
+    moves increases the endpoint distance and the distance term alone settles on
+    vx=0. All vx=0 samples then share one endpoint, leaving the smoothness term to
+    also pick omega=0: the robot stands still facing away instead of turning
+    around. Scoring the end heading breaks that tie toward the goal.
+    """
+    dx = target[0] - traj_end[0]
+    dy = target[1] - traj_end[1]
+    if dx * dx + dy * dy < 1e-6:
+        return 0.0
+
+    # world XY heading from the quaternion (body +Z forward), as in the footprint check
+    qx, qy, qz, qw = traj_end[3], traj_end[4], traj_end[5], traj_end[6]
+    fwd_x = 2.0 * (qx * qz + qw * qy)
+    fwd_y = 2.0 * (qy * qz - qw * qx)
+    if fwd_x * fwd_x + fwd_y * fwd_y < 1e-12:  # heading straight up/down: no XY bearing to compare
+        return 0.0
+
+    # atan2 of (cross, dot) is scale-free, so neither vector needs normalizing
+    return abs(np.arctan2(fwd_x * dy - fwd_y * dx, fwd_x * dx + fwd_y * dy))
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -624,7 +649,13 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                # 1 rad of end-heading error costs the same as 1 m of distance: it
+                # dominates while the goal is behind (up to pi, against the ~1.5 m a
+                # sample can cover) and yields to progress once roughly aligned, so
+                # the robot turns toward the goal instead of stalling at vx=w=0.
+                heading = goal_heading_error(traj[-1], target_pose) if target_pose is not None else 0.0
+
+                return score * 100000 + 100 * dist + 100 * heading + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
