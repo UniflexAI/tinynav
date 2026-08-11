@@ -6,7 +6,8 @@ import os
 from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
-from planning_node import run_raycasting_loopy
+from planning_node import run_raycasting_loopy, generate_trajectory_library_3d, goal_heading_error
+from tinynav.core.math_utils import matrix_to_quat
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -143,5 +144,58 @@ def test_run_raycasting_comparison():
             print_diffs(py_occupancy_grid, cpp_occupancy_grid, "Vectorized", "C++")
         assert False, "Implementations do not match."
 
+# body +Z (forward) along world +X, body +Y (down) along world -Z: the camera convention
+_FACING_X = np.array([[0.0, 0.0, 1.0],
+                      [-1.0, 0.0, 0.0],
+                      [0.0, -1.0, 0.0]])
+
+def _pick(target, heading_weight):
+    """Lowest-cost (vx, omega) from cost_function with a clear ESDF and no reverse gating."""
+    trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    last_param = np.zeros(2)
+    costs = [
+        100 * np.linalg.norm(trajectories[i][-1, :3] - target)
+        + heading_weight * goal_heading_error(trajectories[i][-1], target)
+        + 10 * abs(last_param[0] - params[i, 0])
+        + 10 * abs(last_param[1] - params[i, 1])
+        for i in range(len(trajectories))
+    ]
+    return params[np.argsort(costs, kind='stable')[0]]
+
+def test_goal_heading_error():
+    end = np.zeros(7)
+    end[3:] = matrix_to_quat(_FACING_X)
+    for target, expected in (
+        ([5.0, 0.0, 0.0], 0.0),
+        ([-5.0, 0.0, 0.0], np.pi),
+        ([0.0, 5.0, 0.0], np.pi / 2),
+        ([0.0, -5.0, 0.0], np.pi / 2),  # unsigned, so both sides score the same
+        ([0.0, 0.0, 5.0], 0.0),         # no XY bearing
+    ):
+        got = goal_heading_error(end, np.array(target))
+        assert abs(got - expected) < 1e-6, f"target {target}: {got} != {expected}"
+
+def test_goal_behind_turns_in_place():
+    # forward-only samples all recede from a target behind, so distance alone picks vx=0,
+    # and the shared vx=0 endpoint leaves smoothness to pick omega=0 too
+    behind = np.array([-5.0, 0.0, 0.0])
+    assert tuple(_pick(behind, heading_weight=0.0)) == (0.0, 0.0)
+
+    vx, omega = _pick(behind, heading_weight=100.0)
+    assert abs(omega) > 1e-6, f"target behind still yields omega={omega}"
+
+def test_goal_ahead_still_drives_straight():
+    vx, omega = _pick(np.array([5.0, 0.0, 0.0]), heading_weight=100.0)
+    assert vx > 0.0 and abs(omega) < 1e-6, f"target ahead yields vx={vx}, omega={omega}"
+
+def test_goal_abeam_turns_while_driving():
+    for side in (5.0, -5.0):
+        vx, omega = _pick(np.array([0.0, side, 0.0]), heading_weight=100.0)
+        assert vx > 0.0 and abs(omega) > 1e-6, f"target abeam yields vx={vx}, omega={omega}"
+
 if __name__ == "__main__":
+    test_goal_heading_error()
+    test_goal_behind_turns_in_place()
+    test_goal_ahead_still_drives_straight()
+    test_goal_abeam_turns_while_driving()
     test_run_raycasting_comparison()

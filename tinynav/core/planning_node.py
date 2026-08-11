@@ -267,6 +267,19 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         occ_points.append(closest_step_for_traj)
     return scores, occ_points
 
+@njit(cache=True)
+def goal_heading_error(traj_end, target):
+    """Absolute yaw error between a trajectory's end heading and the bearing to the target.
+    Degenerate input (target at the end point, heading straight up) scores 0."""
+    dx = target[0] - traj_end[0]
+    dy = target[1] - traj_end[1]
+    qx, qy, qz, qw = traj_end[3], traj_end[4], traj_end[5], traj_end[6]
+
+    # world XY forward from quaternion (body +Z forward)
+    fwd_x = 2.0 * (qx * qz + qw * qy)
+    fwd_y = 2.0 * (qy * qz - qw * qx)
+    return abs(np.arctan2(fwd_x * dy - fwd_y * dx, fwd_x * dx + fwd_y * dy))
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -572,7 +585,10 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                # 1 rad of end-heading error costs like 1 m, so a target behind turns the robot instead of stalling at vx=omega=0
+                heading = goal_heading_error(traj[-1], target_end)
+
+                return score * 100000 + 100 * dist + 100 * heading + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
