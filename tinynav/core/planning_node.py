@@ -1,3 +1,4 @@
+import heapq
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -346,6 +347,122 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def _astar_grid_path(start_idx, goal_idx, blocked, resolution):
+    """8-connected A* over a 2D blocked-cell grid.
+
+    Not numba-jitted (dict/heapq/tuple keys, same as map_node.py's
+    search_within_sdf_map) — this runs once per planning cycle over a small
+    local grid, not in a hot per-pixel loop.
+
+    Returns the list of grid indices from start_idx to goal_idx, or — if
+    goal_idx is unreachable (blocked / disconnected) — to whichever visited
+    cell came closest to it, so the caller always gets a path to walk along.
+    """
+    rows, cols = blocked.shape
+    neighbor_offsets = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    )
+
+    def heuristic(a, b):
+        return resolution * ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+    open_heap = [(heuristic(start_idx, goal_idx), start_idx)]
+    came_from = {}
+    g_score = {start_idx: 0.0}
+    visited = set()
+    best_reached = start_idx
+    best_reached_h = heuristic(start_idx, goal_idx)
+
+    while open_heap:
+        _, current = heapq.heappop(open_heap)
+        if current in visited:
+            continue
+        visited.add(current)
+
+        h = heuristic(current, goal_idx)
+        if h < best_reached_h:
+            best_reached_h = h
+            best_reached = current
+        if current == goal_idx:
+            best_reached = current
+            break
+
+        for dr, dc in neighbor_offsets:
+            neighbor = (current[0] + dr, current[1] + dc)
+            if not (0 <= neighbor[0] < rows and 0 <= neighbor[1] < cols):
+                continue
+            if blocked[neighbor]:
+                continue
+            step_cost = resolution * (1.41421356 if dr != 0 and dc != 0 else 1.0)
+            tentative_g = g_score[current] + step_cost
+            if tentative_g < g_score.get(neighbor, float('inf')):
+                g_score[neighbor] = tentative_g
+                came_from[neighbor] = current
+                heapq.heappush(open_heap, (tentative_g + heuristic(neighbor, goal_idx), neighbor))
+
+    path = [best_reached]
+    node = best_reached
+    while node in came_from:
+        node = came_from[node]
+        path.append(node)
+    path.reverse()
+    return path
+
+
+def find_local_astar_waypoint(start_xy, goal_xy, obstacle_mask, ESDF_map, origin, resolution,
+                               safety_radius=0.1, lookahead_dist=1.5):
+    """A* a local, obstacle-aware route from start_xy to goal_xy over the
+    freshly-observed occupancy grid, then return the point lookahead_dist
+    along that route (world xy) — a short, already-clear intermediate goal
+    for the DWA trajectory scoring to chase instead of the raw (possibly
+    distant or occluded) final target.
+
+    Cells are blocked wherever ESDF_map < safety_radius, i.e. the obstacle
+    mask inflated by the robot's own footprint margin, matching the clearance
+    score_trajectories_by_ESDF already enforces — this only picks a nearer
+    target for it to score against, it doesn't relax or duplicate that check.
+
+    Returns None when there's nothing useful to hand back (start already
+    inside the inflated margin, or A* made no progress at all toward goal)
+    so the caller can fall back to the raw goal_xy.
+    """
+    rows, cols = obstacle_mask.shape
+    blocked = ESDF_map < safety_radius
+
+    def to_idx(xy):
+        r = int((xy[0] - origin[0]) / resolution)
+        c = int((xy[1] - origin[1]) / resolution)
+        return (min(max(r, 0), rows - 1), min(max(c, 0), cols - 1))
+
+    def to_world(idx):
+        return np.array([
+            origin[0] + (idx[0] + 0.5) * resolution,
+            origin[1] + (idx[1] + 0.5) * resolution,
+        ])
+
+    start_idx = to_idx(start_xy)
+    goal_idx = to_idx(goal_xy)
+
+    if blocked[start_idx]:
+        return None  # already inside the inflated margin — let the DWA-side gates handle it
+
+    path_idx = _astar_grid_path(start_idx, goal_idx, blocked, resolution)
+    if len(path_idx) < 2:
+        return None  # no reachable progress at all from start
+
+    accumulated = 0.0
+    prev_world = to_world(path_idx[0])
+    for idx in path_idx[1:]:
+        cur_world = to_world(idx)
+        accumulated += float(np.linalg.norm(cur_world - prev_world))
+        if accumulated >= lookahead_dist:
+            return cur_world
+        prev_world = cur_world
+    return prev_world  # whole reachable route is shorter than lookahead_dist
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -382,6 +499,9 @@ class PlanningNode(Node):
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ObstacleConfig()
+        # How far along the local A* route (see find_local_astar_waypoint) to
+        # place the intermediate goal the DWA scoring chases each cycle.
+        self.local_astar_lookahead_dist = 1.5  # m
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
@@ -605,6 +725,22 @@ class PlanningNode(Node):
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
+        with Timer(name='astar', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # A short, already-obstacle-aware intermediate goal for the DWA cost
+            # function below to chase, instead of handing it the raw (possibly
+            # distant/occluded) final target — see find_local_astar_waypoint.
+            # score_trajectories_by_ESDF above is untouched: this only changes
+            # what "the goal" means to cost_function, not the collision scoring.
+            local_target = self.target_pose
+            if self.target_pose is not None:
+                waypoint_xy = find_local_astar_waypoint(
+                    init_p[:2], self.target_pose[:2], obstacle_mask, ESDF_map,
+                    self.origin, self.resolution, self.robot.safety_radius,
+                    self.local_astar_lookahead_dist,
+                )
+                if waypoint_xy is not None:
+                    local_target = np.array([waypoint_xy[0], waypoint_xy[1], self.target_pose[2]])
+
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
@@ -627,7 +763,7 @@ class PlanningNode(Node):
                 return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], local_target) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path
