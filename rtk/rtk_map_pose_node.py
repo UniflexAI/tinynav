@@ -82,9 +82,11 @@ class RtkMapPoseNode(Node):
         self.declare_parameter("output_topic", "/rtk/map_pose")
         self.declare_parameter("map_frame_id", "map")
         self.declare_parameter("child_frame_id", "rtk")
-        # Publish only at RTK FIXED/FLOAT (q4/5): cm-level fixes. DGNSS/single are
-        # too noisy both for the position and for the straight-segment heading.
+        # Publish only at RTK FIXED. rtk_bridge_node maps both GGA q4/q5 to
+        # NavSatStatus.STATUS_GBAS_FIX, so use its covariance model to keep q5
+        # RTK_FLOAT out: q4 sigma_h~=0.02m, q5 sigma_h~=0.15m.
         self.declare_parameter("min_status", int(NavSatStatus.STATUS_GBAS_FIX))
+        self.declare_parameter("fixed_max_horizontal_sigma_m", 0.05)
         # RTK straight-segment heading observation (course-over-ground).
         self.declare_parameter("heading_min_dist_m", 1.0)   # window length
         self.declare_parameter("straight_max_offline_m", 0.15)  # straightness gate
@@ -105,6 +107,7 @@ class RtkMapPoseNode(Node):
 
         self.align_filename = self.get_parameter("align_filename").value
         self.min_status = int(self.get_parameter("min_status").value)
+        self.fixed_max_horizontal_sigma_m = float(self.get_parameter("fixed_max_horizontal_sigma_m").value)
         self.map_frame = self.get_parameter("map_frame_id").value
         self.child_frame = self.get_parameter("child_frame_id").value
         self.fix_timeout_s = float(self.get_parameter("fix_timeout_s").value)
@@ -139,6 +142,7 @@ class RtkMapPoseNode(Node):
         self.last_imu_t = None           # last IMU header time (s), for dt
         # Latest-fix bookkeeping for the handshake status.
         self.last_status = -1
+        self.last_fix_is_fixed = False
         self.last_fix_wall = None
 
         self.pub = self.create_publisher(
@@ -248,6 +252,16 @@ class RtkMapPoseNode(Node):
     def _now_s(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
+    def _is_fixed_fix(self, msg: NavSatFix) -> bool:
+        if int(msg.status.status) < self.min_status:
+            return False
+        cov = list(msg.position_covariance)
+        if len(cov) < 8:
+            return False
+        sigma_x = math.sqrt(max(float(cov[0]), 0.0))
+        sigma_y = math.sqrt(max(float(cov[7]), 0.0))
+        return max(sigma_x, sigma_y) <= self.fixed_max_horizontal_sigma_m
+
     def on_imu(self, msg: Imu):
         """Advance the heading with the gyro (gravity-projected). High rate."""
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -268,10 +282,11 @@ class RtkMapPoseNode(Node):
     def on_fix(self, msg: NavSatFix):
         # Record quality/time first (drives the handshake status even at low fix).
         self.last_status = int(msg.status.status)
+        self.last_fix_is_fixed = self._is_fixed_fix(msg)
         self.last_fix_wall = self._now_s()
         if self.enu is None:                      # gated: no active map yet
             return
-        if msg.status.status < self.min_status:   # q4/5 only
+        if not self.last_fix_is_fixed:
             return
         if not (math.isfinite(msg.latitude) and math.isfinite(msg.longitude)):
             return
@@ -331,8 +346,8 @@ class RtkMapPoseNode(Node):
 
         States:
           NO_MAP        - no active map / no rtk_align.json -> nothing to do
-          WAIT_FIX      - map ready, waiting for RTK FIXED/FLOAT (q4/5)
-          NEED_YAW_INIT - map + q4/5 but heading not bootstrapped -> DRIVE ~1 m
+          WAIT_FIX      - map ready, waiting for RTK FIXED
+          NEED_YAW_INIT - map + RTK FIXED but heading not bootstrapped -> DRIVE ~1 m
           ACTIVE        - heading acquired; /rtk/map_pose is publishing
         The nav node should drive the robot slowly forward (with its own obstacle
         avoidance) while need_forward_init is true, and stop once ACTIVE.
@@ -340,7 +355,7 @@ class RtkMapPoseNode(Node):
         have_map = self.enu is not None
         fix_recent = (self.last_fix_wall is not None
                       and self._now_s() - self.last_fix_wall < self.fix_timeout_s)
-        fix_ok = fix_recent and self.last_status >= self.min_status  # q4/5
+        fix_ok = fix_recent and self.last_fix_is_fixed
         yaw_ready = self.hf.ready
         if not have_map:
             state = "NO_MAP"
@@ -357,6 +372,7 @@ class RtkMapPoseNode(Node):
             "map": (self.meta or {}).get("map") if have_map else None,
             "fix_ok": bool(fix_ok),
             "navsat_status": self.last_status,   # 2 == GBAS_FIX (RTK q4/5)
+            "fixed_max_horizontal_sigma_m": self.fixed_max_horizontal_sigma_m,
             "yaw_ready": yaw_ready,
             "yaw_deg": None if not yaw_ready else round(math.degrees(self.hf.heading), 1),
             "heading_source": self.heading_source,

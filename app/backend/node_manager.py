@@ -447,6 +447,10 @@ class BackendNode(Ros2NodeManager):
             cmd_vel_proc = self._cmd_vel_proc
             self._cmd_vel_proc = None
             self._rtk_yaw_init_active = True
+            was_nav_active = self._nav_active
+        if was_nav_active:
+            self._set_nav_active(False)
+            self.get_logger().info('RTK yaw-init paused navigation before taking /cmd_vel ownership')
         had_cmd_vel_proc = cmd_vel_proc is not None and cmd_vel_proc.poll() is None
         if had_cmd_vel_proc:
             self._kill_proc(cmd_vel_proc)
@@ -471,9 +475,9 @@ class BackendNode(Ros2NodeManager):
                 restart_cmd_vel = (
                     had_cmd_vel_proc
                     and self._nav_nodes_running
-                    and not self._loc_assist_enabled
                     and self._cmd_vel_proc is None
                 )
+                resume_nav = was_nav_active and self._nav_nodes_running
                 self._rtk_yaw_init_thread = None
             if restart_cmd_vel:
                 env = os.environ.copy()
@@ -484,6 +488,9 @@ class BackendNode(Ros2NodeManager):
                     env=env,
                 )
                 self.get_logger().info('RTK yaw-init restarted cmd_vel_control')
+            if resume_nav:
+                self._set_nav_active(True)
+                self.get_logger().info('RTK yaw-init resumed navigation')
             self.get_logger().info('RTK yaw-init stopped')
 
     def _set_nav_active(self, active: bool):
@@ -1785,9 +1792,10 @@ class BackendNode(Ros2NodeManager):
         rtk_mode = self._nav_rtk_mode
         with self._lock:
             loc_assist_requested = self._loc_assist_enabled
-        loc_assist = loc_assist_requested and rtk_mode != 'replace'
-        if loc_assist_requested and rtk_mode == 'replace':
-            self.get_logger().info('Localization assist ignored for RTK map')
+        # RTK-enabled maps still use visual relocalization while RTK is not ACTIVE.
+        # If RTK later reaches NEED_YAW_INIT, the yaw-init loop will stop assist and
+        # take direct /cmd_vel ownership before RTK replaces the map transform.
+        loc_assist = loc_assist_requested
         if loc_assist:
             # Don't start cmd_vel_control yet; start localization assist sweep
             self._start_loc_assist(_env)
@@ -1875,9 +1883,6 @@ class BackendNode(Ros2NodeManager):
 
     def _start_loc_assist(self, env: dict):
         """Start the yaw sweep thread (no cmd_vel_control process)."""
-        if self._nav_rtk_mode == 'replace':
-            self.get_logger().info('Localization assist sweep skipped for RTK map')
-            return
         if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
             self.get_logger().info('Localization assist sweep already running')
             return
