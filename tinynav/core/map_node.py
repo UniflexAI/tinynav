@@ -481,6 +481,7 @@ class MapNode(Node):
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
         self.planning_terrain_mode = self._load_planning_terrain_mode(tinynav_map_path)
+        self.planning_only_straight_back = self._load_planning_bool(tinynav_map_path, "only_straight_back", False)
         self.planning_max_linear_speed = self._load_planning_max_linear_speed(tinynav_map_path)
         self.planning_lidar_min_votes = self._load_planning_int(tinynav_map_path, "lidar_min_votes", None, minimum=1, maximum=50)
         self.planning_lidar_min_obstacle_area_cells = self._load_planning_int(
@@ -928,6 +929,28 @@ class MapNode(Node):
         )
         return None if value is None else int(value)
 
+    def _load_planning_bool(self, tinynav_map_path: str, key: str, default_value: bool) -> bool:
+        planning_config = self._load_planning_config(tinynav_map_path)
+        if key not in planning_config:
+            return default_value
+        value = planning_config.get(key)
+        if isinstance(value, bool):
+            parsed = value
+        elif isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                parsed = True
+            elif normalized in {"false", "0", "no", "off"}:
+                parsed = False
+            else:
+                self.get_logger().warning(f"Invalid planning.{key}={value!r}; using {default_value}")
+                return default_value
+        else:
+            self.get_logger().warning(f"Invalid planning.{key}={value!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using planning.{key}={parsed}")
+        return parsed
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -971,6 +994,7 @@ class MapNode(Node):
         config = {
             "dilation_cells": self.planning_dilation_cells,
             "terrain_mode": self.planning_terrain_mode,
+            "only_straight_back": self.planning_only_straight_back,
             "max_linear_speed": self.planning_max_linear_speed,
         }
         if self.planning_comfort_radius is not None:

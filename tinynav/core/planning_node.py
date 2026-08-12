@@ -599,6 +599,7 @@ class PlanningNode(Node):
         self.reverse_enter_threshold = 0.30
         self.terrain_mode = "normal"
         self.max_linear_speed = 0.5
+        self.only_straight_back = False
         self.reverse_speed = 0.3
         self.reverse_omegas = (0.0, -0.5, 0.5)
         self.trajectory_smooth_weight = 10.0
@@ -680,17 +681,42 @@ class PlanningNode(Node):
             else:
                 old = self.terrain_mode
                 self.terrain_mode = terrain_mode
-                if terrain_mode == "stairs":
-                    self.reverse_speed = 0.15
-                    self.reverse_omegas = (0.0,)
-                else:
-                    self.reverse_speed = 0.3
-                    self.reverse_omegas = (0.0, -0.5, 0.5)
+                self._update_reverse_behavior()
                 if old != terrain_mode:
                     self.get_logger().info(
                         f"Updated planning terrain_mode: {old} -> {terrain_mode} "
-                        f"(reverse_speed={self.reverse_speed:.2f}, reverse_omegas={list(self.reverse_omegas)})"
+                        f"(only_straight_back={self.only_straight_back}, "
+                        f"reverse_speed={self.reverse_speed:.2f}, reverse_omegas={list(self.reverse_omegas)})"
                     )
+
+        if "only_straight_back" in config:
+            value = config["only_straight_back"]
+            if isinstance(value, bool):
+                only_straight_back = value
+            elif isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("true", "1", "yes", "on"):
+                    only_straight_back = True
+                elif normalized in ("false", "0", "no", "off"):
+                    only_straight_back = False
+                else:
+                    self.get_logger().warning(
+                        f"Invalid planning only_straight_back: {config.get('only_straight_back')!r}"
+                    )
+                    only_straight_back = self.only_straight_back
+            else:
+                self.get_logger().warning(
+                    f"Invalid planning only_straight_back: {config.get('only_straight_back')!r}"
+                )
+                only_straight_back = self.only_straight_back
+            old = self.only_straight_back
+            self.only_straight_back = only_straight_back
+            self._update_reverse_behavior()
+            if old != only_straight_back:
+                self.get_logger().info(
+                    f"Updated planning only_straight_back: {old} -> {only_straight_back} "
+                    f"(reverse_speed={self.reverse_speed:.2f}, reverse_omegas={list(self.reverse_omegas)})"
+                )
 
         if "max_linear_speed" in config:
             try:
@@ -781,6 +807,17 @@ class PlanningNode(Node):
                     self.get_logger().info(
                         f"Updated planning trajectory_smooth_weight: {old:.1f} -> {smooth_weight:.1f}"
                     )
+
+    def _update_reverse_behavior(self):
+        if self.terrain_mode == "stairs":
+            self.reverse_speed = 0.15
+        else:
+            self.reverse_speed = 0.3
+
+        if self.terrain_mode == "stairs" or self.only_straight_back:
+            self.reverse_omegas = (0.0,)
+        else:
+            self.reverse_omegas = (0.0, -0.5, 0.5)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
