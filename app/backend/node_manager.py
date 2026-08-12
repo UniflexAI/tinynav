@@ -148,6 +148,10 @@ class BackendNode(Ros2NodeManager):
         # topic goes quiet there, so without this the UI cannot tell a stretch running
         # uncorrected from one that simply has not expired yet.
         self._reloc_status: str = ''
+        # The capture-speed prior at the robot (path_speed.npy, via map_node). None
+        # where the map has no answer -- off-path, or a map baked before the prior
+        # existed -- which the topic says as +inf and JSON cannot carry.
+        self._path_speed: float | None = None
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
@@ -169,6 +173,7 @@ class BackendNode(Ros2NodeManager):
             Odometry, '/map/relocalization_fix', self._on_relocalization, 10
         )
         self.create_subscription(String, '/map/reloc_status', self._on_reloc_status, 10)
+        self.create_subscription(Float32, '/planning/speed_cap', self._on_path_speed, 10)
         self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
         self.create_subscription(
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
@@ -308,6 +313,9 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = pose
             self._localized = True
             self._reloc_seq += 1
+            # A fix landing outranks any status word, including one left by a previous
+            # map_node process -- the status topic has no way to retract those itself.
+            self._reloc_status = ''
 
     def _on_reloc_status(self, msg: String):
         status = str(msg.data)
@@ -317,6 +325,11 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warning(
                 f'[reloc] running open-loop: {status.split(" ", 1)[-1]} relocalizations '
                 'in a row disagreed with the carried fix, so nothing was fused')
+
+    def _on_path_speed(self, msg: Float32):
+        v = float(msg.data)
+        with self._lock:
+            self._path_speed = v if math.isfinite(v) else None
 
     def _on_on_stairs(self, msg: Bool):
         with self._lock:
@@ -631,6 +644,7 @@ class BackendNode(Ros2NodeManager):
                 'localized': self._localized,
                 'reloc_seq': self._reloc_seq,
                 'reloc_status': self._reloc_status,
+                'path_speed': self._path_speed,
                 'odom_pose': self._odom_pose,
                 'odom_pose_at_kf': self._odom_pose_at_kf,
                 'map_pose': self._map_pose,
