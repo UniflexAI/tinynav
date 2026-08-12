@@ -414,19 +414,23 @@ def _astar_grid_path(start_idx, goal_idx, blocked, resolution):
 def find_local_astar_waypoint(start_xy, goal_xy, obstacle_mask, ESDF_map, origin, resolution,
                                safety_radius=0.1, lookahead_dist=1.5):
     """A* a local, obstacle-aware route from start_xy to goal_xy over the
-    freshly-observed occupancy grid, then return the point lookahead_dist
-    along that route (world xy) — a short, already-clear intermediate goal
-    for the DWA trajectory scoring to chase instead of the raw (possibly
-    distant or occluded) final target.
+    freshly-observed occupancy grid, then return (waypoint, route):
+
+      waypoint — the point lookahead_dist along that route (world xy), a
+                 short, already-clear intermediate goal for the DWA trajectory
+                 scoring to chase instead of the raw (possibly distant or
+                 occluded) final target.
+      route    — the full route as a list of world-xy points, start to
+                 best-reached, for visualization (see publish_astar_path).
 
     Cells are blocked wherever ESDF_map < safety_radius, i.e. the obstacle
     mask inflated by the robot's own footprint margin, matching the clearance
     score_trajectories_by_ESDF already enforces — this only picks a nearer
     target for it to score against, it doesn't relax or duplicate that check.
 
-    Returns None when there's nothing useful to hand back (start already
-    inside the inflated margin, or A* made no progress at all toward goal)
-    so the caller can fall back to the raw goal_xy.
+    Returns (None, []) when there's nothing useful to hand back (start
+    already inside the inflated margin, or A* made no progress at all toward
+    goal) so the caller can fall back to the raw goal_xy.
     """
     rows, cols = obstacle_mask.shape
     blocked = ESDF_map < safety_radius
@@ -446,21 +450,22 @@ def find_local_astar_waypoint(start_xy, goal_xy, obstacle_mask, ESDF_map, origin
     goal_idx = to_idx(goal_xy)
 
     if blocked[start_idx]:
-        return None  # already inside the inflated margin — let the DWA-side gates handle it
+        return None, []  # already inside the inflated margin — let the DWA-side gates handle it
 
     path_idx = _astar_grid_path(start_idx, goal_idx, blocked, resolution)
     if len(path_idx) < 2:
-        return None  # no reachable progress at all from start
+        return None, []  # no reachable progress at all from start
+
+    route = [to_world(idx) for idx in path_idx]
 
     accumulated = 0.0
-    prev_world = to_world(path_idx[0])
-    for idx in path_idx[1:]:
-        cur_world = to_world(idx)
+    prev_world = route[0]
+    for cur_world in route[1:]:
         accumulated += float(np.linalg.norm(cur_world - prev_world))
         if accumulated >= lookahead_dist:
-            return cur_world
+            return cur_world, route
         prev_world = cur_world
-    return prev_world  # whole reachable route is shorter than lookahead_dist
+    return prev_world, route  # whole reachable route is shorter than lookahead_dist
 
 
 # === PlanningNode class ===
@@ -476,6 +481,11 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
+        # find_local_astar_waypoint's full route (not just the lookahead
+        # waypoint cost_function chases) and that waypoint itself, for
+        # visualization — see publish_astar_path / publish_astar_waypoint.
+        self.astar_path_pub = self.create_publisher(Path, '/planning/astar_path', 10)
+        self.astar_waypoint_pub = self.create_publisher(Odometry, '/planning/astar_waypoint', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
@@ -557,6 +567,38 @@ class PlanningNode(Node):
         msg.header.frame_id = "world"
         msg.points = points
         self.footprint_pub.publish(msg)
+
+    def publish_astar_path(self, route_xy, z, stamp):
+        """Publish find_local_astar_waypoint's full route (world xy) as a Path,
+        for visualizing the obstacle-routed line separately from the sampled
+        arc cost_function ends up picking on /planning/trajectory_path."""
+        path = Path()
+        path.header = Header()
+        path.header.stamp = stamp
+        path.header.frame_id = "world"
+        for p in route_xy:
+            pose = PoseStamped()
+            pose.header = path.header
+            pose.pose.position.x = float(p[0])
+            pose.pose.position.y = float(p[1])
+            pose.pose.position.z = float(z)
+            pose.pose.orientation.w = 1.0
+            path.poses.append(pose)
+        self.astar_path_pub.publish(path)
+
+    def publish_astar_waypoint(self, waypoint_xy, z, stamp):
+        """Publish the single lookahead point find_local_astar_waypoint hands
+        to cost_function as the goal, so it can be marked distinctly from the
+        full route (publish_astar_path) and the raw final target."""
+        msg = Odometry()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.pose.pose.position.x = float(waypoint_xy[0])
+        msg.pose.pose.position.y = float(waypoint_xy[1])
+        msg.pose.pose.position.z = float(z)
+        msg.pose.pose.orientation.w = 1.0
+        self.astar_waypoint_pub.publish(msg)
 
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
@@ -733,13 +775,16 @@ class PlanningNode(Node):
             # what "the goal" means to cost_function, not the collision scoring.
             local_target = self.target_pose
             if self.target_pose is not None:
-                waypoint_xy = find_local_astar_waypoint(
+                waypoint_xy, astar_route = find_local_astar_waypoint(
                     init_p[:2], self.target_pose[:2], obstacle_mask, ESDF_map,
                     self.origin, self.resolution, self.robot.safety_radius,
                     self.local_astar_lookahead_dist,
                 )
                 if waypoint_xy is not None:
                     local_target = np.array([waypoint_xy[0], waypoint_xy[1], self.target_pose[2]])
+                    self.publish_astar_waypoint(waypoint_xy, init_p[2], depth_msg.header.stamp)
+                if astar_route:
+                    self.publish_astar_path(astar_route, init_p[2], depth_msg.header.stamp)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
