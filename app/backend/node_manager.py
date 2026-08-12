@@ -144,6 +144,10 @@ class BackendNode(Ros2NodeManager):
         self._map_pose: dict | None = None
         self._localized: bool = False
         self._reloc_seq: int = 0   # monotonic count of accepted relocalization fixes
+        # Last /map/reloc_status word. 'open_loop N' is the one that matters: the fix
+        # topic goes quiet there, so without this the UI cannot tell a stretch running
+        # uncorrected from one that simply has not expired yet.
+        self._reloc_status: str = ''
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
@@ -164,6 +168,7 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             Odometry, '/map/relocalization_fix', self._on_relocalization, 10
         )
+        self.create_subscription(String, '/map/reloc_status', self._on_reloc_status, 10)
         self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
         self.create_subscription(
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
@@ -303,6 +308,15 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = pose
             self._localized = True
             self._reloc_seq += 1
+
+    def _on_reloc_status(self, msg: String):
+        status = str(msg.data)
+        with self._lock:
+            self._reloc_status = status
+        if status.startswith('open_loop'):
+            self.get_logger().warning(
+                f'[reloc] running open-loop: {status.split(" ", 1)[-1]} relocalizations '
+                'in a row disagreed with the carried fix, so nothing was fused')
 
     def _on_on_stairs(self, msg: Bool):
         with self._lock:
@@ -616,6 +630,7 @@ class BackendNode(Ros2NodeManager):
             snapshot = {
                 'localized': self._localized,
                 'reloc_seq': self._reloc_seq,
+                'reloc_status': self._reloc_status,
                 'odom_pose': self._odom_pose,
                 'odom_pose_at_kf': self._odom_pose_at_kf,
                 'map_pose': self._map_pose,

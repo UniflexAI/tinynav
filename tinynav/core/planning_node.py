@@ -8,6 +8,7 @@ reverse gate.
 """
 
 import json
+import os
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
 from dataclasses import dataclass, fields as dataclass_fields
@@ -479,12 +480,20 @@ class PlanningNode(Node):
         # so a riser reads as a step, and only those cells do -- everything beside the
         # staircase keeps the strict default. Producer: core_runtime's PilotMapNode.
         # No message, or a stale stream, means no region, i.e. strict everywhere.
-        self.declare_parameter('climb_region_radius_m', 1.5)
+        # Both radius and span are deliberately small: a relaxed cell cannot see an
+        # obstacle shorter than the span, and the labels that open these regions are
+        # inferred from path z, which VIO drift fakes. Measured on n2n3-backward: 21
+        # labelled runs, 4 real, 61% of the route relaxed at radius 1.5. Env-overridable
+        # so the site can be retuned without a code edit.
+        self.declare_parameter('climb_region_radius_m',
+                               float(os.environ.get('TINYNAV_CLIMB_REGION_RADIUS_M', '0.75')))
         self._climb_region_cells = int(round(
             float(self.get_parameter('climb_region_radius_m').value) / self.resolution))
         self.declare_parameter('climb_region_ttl_s', 3.0)
         self._climb_region_ttl_ns = int(float(self.get_parameter('climb_region_ttl_s').value) * 1e9)
-        self.declare_parameter('climb_min_wall_span_m', 0.3)
+        # 0.2 keeps a ~0.15m riser reading as a step while a 0.2m+ obstacle survives.
+        self.declare_parameter('climb_min_wall_span_m',
+                               float(os.environ.get('TINYNAV_CLIMB_MIN_WALL_SPAN_M', '0.2')))
         self._climb_min_wall_span_m = float(self.get_parameter('climb_min_wall_span_m').value)
         self._climb_points = np.empty((0, 2))
         self._climb_stamp_ns = None
