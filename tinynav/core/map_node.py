@@ -472,6 +472,9 @@ class MapNode(Node):
         self.relocalization_threshold = 0.70
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 50
+        self.night_relocalization_min_match_count = 30
+        self.night_relocalization_min_landmark_count = 50
+        self.night_relocalization_min_inlier_count = 30
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
@@ -1414,6 +1417,7 @@ class MapNode(Node):
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None, current_odom_pose: np.ndarray | None = None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
+        min_match_count, min_landmark_count, min_inlier_count = self._get_relocalization_pnp_thresholds()
 
         # Prefer DINOv2 patch VLAD if the map has a VLAD vocabulary/index.
         # Fall back to SuperPoint BoW if available, then finally to DINO global embedding.
@@ -1478,23 +1482,23 @@ class MapNode(Node):
 
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
-                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+            if len(matches) < min_match_count:
+                print(f"not enough matched features to relocalize, {len(matches)} < {min_match_count}")
                 continue
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
-            if point_count <= 80:
-                print(f"not enough landmarks to relocalize, {point_count}")
+            if point_count <= min_landmark_count:
+                print(f"not enough landmarks to relocalize, {point_count} <= {min_landmark_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
         success, best_pose_in_camera, pose_cov_weight, best_candidate_index, best_inlier_count, best_point_count = rerank_by_pnp_inliers(
             pnp_candidates,
             self.map_K,
-            min_inlier_count=self.relocalization_min_inlier_count,
+            min_inlier_count=min_inlier_count,
         )
         if success:
             print(
@@ -1506,6 +1510,17 @@ class MapNode(Node):
 
         print("no valid PnP relocalization candidate found")
         return False, np.eye(4), -np.inf
+
+    def _get_relocalization_pnp_thresholds(self) -> tuple[int, int, int]:
+        now_hour = datetime.now().hour
+        is_night = now_hour >= 18 or now_hour < 6
+        if is_night:
+            return (
+                self.night_relocalization_min_match_count,
+                self.night_relocalization_min_landmark_count,
+                self.night_relocalization_min_inlier_count,
+            )
+        return 50, 80, self.relocalization_min_inlier_count
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
         point_in_camera = []
