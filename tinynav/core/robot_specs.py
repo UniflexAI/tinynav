@@ -87,7 +87,7 @@ G1_CONFIG = RobotConfig(
     min_linear_vel=0.2,min_angular_vel=0.3
 )
 
-ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
+ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
 try:
     ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
 except KeyError:
