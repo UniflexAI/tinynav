@@ -84,33 +84,6 @@ def matrix_to_quat(R):
     return np.array([qx, qy, qz, qw]) 
 
 # get rotation matrix from two vectors, so that R @ a = b
-def wrap_angle(a):
-    """Angle folded into (-pi, pi] — the shorter way round to a heading."""
-    return np.arctan2(np.sin(a), np.cos(a))
-
-
-def heading_of(rot):
-    """World heading (rad) of a rotation: its forward axis projected onto world XY.
-
-    THE yaw convention of this stack. Poses here are camera-convention (body +z is
-    forward), and the textbook quaternion-to-yaw formula is both wrong for that and
-    erratic under the pitch wobble of a walking gait — see the note in
-    app/backend/node_manager._odom_to_dict, which computes this same projection
-    straight from quaternion components. Planner, controller and map node all have to
-    agree on this or the robot faces a wall, so it lives in one place."""
-    fwd = np.asarray(rot)[:3, :3] @ np.array([0.0, 0.0, 1.0])
-    return float(np.arctan2(fwd[1], fwd[0]))
-
-
-def yaw_to_camera_rot(yaw):
-    """Rotation whose forward axis points along `yaw` in world XY — the inverse of
-    heading_of. Columns are [right, down, forward]."""
-    c, s = np.cos(yaw), np.sin(yaw)
-    return np.array([[s, 0.0, c],
-                     [-c, 0.0, s],
-                     [0.0, -1.0, 0.0]])
-
-
 def rot_from_two_vector(a, b):
     """Get rotation matrix that rotates vector a to vector b."""
     a = a / np.linalg.norm(a)
@@ -175,6 +148,24 @@ def tf2np(tf_msg:TransformStamped):
     T[:3, :3] = R.from_quat(quat).as_matrix()
     T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
     return tf_msg.header.frame_id, tf_msg.child_frame_id, T
+
+def wrap_angle(a):
+    """Angle folded into (-pi, pi] — the shorter way round to a heading."""
+    return np.arctan2(np.sin(a), np.cos(a))
+
+
+def heading_of(rot):
+    """World heading (rad) of a rotation: its forward axis projected onto world XY.
+
+    THE yaw convention of this stack. Poses here are camera-convention (body +z is
+    forward), and the textbook quaternion-to-yaw formula is both wrong for that and
+    erratic under the pitch wobble of a walking gait — see the note in
+    app/backend/node_manager._odom_to_dict, which computes this same projection
+    straight from quaternion components. Anything comparing a heading to a stored one
+    has to use this or the robot faces a wall, so it lives in one place."""
+    fwd = np.asarray(rot)[:3, :3] @ np.array([0.0, 0.0, 1.0])
+    return float(np.arctan2(fwd[1], fwd[0]))
+
 
 def msg2np(msg):
     T = np.eye(4)

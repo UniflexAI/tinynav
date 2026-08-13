@@ -9,30 +9,7 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
-from tinynav.core.math_utils import heading_of, wrap_angle
-from tinynav.core.planning_node import (GOAL_POSE_TOPIC, GOAL_POSE_TTL_S,
-                                        ROBOT_CONFIG_TOPIC, RobotConfig)
-
-# Near-goal law (see _near_goal_cmd). Fixed policy, not per-instance tuning.
-NEAR_GOAL_M = 0.6           # where the path follower stops being the better tool
-# ...but TRANSLATION only inside this, and only while the planner is alive. This node
-# subscribes to odometry, a path, a feedforward and a goal -- it has no ESDF, no
-# obstacle mask, no grid. It cannot see anything. Driving 0.6m at a goal pose on that
-# basis is driving blind, and a goal pose is only ever as good as T_from_map_to_odom,
-# which on these maps has been observed to move tens of metres on one bad fusion.
-# Everything beyond this radius is translated by the planner, which checks the ESDF.
-# What is left here needs no map: turning on the spot, and a last step shorter than
-# the robot's own footprint.
-NEAR_GOAL_DRIVE_M = 0.25
-NEAR_GOAL_POS_TOL_M = 0.10
-NEAR_GOAL_YAW_TOL = np.deg2rad(4.0)
-NEAR_GOAL_VX_MAX = 0.25
-NEAR_GOAL_OMEGA_MAX = 0.6
-NEAR_GOAL_KV = 0.8          # (m/s)/m
-NEAR_GOAL_KOMEGA = 1.2      # (rad/s)/rad
-# Drive only when roughly facing the goal: over half a metre there is no room to
-# correct a heading error by arcing.
-NEAR_GOAL_BEARING_TOL = np.deg2rad(25.0)
+from tinynav.core.planning_node import ROBOT_CONFIG_TOPIC, RobotConfig
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -127,22 +104,7 @@ class CmdVelControlNode(Node):
         self._forward_speed_cap_time = None
         self.forward_speed_cap_ttl_s = 2.0
 
-        # Near-goal state. Everything above this line steers by following a path: the
-        # yaw drift PI references the trajectory pose nearest the control center, and
-        # vx comes from the planner's feedforward. Close to the goal that reference
-        # stops being useful — the remaining path is shorter than its own decimation
-        # stride — so the endgame closes on the real remaining distance and angle.
-        self._goal_pose = None
-        self._goal_pose_time = None
-        self._goal_locked = False
-        self.create_subscription(Odometry, GOAL_POSE_TOPIC, self._goal_pose_callback, 10)
-
         self.latest_cmd = Twist()
-        # Whether the trajectory the planner selected ENDS on the goal pose, as
-        # opposed to merely being the best arc available (planning_node's angular.y).
-        # The endgame law stands down while one is being followed: it has been checked
-        # against the ESDF and this law has not.
-        self._ff_terminal = False
         self.path_vyaw_ff = 0.0
         self.is_backward_segment = False
         self.prev_cmd = Twist()
@@ -183,7 +145,6 @@ class CmdVelControlNode(Node):
         if was_active and not self._nav_active:
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
-            self._ff_terminal = False
             self.last_path_update_time = None
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
@@ -235,98 +196,6 @@ class CmdVelControlNode(Node):
         best_i = int(np.argmin(d2))
         return float(self._path_pose_yaw[best_i])
 
-    def _goal_pose_callback(self, msg):
-        T = self._pose_to_T(msg.pose)
-        if self._goal_pose is not None and not np.allclose(T, self._goal_pose, atol=0.05):
-            self._goal_locked = False   # a different goal: this one is not done yet
-        self._goal_pose = T
-        self._goal_pose_time = time.monotonic()
-
-    def _goal_error(self):
-        """(distance, bearing error, heading error) from the control center to the
-        goal, or None when there is no live goal / pose.
-
-        All three at the control center, which is what the body actually parks: the
-        camera sits ~0.3m ahead of it, so closing on the camera's numbers would leave
-        the body short by exactly that, and a turn would then swing the camera off
-        again. Bearing is where the goal is; heading is which way it wants us facing —
-        the same distinction that makes the last stretch drive-then-turn."""
-        if (self.pose is None or self._goal_pose is None
-                or self._goal_pose_time is None
-                or time.monotonic() - self._goal_pose_time > GOAL_POSE_TTL_S):
-            return None
-        ctrl = self._pose_to_T(self.pose.pose) @ self.T_camera_to_control
-        goal = self._goal_pose @ self.T_camera_to_control
-        d = goal[:2, 3] - ctrl[:2, 3]
-        here = heading_of(ctrl)
-        return (float(np.hypot(d[0], d[1])),
-                float(wrap_angle(np.arctan2(d[1], d[0]) - here)),
-                float(wrap_angle(heading_of(goal) - here)))
-
-    def _near_goal_cmd(self, planner_live: bool = True):
-        """The endgame target (vx, omega), or None to leave the path follower alone.
-
-        Two jobs the path follower cannot do. Getting ONTO the goal: it only ever
-        arrives near one, because its yaw reference is the trajectory pose nearest the
-        control center and the remaining path down here is shorter than its own
-        decimation stride. And STAYING there: a proportional law alone sits at its goal
-        making ever-smaller corrections that the executable-speed floors round straight
-        back up to the floor, which is a robot that never stops shuffling — hence the
-        latch, released only at twice the tolerance so a dithering pose cannot restart
-        the manoeuvre.
-
-        It does NOT take over from a planner that is already delivering. A terminal
-        trajectory ends on this same goal and has been checked against the ESDF, which
-        this law has not; while one is selected and there is still ground to cover, it
-        is the better command. The handover is at the position tolerance — inside a
-        10cm circle there is nothing left to avoid, and the latch has to live
-        somewhere. Returns a target for the shared output stage, which owns the
-        acceleration limit and the executable-speed floors."""
-        err = self._goal_error()
-        if err is None or err[0] > NEAR_GOAL_M:
-            self._goal_locked = False
-            return None
-        dist, bearing_err, heading_err = err
-
-        if self._goal_locked:
-            if (dist <= NEAR_GOAL_POS_TOL_M * 2 and
-                    abs(heading_err) <= NEAR_GOAL_YAW_TOL * 2):
-                return Twist()          # still there: hold, do not re-converge
-            self._goal_locked = False
-
-        cmd = Twist()
-        if dist > NEAR_GOAL_POS_TOL_M:
-            if self._ff_terminal:
-                return None             # the planner is driving us there; let it
-            # Translating outside NEAR_GOAL_DRIVE_M is not ours -- this node has no ESDF.
-            # HAND BACK rather than stand down in place: declining to drive and declining
-            # to yield are different things, and conflating them is a deadlock. Returning
-            # a zero-vx command here still REPLACES the path follower (see the caller), so
-            # the planner's perfectly good `sel vx=0.31` gets thrown away and the robot
-            # sits turning on the spot forever. Measured on 65: parked 0.313m from POI 2,
-            # inside the 0.6m takeover and outside the 0.25m drive radius, with the
-            # planner asking to move the whole time.
-            if dist > NEAR_GOAL_DRIVE_M and planner_live:
-                return None             # the planner can see; let it cover the ground
-            # Only reached with the planner gone quiet: nothing else is going to act, so
-            # aim -- and still refuse to translate from out here, blind.
-            may_drive = planner_live
-            # Rotate-first in miniature: driving while badly misaligned over half a
-            # metre lands somewhere else entirely, and there is no room to correct.
-            cmd.linear.x = (0.0 if (not may_drive
-                                    or abs(bearing_err) > NEAR_GOAL_BEARING_TOL)
-                            else float(np.clip(NEAR_GOAL_KV * dist, 0.0, NEAR_GOAL_VX_MAX)))
-            turn = NEAR_GOAL_KOMEGA * bearing_err
-        elif abs(heading_err) > NEAR_GOAL_YAW_TOL:
-            turn = NEAR_GOAL_KOMEGA * heading_err
-        else:
-            self._goal_locked = True
-            self.logger.info(
-                f"goal reached: {dist:.2f}m, {np.rad2deg(heading_err):+.1f}deg")
-            return Twist()
-        cmd.angular.z = float(np.clip(turn, -NEAR_GOAL_OMEGA_MAX, NEAR_GOAL_OMEGA_MAX))
-        return cmd
-
     def cmd_timer_callback(self):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
@@ -344,82 +213,61 @@ class CmdVelControlNode(Node):
         age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
         stale_slow_s = max(self.path_stale_slow_s, self.path_period_ema * self.path_stale_slow_factor)
         stale_stop_s = max(self.path_stale_stop_s, self.path_period_ema * self.path_stale_stop_factor)
-        # A terminal selection is only a reason to stand down while the planner is
-        # still making them. velocity_ff and the path come from the same cycle, so a
-        # stale path means the flag is stale too -- and believing it then would leave
-        # the endgame deferring forever to a planner that has stopped.
-        if age > stale_stop_s:
-            self._ff_terminal = False
-
-        # Endgame: where it applies it replaces the path follower rather than
-        # correcting it. Evaluated before the stale guards attenuate anything -- it
-        # does not consume the path, so a quiet planner is no reason to stop turning
-        # to a goal we can see directly. It may not TRANSLATE on a dead planner
-        # though: the guards exist because nothing else here knows what is ahead.
-        # It still falls through to the shared output stage below for acceleration
-        # limiting and the speed floors.
-        near = self._near_goal_cmd(planner_live=age <= stale_stop_s)
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
 
-        if near is not None:
-            # The endgame owns steering outright: the drift PI references a path
-            # pose, rotate-first gates on the planner's omega, and the stale guards
-            # attenuate a path -- none of which this command came from.
-            target_cmd = near
-        else:
-            # Yaw = planner feedforward omega minus the learned per-device yaw bias, where
-            # the bias is integrated from the heading drift (measured vs plan-intended).
-            intended_yaw = self._path_intended_yaw()
-            actual_yaw = self._actual_yaw()
-            vx_now = float(self.latest_cmd.linear.x)
-            # rad/m bias -> rad/s correction at the current speed; zero when stopped.
-            bias_rate = self._yaw_bias_per_m * vx_now if vx_now > self.yaw_bias_min_vx else 0.0
-            if intended_yaw is not None and actual_yaw is not None:
-                drift = float(np.arctan2(np.sin(actual_yaw - intended_yaw),
-                                         np.cos(actual_yaw - intended_yaw)))
-                # Low-pass the raw drift before it feeds P/I (see drift_filter_tau).
-                if self._drift_lp is None:
-                    self._drift_lp = drift
-                else:
-                    a = dt / (self.drift_filter_tau + dt)
-                    self._drift_lp += a * (drift - self._drift_lp)
-                # Learn the bias only on straight, non-backward segments moving fast enough
-                # that vx is a reliable divisor (windup guard). "straight" also implies fresh,
-                # since path_vyaw_ff comes from the latest path. Integrate in rad/m: divide the
-                # rad/s drift update by vx so the estimate is speed-independent.
-                straight = abs(self.path_vyaw_ff) < self.straight_ff_threshold
-                if straight and not self.is_backward_segment and vx_now > self.yaw_bias_min_vx:
-                    self._yaw_bias_per_m += self.yaw_bias_ki * self._drift_lp * dt / vx_now
-                    self._yaw_bias_per_m = float(np.clip(self._yaw_bias_per_m,
-                                                         -self.yaw_bias_limit, self.yaw_bias_limit))
-                vyaw = self.path_vyaw_ff - (self.yaw_kp * self._drift_lp + bias_rate)
+        # Yaw = planner feedforward omega minus the learned per-device yaw bias, where
+        # the bias is integrated from the heading drift (measured vs plan-intended).
+        intended_yaw = self._path_intended_yaw()
+        actual_yaw = self._actual_yaw()
+        vx_now = float(self.latest_cmd.linear.x)
+        # rad/m bias -> rad/s correction at the current speed; zero when stopped.
+        bias_rate = self._yaw_bias_per_m * vx_now if vx_now > self.yaw_bias_min_vx else 0.0
+        if intended_yaw is not None and actual_yaw is not None:
+            drift = float(np.arctan2(np.sin(actual_yaw - intended_yaw),
+                                     np.cos(actual_yaw - intended_yaw)))
+            # Low-pass the raw drift before it feeds P/I (see drift_filter_tau).
+            if self._drift_lp is None:
+                self._drift_lp = drift
             else:
-                # No path/pose yet: feedforward minus the bias learned so far.
-                self._drift_lp = None
-                vyaw = self.path_vyaw_ff - bias_rate
-            target_cmd.angular.z = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
+                a = dt / (self.drift_filter_tau + dt)
+                self._drift_lp += a * (drift - self._drift_lp)
+            # Learn the bias only on straight, non-backward segments moving fast enough
+            # that vx is a reliable divisor (windup guard). "straight" also implies fresh,
+            # since path_vyaw_ff comes from the latest path. Integrate in rad/m: divide the
+            # rad/s drift update by vx so the estimate is speed-independent.
+            straight = abs(self.path_vyaw_ff) < self.straight_ff_threshold
+            if straight and not self.is_backward_segment and vx_now > self.yaw_bias_min_vx:
+                self._yaw_bias_per_m += self.yaw_bias_ki * self._drift_lp * dt / vx_now
+                self._yaw_bias_per_m = float(np.clip(self._yaw_bias_per_m,
+                                                     -self.yaw_bias_limit, self.yaw_bias_limit))
+            vyaw = self.path_vyaw_ff - (self.yaw_kp * self._drift_lp + bias_rate)
+        else:
+            # No path/pose yet: feedforward minus the bias learned so far.
+            self._drift_lp = None
+            vyaw = self.path_vyaw_ff - bias_rate
+        target_cmd.angular.z = float(np.clip(vyaw, -self.max_angular_speed, self.max_angular_speed))
 
-            # Rotate-first, ahead of the stale guards: those only ever attenuate, so they
-            # must run last. Gated on the planner's UNCLAMPED omega (path_vyaw_raw), not the
-            # clamped path_vyaw_ff -- the clamp sits at max_angular_speed, below this
-            # threshold, so gating on the clamped value would make this unreachable. Reverse
-            # is excluded (the fixed-speed vocabulary owns its own heading). Replaces the
-            # drift-PI yaw outright: turning in place covers no distance for a per-metre
-            # bias to apply over, and bias learning is already gated off below
-            # yaw_bias_min_vx.
-            if (target_cmd.linear.x > 0.0 and not self.is_backward_segment
-                    and abs(self.path_vyaw_raw) > self.rotate_first_omega):
-                target_cmd.linear.x = 0.0
-                target_cmd.angular.z = float(np.copysign(self.rotate_first_max_omega,
-                                                         self.path_vyaw_raw))
+        # Rotate-first, ahead of the stale guards: those only ever attenuate, so they
+        # must run last. Gated on the planner's UNCLAMPED omega (path_vyaw_raw), not the
+        # clamped path_vyaw_ff -- the clamp sits at max_angular_speed, below this
+        # threshold, so gating on the clamped value would make this unreachable. Reverse
+        # is excluded (the fixed-speed vocabulary owns its own heading). Replaces the
+        # drift-PI yaw outright: turning in place covers no distance for a per-metre
+        # bias to apply over, and bias learning is already gated off below
+        # yaw_bias_min_vx.
+        if (target_cmd.linear.x > 0.0 and not self.is_backward_segment
+                and abs(self.path_vyaw_raw) > self.rotate_first_omega):
+            target_cmd.linear.x = 0.0
+            target_cmd.angular.z = float(np.copysign(self.rotate_first_max_omega,
+                                                     self.path_vyaw_raw))
 
-            if age > stale_stop_s:
-                target_cmd.linear.x = 0.0
-                target_cmd.angular.z = 0.0
-            elif age > stale_slow_s:
-                target_cmd.linear.x *= 0.3
-                target_cmd.angular.z *= 0.5
+        if age > stale_stop_s:
+            target_cmd.linear.x = 0.0
+            target_cmd.angular.z = 0.0
+        elif age > stale_slow_s:
+            target_cmd.linear.x *= 0.3
+            target_cmd.angular.z *= 0.5
 
         out = Twist()
 
@@ -495,7 +343,6 @@ class CmdVelControlNode(Node):
         # planner (angular.x) rather than inferred from the sign of vx -- a real Twist
         # can legitimately have vx<0 with nonzero omega (reversing while turning).
         is_backward_segment = bool(msg.angular.x)
-        self._ff_terminal = bool(msg.angular.y)
         if is_backward_segment:
             vx = -self.fixed_reverse_speed
         else:
