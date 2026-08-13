@@ -186,6 +186,7 @@ class RosPlanningSimNode(Node):
         self.last_path: list[list[float]] = []
         self.last_footprint: list[list[float]] = []
         self.last_obstacle_mask: dict[str, Any] | None = None
+        self.last_esdf_grid: dict[str, Any] | None = None
         self.running = True
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
@@ -201,6 +202,7 @@ class RosPlanningSimNode(Node):
         self.create_subscription(RosPath, "/planning/trajectory_path", self.path_callback, 10)
         self.create_subscription(PointCloud, "/planning/footprint", self.footprint_callback, 10)
         self.create_subscription(OccupancyGrid, "/planning/obstacle_mask", self.obstacle_callback, 10)
+        self.create_subscription(OccupancyGrid, "/planning/occupancy_grid", self.esdf_callback, 10)
 
         self.timer = self.create_timer(1.0 / 8.0, self.tick)
 
@@ -212,6 +214,9 @@ class RosPlanningSimNode(Node):
                 self.yaw_deg = float(self.config.get("start", {}).get("yaw_deg", 0.0))
                 self.last_cmd = Twist()
                 self.last_path = []
+                self.last_footprint = []
+                self.last_obstacle_mask = None
+                self.last_esdf_grid = None
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -239,6 +244,19 @@ class RosPlanningSimNode(Node):
                 "width": int(u8.shape[1]),
                 "height": int(u8.shape[0]),
                 "data": u8.ravel().tolist(),
+                "origin": [float(msg.info.origin.position.x), float(msg.info.origin.position.y)],
+                "resolution": float(msg.info.resolution),
+            }
+
+    def esdf_callback(self, msg: OccupancyGrid) -> None:
+        data = np.asarray(msg.data, dtype=np.int16).reshape((msg.info.width, msg.info.height), order="F")
+        risk = np.clip(data, 0, 120).astype(np.float32) / 120.0
+        clearance_u8 = np.round((1.0 - risk) * 255.0).astype(np.uint8)
+        with self.lock:
+            self.last_esdf_grid = {
+                "width": int(clearance_u8.shape[1]),
+                "height": int(clearance_u8.shape[0]),
+                "data": clearance_u8.ravel().tolist(),
                 "origin": [float(msg.info.origin.position.x), float(msg.info.origin.position.y)],
                 "resolution": float(msg.info.resolution),
             }
@@ -328,6 +346,7 @@ class RosPlanningSimNode(Node):
                 "obstacle_cells": int(sum(1 for v in (self.last_obstacle_mask or {}).get("data", []) if v)),
                 "depth_u8": image_u8_payload(self.last_depth, 0.0, float(cam["max_range"])),
                 "obstacle_u8": self.last_obstacle_mask,
+                "esdf_u8": self.last_esdf_grid,
                 "next_start": {"xy": [float(self.control_xy[0]), float(self.control_xy[1])], "yaw_deg": float(self.yaw_deg)},
             }
 

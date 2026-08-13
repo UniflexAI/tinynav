@@ -163,10 +163,9 @@ function drawScene() {
   drawRealtimeOverlay();
 }
 
-function gridCellToCanvasRect(ix, iy, width, height) {
-  const grid = config.grid;
-  const resolution = Number(grid.resolution);
-  const origin = grid.origin;
+function gridCellToCanvasRect(payload, ix, iy) {
+  const resolution = Number(payload.resolution);
+  const origin = payload.origin;
   const x0 = origin[0] + ix * resolution;
   const y0 = origin[1] + iy * resolution;
   const x1 = origin[0] + (ix + 1) * resolution;
@@ -177,14 +176,14 @@ function gridCellToCanvasRect(ix, iy, width, height) {
 }
 
 function esdfColor(value, obstacleValue) {
-  const d = Math.max(0, Math.min(1, value / 255));
+  const clearance = Math.max(0, Math.min(1, value / 255));
   if (obstacleValue > 0) return "rgba(239, 68, 68, 0.62)";
-  if (d < 0.18) {
-    const t = d / 0.18;
+  if (clearance < 0.18) {
+    const t = clearance / 0.18;
     return `rgba(${Math.round(249 - 80 * t)}, ${Math.round(115 + 80 * t)}, ${Math.round(22 + 20 * t)}, 0.46)`;
   }
-  if (d < 0.45) {
-    const t = (d - 0.18) / 0.27;
+  if (clearance < 0.45) {
+    const t = (clearance - 0.18) / 0.27;
     return `rgba(${Math.round(169 - 80 * t)}, ${Math.round(195 + 35 * t)}, ${Math.round(42 + 85 * t)}, 0.28)`;
   }
   return "rgba(15, 22, 33, 0.10)";
@@ -201,12 +200,36 @@ function drawEsdfSceneOverlay() {
       const value = esdf.data[idx];
       const obstacleValue = obstacle[idx] || 0;
       if (value > 150 && obstacleValue === 0) continue;
-      const [x, y, w, h] = gridCellToCanvasRect(ix, iy, esdf.width, esdf.height);
+      const [x, y, w, h] = gridCellToCanvasRect(esdf, ix, iy);
       ctx.fillStyle = esdfColor(value, obstacleValue);
       ctx.fillRect(x, y, Math.max(w, 1), Math.max(h, 1));
     }
   }
+  drawEsdfLegend();
   ctx.restore();
+}
+
+function drawEsdfLegend() {
+  const x = canvas.width - 178;
+  const y = 16;
+  ctx.fillStyle = "rgba(255,255,255,0.88)";
+  ctx.fillRect(x, y, 154, 58);
+  ctx.fillStyle = "#17202a";
+  ctx.font = "12px system-ui";
+  ctx.fillText("ESDF clearance", x + 12, y + 18);
+  const colors = [
+    "rgba(239, 68, 68, 0.72)",
+    "rgba(249, 115, 22, 0.62)",
+    "rgba(89, 230, 127, 0.36)",
+    "rgba(15, 22, 33, 0.14)",
+  ];
+  colors.forEach((color, index) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(x + 12 + index * 30, y + 28, 30, 12);
+  });
+  ctx.fillStyle = "#5c6975";
+  ctx.fillText("near", x + 12, y + 53);
+  ctx.fillText("clear", x + 106, y + 53);
 }
 
 function drawPath(points, color, width, alpha = 1) {
@@ -309,7 +332,8 @@ function drawRealtimeFrame(frame) {
   currentFrame = frame;
   drawU8Canvas(depthCanvas, depthCtx, frame.depth_u8, "depth");
   drawScene();
-  diagnosticNote.textContent = `Realtime depth updates here; ESDF is fused into the scene. Valid trajectories: ${frame.valid_trajectories}, clearance: ${Number(frame.front_clearance).toFixed(2)}m, reverse: ${frame.selected_is_reverse ? "selected" : frame.should_reverse ? "gated" : "no"}, recovery: ${frame.recovery_reason || "normal"}.`;
+  const esdfState = frame.esdf_u8 ? "ESDF live" : "waiting for ESDF";
+  diagnosticNote.textContent = `${esdfState}; depth updates here. Valid trajectories: ${frame.valid_trajectories}, clearance: ${Number(frame.front_clearance).toFixed(2)}m, reverse: ${frame.selected_is_reverse ? "selected" : frame.should_reverse ? "gated" : "no"}, recovery: ${frame.recovery_reason || "normal"}.`;
 }
 
 function drawHeadingArrow(drawCtx, mapper, xy, yawDeg, color, length = 0.45) {
