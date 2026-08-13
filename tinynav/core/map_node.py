@@ -417,6 +417,7 @@ class MapNode(Node):
         tinynav_map_path: str,
         verbose_timer: bool = True,
         enable_first_done: bool = False,
+        initial_map_to_odom_transform_path: str | None = None,
     ):
         """Initialization
 
@@ -425,6 +426,9 @@ class MapNode(Node):
             tinynav_map_path (str): Directory to load the pre-built map.
             verbose_timer (bool): Whether to use verbose timer output.
             enable_first_done (bool): If true, stop keyframe relocalization after the first success.
+            initial_map_to_odom_transform_path (str | None): Path to a .npy 4x4
+                T_from_map_to_odom to seed this session with (map handoff), instead of
+                waiting for a fresh cold relocalization/RTK fix.
         """
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
@@ -585,6 +589,17 @@ class MapNode(Node):
         self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
+        # Map-handoff seeding: publish one /map/relocalization the moment we have an odom
+        # pose to pair it with (see continuous_odom_callback), instead of waiting for a real
+        # relocalization -- node_manager's _on_relocalization sets its own _localized=True
+        # off that same topic, so this needs no other changes to how "localized" is tracked.
+        self._seed_map_to_odom_pending = False
+        if initial_map_to_odom_transform_path is not None:
+            self.T_from_map_to_odom = np.load(initial_map_to_odom_transform_path)
+            self._seed_map_to_odom_pending = True
+            self.get_logger().info(
+                f"Seeded T_from_map_to_odom from {initial_map_to_odom_transform_path} for map handoff"
+            )
         self._rtk_yaw_offset = None   # map<-odom yaw offset, locked once on first RTK fix
         # RTK replace mode only: stateless xy -> map-frame z lookup over the map keyframes.
         self._rtk_kf_xy = None
@@ -1118,6 +1133,12 @@ class MapNode(Node):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
         self.latest_odom_pose, _ = msg2np(odom_msg)
         self.latest_odom_stamp_msg = odom_msg.header.stamp
+        if self._seed_map_to_odom_pending:
+            self._seed_map_to_odom_pending = False
+            pose_in_world = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
+            self.relocation_pub.publish(np2msg(pose_in_world, self.latest_odom_stamp_msg, "world", "camera"))
+            self.first_done = True
+            self.get_logger().info(f"Published seeded map-handoff pose: xyz={pose_in_world[:3, 3]}")
 
     def rtk_init_status_callback(self, msg: String):
         if self.rtk_mode != "replace":
@@ -2298,11 +2319,23 @@ def main(args=None):
         default=False,
         help="Skip keyframe relocalization after the first successful relocalization",
     )
+    parser.add_argument(
+        "--initial_map_to_odom_transform",
+        type=str,
+        default=None,
+        help=(
+            "Path to a .npy 4x4 T_from_map_to_odom to seed this session with (map handoff "
+            "between two calibrated-adjacent maps), instead of waiting for a fresh cold "
+            "relocalization/RTK fix. See app/backend/node_manager.py's "
+            "_maybe_seed_map_handoff."
+        ),
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
                    verbose_timer=parsed_args.verbose_timer,
-                   enable_first_done=parsed_args.enable_first_done)
+                   enable_first_done=parsed_args.enable_first_done,
+                   initial_map_to_odom_transform_path=parsed_args.initial_map_to_odom_transform)
 
     rclpy.spin(node)
     node.destroy_node()
