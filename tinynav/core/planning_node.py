@@ -727,7 +727,8 @@ class PlanningNode(Node):
         """The FINAL goal pose, published only while the current POI is the last one
         and carries a heading. Held with a freshness window rather than cleared by a
         sentinel: map_node retracts it by ceasing to publish."""
-        self.goal_pose = msg2np(msg)
+        # msg2np returns (T, stamp) -- keep the matrix, the freshness stamp is ours.
+        self.goal_pose, _ = msg2np(msg)
         self._goal_pose_stamp_ns = self.get_clock().now().nanoseconds
 
     def _fresh_goal_pose(self):
