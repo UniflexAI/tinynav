@@ -26,6 +26,7 @@ from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
+from tinynav.core.robot_specs import ROBOT_CONFIG
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
@@ -715,7 +716,7 @@ class MapNode(Node):
             "estimated_remaining_s": round(estimated_remaining_s, 1),
         })))
 
-        max_speed = 0.5
+        max_speed = ROBOT_CONFIG.max_linear_vel
         accumulated_distance = 0.0
         start_point = pos[:3]
         target_position = paths[-1]
