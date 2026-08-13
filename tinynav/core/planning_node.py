@@ -546,6 +546,10 @@ class PlanningNode(Node):
             [[p.x, p.y] for p in msg.points], dtype=np.float64).reshape(-1, 2)
         self._climb_stamp_ns = self.get_clock().now().nanoseconds
 
+    def _postprocess_obstacle_mask(self, obstacle_mask, T):
+        """Subclass seam: extra keepouts merged into the mask before ESDF."""
+        return obstacle_mask
+
     def _min_span_map(self, origin, resolution, shape):
         """Per-cell min_wall_span_m for build_obstacle_map, or None for the strict
         default everywhere -- which is also what a missing or stale region gives.
@@ -805,6 +809,7 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
             )
+            obstacle_mask = self._postprocess_obstacle_mask(obstacle_mask, T)
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
