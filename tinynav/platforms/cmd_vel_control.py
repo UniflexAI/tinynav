@@ -298,11 +298,19 @@ class CmdVelControlNode(Node):
         if dist > NEAR_GOAL_POS_TOL_M:
             if self._ff_terminal:
                 return None             # the planner is driving us there; let it
-            # Turning is always ours -- it needs no map. Translating is not: outside
-            # NEAR_GOAL_DRIVE_M, or with the planner gone quiet, we point at the goal
-            # and let something that can see obstacles cover the ground. Standing
-            # still is a recoverable failure; driving blind is the other kind.
-            may_drive = planner_live and dist <= NEAR_GOAL_DRIVE_M
+            # Translating outside NEAR_GOAL_DRIVE_M is not ours -- this node has no ESDF.
+            # HAND BACK rather than stand down in place: declining to drive and declining
+            # to yield are different things, and conflating them is a deadlock. Returning
+            # a zero-vx command here still REPLACES the path follower (see the caller), so
+            # the planner's perfectly good `sel vx=0.31` gets thrown away and the robot
+            # sits turning on the spot forever. Measured on 65: parked 0.313m from POI 2,
+            # inside the 0.6m takeover and outside the 0.25m drive radius, with the
+            # planner asking to move the whole time.
+            if dist > NEAR_GOAL_DRIVE_M and planner_live:
+                return None             # the planner can see; let it cover the ground
+            # Only reached with the planner gone quiet: nothing else is going to act, so
+            # aim -- and still refuse to translate from out here, blind.
+            may_drive = planner_live
             # Rotate-first in miniature: driving while badly misaligned over half a
             # metre lands somewhere else entirely, and there is no room to correct.
             cmd.linear.x = (0.0 if (not may_drive
