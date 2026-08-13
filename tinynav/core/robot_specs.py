@@ -87,8 +87,26 @@ G1_CONFIG = RobotConfig(
     min_linear_vel=0.2,min_angular_vel=0.3
 )
 
-ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
+SUPPORTED_ROBOT_TYPES = sorted(
+    name[: -len("_CONFIG")].lower()
+    for name, value in list(globals().items())
+    if name.endswith("_CONFIG") and isinstance(value, RobotConfig)
+)
+
+ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "").strip().lower()
+if not ROBOT_TYPE:
+    raise RuntimeError(
+        "ROBOT_TYPE environment variable is not set, so the robot geometry and "
+        "velocity limits are unknown.\n"
+        f"Set it to one of: {', '.join(SUPPORTED_ROBOT_TYPES)}\n"
+        "  e.g. ROBOT_TYPE=go2 uv run python tinynav/core/planning_node.py\n"
+        "Docker deployments set this in the compose environment; when running "
+        "the nodes directly you need to export it yourself."
+    )
 try:
     ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
 except KeyError:
-    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
+    raise ValueError(
+        f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}. "
+        f"Supported values are: {', '.join(SUPPORTED_ROBOT_TYPES)}"
+    ) from None
