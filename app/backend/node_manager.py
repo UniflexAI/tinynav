@@ -958,12 +958,51 @@ class BackendNode(Ros2NodeManager):
         )
         self.get_logger().info(f'Map handoff lookat {"finished" if ok else "continued after timeout"}')
 
+    def _maybe_seed_map_handoff(
+        self, source_map: str, target_map: str, T_source_to_odom_live: np.ndarray | None,
+    ) -> str | None:
+        """If a calibrated map_handoff_from_<source_map>.json edge exists inside the target
+        map's own directory (see tool/calibrate_map_transform.py), compute a seed
+        T_from_map_to_odom for the target map and write it to a temp file map_node.py can be
+        launched with, so nav on the target map doesn't wait on a fresh cold relocalization.
+        Returns None (map_node falls back to its normal cold-start behavior) if there's no
+        edge for this map pair, or if we don't have a live source-map pose to seed from.
+        """
+        if T_source_to_odom_live is None:
+            self.get_logger().warning(
+                f'Map handoff {source_map}->{target_map}: no live source-map pose available, '
+                'target map will cold-start relocalization as usual'
+            )
+            return None
+        edge_path = os.path.join(self.tinynav_db_path, 'maps', target_map, f'map_handoff_from_{source_map}.json')
+        if not os.path.exists(edge_path):
+            return None
+        try:
+            with open(edge_path) as f:
+                edge = json.load(f)
+            source_to_target = np.array(edge['mapA_to_mapB'])
+            T_target_to_odom_seed = T_source_to_odom_live @ np.linalg.inv(source_to_target)
+        except Exception as exc:
+            self.get_logger().error(f'Map handoff {source_map}->{target_map}: failed to apply edge {edge_path}: {exc}')
+            return None
+        seed_path = f'/tmp/map_handoff_seed_{source_map}_to_{target_map}.npy'
+        np.save(seed_path, T_target_to_odom_seed)
+        self.get_logger().info(
+            f'Map handoff {source_map}->{target_map}: seeded T_from_map_to_odom from {edge_path} -> {seed_path}'
+        )
+        return seed_path
+
     def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
         target_map = rule['target_map']
         poi_list = rule['poi_list']
         self.get_logger().info(
             f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
         )
+        # Snapshot the live source-map localization NOW, before cmd_stop_nav_nodes/
+        # _set_active_map_link tear down this session's state below -- this is the one
+        # (map_pose, odom_pose) pair we have to seed the target map's T_from_map_to_odom
+        # with, if a calibrated edge exists for this map pair (see _maybe_seed_map_handoff).
+        T_source_to_odom_live = self._compute_live_map_to_odom()
         try:
             lookat = rule.get('lookat')
             if lookat is not None:
@@ -1005,7 +1044,8 @@ class BackendNode(Ros2NodeManager):
                 # Give the device time to apply the ZUPT change before restarting nav nodes.
                 time.sleep(3)
 
-            self.cmd_start_nav_nodes()
+            seed_transform_path = self._maybe_seed_map_handoff(source_map, target_map, T_source_to_odom_live)
+            self.cmd_start_nav_nodes(initial_map_to_odom_transform_path=seed_transform_path)
 
             if not self._wait_for_map_handoff_localization(target_map):
                 self.state = 'idle'
@@ -1290,6 +1330,29 @@ class BackendNode(Ros2NodeManager):
             [    2*(qx*qy + qw*qz), 1 - 2*(qx*qx + qz*qz),     2*(qy*qz - qw*qx)],
             [    2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx), 1 - 2*(qx*qx + qy*qy)],
         ])
+
+    @classmethod
+    def _pose_dict_to_matrix(cls, pose: dict) -> np.ndarray:
+        T = np.eye(4)
+        T[:3, :3] = cls._quat_to_rot(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
+        T[:3, 3] = [pose['x'], pose['y'], pose['z']]
+        return T
+
+    def _compute_live_map_to_odom(self) -> np.ndarray | None:
+        """T_from_map_to_odom for the CURRENTLY active map, from whatever pose_in_map and
+        pose_in_odom this session has already observed -- used to seed the next map at a
+        handoff (see _run_map_handoff) instead of that map waiting on a fresh cold
+        relocalization. _odom_pose_at_kf is odom frozen at the same keyframe _map_pose came
+        from (see _on_pose_in_map), so the pair is already time-synchronized.
+        """
+        with self._lock:
+            map_pose = self._map_pose
+            odom_pose = self._odom_pose_at_kf or self._odom_pose
+        if map_pose is None or odom_pose is None:
+            return None
+        pose_in_map = self._pose_dict_to_matrix(map_pose)
+        pose_in_odom = self._pose_dict_to_matrix(odom_pose)
+        return pose_in_odom @ np.linalg.inv(pose_in_map)
 
     def _transform_path_via_tf(self, path: list) -> list:
         """Transform map-frame path points to odom (world) frame via TF lookup."""
@@ -1770,7 +1833,7 @@ class BackendNode(Ros2NodeManager):
     # Nav nodes toggle                                                     #
     # ------------------------------------------------------------------ #
 
-    def cmd_start_nav_nodes(self):
+    def cmd_start_nav_nodes(self, initial_map_to_odom_transform_path: str | None = None):
         self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -1780,6 +1843,8 @@ class BackendNode(Ros2NodeManager):
         ]
         if self._load_nav_flow_enable_first_done():
             map_node_cmd.append('--enable_first_done')
+        if initial_map_to_odom_transform_path is not None:
+            map_node_cmd += ['--initial_map_to_odom_transform', initial_map_to_odom_transform_path]
         # Decide RTK mode once here, matching MapNode which also decides once at
         # its own startup -- neither side re-checks this while nav is running.
         self._nav_rtk_mode = self._load_nav_flow_rtk_mode()
