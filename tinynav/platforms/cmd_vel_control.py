@@ -20,8 +20,16 @@ from tinynav.core.planning_node import ROBOT_CONFIG_TOPIC, RobotConfig
 # `sel vx=0.31` being thrown away every cycle. There is no takeover boundary here, so
 # there is nothing to fall between.
 FINAL_DECEL_RADIUS_M = 1.0      # taper vx linearly to zero across this
-FINAL_DECEL_ANGLE = np.deg2rad(60.0)   # inside this, drive vyaw off the true yaw error
+# ...and the same radius decides who owns the heading. DISTANCE, not angle: gating the
+# yaw law on "the error is already small" assumes the approach direction and the
+# authored heading roughly agree, and when they do not it never engages at all. Measured
+# on 65: parked 0.083m from the POI needing 110deg, which sat outside a 60deg engage
+# gate, so nothing turned and nothing ever would -- vx was already tapered to zero and
+# the path was spent. On the goal, the path has nothing left to say about heading.
 FINAL_TURN_KP = 1.2             # (rad/s)/rad
+# Above this much heading error, turn in place instead of also driving: a hard swing
+# taken while still closing arcs the robot off the point it is trying to land on.
+FINAL_TURN_ONLY_ANGLE = np.deg2rad(60.0)
 # Stop/resume pairs, not single thresholds: a proportional law parked on its goal makes
 # ever-smaller corrections that the executable-speed floors round straight back up, so
 # without hysteresis the robot shuffles forever.
@@ -251,10 +259,14 @@ class CmdVelControlNode(Node):
         run as a modifier: at any distance the path follower is still steering, and this
         only decides how fast to close and how hard to turn.
 
-        vx tapers linearly to zero across FINAL_DECEL_RADIUS_M. vyaw switches from the
-        path's (lagging) turn rate to a proportional law on the TRUE heading error once
-        inside FINAL_DECEL_ANGLE -- the path rate is derived from a decimated trajectory
-        and overshoots the goal heading by a stale cycle's worth of turn.
+        Both are gated on DISTANCE. Inside FINAL_DECEL_RADIUS_M vx tapers linearly to
+        zero and vyaw switches from the path's (lagging) turn rate to a proportional law
+        on the TRUE heading error -- the path rate comes from a decimated trajectory and
+        overshoots the goal heading by a stale cycle's worth of turn, and on the goal
+        itself the path has nothing left to say about heading at all.
+
+        A big correction turns in place (FINAL_TURN_ONLY_ANGLE) rather than arcing off
+        the point while closing the last of the distance.
 
         The vyaw floor matters as much as the gain: the output stage zeroes turns below
         min_effective_angular_speed, so a correction of a few degrees would be discarded
@@ -264,27 +276,32 @@ class CmdVelControlNode(Node):
             self._final_turn_stop_latched = False
             return vx, vyaw
 
-        here_yaw = self._actual_yaw()
-        if self._goal_yaw is not None and here_yaw is not None and vx >= 0.0:
-            d = self._goal_yaw - here_yaw
-            yaw_err = float(np.arctan2(np.sin(d), np.cos(d)))
-            if abs(yaw_err) < FINAL_DECEL_ANGLE:
-                if abs(yaw_err) < FINAL_TURN_STOP_ANGLE:
-                    self._final_turn_stop_latched = True
-                elif abs(yaw_err) > FINAL_TURN_RESUME_ANGLE:
-                    self._final_turn_stop_latched = False
-                if self._final_turn_stop_latched:
-                    vyaw = 0.0
-                else:
-                    vyaw = FINAL_TURN_KP * yaw_err
-                    if abs(vyaw) < self.min_effective_angular_speed:
-                        vyaw = float(np.sign(vyaw) * self.min_effective_angular_speed)
-            else:
-                self._final_turn_stop_latched = False
-
-        if vx > 0.0 and self._target_xy is not None:
+        dist = None
+        if self._target_xy is not None:
             here = (self._pose_to_T(self.pose.pose) @ self.T_camera_to_control)[:2, 3]
             dist = float(np.hypot(*(self._target_xy - here)))
+        near = dist is not None and dist <= FINAL_DECEL_RADIUS_M
+
+        here_yaw = self._actual_yaw()
+        if self._goal_yaw is not None and here_yaw is not None and near and vx >= 0.0:
+            d = self._goal_yaw - here_yaw
+            yaw_err = float(np.arctan2(np.sin(d), np.cos(d)))
+            if abs(yaw_err) < FINAL_TURN_STOP_ANGLE:
+                self._final_turn_stop_latched = True
+            elif abs(yaw_err) > FINAL_TURN_RESUME_ANGLE:
+                self._final_turn_stop_latched = False
+            if self._final_turn_stop_latched:
+                vyaw = 0.0
+            else:
+                vyaw = FINAL_TURN_KP * yaw_err
+                if abs(vyaw) < self.min_effective_angular_speed:
+                    vyaw = float(np.sign(vyaw) * self.min_effective_angular_speed)
+                if abs(yaw_err) > FINAL_TURN_ONLY_ANGLE:
+                    vx = 0.0
+        elif not near:
+            self._final_turn_stop_latched = False
+
+        if vx > 0.0 and dist is not None:
             # Taper from the speed ceiling, NOT from the incoming vx: scaling the
             # planner's own request compounds with whatever it already slowed for, so a
             # cautious approach collapses below the executable floor while still a third
