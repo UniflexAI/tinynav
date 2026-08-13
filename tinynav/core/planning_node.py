@@ -251,10 +251,10 @@ def run_raycasting_points_loopy(points, T_sensor_to_world, grid_shape, origin, r
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.5
-    robot_z_top: float = 0.4
+    robot_z_bottom: float = -0.8
+    robot_z_top: float = 0.3
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.4
+    min_wall_span_m: float = 0.3
     dilation_cells: int = 0
 
 
