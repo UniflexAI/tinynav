@@ -176,6 +176,12 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
+# Arrival radius, measured from the CAMERA (see nav_target_timer_callback).
+_ARRIVE_M = 0.5
+# ...and for a POI that carries an arrival heading, where being 0.5m out matters.
+_ARRIVE_HEADING_M = 0.2
+
+
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
         """Initialization
@@ -279,6 +285,8 @@ class MapNode(Node):
 
         self.pois = {}
         self.poi_index = -1
+        # Queue indices whose POI carries an arrival heading (tighter arrival radius).
+        self.poi_has_heading = set()
         self._nav_completed = False
         self._leg_initial_length: float | None = None
         self._leg_start_time: float | None = None
@@ -306,10 +314,15 @@ class MapNode(Node):
             self.pois = json.loads(msg.data)
 
             pois_dict = {}
+            poi_has_heading = set()
             keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
-                pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                entry = self.pois[str(key)]
+                pois_dict[index] = np.array(entry["position"])
+                if entry.get("yaw_deg") is not None:
+                    poi_has_heading.add(index)
             self.pois = pois_dict
+            self.poi_has_heading = poi_has_heading
 
             if not self.pois:
                 self.poi_index = -1
@@ -671,7 +684,12 @@ class MapNode(Node):
         # zone: with a camera reference, arrival triggers while the control center is
         # still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
         # Measuring from the camera declares arrival early; that is the point.
-        if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
+        # A POI with an authored heading is parked ON, not near: the mission turns to
+        # that heading where it stops, so stopping 0.5m out puts the turn in the wrong
+        # place. Everything else keeps the loose radius and the margin it buys (above).
+        arrive_m = (_ARRIVE_HEADING_M if self.poi_index in self.poi_has_heading
+                    else _ARRIVE_M)
+        if np.linalg.norm(poi[:2] - pos[:2]) < arrive_m and abs(poi[2] - pos[2]) < 2.0:
             # Unconditional: this message is the only arrival edge consumers get, so
             # gating it on _leg_initial_length (i.e. "this leg published progress at
             # least once") silently loses the arrival for a POI the robot is ALREADY
