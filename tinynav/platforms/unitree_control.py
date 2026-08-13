@@ -1,5 +1,4 @@
 import argparse
-import os
 import rclpy
 from rclpy.node import Node
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -9,6 +8,8 @@ from std_msgs.msg import Float32, String
 from enum import Enum
 import time
 
+from tinynav.core.robot_specs import ROBOT_TYPE, SUPPORTED_ROBOT_TYPES
+
 # go2/b2 are quadrupeds sharing the same SportClient gait API (Move/StandUp/
 # StandDown/BalanceStand/ClassicWalk). go2w/b2w are the wheeled variants of the
 # same chassis — the vendored SDK has no separate go2w/b2w package, so they reuse
@@ -16,10 +17,6 @@ import time
 # controlled through the FSM-based LocoClient instead, so it needs its own
 # client, lowstate IDL, and stand/sit mapping.
 _QUADRUPED_ROBOT_MODELS = ('go2', 'go2w', 'b2', 'b2w')
-_SUPPORTED_ROBOT_MODELS = _QUADRUPED_ROBOT_MODELS + ('g1',)
-ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
-if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
-    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
 
 
 def _build_sport_client(robot_model: str):
@@ -51,8 +48,8 @@ class RobotStatus(Enum):
 class Ros2UnitreeManagerNode(Node):
     def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
         super().__init__('ros2_unitree_manager')
-        if robot_model not in _SUPPORTED_ROBOT_MODELS:
-            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
+        if robot_model not in SUPPORTED_ROBOT_TYPES:
+            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {SUPPORTED_ROBOT_TYPES}")
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
 
