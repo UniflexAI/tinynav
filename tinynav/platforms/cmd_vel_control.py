@@ -9,7 +9,7 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
-from tinynav.core.planning_node import ROBOT_CONFIG_TOPIC, RobotConfig
+from tinynav.core.planning_node import GOAL_POSE_TOPIC, ROBOT_CONFIG_TOPIC, RobotConfig
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -104,6 +104,30 @@ class CmdVelControlNode(Node):
         self._forward_speed_cap_time = None
         self.forward_speed_cap_ttl_s = 2.0
 
+        # Near-goal law. Everything above this line steers by following a path: the
+        # yaw drift PI references the trajectory pose nearest the control center, and
+        # vx comes from the planner's feedforward. Within NEAR_GOAL_M of the final
+        # goal that reference stops being useful — the path is a metre of curve whose
+        # remaining length is smaller than the decimation stride, and "how far is left"
+        # is a question the path cannot answer as well as the goal itself can. So
+        # inside the radius we close on the real remaining distance and angle.
+        self.near_goal_m = 0.6
+        self.near_goal_pos_tol_m = 0.10
+        self.near_goal_yaw_tol = np.deg2rad(4.0)
+        # Release the lock at twice the tolerance, so a pose that dithers across the
+        # boundary does not restart the manoeuvre — the observable symptom this law
+        # exists to remove is a robot twitching forever at its goal.
+        self.near_goal_release = 2.0
+        self.near_goal_kv = 0.8         # (m/s)/m
+        self.near_goal_komega = 1.2     # (rad/s)/rad
+        self.near_goal_vx_max = 0.25
+        self.near_goal_omega_max = 0.6
+        self.goal_pose_ttl_s = 1.5      # map_node's nav timer runs at 2Hz
+        self._goal_pose = None
+        self._goal_pose_time = None
+        self._goal_locked = False
+        self.create_subscription(Odometry, GOAL_POSE_TOPIC, self._goal_pose_callback, 10)
+
         self.latest_cmd = Twist()
         self.path_vyaw_ff = 0.0
         self.is_backward_segment = False
@@ -196,6 +220,92 @@ class CmdVelControlNode(Node):
         best_i = int(np.argmin(d2))
         return float(self._path_pose_yaw[best_i])
 
+    def _goal_pose_callback(self, msg):
+        T = self._pose_to_T(msg.pose)
+        if self._goal_pose is not None and not np.allclose(T, self._goal_pose, atol=0.05):
+            self._goal_locked = False   # a different goal: this one is not done yet
+        self._goal_pose = T
+        self._goal_pose_time = time.monotonic()
+
+    def _goal_error(self):
+        """(distance, bearing error, heading error) from the control center to the
+        goal, or None when there is no live goal / pose.
+
+        All three at the control center, which is what the body actually parks: the
+        camera sits ~0.3m ahead of it, so closing on the camera's numbers would leave
+        the body short by exactly that, and a turn would then swing the camera off
+        again. Bearing is where the goal is; heading is which way it wants us facing —
+        the same distinction that makes the last stretch drive-then-turn."""
+        if (self.pose is None or self._goal_pose is None
+                or self._goal_pose_time is None
+                or time.monotonic() - self._goal_pose_time > self.goal_pose_ttl_s):
+            return None
+        ctrl = self._pose_to_T(self.pose.pose) @ self.T_camera_to_control
+        goal = self._goal_pose @ self.T_camera_to_control
+        d = goal[:2, 3] - ctrl[:2, 3]
+        dist = float(np.hypot(d[0], d[1]))
+
+        def _yaw(T):
+            fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+            return float(np.arctan2(fwd[1], fwd[0]))
+
+        def _wrap(a):
+            return float(np.arctan2(np.sin(a), np.cos(a)))
+
+        here = _yaw(ctrl)
+        return dist, _wrap(np.arctan2(d[1], d[0]) - here), _wrap(_yaw(goal) - here)
+
+    def _near_goal_cmd(self):
+        """The endgame command, or None to leave the path follower in charge.
+
+        Drive while there is distance to cover, steering at the goal; once on it,
+        turn to the goal heading; once both are satisfied, latch stopped. The latch is
+        the point — a proportional law alone sits at its goal making ever-smaller
+        corrections that the executable-speed floors below round straight back up to
+        the floor, which is a robot that never stops shuffling."""
+        err = self._goal_error()
+        if err is None:
+            self._goal_locked = False
+            return None
+        dist, bearing_err, heading_err = err
+        if dist > self.near_goal_m:
+            self._goal_locked = False
+            return None
+
+        release = self.near_goal_release
+        if self._goal_locked:
+            if (dist <= self.near_goal_pos_tol_m * release
+                    and abs(heading_err) <= self.near_goal_yaw_tol * release):
+                return Twist()          # still there: hold, do not re-converge
+            self._goal_locked = False
+
+        cmd = Twist()
+        if dist > self.near_goal_pos_tol_m:
+            # Rotate-first in miniature: driving while badly misaligned over half a
+            # metre lands somewhere else entirely, and there is no room to correct.
+            if abs(bearing_err) > np.deg2rad(25.0):
+                cmd.linear.x = 0.0
+            else:
+                cmd.linear.x = float(np.clip(self.near_goal_kv * dist,
+                                             self.min_effective_linear_speed,
+                                             self.near_goal_vx_max))
+            turn = self.near_goal_komega * bearing_err
+        elif abs(heading_err) > self.near_goal_yaw_tol:
+            turn = self.near_goal_komega * heading_err
+        else:
+            self._goal_locked = True
+            self.logger.info(
+                f"goal reached: {dist:.2f}m, {np.rad2deg(heading_err):+.1f}deg")
+            return Twist()
+        cmd.angular.z = float(np.clip(turn, -self.near_goal_omega_max,
+                                      self.near_goal_omega_max))
+        # Below the executable yaw floor the base does not turn at all, so a request
+        # that small has to be raised to it or dropped — and dropping it here would
+        # stall the manoeuvre short of the tolerance that ends it.
+        if 0.0 < abs(cmd.angular.z) < self.min_effective_angular_speed:
+            cmd.angular.z = float(np.sign(cmd.angular.z) * self.min_effective_angular_speed)
+        return cmd
+
     def cmd_timer_callback(self):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
@@ -207,6 +317,16 @@ class CmdVelControlNode(Node):
         if self._paused:
             self.cmd_pub.publish(Twist())
             self.prev_cmd = Twist()
+            return
+
+        # Endgame first: inside the near-goal radius this replaces the whole path
+        # follower rather than correcting it. Deliberately ahead of the stale-path
+        # guards too — it does not consume the path, so a planner that has gone quiet
+        # is no reason to stop closing the last 20cm on a goal we can see directly.
+        near = self._near_goal_cmd()
+        if near is not None:
+            self.cmd_pub.publish(near)
+            self.prev_cmd = near
             return
 
         # Stale-path protection: slow down, then stop if planner has not refreshed.

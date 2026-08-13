@@ -28,7 +28,39 @@ from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
+from tinynav.core.planning_node import GOAL_POSE_TOPIC
 from tinynav.core.path_speed import PathSpeedIndex
+
+# Arrival for a POI that carries an authored heading. The ordinary 0.5 m radius is
+# the planner's ability boundary, not a specification: inside ~0.4 m every forward
+# arc in the lattice overshoots, so distance-to-goal ranks standing still first, and
+# the heading term that would break the tie is switched off inside 0.3 m. A POI with
+# a heading is served by the terminal planner instead, which can close both — so its
+# arrival is allowed to ask for both.
+_PRECISE_TOL_M = 0.15
+_PRECISE_YAW_DEG = 5.0
+# ...but never at the cost of hanging. Once inside the ordinary radius this long
+# without meeting the tight test, declare arrival anyway. The mission layer's turn is
+# the backstop for the heading; a leg that never ends is not recoverable at all.
+_PRECISE_GRACE_S = 20.0
+
+
+def _yaw_to_camera_rot(yaw: float) -> np.ndarray:
+    """Rotation whose forward axis (optical +z) points along `yaw` in world XY.
+
+    Inverse of the yaw convention used everywhere downstream (forward axis projected
+    onto XY, cf. planning_node._world_heading): columns are [right, down, forward]."""
+    c, s = np.cos(yaw), np.sin(yaw)
+    return np.array([[s, 0.0, c],
+                     [-c, 0.0, s],
+                     [0.0, -1.0, 0.0]])
+
+
+def _heading_of(R: np.ndarray) -> float:
+    """World heading of a camera-convention rotation — the projection its inverse
+    _yaw_to_camera_rot undoes."""
+    fwd = R @ np.array([0.0, 0.0, 1.0])
+    return float(np.arctan2(fwd[1], fwd[0]))
 logger = logging.getLogger(__name__)
 
 
@@ -278,6 +310,13 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
 
         self.pois = {}
+        # Authored arrival heading per queue index (rad, map frame), or absent. Only
+        # the LAST POI's is acted on: a heading on a waypoint would mean stopping to
+        # turn mid-route for nothing.
+        self.poi_yaws = {}
+        # When the robot first entered the loose arrival radius of a POI that wants a
+        # precise ending — the clock on _PRECISE_GRACE_S.
+        self._precise_since = None
         self.poi_index = -1
         self._nav_completed = False
         self._leg_initial_length: float | None = None
@@ -294,6 +333,14 @@ class MapNode(Node):
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        # The FINAL goal pose (position + heading, odom frame) — distinct from
+        # target_pose, which is a lookahead carrot ~2.5 m downrange that the lattice
+        # scores distance against. The terminal planner and the near-goal control law
+        # need the actual endpoint, so they get their own topic rather than one that
+        # means something else everywhere it is already used. Published only while the
+        # current POI is the last one AND carries a heading; consumers treat it with a
+        # freshness window, so ceasing to publish is how it is retracted.
+        self.goal_pose_pub = self.create_publisher(Odometry, GOAL_POSE_TOPIC, 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -306,10 +353,22 @@ class MapNode(Node):
             self.pois = json.loads(msg.data)
 
             pois_dict = {}
+            yaws = {}
             keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
-                pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                entry = self.pois[str(key)]
+                pois_dict[index] = np.array(entry["position"])
+                # Authored in degrees (a human types it into the POI editor); kept in
+                # radians from here on, like every other angle in this node.
+                try:
+                    if entry.get("yaw_deg") is not None:
+                        yaws[index] = np.deg2rad(float(entry["yaw_deg"]))
+                except (TypeError, ValueError):
+                    self.get_logger().warning(
+                        f"POI {key} has an unreadable yaw_deg — ignoring it")
             self.pois = pois_dict
+            self.poi_yaws = yaws
+            self._precise_since = None
 
             if not self.pois:
                 self.poi_index = -1
@@ -639,6 +698,65 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.global_plan_pub.publish(path_msg)
 
+    def _goal_yaw(self):
+        """Arrival heading of the POI being driven to, or None.
+
+        Only the LAST POI in the queue has one honoured: a heading on a waypoint
+        would stop the robot to turn mid-route and then immediately turn away again."""
+        if self.poi_index != len(self.pois) - 1:
+            return None
+        return self.poi_yaws.get(self.poi_index)
+
+    def _publish_goal_pose(self, poi, goal_yaw, pose_in_map) -> None:
+        """The final goal as a full pose in the odom frame — what the terminal planner
+        and the near-goal control law aim at. Same map->odom composition as the
+        lookahead carrot below, applied to a rotation as well as a position."""
+        T_goal_in_map = np.eye(4)
+        T_goal_in_map[:3, :3] = _yaw_to_camera_rot(goal_yaw)
+        T_goal_in_map[:3, 3] = poi[:3]
+        T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
+        self.goal_pose_pub.publish(np2msg(T @ T_goal_in_map,
+                                          self.get_clock().now().to_msg(),
+                                          "world", "camera"))
+
+    def _arrived(self, poi, pos, pose_in_map, goal_yaw) -> bool:
+        """Whether this leg is done.
+
+        Without an authored heading this is unchanged: 0.5 m in XY measured from the
+        CAMERA, which declares arrival while the control center is still ~0.8 m out
+        (that margin is deliberate — see the class comment on the near-goal dead zone).
+
+        With one, the leg is not done until the robot is actually on the POI facing
+        the right way, because something downstream is about to act on that heading.
+        The grace timer is the escape hatch: precision is worth waiting for, not worth
+        hanging a mission over."""
+        loose = (np.linalg.norm(poi[:2] - pos[:2]) < 0.5
+                 and abs(poi[2] - pos[2]) < 2.0)
+        if goal_yaw is None:
+            self._precise_since = None
+            return loose
+        if not loose:
+            self._precise_since = None   # left the radius: the clock restarts
+            return False
+        yaw_err = _heading_of(pose_in_map[:3, :3]) - goal_yaw
+        yaw_err = abs(np.arctan2(np.sin(yaw_err), np.cos(yaw_err)))
+        if (np.linalg.norm(poi[:2] - pos[:2]) < _PRECISE_TOL_M
+                and yaw_err < np.deg2rad(_PRECISE_YAW_DEG)):
+            self._precise_since = None
+            return True
+        now = time.monotonic()
+        if self._precise_since is None:
+            self._precise_since = now
+            return False
+        if now - self._precise_since > _PRECISE_GRACE_S:
+            self.get_logger().warning(
+                f"POI {self.poi_index}: gave up on the precise ending after "
+                f"{_PRECISE_GRACE_S:.0f}s — {np.linalg.norm(poi[:2] - pos[:2]):.2f}m "
+                f"out, {np.rad2deg(yaw_err):.0f}deg off")
+            self._precise_since = None
+            return True
+        return False
+
     def nav_target_timer_callback(self):
         if (
             self.poi_index < 0
@@ -664,6 +782,9 @@ class MapNode(Node):
 
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
+        goal_yaw = self._goal_yaw()
+        if goal_yaw is not None:
+            self._publish_goal_pose(poi, goal_yaw, pose_in_map)
         # Arrival is measured from the CAMERA pose, not the control center. Shifting it
         # back to the control center is more literally correct ("did the body reach the
         # POI") but it costs cam_offset (0.30 m) of extra approach before arrival fires,
@@ -671,7 +792,7 @@ class MapNode(Node):
         # zone: with a camera reference, arrival triggers while the control center is
         # still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
         # Measuring from the camera declares arrival early; that is the point.
-        if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
+        if self._arrived(poi, pos, pose_in_map, goal_yaw):
             # Unconditional: this message is the only arrival edge consumers get, so
             # gating it on _leg_initial_length (i.e. "this leg published progress at
             # least once") silently loses the arrival for a POI the robot is ALREADY
