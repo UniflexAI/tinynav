@@ -1,4 +1,5 @@
 import argparse
+import os
 import rclpy
 from rclpy.node import Node
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -16,7 +17,9 @@ import time
 # client, lowstate IDL, and stand/sit mapping.
 _QUADRUPED_ROBOT_MODELS = ('go2', 'go2w', 'b2', 'b2w')
 _SUPPORTED_ROBOT_MODELS = _QUADRUPED_ROBOT_MODELS + ('g1',)
-_DEFAULT_ROBOT_MODEL = 'go2'
+ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
+if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
+    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
 
 
 def _build_sport_client(robot_model: str):
@@ -46,7 +49,7 @@ class RobotStatus(Enum):
 
 
 class Ros2UnitreeManagerNode(Node):
-    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = _DEFAULT_ROBOT_MODEL):
+    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
         super().__init__('ros2_unitree_manager')
         if robot_model not in _SUPPORTED_ROBOT_MODELS:
             raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
@@ -140,14 +143,12 @@ class Ros2UnitreeManagerNode(Node):
 
 def main(args=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--robot-model", choices=_SUPPORTED_ROBOT_MODELS, default=_DEFAULT_ROBOT_MODEL,
-                         help="Unitree robot model to control")
     parser.add_argument("--network-interface", default="enP8p1s0",
-                         help="Network interface connected to the robot")
+                        help="Network interface connected to the robot")
     parsed_args, ros_args = parser.parse_known_args(args=args)
 
     rclpy.init(args=ros_args)
-    node = Ros2UnitreeManagerNode(parsed_args.network_interface, parsed_args.robot_model)
+    node = Ros2UnitreeManagerNode(parsed_args.network_interface)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

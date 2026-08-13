@@ -1,5 +1,3 @@
-import argparse
-import sys
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -11,17 +9,15 @@ from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
-from tinynav.core.robot_specs import ROBOT_CONFIGS
+from tinynav.core.robot_specs import ROBOT_CONFIG
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
 
 class CmdVelControlNode(Node):
-    def __init__(self, robot_model='go2'):
+    def __init__(self):
         super().__init__('cmd_vel_control_node')
-        if robot_model not in ROBOT_CONFIGS:
-            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {tuple(ROBOT_CONFIGS)}")
-        self.robot = ROBOT_CONFIGS[robot_model]
+        self.robot = ROBOT_CONFIG
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
@@ -251,12 +247,7 @@ def main(args=None):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--robot-model", choices=tuple(ROBOT_CONFIGS), default='go2',
-                         help="Robot to use for min/max linear & angular speed limits")
-    parsed_args, _ = parser.parse_known_args(sys.argv[1:])
-
-    node = CmdVelControlNode(robot_model=parsed_args.robot_model)
+    node = CmdVelControlNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

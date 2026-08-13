@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from dataclasses import dataclass
 
@@ -8,7 +9,7 @@ class RobotConfig:
 
     Shared between planning_node (trajectory sampling/collision footprint) and
     cmd_vel_control (final cmd_vel clamping) so both nodes read the same numbers
-    for a given --robot-model instead of keeping separate copies.
+    for a given ROBOT_TYPE instead of keeping separate copies.
     """
     name: str = 'go2'
     shape: str = 'square'
@@ -86,10 +87,16 @@ G1_CONFIG = RobotConfig(
     min_linear_vel=0.2,min_angular_vel=0.3
 )
 
-ROBOT_CONFIGS = {
-    GO2_CONFIG.name: GO2_CONFIG,
-    GO2W_CONFIG.name: GO2W_CONFIG,
-    B2_CONFIG.name: B2_CONFIG,
-    B2W_CONFIG.name: B2W_CONFIG,
-    G1_CONFIG.name: G1_CONFIG,
-}
+ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
+if ROBOT_TYPE == "go2":
+    ROBOT_CONFIG = GO2_CONFIG
+elif ROBOT_TYPE == "go2w":
+    ROBOT_CONFIG = GO2W_CONFIG
+elif ROBOT_TYPE == "b2":
+    ROBOT_CONFIG = B2_CONFIG
+elif ROBOT_TYPE == "b2w":
+    ROBOT_CONFIG = B2W_CONFIG
+elif ROBOT_TYPE == "g1":
+    ROBOT_CONFIG = G1_CONFIG
+else:
+    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}")

@@ -1,5 +1,3 @@
-import argparse
-import sys
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -18,7 +16,7 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
-from tinynav.core.robot_specs import ROBOT_CONFIGS
+from tinynav.core.robot_specs import ROBOT_CONFIG
 
 # === Helper functions ===
 @njit(cache=True)
@@ -304,11 +302,9 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 
 # === PlanningNode class ===
 class PlanningNode(Node):
-    def __init__(self, robot_model='go2'):
+    def __init__(self):
         super().__init__('planning_node')
-        if robot_model not in ROBOT_CONFIGS:
-            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {tuple(ROBOT_CONFIGS)}")
-        self.robot = ROBOT_CONFIGS[robot_model]
+        self.robot = ROBOT_CONFIG
         self.get_logger().info(
             f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
             f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
@@ -621,11 +617,7 @@ class PlanningNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--robot-model", choices=tuple(ROBOT_CONFIGS), default='go2',
-                         help="Robot geometry to use for footprint/collision planning")
-    parsed_args, _ = parser.parse_known_args(sys.argv[1:])
-    node = PlanningNode(robot_model=parsed_args.robot_model)
+    node = PlanningNode()
 
     try:
         rclpy.spin(node)
