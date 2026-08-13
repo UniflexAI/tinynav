@@ -349,6 +349,18 @@ def create_poi_ui(
             color_r_slider = server.gui.add_slider("Color R", min=0, max=255, step=1, initial_value=int(sphere_handle.color[0]))
             color_g_slider = server.gui.add_slider("Color G", min=0, max=255, step=1, initial_value=int(sphere_handle.color[1]))
             color_b_slider = server.gui.add_slider("Color B", min=0, max=255, step=1, initial_value=int(sphere_handle.color[2]))
+            # Heading to face once parked on this POI, in the MAP frame. Stored as
+            # a plain angle rather than taken off the gizmo's quaternion: the
+            # runtime's yaw is the forward axis projected onto map XY
+            # (node_manager._odom_to_dict), and a 3D rotation would have to be
+            # re-derived into that convention every time anyone touched it. The
+            # arrow below is the check that the number means what you think.
+            has_yaw = poi_points[poi_index].get('yaw_deg') is not None
+            face_on_arrival = server.gui.add_checkbox(
+                "Face on arrival", initial_value=has_yaw)
+            heading_deg = server.gui.add_slider(
+                "Heading (deg)", min=-180.0, max=180.0, step=1.0,
+                initial_value=float(poi_points[poi_index].get('yaw_deg') or 0.0))
             set_start_button = None
             set_goal_button = None
             if nav_state is not None:
@@ -370,6 +382,38 @@ def create_poi_ui(
             if refresh_nav_markers is not None:
                 refresh_nav_markers()
 
+    heading_handle = {"h": None}
+    HEADING_ARROW_M = 1.0
+
+    def refresh_heading(_event=None):
+        """Sync poi_points['yaw_deg'] with the widgets and redraw the arrow.
+
+        Unchecking drops the key entirely rather than storing 0.0 — "no heading"
+        and "face map-east" are different instructions, and the executor reads a
+        missing key as "keep whatever the approach left you facing"."""
+        if heading_handle["h"] is not None:
+            heading_handle["h"].remove()
+            heading_handle["h"] = None
+        if not face_on_arrival.value:
+            poi_points[poi_index].pop('yaw_deg', None)
+            return
+        yaw = float(heading_deg.value)
+        poi_points[poi_index]['yaw_deg'] = yaw
+        origin = np.asarray(poi_points[poi_index]['position'], dtype=np.float32)
+        tip = origin + np.array(
+            [math.cos(math.radians(yaw)), math.sin(math.radians(yaw)), 0.0],
+            dtype=np.float32) * HEADING_ARROW_M
+        heading_handle["h"] = server.scene.add_line_segments(
+            f"/{poi_points[poi_index]['name']}_heading",
+            points=np.array([[origin, tip]], dtype=np.float32),
+            colors=np.array([[(255, 200, 0), (255, 200, 0)]], dtype=np.uint8),
+            line_width=4,
+        )
+
+    face_on_arrival.on_update(refresh_heading)
+    heading_deg.on_update(refresh_heading)
+    refresh_heading()
+
     def update_scale(event):
         sphere_handle.radius = scale.value
     scale.on_update(update_scale)
@@ -387,6 +431,7 @@ def create_poi_ui(
         sphere_handle.position = event.target.position
         gui_vector3.value = event.target.position
         poi_points[poi_index]['position'] = np.asarray(event.target.position, dtype=np.float32)
+        refresh_heading()  # the arrow starts at the POI, so a move redraws it
         if refresh_nav_markers is not None and nav_state is not None and (
             nav_state.get("start_poi_id") == poi_index or nav_state.get("goal_poi_id") == poi_index
         ):
@@ -399,6 +444,7 @@ def create_poi_ui(
         sphere_handle.position = new_pos
         gizmo.position = new_pos
         poi_points[poi_index]['position'] = new_pos
+        refresh_heading()
         if refresh_nav_markers is not None and nav_state is not None and (
             nav_state.get("start_poi_id") == poi_index or nav_state.get("goal_poi_id") == poi_index
         ):
@@ -417,6 +463,8 @@ def create_poi_ui(
         poi_container.remove()
         sphere_handle.remove()
         gizmo.remove()
+        if heading_handle["h"] is not None:
+            heading_handle["h"].remove()
         if refresh_nav_markers is not None:
             refresh_nav_markers()
 
