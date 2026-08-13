@@ -546,7 +546,7 @@ class PlanningNode(Node):
             [[p.x, p.y] for p in msg.points], dtype=np.float64).reshape(-1, 2)
         self._climb_stamp_ns = self.get_clock().now().nanoseconds
 
-    def _postprocess_obstacle_mask(self, obstacle_mask, T):
+    def _postprocess_obstacle_mask(self, obstacle_mask):
         """Subclass seam: extra keepouts merged into the mask before ESDF."""
         return obstacle_mask
 
@@ -809,7 +809,7 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
             )
-            obstacle_mask = self._postprocess_obstacle_mask(obstacle_mask, T)
+            obstacle_mask = self._postprocess_obstacle_mask(obstacle_mask)
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
