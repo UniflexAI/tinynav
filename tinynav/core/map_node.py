@@ -671,7 +671,7 @@ class MapNode(Node):
         if not needs_replan:
             paths = self.cached_nav_path_in_map
             closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
-            if np.linalg.norm(paths[closest_idx, :2] - pos[:2]) > 0.5:
+            if np.linalg.norm(paths[closest_idx, :2] - pos[:2]) > 1.5:
                 needs_replan = True
 
         if needs_replan:
@@ -721,7 +721,7 @@ class MapNode(Node):
         target_position = paths[-1]
         for i in range(closest_idx, len(paths) - 1):
             accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-            if accumulated_distance > max_speed * 5:
+            if accumulated_distance > max_speed * 8:
                 target_position = paths[i]
                 break
             start_point = paths[i]

@@ -55,7 +55,7 @@ GO2_CONFIG = RobotConfig(
     length=0.4, width=0.3,
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
+    safety_radius=0.05,
 )
 
 B2_CONFIG = RobotConfig(
@@ -150,38 +150,64 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     return occupancy_grid
 
 
+# Cost for cells with no A* route, or trajectories leaving the local grid.
+OFF_ROUTE_COST = 1.0e3
+
+
 @dataclass
 class ObstacleConfig:
     robot_z_bottom: float = -0.4
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
+    # Schmitt-trigger release level, keeps cells near occ_threshold from flipping every frame
+    occ_release_threshold: float = 0.05
     min_wall_span_m: float = 0.2
     dilation_cells: int = 2
 
 
-def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
-    """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
-    Walls have large z-span; stair risers / ground bumps have small span."""
+def _span_filtered_occupancy(band, threshold, min_span_m, resolution):
+    """
+    Cells whose occupied voxels span >= min_span_m vertically within the band.
+    Walls have a large z-span, stair risers and ground bumps have a small one.
+    """
+    band_occ = band > threshold
+    has_occ = np.any(band_occ, axis=2)
+    n_z = band_occ.shape[2]
+    z_idx = np.arange(n_z, dtype=np.float32)
+    occ_high = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
+    occ_low = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], n_z).min(axis=2)
+    z_span = (occ_high - occ_low) * resolution
+    return has_occ & (z_span >= min_span_m)
+
+
+def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
+                       prev_core=None):
+    """
+    Mark cells whose occupied voxels span >= min_wall_span_m in z as obstacles.
+    :return: (obstacle, core), dilated mask for the ESDF and the raw mask, which the
+             caller feeds back as prev_core for hysteresis.
+    """
     config = config or ObstacleConfig()
     h, w, z_dim = occupancy_grid.shape
     z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
     z_rel = z_world - robot_z
     z_mask = (z_rel >= config.robot_z_bottom) & (z_rel <= config.robot_z_top)
 
-    obstacle = np.zeros((h, w), dtype=bool)
+    core = np.zeros((h, w), dtype=bool)
     if np.any(z_mask):
-        band_occ = occupancy_grid[:, :, z_mask] > config.occ_threshold
-        has_occ = np.any(band_occ, axis=2)
-        n_z = band_occ.shape[2]
-        z_idx = np.arange(n_z, dtype=np.float32)
-        occ_high = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
-        occ_low = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], n_z).min(axis=2)
-        z_span = (occ_high - occ_low) * resolution
-        obstacle = has_occ & (z_span >= config.min_wall_span_m)
+        band = occupancy_grid[:, :, z_mask]
+        core = _span_filtered_occupancy(band, config.occ_threshold,
+                                        config.min_wall_span_m, resolution)
+        if prev_core is not None and config.occ_release_threshold < config.occ_threshold:
+            # cells already marked as obstacle survive on the looser threshold
+            held = _span_filtered_occupancy(band, config.occ_release_threshold,
+                                            config.min_wall_span_m, resolution)
+            core = core | (prev_core & held)
 
-    if config.dilation_cells > 0 and np.any(obstacle):
-        obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
-    return obstacle
+    obstacle = core
+    if config.dilation_cells > 0 and np.any(core):
+        obstacle = binary_dilation(core, iterations=config.dilation_cells)
+    return obstacle, core
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
@@ -256,17 +282,28 @@ def generate_predefined_trajectory_vocabularies(
     return np.asarray(trajectories), np.asarray(params)
 
 @njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
+def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
+                                origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
+    """
+    Score trajectories by ESDF clearance over the footprint (center + 4 corners) and
+    against the A* route maps, which share the shape, origin and resolution of ESDF_map.
+    :return: per trajectory, the obstacle score (inf on collision), the step index of the
+             minimum clearance, the mean distance from the trajectory center to the route,
+             and the route arc length still ahead of its end cell.
+    """
     scores = []
     occ_points = []
+    path_costs = []
+    end_remainings = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
 
     for t in range(len(trajectories)):
         traj = trajectories[t]
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
+        path_cost_sum = 0.0
+        path_cost_n = 0
 
         for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
@@ -308,6 +345,21 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
                     if dist < min_dist_for_traj:
                         min_dist_for_traj = dist
                         closest_step_for_traj = i
+                    if k == 0:  # route adherence is measured on the center only
+                        path_cost_sum += float(path_dist_map[x_img, y_img])
+                        path_cost_n += 1
+
+        if path_cost_n > 0:
+            path_costs.append(path_cost_sum / path_cost_n)
+        else:
+            path_costs.append(OFF_ROUTE_COST)  # the whole trajectory left the grid
+
+        end_x_img = int((traj[-1, 0] - origin[0]) / resolution)
+        end_y_img = int((traj[-1, 1] - origin[1]) / resolution)
+        if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
+            end_remainings.append(float(remaining_map[end_x_img, end_y_img]))
+        else:
+            end_remainings.append(OFF_ROUTE_COST)
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
@@ -322,41 +374,38 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
-    return scores, occ_points
+    return scores, occ_points, path_costs, end_remainings
+
+def roll_and_clear(array, shift_cells, fill):
+    """
+    Roll an array by whole cells along its leading axes and clear the newly exposed band,
+    which has not been observed at its new coordinates.
+    """
+    rolled = np.roll(array, shift=tuple(-shift_cells), axis=tuple(range(len(shift_cells))))
+    for axis, shift in enumerate(shift_cells):
+        if shift == 0:
+            continue
+        band = [slice(None)] * array.ndim
+        band[axis] = slice(-shift, None) if shift > 0 else slice(None, -shift)
+        rolled[tuple(band)] = fill
+    return rolled
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
     if np.all(shift_voxels == 0):
         return occupancy_grid, old_origin
-    rolled = np.roll(occupancy_grid, shift=tuple(-shift_voxels), axis=(0, 1, 2))
-    x, y, z = occupancy_grid.shape
-    if shift_voxels[0] > 0:
-        rolled[-shift_voxels[0]:, :, :] = 0
-    elif shift_voxels[0] < 0:
-        rolled[:-shift_voxels[0], :, :] = 0
-    if shift_voxels[1] > 0:
-        rolled[:, -shift_voxels[1]:, :] = 0
-    elif shift_voxels[1] < 0:
-        rolled[:, :-shift_voxels[1], :] = 0
-    if shift_voxels[2] > 0:
-        rolled[:, :, -shift_voxels[2]:] = 0
-    elif shift_voxels[2] < 0:
-        rolled[:, :, :-shift_voxels[2]] = 0
+    rolled = roll_and_clear(occupancy_grid, shift_voxels, 0)
     updated_origin = old_origin + shift_voxels * resolution
     return rolled, updated_origin
 
 
-def _astar_grid_path(start_idx, goal_idx, blocked, resolution):
-    """8-connected A* over a 2D blocked-cell grid.
-
-    Not numba-jitted (dict/heapq/tuple keys, same as map_node.py's
-    search_within_sdf_map) — this runs once per planning cycle over a small
-    local grid, not in a hot per-pixel loop.
-
-    Returns the list of grid indices from start_idx to goal_idx, or — if
-    goal_idx is unreachable (blocked / disconnected) — to whichever visited
-    cell came closest to it, so the caller always gets a path to walk along.
+def _astar_grid_path(start_idx, goal_idx, blocked, resolution, hist_cost=None):
+    """
+    8-connected A* over a 2D blocked-cell grid.
+    :param hist_cost: optional per-cell surcharge in m on entering a cell, see build_history_cost.
+    :return: grid indices from start_idx to goal_idx, or to the closest visited cell when
+             goal_idx is unreachable.
     """
     rows, cols = blocked.shape
     neighbor_offsets = (
@@ -386,7 +435,6 @@ def _astar_grid_path(start_idx, goal_idx, blocked, resolution):
             best_reached_h = h
             best_reached = current
         if current == goal_idx:
-            best_reached = current
             break
 
         for dr, dc in neighbor_offsets:
@@ -396,6 +444,8 @@ def _astar_grid_path(start_idx, goal_idx, blocked, resolution):
             if blocked[neighbor]:
                 continue
             step_cost = resolution * (1.41421356 if dr != 0 and dc != 0 else 1.0)
+            if hist_cost is not None:
+                step_cost += float(hist_cost[neighbor])
             tentative_g = g_score[current] + step_cost
             if tentative_g < g_score.get(neighbor, float('inf')):
                 g_score[neighbor] = tentative_g
@@ -411,29 +461,81 @@ def _astar_grid_path(start_idx, goal_idx, blocked, resolution):
     return path
 
 
-def find_local_astar_waypoint(start_xy, goal_xy, obstacle_mask, ESDF_map, origin, resolution,
-                               safety_radius=0.1, lookahead_dist=1.5):
-    """A* a local, obstacle-aware route from start_xy to goal_xy over the
-    freshly-observed occupancy grid, then return (waypoint, route):
-
-      waypoint — the point lookahead_dist along that route (world xy), a
-                 short, already-clear intermediate goal for the DWA trajectory
-                 scoring to chase instead of the raw (possibly distant or
-                 occluded) final target.
-      route    — the full route as a list of world-xy points, start to
-                 best-reached, for visualization (see publish_astar_path).
-
-    Cells are blocked wherever ESDF_map < safety_radius, i.e. the obstacle
-    mask inflated by the robot's own footprint margin, matching the clearance
-    score_trajectories_by_ESDF already enforces — this only picks a nearer
-    target for it to score against, it doesn't relax or duplicate that check.
-
-    Returns (None, []) when there's nothing useful to hand back (start
-    already inside the inflated margin, or A* made no progress at all toward
-    goal) so the caller can fall back to the raw goal_xy.
+def smooth_route(route_xy, blocked, origin, resolution,
+                 weight_data=0.4, weight_smooth=0.3, iterations=40):
     """
-    rows, cols = obstacle_mask.shape
-    blocked = ESDF_map < safety_radius
+    Gradient-descent smoothing of an A* route, endpoints pinned.
+    Each interior point is pulled weight_data toward where A* put it and weight_smooth
+    toward the average of its neighbors, all updated at once (Jacobi). Moves into blocked
+    space are rejected, so the route is never smoothed through an obstacle.
+    :return: (N, 2) world xy, same point count and endpoints as the input.
+    """
+    if len(route_xy) < 3 or iterations <= 0:
+        return list(route_xy)
+
+    rows, cols = blocked.shape
+    original = np.asarray(route_xy, dtype=float)
+    smoothed = original.copy()
+
+    for _ in range(iterations):
+        interior = smoothed[1:-1]
+        laplacian = smoothed[:-2] + smoothed[2:] - 2.0 * interior
+        candidate = (interior
+                     + weight_data * (original[1:-1] - interior)
+                     + weight_smooth * laplacian)
+        r = ((candidate[:, 0] - origin[0]) / resolution).astype(np.int64)
+        c = ((candidate[:, 1] - origin[1]) / resolution).astype(np.int64)
+        inside = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
+        accept = inside.copy()
+        accept[inside] &= ~blocked[r[inside], c[inside]]
+        interior[accept] = candidate[accept]
+    return list(smoothed)
+
+
+def build_history_cost(prev_route_xy, blocked, origin, resolution, weight, cap,
+                       min_valid_frac=0.5):
+    """
+    Per-cell surcharge in m that biases A* toward the route of the last cycle, so that
+    near-tied choices around an obstacle do not flip sides on noise alone.
+    prev_route_xy is in world coordinates and re-rasterized against the current origin.
+    :return: (H, W) cost map, or None when less than min_valid_frac of the route survives.
+    """
+    if prev_route_xy is None or len(prev_route_xy) < 2 or weight <= 0.0:
+        return None
+    rows, cols = blocked.shape
+    route = np.asarray(prev_route_xy, dtype=float)
+    r = ((route[:, 0] - origin[0]) / resolution).astype(np.int64)
+    c = ((route[:, 1] - origin[1]) / resolution).astype(np.int64)
+    inside = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)  # rolled-away cells drop out
+    in_grid = int(inside.sum())
+    if in_grid == 0:
+        return None
+    prev_mask = np.zeros((rows, cols), dtype=bool)
+    prev_mask[r[inside], c[inside]] = True
+    prev_mask &= ~blocked
+    if prev_mask.sum() < min_valid_frac * in_grid:
+        return None
+    dist = distance_transform_edt(~prev_mask) * resolution
+    return (weight * np.minimum(dist, cap)).astype(np.float32)
+
+
+def plan_local_astar_route(start_xy, goal_xy, ESDF_map, origin, resolution,
+                            safety_radius=0.1, robot_half_width=0.0,
+                            prev_route_xy=None, history_weight=0.0, history_cap=0.5,
+                            smooth_weight=0.3, smooth_data_weight=0.4,
+                            smooth_iterations=40):
+    """
+    Plan a local, obstacle-aware route from start_xy to goal_xy over the freshly observed
+    occupancy grid, smooth it, and return it as world-xy points.
+    Cells are blocked wherever ESDF_map < safety_radius + robot_half_width. The search
+    carries no heading state, so the inflation keeps the footprint corners clear at any yaw.
+    :return: (route, start_margin), route is empty when no useful route exists. start_margin
+             is the clearance of the robot cell minus the inflation, negative when the robot
+             sits inside the inflated band and the caller has to reverse out.
+    """
+    rows, cols = ESDF_map.shape
+    inflation = safety_radius + robot_half_width
+    blocked = ESDF_map < inflation
 
     def to_idx(xy):
         r = int((xy[0] - origin[0]) / resolution)
@@ -449,23 +551,64 @@ def find_local_astar_waypoint(start_xy, goal_xy, obstacle_mask, ESDF_map, origin
     start_idx = to_idx(start_xy)
     goal_idx = to_idx(goal_xy)
 
-    if blocked[start_idx]:
-        return None, []  # already inside the inflated margin — let the DWA-side gates handle it
+    start_margin = float(ESDF_map[start_idx]) - inflation
+    if start_margin < 0.0:
+        return [], start_margin  # inside the inflated band, the caller reverses out
 
-    path_idx = _astar_grid_path(start_idx, goal_idx, blocked, resolution)
+    hist_cost = build_history_cost(prev_route_xy, blocked, origin, resolution,
+                                   history_weight, history_cap)
+    path_idx = _astar_grid_path(start_idx, goal_idx, blocked, resolution, hist_cost)
     if len(path_idx) < 2:
-        return None, []  # no reachable progress at all from start
+        return [], start_margin  # no reachable progress from start
 
-    route = [to_world(idx) for idx in path_idx]
+    # smooth before anything consumes it, the route feeds the DWA lookup maps,
+    # the history bias and the published path alike
+    route = smooth_route([to_world(idx) for idx in path_idx], blocked,
+                         origin, resolution, smooth_data_weight,
+                         smooth_weight, smooth_iterations)
+    return route, start_margin
 
-    accumulated = 0.0
-    prev_world = route[0]
-    for cur_world in route[1:]:
-        accumulated += float(np.linalg.norm(cur_world - prev_world))
-        if accumulated >= lookahead_dist:
-            return cur_world, route
-        prev_world = cur_world
-    return prev_world, route  # whole reachable route is shorter than lookahead_dist
+
+def build_route_fields(route_xy, shape, origin, resolution):
+    """
+    Rasterize an A* route into the lookup maps read by the DWA scoring, so that scoring
+    costs one array lookup per trajectory point instead of a search over route points.
+    The route is resampled at half-cell steps so the rasterized line has no gaps for the EDT.
+    :param route_xy: (N, 2) route in world xy, smooth_route moves points off cell centers.
+    :return: (path_dist_map, remaining_map, has_route). path_dist_map is the distance in m
+             from each cell to the nearest route cell, remaining_map is the route arc length
+             still ahead, with off-route cells inheriting the arc length of their nearest
+             route cell.
+    """
+    path_dist_map = np.full(shape, OFF_ROUTE_COST, dtype=np.float32)
+    remaining_map = np.full(shape, OFF_ROUTE_COST, dtype=np.float32)
+    if len(route_xy) < 2:
+        return path_dist_map, remaining_map, False
+
+    rows, cols = shape
+    route = np.asarray(route_xy, dtype=float)
+    node_arc = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))))
+    arc = float(node_arc[-1])
+    if arc < 1e-9:
+        return path_dist_map, remaining_map, False
+
+    sample_arc = np.linspace(0.0, arc, int(np.ceil(arc / (0.5 * resolution))) + 1)
+    r = ((np.interp(sample_arc, node_arc, route[:, 0]) - origin[0]) / resolution).astype(np.int64)
+    c = ((np.interp(sample_arc, node_arc, route[:, 1]) - origin[1]) / resolution).astype(np.int64)
+    inside = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
+    if not np.any(inside):
+        return path_dist_map, remaining_map, False
+
+    route_mask = np.zeros(shape, dtype=bool)
+    arc_map = np.zeros(shape, dtype=np.float32)
+    route_mask[r[inside], c[inside]] = True
+    # last write wins, a cell crossed twice reports the later arc length
+    arc_map[r[inside], c[inside]] = sample_arc[inside]
+
+    dist_cells, (near_r, near_c) = distance_transform_edt(~route_mask, return_indices=True)
+    path_dist_map = (dist_cells * resolution).astype(np.float32)
+    remaining_map = (arc - arc_map[near_r, near_c]).astype(np.float32)
+    return path_dist_map, remaining_map, True
 
 
 # === PlanningNode class ===
@@ -481,11 +624,7 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
-        # find_local_astar_waypoint's full route (not just the lookahead
-        # waypoint cost_function chases) and that waypoint itself, for
-        # visualization — see publish_astar_path / publish_astar_waypoint.
         self.astar_path_pub = self.create_publisher(Path, '/planning/astar_path', 10)
-        self.astar_waypoint_pub = self.create_publisher(Odometry, '/planning/astar_waypoint', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
@@ -509,9 +648,28 @@ class PlanningNode(Node):
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ObstacleConfig()
-        # How far along the local A* route (see find_local_astar_waypoint) to
-        # place the intermediate goal the DWA scoring chases each cycle.
-        self.local_astar_lookahead_dist = 1.5  # m
+        # DWA cost weights, the obstacle term dominates with its 1e5 multiplier in
+        # cost_function. Among the survivors, progress drives the speed, follow keeps
+        # the robot on the side of an obstacle chosen by A*, and terminal breaks the
+        # tie once remaining_map saturates at 0 past the route end.
+        self.w_route_progress = 100.0
+        self.w_path_follow = 80.0
+        self.w_goal_terminal = 100.0
+        self.route_terminal_band = 0.5  # m of remaining route that arms w_goal_terminal
+
+        # surcharge for straying from the route of the last cycle, capped so a better
+        # route can still win, a fully deviating route pays about +50% length here
+        self.astar_history_weight = 0.1
+        self.astar_history_cap = 0.5  # m
+        self.astar_smooth_weight = 0.3
+        self.astar_smooth_data_weight = 0.4
+        self.astar_smooth_iterations = 15  # converges by ~10 sweeps at any route length
+        # extra clearance required before forward motion resumes, so the robot does
+        # not re-enter the inflated band and chatter at its boundary
+        self.blocked_reverse_exit_margin = 0.10  # m
+        self._reversing_from_blocked = False
+        self.prev_route_world = None  # in world xy, self.origin rolls so indices would not survive
+        self.prev_obstacle_core = None  # pre-dilation mask feeding the occupancy hysteresis
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
@@ -524,6 +682,7 @@ class PlanningNode(Node):
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self.prev_route_world = None  # the remembered route leads to the old target
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -569,9 +728,10 @@ class PlanningNode(Node):
         self.footprint_pub.publish(msg)
 
     def publish_astar_path(self, route_xy, z, stamp):
-        """Publish find_local_astar_waypoint's full route (world xy) as a Path,
-        for visualizing the obstacle-routed line separately from the sampled
-        arc cost_function ends up picking on /planning/trajectory_path."""
+        """
+        Publish the A* route (world xy) as a Path, separately from the sampled arc
+        on /planning/trajectory_path.
+        """
         path = Path()
         path.header = Header()
         path.header.stamp = stamp
@@ -586,23 +746,11 @@ class PlanningNode(Node):
             path.poses.append(pose)
         self.astar_path_pub.publish(path)
 
-    def publish_astar_waypoint(self, waypoint_xy, z, stamp):
-        """Publish the single lookahead point find_local_astar_waypoint hands
-        to cost_function as the goal, so it can be marked distinctly from the
-        full route (publish_astar_path) and the raw final target."""
-        msg = Odometry()
-        msg.header = Header()
-        msg.header.stamp = stamp
-        msg.header.frame_id = "world"
-        msg.pose.pose.position.x = float(waypoint_xy[0])
-        msg.pose.pose.position.y = float(waypoint_xy[1])
-        msg.pose.pose.position.z = float(z)
-        msg.pose.pose.orientation.w = 1.0
-        self.astar_waypoint_pub.publish(msg)
-
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
-        """Distance from the robot's front face to the nearest obstacle in the forward corridor.
-        Scans start at the front face so the returned value matches physical clearance."""
+        """
+        Distance from the front face of the robot to the nearest obstacle in the forward
+        corridor. The scan starts at the front face, so the value is the physical clearance.
+        """
         center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
@@ -729,7 +877,12 @@ class PlanningNode(Node):
             if np.linalg.norm(delta) > .1:
                 new_center = robot_pos
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
+                old_origin = self.origin.copy()
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+                # the hysteresis mask is indexed by grid cell, so it rolls with the grid
+                shift_cells = np.round((self.origin - old_origin) / self.resolution).astype(int)[:2]
+                if self.prev_obstacle_core is not None and np.any(shift_cells):
+                    self.prev_obstacle_core = roll_and_clear(self.prev_obstacle_core, shift_cells, False)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
             self.occupancy_grid *= 0.99
             self.occupancy_grid += new_occ
@@ -738,9 +891,10 @@ class PlanningNode(Node):
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            obstacle_mask = build_obstacle_map(
+            obstacle_mask, self.prev_obstacle_core = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config,
+                prev_core=self.prev_obstacle_core,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
@@ -761,54 +915,89 @@ class PlanningNode(Node):
             self.last_T = T
             self.last_stamp = stamp
 
-        with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_len, rear_len, half_w = self.robot.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
-            top_k = 100
-            top_indices = np.argsort(scores, kind='stable')[:top_k]
-
         with Timer(name='astar', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            # A short, already-obstacle-aware intermediate goal for the DWA cost
-            # function below to chase, instead of handing it the raw (possibly
-            # distant/occluded) final target — see find_local_astar_waypoint.
-            # score_trajectories_by_ESDF above is untouched: this only changes
-            # what "the goal" means to cost_function, not the collision scoring.
-            local_target = self.target_pose
+            astar_route = []
+            start_margin = float('inf')
             if self.target_pose is not None:
-                waypoint_xy, astar_route = find_local_astar_waypoint(
-                    init_p[:2], self.target_pose[:2], obstacle_mask, ESDF_map,
+                astar_route, start_margin = plan_local_astar_route(
+                    init_p[:2], self.target_pose[:2], ESDF_map,
                     self.origin, self.resolution, self.robot.safety_radius,
-                    self.local_astar_lookahead_dist,
+                    self.robot.width / 2.0,
+                    self.prev_route_world, self.astar_history_weight, self.astar_history_cap,
+                    self.astar_smooth_weight, self.astar_smooth_data_weight,
+                    self.astar_smooth_iterations,
                 )
-                if waypoint_xy is not None:
-                    local_target = np.array([waypoint_xy[0], waypoint_xy[1], self.target_pose[2]])
-                    self.publish_astar_waypoint(waypoint_xy, init_p[2], depth_msg.header.stamp)
+                self.prev_route_world = astar_route  # build_history_cost drops a short one
                 if astar_route:
                     self.publish_astar_path(astar_route, init_p[2], depth_msg.header.stamp)
+            path_dist_map, remaining_map, has_route = build_route_fields(
+                astar_route, ESDF_map.shape, self.origin, self.resolution,
+            )
+
+        with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            front_len, rear_len, half_w = self.robot.footprint_from_control()
+            scores, occ_points, path_costs, end_remainings = score_trajectories_by_ESDF(
+                trajectories, ESDF_map, path_dist_map, remaining_map,
+                self.origin, self.resolution, self.robot.safety_radius,
+                front_len, rear_len, half_w,
+            )
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            enter_threshold = 0.30
+            enter_threshold = 0.2
 
-            def cost_function(traj, param, score, target_pose):
+            # latched, releasing at margin 0 would put the robot back on the
+            # boundary it just backed off and oscillate there
+            if start_margin < 0.0:
+                self._reversing_from_blocked = True
+            elif start_margin > self.blocked_reverse_exit_margin:
+                self._reversing_from_blocked = False
+            if self._reversing_from_blocked:
+                self.get_logger().warning(
+                    f'Robot inside inflated band (margin {start_margin:+.2f} m), reversing out'
+                )
+
+            def cost_function(traj, param, score, path_cost, end_remaining):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= enter_threshold
+                should_reverse = (front_clearance <= enter_threshold
+                                  or self._reversing_from_blocked)
                 reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
-                elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                if should_reverse != is_backward_traj:
+                    reverse_gate_penalty = 1e9
 
-                # regular trajectory penalty
-                traj_end = np.array(traj[-1,:3])
-                target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
+                smoothness = (10 * abs(self.last_param[0] - param[0])
+                              + 10 * abs(self.last_param[1] - param[1]))
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                if not has_route:
+                    # no route this cycle, both route maps are flat, so fall back
+                    # to steering at the raw target
+                    traj_end = np.array(traj[-1, :3])
+                    target_end = self.target_pose if self.target_pose is not None else traj_end
+                    return (score * 100000 + 100 * np.linalg.norm(traj_end - target_end)
+                            + smoothness + reverse_gate_penalty)
+
+                # xy only, the trajectory z is pinned to the height of the robot
+                terminal = 0.0
+                if end_remaining < self.route_terminal_band and self.target_pose is not None:
+                    terminal = self.w_goal_terminal * float(
+                        np.linalg.norm(traj[-1, :2] - self.target_pose[:2])
+                    )
+
+                return (score * 100000
+                        + self.w_route_progress * end_remaining
+                        + self.w_path_follow * path_cost
+                        + terminal
+                        + smoothness
+                        + reverse_gate_penalty)
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], local_target) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            costs = np.array([
+                cost_function(trajectories[i], params[i], scores[i], path_costs[i],
+                              end_remainings[i])
+                for i in range(len(trajectories))
+            ])
+            top_indices = np.argsort(costs, kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path

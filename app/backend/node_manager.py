@@ -146,8 +146,7 @@ class BackendNode(Ros2NodeManager):
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
-        self._astar_path: list = []       # find_local_astar_waypoint's full local route
-        self._astar_waypoint: dict | None = None  # the lookahead point cost_function chases
+        self._astar_path: list = []       # plan_local_astar_route's full local route
         self._global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
         self._voxel_points: list = []
@@ -170,7 +169,6 @@ class BackendNode(Ros2NodeManager):
         )
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
         self.create_subscription(Path, '/planning/astar_path', self._on_astar_path, 1)
-        self.create_subscription(Odometry, '/planning/astar_waypoint', self._on_astar_waypoint, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
         self.create_subscription(
             Odometry, '/control/target_pose', self._on_nav_target_pose, 1
@@ -369,13 +367,6 @@ class BackendNode(Ros2NodeManager):
         ]
         with self._lock:
             self._astar_path = pts
-
-    def _on_astar_waypoint(self, msg: Odometry):
-        with self._lock:
-            self._astar_waypoint = {
-                'x': msg.pose.pose.position.x,
-                'y': msg.pose.pose.position.y,
-            }
 
     def _on_global_plan(self, msg: Path):
         pts = [
@@ -629,7 +620,6 @@ class BackendNode(Ros2NodeManager):
                 'obstacle_image': base64.b64encode(self._obstacle_bytes).decode() if self._obstacle_bytes else None,
                 'trajectory': list(self._trajectory),
                 'astar_path': list(self._astar_path),
-                'astar_waypoint': self._astar_waypoint,
                 'global_path': None,  # filled after TF transform (odom frame)
                 'map_global_path': path_snapshot,
                 'grid_info': self._grid_info,
