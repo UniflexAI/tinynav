@@ -176,10 +176,6 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
-# Arrival also requires the authored heading within this, when a POI carries one.
-_ARRIVE_YAW_DEG = 5.0
-
-
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
         """Initialization
@@ -298,15 +294,6 @@ class MapNode(Node):
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
-        # Side channel for cmd_vel_control's final approach: whether target_pose is the
-        # FINAL poi (rather than a lookahead point along the way), and that poi's
-        # authored arrival heading converted into the odom frame. Deliberately metadata
-        # on the existing target rather than a second pose topic -- the controller
-        # already tracks target_pose, and this only tells it what the target means.
-        self.target_pose_meta_pub = self.create_publisher(String, "/control/target_pose_meta", 10)
-        # POI queue index -> authored arrival heading (rad, map frame), for the POIs
-        # that carry one.
-        self.poi_yaws = {}
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -319,22 +306,10 @@ class MapNode(Node):
             self.pois = json.loads(msg.data)
 
             pois_dict = {}
-            poi_yaws = {}
             keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
-                entry = self.pois[str(key)]
-                pois_dict[index] = np.array(entry["position"])
-                # Authored in degrees (a human types it into the POI editor); radians
-                # from here on, like every other angle in this node. Keyed by QUEUE
-                # INDEX, matching pois_dict, because that is what poi_index selects.
-                try:
-                    if entry.get("yaw_deg") is not None:
-                        poi_yaws[index] = np.deg2rad(float(entry["yaw_deg"]))
-                except (TypeError, ValueError):
-                    self.get_logger().warning(
-                        f"POI {key} has an unreadable yaw_deg — ignoring it")
+                pois_dict[index] = np.array(self.pois[str(key)]["position"])
             self.pois = pois_dict
-            self.poi_yaws = poi_yaws
 
             if not self.pois:
                 self.poi_index = -1
@@ -696,19 +671,7 @@ class MapNode(Node):
         # zone: with a camera reference, arrival triggers while the control center is
         # still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
         # Measuring from the camera declares arrival early; that is the point.
-        # With an authored heading the leg is not done until the robot is facing it:
-        # cmd_vel_control is actively driving that heading during the final approach, so
-        # arriving on position alone would cut the turn off half way. Same forward-axis
-        # projection as every other yaw here (body +z is forward).
-        goal_yaw = self.poi_yaws.get(self.poi_index)
-        yaw_ok = True
-        if goal_yaw is not None:
-            rot = pose_in_map[:3, :3]
-            cur_yaw = float(np.arctan2(rot[1, 2], rot[0, 2]))
-            yaw_err = float((goal_yaw - cur_yaw + np.pi) % (2 * np.pi) - np.pi)
-            yaw_ok = abs(yaw_err) < np.deg2rad(_ARRIVE_YAW_DEG)
-        if (np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0
-                and yaw_ok):
+        if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
             # Unconditional: this message is the only arrival edge consumers get, so
             # gating it on _leg_initial_length (i.e. "this leg published progress at
             # least once") silently loses the arrival for a POI the robot is ALREADY
@@ -790,15 +753,10 @@ class MapNode(Node):
         accumulated_distance = 0.0
         start_point = pos[:3]
         target_position = paths[-1]
-        # ...unless the loop below breaks early, in which case the target is a lookahead
-        # point on the way. A numpy row identity check cannot answer this (`paths[-1]`
-        # builds a fresh view every time), so the loop says so itself.
-        goal_is_last = True
         for i in range(closest_idx, len(paths) - 1):
             accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
             if accumulated_distance > max_speed * 5:
                 target_position = paths[i]
-                goal_is_last = False
                 break
             start_point = paths[i]
 
@@ -807,25 +765,6 @@ class MapNode(Node):
         dummy_pose = np.eye(4)
         dummy_pose[:3, 3] = target_position_in_odom
         self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
-
-        # What that target MEANS. `is_last` is false while target_position is a
-        # lookahead point part-way along the path -- shaping the approach against one of
-        # those would brake for somewhere the robot is only passing through.
-        #
-        # The heading is converted here, not in the controller: T is map->odom, both
-        # frames are z-up, so its rotation is a yaw about z and adding it moves an
-        # authored map heading into the frame odom reports. Doing it once, where T lives,
-        # is what keeps the controller from having to know the map exists.
-        goal_yaw_in_odom = None
-        goal_yaw = self.poi_yaws.get(self.poi_index) if goal_is_last else None
-        if goal_yaw is not None:
-            map_yaw_offset = float(np.arctan2(T[1, 0], T[0, 0]))
-            goal_yaw_in_odom = float(
-                (goal_yaw + map_yaw_offset + np.pi) % (2 * np.pi) - np.pi)
-        self.target_pose_meta_pub.publish(String(data=json.dumps({
-            "is_last": bool(goal_is_last),
-            "yaw": goal_yaw_in_odom,
-        })))
 
         self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
 
