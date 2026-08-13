@@ -25,7 +25,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from tinynav.core.math_utils import (rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np,
+                                     heading_of, wrap_angle, yaw_to_camera_rot)
 
 
 ROBOT_CONFIG_TOPIC = '/robot/config'
@@ -34,6 +35,30 @@ ROBOT_CONFIG_TOPIC = '/robot/config'
 # planner here and by cmd_vel_control's near-goal law. Declared alongside
 # ROBOT_CONFIG_TOPIC so the three nodes cannot disagree about the name.
 GOAL_POSE_TOPIC = '/control/goal_pose'
+# How long a goal pose stays live after the last message. map_node's nav timer runs at
+# 2Hz, so this is "one period plus slack" — and ceasing to publish is how map_node
+# retracts the goal, which makes the window part of the topic's contract rather than a
+# per-consumer choice.
+GOAL_POSE_TTL_S = 1.5
+
+# Terminal candidates (see generate_terminal_trajectories). Module constants, not
+# node parameters: nothing varies them, and two of the three are pinned to facts
+# elsewhere rather than free to tune.
+#
+# _TERMINAL_BIAS is the one real weight. It is a lexicographic threshold, not a
+# nudge: large enough that a collision-free terminal candidate beats the distance and
+# smoothness terms outright, small enough that scores[i]*100000 (the clearance term)
+# passes it once the curve comes within ~5cm of something. Below that clearance,
+# falling back to the lattice — and to arrival's grace timeout — beats scraping a wall
+# to be exact.
+_TERMINAL_BIAS = 1e6
+# Must match cmd_vel_control's max_angular_speed: a curve demanding more would be
+# executed as a wider one than the curve that was scored for collisions.
+_TERMINAL_MAX_OMEGA = 0.8
+# Beyond this the lattice is the right tool — it plans around things, a single curve
+# does not, and a long curve is mostly guesswork about a corridor we cannot see the
+# end of. This candidate is for the endgame.
+_TERMINAL_REACH_M = 3.0
 
 
 @dataclass
@@ -291,19 +316,51 @@ def generate_predefined_trajectory_vocabularies(
     return np.asarray(trajectories), np.asarray(params)
 
 
-def _heading_to_quat(yaw: float) -> np.ndarray:
-    """Quaternion (x,y,z,w) whose forward axis (optical +z) points along `yaw` in
-    world XY — the inverse of _world_heading, which every consumer of these
-    trajectories uses to read a heading back out."""
-    c, s = np.cos(yaw), np.sin(yaw)
-    return matrix_to_quat(np.array([[s, 0.0, c],
-                                    [-c, 0.0, s],
-                                    [0.0, -1.0, 0.0]]))
+def _bezier_to_pose(p0, yaw0, p1, goal_yaw, num_steps, duration, dt,
+                    vx_max, max_omega, reach_m):
+    """A cubic Bezier from (p0, yaw0) to (p1, goal_yaw), or None if it is not a
+    candidate worth offering.
+
+    Control points laid a third of the span along each heading: the curve leaves
+    along the current heading and arrives along the goal's, so position and heading
+    converge together instead of drive-then-turn. Heading follows the tangent.
+
+    Returns (points, yaws, vx). None means "no Bezier this cycle" — too far to be the
+    endgame, degenerate, or a curvature the base cannot hold. That last one matters:
+    an untrackable curve would win the cost on the terminal bias and then be executed
+    as a wider curve than the one that was scored for collisions."""
+    span = float(np.linalg.norm(p1[:2] - p0[:2]))
+    if span < 1e-3 or span > reach_m:
+        return None
+    h = span / 3.0
+    b1 = p0 + np.array([np.cos(yaw0), np.sin(yaw0), 0.0]) * h
+    b2 = p1 - np.array([np.cos(goal_yaw), np.sin(goal_yaw), 0.0]) * h
+    t = np.linspace(0.0, 1.0, num_steps)[:, None]
+    pts = ((1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * b1
+           + 3 * (1 - t) * t ** 2 * b2 + t ** 3 * p1)
+    pts[:, 2] = p0[2]
+    d = np.diff(pts[:, :2], axis=0)
+    seg = np.linalg.norm(d, axis=1)
+    if not np.all(seg > 1e-6):
+        return None                     # degenerate (cusp)
+    yaws = np.empty(num_steps)
+    yaws[:-1] = np.arctan2(d[:, 1], d[:, 0])
+    yaws[-1] = goal_yaw                 # the tangent already points here; say it exactly
+    # Traversed at whatever speed covers the arc in `duration`; the turn rate that
+    # implies is what the base would have to hold (and slows with a speed cap).
+    arc = float(seg.sum())
+    vx = min(arc / duration, vx_max)
+    if vx <= 1e-3:
+        return None
+    scale = vx * duration / max(arc, 1e-6)
+    if np.max(np.abs(wrap_angle(np.diff(yaws)))) / dt * scale > max_omega:
+        return None                     # too tight to track
+    return pts, yaws, vx
 
 
 def generate_terminal_trajectories(
     init_p, init_q, goal_p, goal_yaw, duration=3.0, dt=0.1,
-    vx_max=0.5, max_omega=0.8, reach_m=3.0,
+    vx_max=0.5, max_omega=_TERMINAL_MAX_OMEGA, reach_m=_TERMINAL_REACH_M,
 ):
     """Candidates that END at the goal, in position AND heading.
 
@@ -312,86 +369,45 @@ def generate_terminal_trajectories(
     cost only measures how close an endpoint lands. Inside roughly half an arc-length
     of the goal every forward row overshoots and the stationary rows win on
     distance — the near-goal dead zone that forces arrival to be declared 0.5 m out.
-    These two candidates are the way out, and they only exist when there is a goal
-    pose to aim at (i.e. the last POI, and it carries a heading).
 
-      - a cubic Bezier from here to the goal, control points laid along the two
-        headings so the curve leaves along the current heading and arrives along the
-        goal's. Heading follows the tangent, so position and heading converge
-        together instead of drive-then-turn.
-      - a rotate-in-place to the goal heading, for when the position is already right.
-        Not redundant with the lattice's vx=0 rows: those are scored by a heading term
-        that is deliberately switched off within 0.3 m of the goal.
+    Two candidates, and they only exist when there is a goal pose to aim at (i.e. the
+    last POI, and it carries a heading): a Bezier onto the goal (_bezier_to_pose), and
+    a rotate-in-place for when the position is already right. The rotation is not
+    redundant with the lattice's vx=0 rows — those are ranked by a heading term that
+    is deliberately switched off within 0.3 m of the goal, exactly where it is needed.
 
-    Returns (trajectories, params) with 0-2 rows, shaped like the lattice's so they
-    concatenate and score with no special handling. A Bezier whose curvature the base
-    cannot track is dropped rather than offered — it would win the cost and then be
-    executed badly.
+    Returns (trajectories, params) with 1-2 rows, shaped like the lattice's so they
+    concatenate and score with no special handling.
     """
     num_steps = int(duration / dt) + 1
     p0 = np.asarray(init_p, dtype=np.float64).copy()
-    R0 = quat_to_matrix(np.asarray(init_q, dtype=np.float64))
-    fwd0 = R0 @ np.array([0.0, 0.0, 1.0])
-    yaw0 = np.arctan2(fwd0[1], fwd0[0])
+    yaw0 = heading_of(quat_to_matrix(np.asarray(init_q, dtype=np.float64)))
     p1 = np.asarray(goal_p, dtype=np.float64).copy()
     p1[2] = p0[2]        # planar, like the lattice's own flattening
 
     trajs, params = [], []
 
-    def _rows(points, yaws, vx):
+    def _add(points, yaws, vx):
         traj = np.empty((num_steps, 7))
+        traj[:, :3] = points
         for i in range(num_steps):
-            traj[i, :3] = points[i]
-            traj[i, 3:] = _heading_to_quat(yaws[i])
+            traj[i, 3:] = matrix_to_quat(yaw_to_camera_rot(yaws[i]))
         trajs.append(traj)
         params.append(np.array([vx, 0.0]))
 
-    # -- rotate in place -------------------------------------------------- #
-    turn = np.arctan2(np.sin(goal_yaw - yaw0), np.cos(goal_yaw - yaw0))
     # Spend only as much of the horizon as the turn needs, then hold: a trajectory
-    # that is still rotating at its endpoint reports an endpoint heading that is not
-    # where it means to stop.
+    # still rotating at its endpoint reports an endpoint heading that is not where it
+    # means to stop.
+    turn = wrap_angle(goal_yaw - yaw0)
     turn_steps = max(1, min(num_steps - 1,
                             int(abs(turn) / max(max_omega * dt, 1e-6)) + 1))
-    yaws = np.array([yaw0 + turn * min(i / turn_steps, 1.0) for i in range(num_steps)])
-    _rows(np.repeat(p0[None, :], num_steps, axis=0), yaws, 0.0)
+    _add(np.repeat(p0[None, :], num_steps, axis=0),
+         yaw0 + turn * np.minimum(np.arange(num_steps) / turn_steps, 1.0), 0.0)
 
-    # -- Bezier ----------------------------------------------------------- #
-    span = float(np.linalg.norm(p1[:2] - p0[:2]))
-    # Far away the lattice is the right tool (it plans around things; a single curve
-    # does not), and a long curve is mostly guesswork about a corridor we cannot see
-    # the end of. This candidate is for the endgame.
-    if span < 1e-3 or span > reach_m:
-        return np.asarray(trajs), np.asarray(params)
-    fwd1 = np.array([np.cos(goal_yaw), np.sin(goal_yaw), 0.0])
-    fwd0_xy = np.array([np.cos(yaw0), np.sin(yaw0), 0.0])
-    # Handle length: the classic third-of-the-span gives a curve that leaves and
-    # arrives tangentially without looping.
-    h = span / 3.0
-    b0, b3 = p0, p1
-    b1, b2 = p0 + fwd0_xy * h, p1 - fwd1 * h
-    t = np.linspace(0.0, 1.0, num_steps)[:, None]
-    pts = ((1 - t) ** 3 * b0 + 3 * (1 - t) ** 2 * t * b1
-           + 3 * (1 - t) * t ** 2 * b2 + t ** 3 * b3)
-    pts[:, 2] = p0[2]
-    d = np.diff(pts[:, :2], axis=0)
-    seg = np.linalg.norm(d, axis=1)
-    if not np.all(seg > 1e-6):
-        return np.asarray(trajs), np.asarray(params)   # degenerate (cusp)
-    yaws = np.empty(num_steps)
-    yaws[:-1] = np.arctan2(d[:, 1], d[:, 0])
-    yaws[-1] = goal_yaw          # the tangent already points here; say it exactly
-    dyaw = np.arctan2(np.sin(np.diff(yaws)), np.cos(np.diff(yaws)))
-    # The curve is traversed at whatever speed covers it in `duration`; the turn rate
-    # that implies is what the base would have to hold.
-    arc = float(seg.sum())
-    vx = min(arc / duration, vx_max)
-    if vx <= 1e-3:
-        return np.asarray(trajs), np.asarray(params)
-    scale = vx * duration / max(arc, 1e-6)   # <1 when speed-capped: the turn slows too
-    if np.max(np.abs(dyaw)) / dt * scale > max_omega:
-        return np.asarray(trajs), np.asarray(params)   # too tight to track
-    _rows(pts, yaws, vx)
+    bezier = _bezier_to_pose(p0, yaw0, p1, goal_yaw, num_steps, duration, dt,
+                             vx_max, max_omega, reach_m)
+    if bezier is not None:
+        _add(*bezier)
     return np.asarray(trajs), np.asarray(params)
 
 
@@ -584,18 +600,7 @@ class PlanningNode(Node):
         self.create_subscription(Odometry, GOAL_POSE_TOPIC, self.goal_pose_callback, 10)
         self.goal_pose = None
         self._goal_pose_stamp_ns = None
-        self._goal_pose_ttl_ns = int(1.5e9)   # map_node's nav timer runs at 2Hz
-        # How much a terminal candidate is preferred by when it is collision-free.
-        # Large enough to beat the distance/smoothness terms outright ("only pick it
-        # if it does not hit anything"), small enough that the clearance term still
-        # outranks it: scores[i]*100000 passes 1e6 once the curve comes within ~5cm
-        # of something, at which point falling back to the lattice — and to arrival's
-        # grace timeout — beats scraping a wall to be exact.
-        self._terminal_bias = 1e6
-        # Ceiling on the turn rate a terminal candidate may demand. cmd_vel_control
-        # clamps at 0.8 rad/s, so a curve needing more would be executed as a wider
-        # one than the curve that was scored for collisions.
-        self._terminal_max_omega = 0.8
+        self._goal_pose_ttl_ns = int(GOAL_POSE_TTL_S * 1e9)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -731,9 +736,8 @@ class PlanningNode(Node):
         built in — aiming the camera would park the body 0.3m short."""
         if not self._signal_fresh(self._goal_pose_stamp_ns, self._goal_pose_ttl_ns):
             return None
-        T = self.goal_pose
-        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-        return self.camera_to_robot_center(T), float(np.arctan2(fwd[1], fwd[0]))
+        return (self.camera_to_robot_center(self.goal_pose),
+                heading_of(self.goal_pose))
 
     def _signal_fresh(self, stamp_ns, window_ns):
         """True if a signal last stamped at stamp_ns is still within window_ns of
@@ -752,14 +756,21 @@ class PlanningNode(Node):
         return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
                                [self._vx_min, v_open]))
 
-    def _publish_velocity_ff(self, vx, omega):
+    def _publish_velocity_ff(self, vx, omega, terminal=False):
         """Publish a (vx, omega) feedforward on /planning/velocity_ff. angular.x
         carries the fixed-speed reverse flag, derived from the sign of vx here so the
-        reverse-vocabulary convention cmd_vel_control consumes lives in one place."""
+        reverse-vocabulary convention cmd_vel_control consumes lives in one place.
+
+        angular.y says the selected trajectory ends ON the goal pose. That is the
+        difference between "follow this because it is the best arc available" and
+        "follow this because it lands where we are going", and cmd_vel_control needs
+        it to know whether its own endgame law has anything to add — a collision-
+        checked curve onto the goal should not be thrown away for an open-loop one."""
         ff = Twist()
         ff.linear.x = vx
         ff.angular.z = omega
         ff.angular.x = 1.0 if vx < 0.0 else 0.0
+        ff.angular.y = 1.0 if terminal else 0.0
         self.velocity_ff_pub.publish(ff)
 
     def info_callback(self, msg):
@@ -968,16 +979,20 @@ class PlanningNode(Node):
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
-            # Terminal candidates last, so their indices are the tail of the array.
-            n_lattice = len(trajectories)
+            # Carried as a mask rather than an index range: the cost below asks "does
+            # this candidate end on the goal", which is a property of the candidate,
+            # not of where two concatenations happened to put it. Upstream edits the
+            # vocabulary concat above, so index arithmetic here would break silently.
+            is_terminal = np.zeros(len(trajectories), dtype=bool)
             goal = self._fresh_goal_pose()
             if goal is not None:
                 term_trajs, term_params = generate_terminal_trajectories(
                     init_p=init_p, init_q=init_q, goal_p=goal[0], goal_yaw=goal[1],
-                    vx_max=v_allow, max_omega=self._terminal_max_omega)
-                if len(term_trajs):
-                    trajectories = np.concatenate([trajectories, term_trajs], axis=0)
-                    params = np.concatenate([params, term_params], axis=0)
+                    vx_max=v_allow)
+                trajectories = np.concatenate([trajectories, term_trajs], axis=0)
+                params = np.concatenate([params, term_params], axis=0)
+                is_terminal = np.concatenate(
+                    [is_terminal, np.ones(len(term_trajs), dtype=bool)])
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = self.robot.footprint_from_control()
@@ -1065,7 +1080,7 @@ class PlanningNode(Node):
                 # it would scrape something. Not folded into `dist`: distance-to-
                 # endpoint cannot express "and facing the right way", and the lattice
                 # rows must keep competing among themselves on the old cost exactly.
-                terminal_bonus = -self._terminal_bias if i >= n_lattice else 0.0
+                terminal_bonus = -_TERMINAL_BIAS if is_terminal[i] else 0.0
                 return (scores[i] * 100000
                         + 100 * dist
                         + 10 * smooth
@@ -1105,7 +1120,8 @@ class PlanningNode(Node):
             dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
             sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
-            self._publish_velocity_ff(sel_vx, sel_omega)
+            self._publish_velocity_ff(sel_vx, sel_omega,
+                                      terminal=bool(is_terminal[top_indices[0]]))
 
             # path
             path = Path()

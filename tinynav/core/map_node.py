@@ -10,7 +10,9 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
+from tinynav.core.math_utils import (matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf,
+                                     rerank_by_pnp_inliers, heading_of, wrap_angle,
+                                     yaw_to_camera_rot)
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -43,24 +45,6 @@ _PRECISE_YAW_DEG = 5.0
 # without meeting the tight test, declare arrival anyway. The mission layer's turn is
 # the backstop for the heading; a leg that never ends is not recoverable at all.
 _PRECISE_GRACE_S = 20.0
-
-
-def _yaw_to_camera_rot(yaw: float) -> np.ndarray:
-    """Rotation whose forward axis (optical +z) points along `yaw` in world XY.
-
-    Inverse of the yaw convention used everywhere downstream (forward axis projected
-    onto XY, cf. planning_node._world_heading): columns are [right, down, forward]."""
-    c, s = np.cos(yaw), np.sin(yaw)
-    return np.array([[s, 0.0, c],
-                     [-c, 0.0, s],
-                     [0.0, -1.0, 0.0]])
-
-
-def _heading_of(R: np.ndarray) -> float:
-    """World heading of a camera-convention rotation — the projection its inverse
-    _yaw_to_camera_rot undoes."""
-    fwd = R @ np.array([0.0, 0.0, 1.0])
-    return float(np.arctan2(fwd[1], fwd[0]))
 logger = logging.getLogger(__name__)
 
 
@@ -712,10 +696,11 @@ class MapNode(Node):
         and the near-goal control law aim at. Same map->odom composition as the
         lookahead carrot below, applied to a rotation as well as a position."""
         T_goal_in_map = np.eye(4)
-        T_goal_in_map[:3, :3] = _yaw_to_camera_rot(goal_yaw)
+        T_goal_in_map[:3, :3] = yaw_to_camera_rot(goal_yaw)
         T_goal_in_map[:3, 3] = poi[:3]
-        T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
-        self.goal_pose_pub.publish(np2msg(T @ T_goal_in_map,
+        # pose_in_map is inv(T_from_map_to_odom) @ latest_odom_pose, so the map->odom
+        # composition the carrot below spells out longhand is this attribute exactly.
+        self.goal_pose_pub.publish(np2msg(self.T_from_map_to_odom @ T_goal_in_map,
                                           self.get_clock().now().to_msg(),
                                           "world", "camera"))
 
@@ -738,10 +723,9 @@ class MapNode(Node):
         if not loose:
             self._precise_since = None   # left the radius: the clock restarts
             return False
-        yaw_err = _heading_of(pose_in_map[:3, :3]) - goal_yaw
-        yaw_err = abs(np.arctan2(np.sin(yaw_err), np.cos(yaw_err)))
-        if (np.linalg.norm(poi[:2] - pos[:2]) < _PRECISE_TOL_M
-                and yaw_err < np.deg2rad(_PRECISE_YAW_DEG)):
+        dist = float(np.linalg.norm(poi[:2] - pos[:2]))
+        yaw_err = abs(wrap_angle(heading_of(pose_in_map) - goal_yaw))
+        if dist < _PRECISE_TOL_M and yaw_err < np.deg2rad(_PRECISE_YAW_DEG):
             self._precise_since = None
             return True
         now = time.monotonic()
@@ -751,8 +735,8 @@ class MapNode(Node):
         if now - self._precise_since > _PRECISE_GRACE_S:
             self.get_logger().warning(
                 f"POI {self.poi_index}: gave up on the precise ending after "
-                f"{_PRECISE_GRACE_S:.0f}s — {np.linalg.norm(poi[:2] - pos[:2]):.2f}m "
-                f"out, {np.rad2deg(yaw_err):.0f}deg off")
+                f"{_PRECISE_GRACE_S:.0f}s — {dist:.2f}m out, "
+                f"{np.rad2deg(yaw_err):.0f}deg off")
             self._precise_since = None
             return True
         return False
