@@ -248,6 +248,21 @@ function drawPath(points, color, width, alpha = 1) {
   ctx.restore();
 }
 
+function drawLabeledPath(points, color, width, label) {
+  drawPath(points, color, width, 0.94);
+  if (!points || !points.length) return;
+  const [x, y] = points[Math.min(points.length - 1, Math.max(0, Math.floor(points.length * 0.65)))];
+  const [px, py] = worldToCanvas(x, y);
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.88)";
+  ctx.fillRect(px - 36, py - 20, 72, 20);
+  ctx.fillStyle = color;
+  ctx.font = "12px system-ui";
+  ctx.textAlign = "center";
+  ctx.fillText(label, px, py - 6);
+  ctx.restore();
+}
+
 function drawRealtimeOverlay() {
   if (!currentFrame) {
     ctx.fillStyle = "#5c6975";
@@ -258,7 +273,8 @@ function drawRealtimeOverlay() {
 
   drawPath(realtimePath, "#0f766e", 4, 1);
   (currentFrame.candidate_trajectories_xy || []).forEach((path) => drawPath(path, "#8d99a6", 1.1, 0.32));
-  drawPath(currentFrame.selected_trajectory_xy, "#00a9c9", 3, 0.95);
+  drawLabeledPath(currentFrame.local_plan_xy, "#a21caf", 4, "local A*");
+  drawLabeledPath(currentFrame.selected_trajectory_xy, "#00a9c9", 3, "DWA");
   drawFootprint(currentFrame.robot_footprint_xy || []);
   drawHeadingArrow(ctx, worldToCanvas, currentFrame.robot_xy, currentFrame.robot_yaw_deg, "#003f4a");
   if (currentFrame.robot_xy) {
@@ -269,14 +285,15 @@ function drawRealtimeOverlay() {
     ctx.fill();
   }
   ctx.fillStyle = "rgba(255,255,255,0.9)";
-  ctx.fillRect(12, 12, 210, currentFrame.should_reverse || currentFrame.selected_is_reverse ? 92 : 72);
+  ctx.fillRect(12, 12, 232, currentFrame.should_reverse || currentFrame.selected_is_reverse ? 112 : 92);
   ctx.fillStyle = "#17202a";
   ctx.font = "13px system-ui";
   ctx.fillText(`realtime tick ${Math.max(0, realtimePath.length - 1)}`, 24, 34);
   ctx.fillText(`cmd [${currentFrame.selected_param.map((v) => Number(v).toFixed(2)).join(", ")}]`, 24, 54);
   ctx.fillText(`clearance ${Number(currentFrame.front_clearance).toFixed(2)}m`, 24, 74);
+  ctx.fillText(`A* ${currentFrame.local_plan_xy?.length || 0} pts, DWA ${currentFrame.selected_trajectory_xy?.length || 0} pts`, 24, 94);
   if (currentFrame.should_reverse || currentFrame.selected_is_reverse) {
-    ctx.fillText(`reverse ${currentFrame.selected_is_reverse ? "selected" : "gated"}`, 24, 94);
+    ctx.fillText(`reverse ${currentFrame.selected_is_reverse ? "selected" : "gated"}`, 24, 114);
   }
 }
 
@@ -333,7 +350,7 @@ function drawRealtimeFrame(frame) {
   drawU8Canvas(depthCanvas, depthCtx, frame.depth_u8, "depth");
   drawScene();
   const esdfState = frame.esdf_u8 ? "ESDF live" : "waiting for ESDF";
-  diagnosticNote.textContent = `${esdfState}; depth updates here. Valid trajectories: ${frame.valid_trajectories}, clearance: ${Number(frame.front_clearance).toFixed(2)}m, reverse: ${frame.selected_is_reverse ? "selected" : frame.should_reverse ? "gated" : "no"}, recovery: ${frame.recovery_reason || "normal"}.`;
+  diagnosticNote.textContent = `${esdfState}; local A* ${frame.local_plan_xy?.length || 0} pts, DWA ${frame.selected_trajectory_xy?.length || 0} pts. Valid trajectories: ${frame.valid_trajectories}, clearance: ${Number(frame.front_clearance).toFixed(2)}m, reverse: ${frame.selected_is_reverse ? "selected" : frame.should_reverse ? "gated" : "no"}.`;
 }
 
 function drawHeadingArrow(drawCtx, mapper, xy, yawDeg, color, length = 0.45) {

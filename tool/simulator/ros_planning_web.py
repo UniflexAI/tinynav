@@ -184,6 +184,7 @@ class RosPlanningSimNode(Node):
         self.last_depth = np.zeros((100, 160), dtype=np.float32)
         self.last_cmd = Twist()
         self.last_path: list[list[float]] = []
+        self.last_local_plan: list[list[float]] = []
         self.last_footprint: list[list[float]] = []
         self.last_obstacle_mask: dict[str, Any] | None = None
         self.last_esdf_grid: dict[str, Any] | None = None
@@ -200,6 +201,7 @@ class RosPlanningSimNode(Node):
 
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)
         self.create_subscription(RosPath, "/planning/trajectory_path", self.path_callback, 10)
+        self.create_subscription(RosPath, "/planning/local_plan", self.local_plan_callback, 10)
         self.create_subscription(PointCloud, "/planning/footprint", self.footprint_callback, 10)
         self.create_subscription(OccupancyGrid, "/planning/obstacle_mask", self.obstacle_callback, 10)
         self.create_subscription(OccupancyGrid, "/planning/occupancy_grid", self.esdf_callback, 10)
@@ -214,6 +216,7 @@ class RosPlanningSimNode(Node):
                 self.yaw_deg = float(self.config.get("start", {}).get("yaw_deg", 0.0))
                 self.last_cmd = Twist()
                 self.last_path = []
+                self.last_local_plan = []
                 self.last_footprint = []
                 self.last_obstacle_mask = None
                 self.last_esdf_grid = None
@@ -225,6 +228,10 @@ class RosPlanningSimNode(Node):
     def path_callback(self, msg: RosPath) -> None:
         with self.lock:
             self.last_path = [[float(p.pose.position.x), float(p.pose.position.y)] for p in msg.poses]
+
+    def local_plan_callback(self, msg: RosPath) -> None:
+        with self.lock:
+            self.last_local_plan = [[float(p.pose.position.x), float(p.pose.position.y)] for p in msg.poses]
 
     def footprint_callback(self, msg: PointCloud) -> None:
         with self.lock:
@@ -339,6 +346,7 @@ class RosPlanningSimNode(Node):
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": copy.deepcopy(self.last_footprint),
                 "selected_trajectory_xy": copy.deepcopy(self.last_path),
+                "local_plan_xy": copy.deepcopy(self.last_local_plan),
                 "candidate_trajectories_xy": [],
                 "selected_param": [float(self.last_cmd.linear.x), float(self.last_cmd.angular.z)],
                 "front_clearance": 0.0,
