@@ -88,15 +88,7 @@ G1_CONFIG = RobotConfig(
 )
 
 ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
-if ROBOT_TYPE == "go2":
-    ROBOT_CONFIG = GO2_CONFIG
-elif ROBOT_TYPE == "go2w":
-    ROBOT_CONFIG = GO2W_CONFIG
-elif ROBOT_TYPE == "b2":
-    ROBOT_CONFIG = B2_CONFIG
-elif ROBOT_TYPE == "b2w":
-    ROBOT_CONFIG = B2W_CONFIG
-elif ROBOT_TYPE == "g1":
-    ROBOT_CONFIG = G1_CONFIG
-else:
-    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}")
+try:
+    ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
+except KeyError:
+    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
