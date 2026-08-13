@@ -304,12 +304,11 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
-        self.robot = ROBOT_CONFIG
         self.get_logger().info(
-            f"Robot: {self.robot.name} ({self.robot.shape} {self.robot.length}x{self.robot.width}m, "
-            f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
-            f"ctrl=({self.robot.control_x},{self.robot.control_y}), "
-            f"safety_r={self.robot.safety_radius}m)"
+            f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
+            f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
+            f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
+            f"safety_r={ROBOT_CONFIG.safety_radius}m)"
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
@@ -364,14 +363,14 @@ class PlanningNode(Node):
 
     def camera_to_robot_center(self, T):
         """World control-center position derived from camera pose T_cam->world."""
-        return T[:3, 3] - T[:3, :3] @ self.robot.cam_offset_3d
+        return T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
 
     def publish_footprint(self, T, stamp):
         """Publish robot footprint rectangle as a PointCloud for RViz."""
         forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         left    = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
         center  = self.camera_to_robot_center(T)
-        fl, rl, hw = self.robot.footprint_from_control()
+        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
         corners = [
             center + forward * fl + left * hw,
             center + forward * fl - left * hw,
@@ -400,7 +399,7 @@ class PlanningNode(Node):
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        fl, _, hw = self.robot.footprint_from_control()
+        fl, _, hw = ROBOT_CONFIG.footprint_from_control()
         rows, cols = obstacle_mask.shape
         steps = int(max_dist / self.resolution) + 1
         for step in range(steps):
@@ -548,8 +547,8 @@ class PlanningNode(Node):
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectory_library_3d(
                 init_p=init_p, init_q=init_q,
-                max_linear_vel=self.robot.max_linear_vel,
-                max_angular_vel=self.robot.max_angular_vel,
+                max_linear_vel=ROBOT_CONFIG.max_linear_vel,
+                max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             )
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
@@ -558,8 +557,8 @@ class PlanningNode(Node):
             self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_len, rear_len, half_w = self.robot.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, self.robot.safety_radius, front_len, rear_len, half_w)
+            front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
             top_k = 100
             top_indices = np.argsort(scores, kind='stable')[:top_k]
 
