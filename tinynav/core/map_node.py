@@ -476,6 +476,9 @@ class MapNode(Node):
         self.relocalization_threshold = 0.70
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 50
+        self.night_relocalization_min_match_count = 30
+        self.night_relocalization_min_landmark_count = 50
+        self.night_relocalization_min_inlier_count = 30
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
@@ -485,6 +488,7 @@ class MapNode(Node):
         self.planning_comfort_radius = self._load_planning_comfort_radius(tinynav_map_path)
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
         self.planning_terrain_mode = self._load_planning_terrain_mode(tinynav_map_path)
+        self.planning_only_straight_back = self._load_planning_bool(tinynav_map_path, "only_straight_back", False)
         self.planning_max_linear_speed = self._load_planning_max_linear_speed(tinynav_map_path)
         self.planning_lidar_min_votes = self._load_planning_int(tinynav_map_path, "lidar_min_votes", None, minimum=1, maximum=50)
         self.planning_lidar_min_obstacle_area_cells = self._load_planning_int(
@@ -932,6 +936,28 @@ class MapNode(Node):
         )
         return None if value is None else int(value)
 
+    def _load_planning_bool(self, tinynav_map_path: str, key: str, default_value: bool) -> bool:
+        planning_config = self._load_planning_config(tinynav_map_path)
+        if key not in planning_config:
+            return default_value
+        value = planning_config.get(key)
+        if isinstance(value, bool):
+            parsed = value
+        elif isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                parsed = True
+            elif normalized in {"false", "0", "no", "off"}:
+                parsed = False
+            else:
+                self.get_logger().warning(f"Invalid planning.{key}={value!r}; using {default_value}")
+                return default_value
+        else:
+            self.get_logger().warning(f"Invalid planning.{key}={value!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using planning.{key}={parsed}")
+        return parsed
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -975,6 +1001,7 @@ class MapNode(Node):
         config = {
             "dilation_cells": self.planning_dilation_cells,
             "terrain_mode": self.planning_terrain_mode,
+            "only_straight_back": self.planning_only_straight_back,
             "max_linear_speed": self.planning_max_linear_speed,
         }
         if self.planning_comfort_radius is not None:
@@ -1400,6 +1427,7 @@ class MapNode(Node):
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None, current_odom_pose: np.ndarray | None = None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
+        min_match_count, min_landmark_count, min_inlier_count = self._get_relocalization_pnp_thresholds()
 
         # Prefer DINOv2 patch VLAD if the map has a VLAD vocabulary/index.
         # Fall back to SuperPoint BoW if available, then finally to DINO global embedding.
@@ -1464,23 +1492,23 @@ class MapNode(Node):
 
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
-            if len(matches) < 50:
-                print(f"not enough matched features to relocalize, {len(matches)} < 50")
+            if len(matches) < min_match_count:
+                print(f"not enough matched features to relocalize, {len(matches)} < {min_match_count}")
                 continue
 
             point_3d_in_world, inliers = self.keypoint_with_depth_to_3d(reference_matched_keypoints, reference_depth, reference_keyframe_pose, self.map_K)
             point_3d_in_world_list = point_3d_in_world[inliers]
             point_2d_in_keyframe_list = keyframe_matched_keypoints[inliers]
             point_count = len(point_2d_in_keyframe_list)
-            if point_count <= 80:
-                print(f"not enough landmarks to relocalize, {point_count}")
+            if point_count <= min_landmark_count:
+                print(f"not enough landmarks to relocalize, {point_count} <= {min_landmark_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
 
         success, best_pose_in_camera, pose_cov_weight, best_candidate_index, best_inlier_count, best_point_count = rerank_by_pnp_inliers(
             pnp_candidates,
             self.map_K,
-            min_inlier_count=self.relocalization_min_inlier_count,
+            min_inlier_count=min_inlier_count,
         )
         if success:
             print(
@@ -1492,6 +1520,17 @@ class MapNode(Node):
 
         print("no valid PnP relocalization candidate found")
         return False, np.eye(4), -np.inf
+
+    def _get_relocalization_pnp_thresholds(self) -> tuple[int, int, int]:
+        now_hour = datetime.now().hour
+        is_night = now_hour >= 18 or now_hour < 6
+        if is_night:
+            return (
+                self.night_relocalization_min_match_count,
+                self.night_relocalization_min_landmark_count,
+                self.night_relocalization_min_inlier_count,
+            )
+        return 50, 80, self.relocalization_min_inlier_count
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
         point_in_camera = []
