@@ -12,6 +12,7 @@ import sys
 import json
 
 import heapq
+from collections import deque
 from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
@@ -486,7 +487,18 @@ class MapNode(Node):
         self.night_relocalization_min_match_count = 30
         self.night_relocalization_min_landmark_count = 50
         self.night_relocalization_min_inlier_count = 30
-        self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
+        # meters, skip candidates too far from odom prediction -- kept loose because this only
+        # needs to catch grossly-wrong VLAD candidates; a tight value here plus a single trusted
+        # fix corrupting T_from_map_to_odom is what caused candidates to lock out permanently
+        # (ported from xinghan/build-map-precheck after live-testing this branch hit exactly
+        # that lockout: most relocalization attempts failed "too far from odom prediction"
+        # with the old tight 3.0m threshold).
+        self.relocalization_odom_prior_threshold = 8.0
+        # A single PnP-passing fix can still be a false positive (two visually-similar but
+        # distinct places). Fixes are only committed to the map<->odom pose graph once corroborated
+        # by another independent fix within relocalization_vote_tolerance_m -- see keyframe_relocalization.
+        self.relocalization_vote_tolerance_m = 2.0
+        self._pending_relocalization_fixes = deque(maxlen=3)
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
         self.poi_distance = self._load_poi_distance(tinynav_map_path)
@@ -593,11 +605,16 @@ class MapNode(Node):
 
         self.T_from_map_to_odom = None
         self._rtk_yaw_offset = None   # map<-odom yaw offset, locked once on first RTK fix
-        # RTK replace mode only: stateless xy -> map-frame z lookup over the map keyframes.
+        # Stateless xy -> map-frame z lookup over the map keyframes. Built from
+        # self.map_poses alone (see _build_rtk_ground_z_lookup's docstring) -- nothing here
+        # actually depends on RTK, despite the name; build it whenever the map has poses so
+        # _rtk_map_ground_z's fix-up applies in visual-only operation too, not just RTK
+        # replace mode (see keyframe_callback / try_publish_nav_path / _publish_target_pose_
+        # from_path for why the z the pose-graph/odom fusion produces on its own isn't
+        # trustworthy enough to index the 3D occupancy grid with).
         self._rtk_kf_xy = None
         self._rtk_kf_z = None
-        if self.rtk_mode == "replace":
-            self._build_rtk_ground_z_lookup()
+        self._build_rtk_ground_z_lookup()
         self.latest_odom_pose = None
         self.latest_odom_stamp_msg = None
         self.latest_rtk_map_pose = None
@@ -609,6 +626,7 @@ class MapNode(Node):
         self._last_rtk_log_at = 0.0
         self._diag_latest_rtk_xyz = None  # TEMPORARY diagnostic, see rtk_map_pose_callback
         self._diag_latest_rtk_T = None
+        self._diag_force_visual_only = True  # TEMPORARY, see _has_active_rtk_transform
         self._diag_rtk_received_at = None
         self.nav_refresh_timer = None
         self.target_pose_timer = self.create_timer(1.0, self.target_pose_timer_callback)
@@ -1172,6 +1190,14 @@ class MapNode(Node):
         return True
 
     def _has_active_rtk_transform(self) -> bool:
+        if self._diag_force_visual_only:
+            # TEMPORARY (accuracy investigation): force every RTK-gated code path below to
+            # behave as if RTK never became active, so visual (EfficientLoFTR) relocalization
+            # runs unconditionally instead of only in the gaps between RTK fixes -- RTK's own
+            # /rtk/map_pose keeps flowing independently (see rtk_map_pose_callback's
+            # _diag_latest_rtk_xyz/_diag_latest_rtk_T capture) and is used purely as ground
+            # truth for ACCURACY_DIAG, not for localization, while this is set.
+            return False
         if self.latest_rtk_transform_received_at is None:
             return False
         return time.monotonic() - self.latest_rtk_transform_received_at <= _RTK_MAP_POSE_MAX_AGE_S
@@ -1698,6 +1724,29 @@ class MapNode(Node):
             pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
             self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
+
+            # A single PnP-passing fix can still be a false positive (e.g. two visually-similar
+            # but distinct places), and committing it straight into the map<->odom pose graph
+            # would corrupt T_from_map_to_odom for every fix after it. Only commit once this fix
+            # is corroborated by another independent fix within relocalization_vote_tolerance_m.
+            confirmed_by = None
+            for pending_ts, pending_pose, _pending_weight in self._pending_relocalization_fixes:
+                xy_dist = np.linalg.norm(pose_in_world[:2, 3] - pending_pose[:2, 3])
+                if xy_dist <= self.relocalization_vote_tolerance_m:
+                    confirmed_by = (pending_ts, pending_pose, _pending_weight)
+                    break
+            self._pending_relocalization_fixes.append((timestamp_ns, pose_in_world, pose_cov_weight))
+
+            if confirmed_by is None:
+                print(
+                    f"relocalization fix at {timestamp_ns} not yet corroborated by another "
+                    f"independent fix within {self.relocalization_vote_tolerance_m}m, holding"
+                )
+                return False, np.eye(4)
+
+            confirmed_ts, confirmed_pose, confirmed_weight = confirmed_by
+            self.relocalization_poses[confirmed_ts] = confirmed_pose
+            self.relocalization_pose_weights[confirmed_ts] = confirmed_weight
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
             return True, pose_in_world
@@ -1793,8 +1842,11 @@ class MapNode(Node):
                 return
             pose_in_origin_odom = self.pose_graph_used_pose[timestamp]
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
-        if self._has_active_rtk_transform():
-            pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
+        # Always fix up z, not just in RTK replace mode: the pose-graph/odom fusion above
+        # does not reliably reconstruct z (see _build_rtk_ground_z_lookup), and a wrong z
+        # here indexes the wrong slice of the 3D occupancy/SDF grid downstream regardless of
+        # which localization source produced pose_in_map.
+        pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
         publish_stamp = stamp_msg if stamp_msg is not None else self.get_clock().now().to_msg()
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, publish_stamp, "world", "map"))
 
@@ -2251,8 +2303,8 @@ class MapNode(Node):
 
     def _publish_target_pose_from_path(self, paths_in_map: np.ndarray, pose_in_origin_odom: np.ndarray, stamp_msg=None):
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ pose_in_origin_odom
-        if self._has_active_rtk_transform():
-            pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
+        # See try_publish_nav_path's identical fix-up: not RTK-specific, always needed.
+        pose_in_map[2, 3] = self._rtk_map_ground_z(pose_in_map[:3, 3])
         pose_in_map_position = self._nav_position_with_clamped_z(pose_in_map[:3, 3], path=paths_in_map)
         with Timer(name = "Find target position", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
             max_speed = self.planning_max_linear_speed
