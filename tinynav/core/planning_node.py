@@ -51,14 +51,25 @@ GOAL_POSE_TTL_S = 1.5
 # passes it once the curve comes within ~5cm of something. Below that clearance,
 # falling back to the lattice — and to arrival's grace timeout — beats scraping a wall
 # to be exact.
+# ...and it is only paid to a candidate with real clearance (scores[i] == 0.0, i.e.
+# every footprint sample further than safety_radius from anything). Below that the
+# candidate competes on the ordinary cost and loses to a lattice row that avoids
+# things, which is the correct outcome: a single curve does not plan around
+# obstacles, so buying it a win on a thin margin trades the whole avoidance
+# behaviour for exactness we do not need that badly.
 _TERMINAL_BIAS = 1e6
+# Beyond this a stationary candidate is not "the endgame", it is a robot facing the
+# wrong way forever -- see generate_terminal_trajectories.
+_TERMINAL_ROTATE_M = 0.3
 # Must match cmd_vel_control's max_angular_speed: a curve demanding more would be
 # executed as a wider one than the curve that was scored for collisions.
 _TERMINAL_MAX_OMEGA = 0.8
 # Beyond this the lattice is the right tool — it plans around things, a single curve
 # does not, and a long curve is mostly guesswork about a corridor we cannot see the
-# end of. This candidate is for the endgame.
-_TERMINAL_REACH_M = 3.0
+# end of. This candidate is for the endgame. 3m was not an endgame -- it is a full
+# leg of travel handed to a curve that cannot replan, and it out-ranked ~45
+# collision-free lattice rows for the whole distance.
+_TERMINAL_REACH_M = 1.5
 
 
 @dataclass
@@ -395,19 +406,33 @@ def generate_terminal_trajectories(
         trajs.append(traj)
         params.append(np.array([vx, 0.0]))
 
-    # Spend only as much of the horizon as the turn needs, then hold: a trajectory
-    # still rotating at its endpoint reports an endpoint heading that is not where it
-    # means to stop.
-    turn = wrap_angle(goal_yaw - yaw0)
-    turn_steps = max(1, min(num_steps - 1,
-                            int(abs(turn) / max(max_omega * dt, 1e-6)) + 1))
-    _add(np.repeat(p0[None, :], num_steps, axis=0),
-         yaw0 + turn * np.minimum(np.arange(num_steps) / turn_steps, 1.0), 0.0)
+    # ONLY once the position is already right. A stationary candidate carries vx=0,
+    # and the terminal bias makes it beat every forward row outright -- so offering it
+    # from further out is a robot that turns to its final heading wherever it happens
+    # to be standing and then never drives anywhere again. The gate is the distance,
+    # not the intent: "for when the position is already right" has to be a condition,
+    # not a docstring. 0.3m matches where the lattice switches its own heading term
+    # off, i.e. where bearing stops being meaningful.
+    if float(np.linalg.norm(p1[:2] - p0[:2])) <= _TERMINAL_ROTATE_M:
+        # Spend only as much of the horizon as the turn needs, then hold: a trajectory
+        # still rotating at its endpoint reports an endpoint heading that is not where
+        # it means to stop.
+        turn = wrap_angle(goal_yaw - yaw0)
+        turn_steps = max(1, min(num_steps - 1,
+                                int(abs(turn) / max(max_omega * dt, 1e-6)) + 1))
+        _add(np.repeat(p0[None, :], num_steps, axis=0),
+             yaw0 + turn * np.minimum(np.arange(num_steps) / turn_steps, 1.0), 0.0)
 
     bezier = _bezier_to_pose(p0, yaw0, p1, goal_yaw, num_steps, duration, dt,
                              vx_max, max_omega, reach_m)
     if bezier is not None:
         _add(*bezier)
+    if not trajs:
+        # Both gated out (goal beyond reach, and not close enough to be a turn): a
+        # legitimate outcome meaning "the lattice has this one". Shaped, not bare --
+        # the caller concatenates onto (N, num_steps, 7), and np.asarray([]) is (0,),
+        # which raises there instead of contributing nothing.
+        return np.zeros((0, num_steps, 7)), np.zeros((0, 2))
     return np.asarray(trajs), np.asarray(params)
 
 
@@ -1081,7 +1106,8 @@ class PlanningNode(Node):
                 # it would scrape something. Not folded into `dist`: distance-to-
                 # endpoint cannot express "and facing the right way", and the lattice
                 # rows must keep competing among themselves on the old cost exactly.
-                terminal_bonus = -_TERMINAL_BIAS if is_terminal[i] else 0.0
+                terminal_bonus = (-_TERMINAL_BIAS
+                                  if is_terminal[i] and scores[i] == 0.0 else 0.0)
                 return (scores[i] * 100000
                         + 100 * dist
                         + 10 * smooth

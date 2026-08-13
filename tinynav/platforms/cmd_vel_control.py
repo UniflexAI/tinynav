@@ -15,6 +15,15 @@ from tinynav.core.planning_node import (GOAL_POSE_TOPIC, GOAL_POSE_TTL_S,
 
 # Near-goal law (see _near_goal_cmd). Fixed policy, not per-instance tuning.
 NEAR_GOAL_M = 0.6           # where the path follower stops being the better tool
+# ...but TRANSLATION only inside this, and only while the planner is alive. This node
+# subscribes to odometry, a path, a feedforward and a goal -- it has no ESDF, no
+# obstacle mask, no grid. It cannot see anything. Driving 0.6m at a goal pose on that
+# basis is driving blind, and a goal pose is only ever as good as T_from_map_to_odom,
+# which on these maps has been observed to move tens of metres on one bad fusion.
+# Everything beyond this radius is translated by the planner, which checks the ESDF.
+# What is left here needs no map: turning on the spot, and a last step shorter than
+# the robot's own footprint.
+NEAR_GOAL_DRIVE_M = 0.25
 NEAR_GOAL_POS_TOL_M = 0.10
 NEAR_GOAL_YAW_TOL = np.deg2rad(4.0)
 NEAR_GOAL_VX_MAX = 0.25
@@ -254,7 +263,7 @@ class CmdVelControlNode(Node):
                 float(wrap_angle(np.arctan2(d[1], d[0]) - here)),
                 float(wrap_angle(heading_of(goal) - here)))
 
-    def _near_goal_cmd(self):
+    def _near_goal_cmd(self, planner_live: bool = True):
         """The endgame target (vx, omega), or None to leave the path follower alone.
 
         Two jobs the path follower cannot do. Getting ONTO the goal: it only ever
@@ -289,9 +298,15 @@ class CmdVelControlNode(Node):
         if dist > NEAR_GOAL_POS_TOL_M:
             if self._ff_terminal:
                 return None             # the planner is driving us there; let it
+            # Turning is always ours -- it needs no map. Translating is not: outside
+            # NEAR_GOAL_DRIVE_M, or with the planner gone quiet, we point at the goal
+            # and let something that can see obstacles cover the ground. Standing
+            # still is a recoverable failure; driving blind is the other kind.
+            may_drive = planner_live and dist <= NEAR_GOAL_DRIVE_M
             # Rotate-first in miniature: driving while badly misaligned over half a
             # metre lands somewhere else entirely, and there is no room to correct.
-            cmd.linear.x = (0.0 if abs(bearing_err) > NEAR_GOAL_BEARING_TOL
+            cmd.linear.x = (0.0 if (not may_drive
+                                    or abs(bearing_err) > NEAR_GOAL_BEARING_TOL)
                             else float(np.clip(NEAR_GOAL_KV * dist, 0.0, NEAR_GOAL_VX_MAX)))
             turn = NEAR_GOAL_KOMEGA * bearing_err
         elif abs(heading_err) > NEAR_GOAL_YAW_TOL:
@@ -330,10 +345,12 @@ class CmdVelControlNode(Node):
 
         # Endgame: where it applies it replaces the path follower rather than
         # correcting it. Evaluated before the stale guards attenuate anything -- it
-        # does not consume the path, so a quiet planner is no reason to stop closing
-        # the last 20cm on a goal we can see directly. It still falls through to the
-        # shared output stage below for acceleration limiting and the speed floors.
-        near = self._near_goal_cmd()
+        # does not consume the path, so a quiet planner is no reason to stop turning
+        # to a goal we can see directly. It may not TRANSLATE on a dead planner
+        # though: the guards exist because nothing else here knows what is ahead.
+        # It still falls through to the shared output stage below for acceleration
+        # limiting and the speed floors.
+        near = self._near_goal_cmd(planner_live=age <= stale_stop_s)
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
 
