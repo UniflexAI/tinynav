@@ -7,9 +7,27 @@ from std_msgs.msg import Bool, Float32, String
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+import json
 import logging
 import time
 from tinynav.core.planning_node import ROBOT_CONFIG_TOPIC, RobotConfig
+
+# Final approach to a POI that carries an authored arrival heading. This SHAPES the
+# command the path follower already produced -- it never replaces it, and it never
+# declines to answer. An earlier design took control over inside a radius and handed it
+# back outside one, which on 65 left a band where the endgame refused to translate and
+# the planner's command was discarded anyway: the robot sat turning 0.313m short with
+# `sel vx=0.31` being thrown away every cycle. There is no takeover boundary here, so
+# there is nothing to fall between.
+FINAL_DECEL_RADIUS_M = 1.0      # taper vx linearly to zero across this
+FINAL_DECEL_ANGLE = np.deg2rad(60.0)   # inside this, drive vyaw off the true yaw error
+FINAL_TURN_KP = 1.2             # (rad/s)/rad
+# Stop/resume pairs, not single thresholds: a proportional law parked on its goal makes
+# ever-smaller corrections that the executable-speed floors round straight back up, so
+# without hysteresis the robot shuffles forever.
+FINAL_TURN_STOP_ANGLE = np.deg2rad(3.0)
+FINAL_TURN_RESUME_ANGLE = np.deg2rad(8.0)
+FINAL_STOP_RESUME_SPEED = 0.15
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -20,6 +38,17 @@ class CmdVelControlNode(Node):
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
         self.create_subscription(Twist, '/planning/velocity_ff', self.velocity_ff_callback, 10)
         self.create_subscription(Float32, '/planning/forward_speed_cap', self._forward_speed_cap_callback, 10)
+        # The nav target and what it means. Position comes from map_node's existing
+        # target_pose; the meta says whether it is the FINAL poi and, if so, that poi's
+        # arrival heading already converted into this frame (map_node owns that
+        # conversion -- see its nav_target_timer_callback).
+        self.create_subscription(Odometry, '/control/target_pose', self._target_pose_callback, 10)
+        self.create_subscription(String, '/control/target_pose_meta', self._target_meta_callback, 10)
+        self._target_xy = None
+        self._goal_is_last = False
+        self._goal_yaw = None
+        self._final_stop_latched = False
+        self._final_turn_stop_latched = False
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -196,6 +225,83 @@ class CmdVelControlNode(Node):
         best_i = int(np.argmin(d2))
         return float(self._path_pose_yaw[best_i])
 
+    def _target_pose_callback(self, msg):
+        self._target_xy = np.array([msg.pose.pose.position.x,
+                                    msg.pose.pose.position.y])
+
+    def _target_meta_callback(self, msg):
+        try:
+            data = json.loads(msg.data)
+        except (ValueError, TypeError):
+            return
+        was_last = self._goal_is_last
+        self._goal_is_last = bool(data.get('is_last', False))
+        yaw = data.get('yaw')
+        self._goal_yaw = None if yaw is None else float(yaw)
+        if was_last and not self._goal_is_last:
+            # Moved on to another leg: the latches belong to the goal that set them.
+            self._final_stop_latched = False
+            self._final_turn_stop_latched = False
+
+    def _final_approach(self, vx, vyaw):
+        """Shape (vx, vyaw) for the last stretch onto a POI with an authored heading.
+
+        Two independent shapings, deliberately NOT a phase machine. Position and
+        heading converge together instead of drive-then-turn, which is what lets this
+        run as a modifier: at any distance the path follower is still steering, and this
+        only decides how fast to close and how hard to turn.
+
+        vx tapers linearly to zero across FINAL_DECEL_RADIUS_M. vyaw switches from the
+        path's (lagging) turn rate to a proportional law on the TRUE heading error once
+        inside FINAL_DECEL_ANGLE -- the path rate is derived from a decimated trajectory
+        and overshoots the goal heading by a stale cycle's worth of turn.
+
+        The vyaw floor matters as much as the gain: the output stage zeroes turns below
+        min_effective_angular_speed, so a correction of a few degrees would be discarded
+        and the robot would park just outside tolerance forever."""
+        if not self._goal_is_last or self.pose is None:
+            self._final_stop_latched = False
+            self._final_turn_stop_latched = False
+            return vx, vyaw
+
+        here_yaw = self._actual_yaw()
+        if self._goal_yaw is not None and here_yaw is not None and vx >= 0.0:
+            d = self._goal_yaw - here_yaw
+            yaw_err = float(np.arctan2(np.sin(d), np.cos(d)))
+            if abs(yaw_err) < FINAL_DECEL_ANGLE:
+                if abs(yaw_err) < FINAL_TURN_STOP_ANGLE:
+                    self._final_turn_stop_latched = True
+                elif abs(yaw_err) > FINAL_TURN_RESUME_ANGLE:
+                    self._final_turn_stop_latched = False
+                if self._final_turn_stop_latched:
+                    vyaw = 0.0
+                else:
+                    vyaw = FINAL_TURN_KP * yaw_err
+                    if abs(vyaw) < self.min_effective_angular_speed:
+                        vyaw = float(np.sign(vyaw) * self.min_effective_angular_speed)
+            else:
+                self._final_turn_stop_latched = False
+
+        if vx > 0.0 and self._target_xy is not None:
+            here = (self._pose_to_T(self.pose.pose) @ self.T_camera_to_control)[:2, 3]
+            dist = float(np.hypot(*(self._target_xy - here)))
+            # Taper from the speed ceiling, NOT from the incoming vx: scaling the
+            # planner's own request compounds with whatever it already slowed for, so a
+            # cautious approach collapses below the executable floor while still a third
+            # of a metre out and latches to a stop there. The profile has to be a
+            # property of the distance alone.
+            candidate = self._current_forward_cap() * float(
+                np.clip(dist / FINAL_DECEL_RADIUS_M, 0.0, 1.0))
+            # Latch on the TAPERED speed, not the raw one: the floor below would
+            # otherwise creep the robot past the goal at min_effective_linear_speed.
+            if candidate < self.min_effective_linear_speed:
+                self._final_stop_latched = True
+            elif candidate > FINAL_STOP_RESUME_SPEED:
+                self._final_stop_latched = False
+            vx = 0.0 if self._final_stop_latched else min(vx, candidate)
+
+        return vx, vyaw
+
     def cmd_timer_callback(self):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
@@ -261,6 +367,11 @@ class CmdVelControlNode(Node):
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = float(np.copysign(self.rotate_first_max_omega,
                                                      self.path_vyaw_raw))
+
+        # Final approach, after rotate-first (which decides whether we are driving at
+        # all) and before the stale guards (which only ever attenuate, so they run last).
+        target_cmd.linear.x, target_cmd.angular.z = self._final_approach(
+            target_cmd.linear.x, target_cmd.angular.z)
 
         if age > stale_stop_s:
             target_cmd.linear.x = 0.0
