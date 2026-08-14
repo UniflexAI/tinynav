@@ -15,6 +15,8 @@ const ctx = canvas.getContext("2d");
 const depthCanvas = document.getElementById("depthCanvas");
 const depthCtx = depthCanvas.getContext("2d");
 const statusEl = document.getElementById("status");
+const controlsPanel = document.getElementById("controlsPanel");
+const controlsToggle = document.getElementById("controlsToggle");
 const realtimeButton = document.getElementById("realtimeButton");
 const GRID_STEP_M = 1.0;
 
@@ -344,6 +346,16 @@ function drawU8Canvas(targetCanvas, targetCtx, payload, mode) {
   targetCtx.restore();
 }
 
+function setControlsVisible(visible) {
+  controlsPanel.classList.toggle("is-hidden", !visible);
+  controlsToggle.setAttribute("aria-expanded", String(visible));
+  controlsToggle.textContent = visible ? "Controls" : "Controls";
+}
+
+function syncControlsLayout() {
+  setControlsVisible(window.innerWidth > 1180);
+}
+
 function drawRealtimeFrame(frame) {
   currentFrame = frame;
   drawU8Canvas(depthCanvas, depthCtx, frame.depth_u8, "depth");
@@ -554,6 +566,9 @@ editableFields.forEach((field) => {
 });
 
 realtimeButton.addEventListener("click", toggleRealtime);
+controlsToggle.addEventListener("click", () => {
+  setControlsVisible(controlsPanel.classList.contains("is-hidden"));
+});
 document.getElementById("resetScene").addEventListener("click", loadDefault);
 document.getElementById("applyJson").addEventListener("click", () => {
   const nextConfig = JSON.parse(fields.configText.value);
@@ -640,3 +655,5 @@ canvas.addEventListener("pointerup", () => {
 });
 
 loadDefault();
+syncControlsLayout();
+window.addEventListener("resize", syncControlsLayout);

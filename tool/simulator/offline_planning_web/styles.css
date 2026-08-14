@@ -90,6 +90,10 @@ button.primary {
   gap: 8px;
 }
 
+button.secondary {
+  background: #f3f6f9;
+}
+
 button.danger {
   color: #9d1b1b;
 }
@@ -112,6 +116,14 @@ button.danger {
 
 .controls {
   overflow: auto;
+}
+
+.controls.is-hidden {
+  display: none;
+}
+
+.controls-toggle {
+  display: none;
 }
 
 .robot-note {
@@ -211,5 +223,18 @@ textarea {
 @media (max-width: 1180px) {
   .app {
     grid-template-columns: 1fr;
+  }
+
+  .controls-toggle {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .controls {
+    display: none;
+  }
+
+  .controls.is-visible {
+    display: block;
   }
 }

@@ -15,6 +15,7 @@
             <p>Drag objects, tune footprint, run the perception-to-planning loop.</p>
           </div>
           <div class="header-actions">
+            <button id="controlsToggle" class="secondary controls-toggle" type="button" aria-expanded="true">Controls</button>
             <button id="realtimeButton" class="primary">Realtime</button>
           </div>
         </div>
@@ -27,7 +28,7 @@
         </div>
       </section>
 
-      <section class="panel controls">
+      <section class="panel controls" id="controlsPanel">
         <h2>Robot</h2>
         <p class="robot-note">Robot geometry and planner safety settings are read from <code>planning_node.py</code>.</p>
         <div class="robot-summary" id="robotSummary"></div>
