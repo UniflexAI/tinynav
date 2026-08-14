@@ -17,14 +17,9 @@ const depthCtx = depthCanvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const realtimeButton = document.getElementById("realtimeButton");
 const diagnosticNote = document.getElementById("diagnosticNote");
+const GRID_DIVISIONS = 20;
 
 const fields = {
-  robotWidth: document.getElementById("robotWidth"),
-  robotLength: document.getElementById("robotLength"),
-  cameraX: document.getElementById("cameraX"),
-  controlX: document.getElementById("controlX"),
-  safetyRadius: document.getElementById("safetyRadius"),
-  comfortRadius: document.getElementById("comfortRadius"),
   targetX: document.getElementById("targetX"),
   targetY: document.getElementById("targetY"),
   objectName: document.getElementById("objectName"),
@@ -34,6 +29,7 @@ const fields = {
   objectSY: document.getElementById("objectSY"),
   objectSZ: document.getElementById("objectSZ"),
   configText: document.getElementById("configText"),
+  robotSummary: document.getElementById("robotSummary"),
 };
 
 function sceneBounds() {
@@ -73,17 +69,20 @@ function drawGrid(drawCtx, targetCanvas, mapper) {
   drawCtx.fillRect(0, 0, targetCanvas.width, targetCanvas.height);
   drawCtx.strokeStyle = "#e0e7ee";
   drawCtx.lineWidth = 1;
-  for (let x = 0; x <= 5; x += 1) {
-    const [px0, py] = mapper(x, -2.8);
-    const [px1] = mapper(x, 2.8);
+  const b = sceneBounds();
+  for (let i = 0; i <= GRID_DIVISIONS; i += 1) {
+    const x = b.xMin + ((b.xMax - b.xMin) * i) / GRID_DIVISIONS;
+    const [px0, py] = mapper(x, b.yMin);
+    const [px1] = mapper(x, b.yMax);
     drawCtx.beginPath();
     drawCtx.moveTo(px0, py);
     drawCtx.lineTo(px1, py);
     drawCtx.stroke();
   }
-  for (let y = -2; y <= 2; y += 1) {
-    const [px, py0] = mapper(-0.5, y);
-    const [, py1] = mapper(5.0, y);
+  for (let i = 0; i <= GRID_DIVISIONS; i += 1) {
+    const y = b.yMin + ((b.yMax - b.yMin) * i) / GRID_DIVISIONS;
+    const [px, py0] = mapper(b.xMin, y);
+    const [, py1] = mapper(b.xMax, y);
     drawCtx.beginPath();
     drawCtx.moveTo(px, py0);
     drawCtx.lineTo(px, py1);
@@ -151,6 +150,18 @@ function cameraPose() {
       config.start.xy[1] + forward[1] * forwardOffset + left[1] * leftOffset,
     ],
   };
+}
+
+function robotSummaryHtml() {
+  const robot = config.robot || {};
+  const obstacle = config.obstacle || {};
+  return [
+    `preset: <code>${robot.preset || "go2"}</code>`,
+    `size: <code>${Number(robot.length || 0).toFixed(2)} x ${Number(robot.width || 0).toFixed(2)} m</code>`,
+    `camera/control: <code>${Number(robot.camera_x || 0).toFixed(2)} / ${Number(robot.control_x || 0).toFixed(2)} m</code>`,
+    `safety radius: <code>${Number(robot.safety_radius || 0).toFixed(2)} m</code>`,
+    `obstacle dilation: <code>${Number(obstacle.dilation_cells || 0)}</code>`,
+  ].join("<br />");
 }
 
 function drawScene() {
@@ -377,12 +388,6 @@ function drawFootprint(footprint) {
 
 function refreshFields() {
   const obj = selectedObject();
-  fields.robotWidth.value = config.robot.width;
-  fields.robotLength.value = config.robot.length;
-  fields.cameraX.value = config.robot.camera_x;
-  fields.controlX.value = config.robot.control_x;
-  fields.safetyRadius.value = config.robot.safety_radius;
-  fields.comfortRadius.value = config.robot.comfort_radius;
   fields.targetX.value = config.target[0];
   fields.targetY.value = config.target[1];
   if (obj) {
@@ -394,17 +399,12 @@ function refreshFields() {
     fields.objectSZ.value = obj.size[2];
   }
   fields.configText.value = JSON.stringify(config, null, 2);
+  fields.robotSummary.innerHTML = robotSummaryHtml();
   drawScene();
 }
 
 function applyFieldChanges() {
   const obj = selectedObject();
-  config.robot.width = Number(fields.robotWidth.value);
-  config.robot.length = Number(fields.robotLength.value);
-  config.robot.camera_x = Number(fields.cameraX.value);
-  config.robot.control_x = Number(fields.controlX.value);
-  config.robot.safety_radius = Number(fields.safetyRadius.value);
-  config.robot.comfort_radius = Number(fields.comfortRadius.value);
   config.target[0] = Number(fields.targetX.value);
   config.target[1] = Number(fields.targetY.value);
   if (obj) {
@@ -544,9 +544,11 @@ async function loadDefault() {
 }
 
 Object.values(fields).forEach((field) => {
-  if (field !== fields.configText) {
+  if (field !== fields.configText && typeof field.addEventListener === "function") {
     field.addEventListener("change", () => {
-      applyFieldChanges();
+      if (field === fields.targetX || field === fields.targetY || field === fields.objectName || field === fields.objectX || field === fields.objectY || field === fields.objectSX || field === fields.objectSY || field === fields.objectSZ) {
+        applyFieldChanges();
+      }
       noteSceneEdited(true, true);
     });
   }
@@ -555,7 +557,10 @@ Object.values(fields).forEach((field) => {
 realtimeButton.addEventListener("click", toggleRealtime);
 document.getElementById("resetScene").addEventListener("click", loadDefault);
 document.getElementById("applyJson").addEventListener("click", () => {
-  config = JSON.parse(fields.configText.value);
+  const nextConfig = JSON.parse(fields.configText.value);
+  nextConfig.robot = config.robot;
+  nextConfig.obstacle = config.obstacle;
+  config = nextConfig;
   selectedIndex = Math.min(selectedIndex, config.objects.length - 1);
   currentFrame = null;
   refreshFields();

@@ -15,7 +15,7 @@ import os
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +35,13 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
 from pydantic import BaseModel
 
+from tinynav.core.planning_node import GO2_CONFIG, ObstacleConfig
+
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "offline_planning_web"
+PLANNING_ROBOT_DEFAULT = asdict(GO2_CONFIG)
+PLANNING_OBSTACLE_DEFAULT = asdict(ObstacleConfig())
 
 
 @dataclass
@@ -57,17 +61,7 @@ class SimObject:
 def default_config() -> dict[str, Any]:
     return {
         "name": "ros_planning_sim",
-        "robot": {
-            "preset": "b2",
-            "length": 1.0,
-            "width": 0.5,
-            "camera_x": 0.5,
-            "control_x": 0.5,
-            "camera_y": 0.0,
-            "control_y": 0.0,
-            "safety_radius": 0.1,
-            "comfort_radius": 0.1,
-        },
+        "robot": copy.deepcopy(PLANNING_ROBOT_DEFAULT),
         "camera": {
             "width": 160,
             "image_height": 100,
@@ -78,25 +72,13 @@ def default_config() -> dict[str, Any]:
         },
         "start": {"xy": [0.0, 0.0], "yaw_deg": 0.0},
         "target": [4.0, 0.0, 0.0],
+        "obstacle": copy.deepcopy(PLANNING_OBSTACLE_DEFAULT),
         "objects": [
             {"name": "left_wall", "kind": "box", "center": [2.0, 1.0, 0.35], "size": [3.2, 0.25, 1.3]},
             {"name": "right_wall", "kind": "box", "center": [2.0, -1.0, 0.35], "size": [3.2, 0.25, 1.3]},
             {"name": "center_box", "kind": "box", "center": [1.65, 0.0, 0.25], "size": [0.45, 0.55, 0.5]},
         ],
     }
-
-
-def intersect_box(origin: np.ndarray, direction: np.ndarray, obj: SimObject, max_range: float) -> float:
-    box_min, box_max = obj.bounds
-    inv_d = np.divide(1.0, direction, out=np.full(3, np.inf), where=np.abs(direction) > 1e-9)
-    t0 = (box_min - origin) * inv_d
-    t1 = (box_max - origin) * inv_d
-    t_near = np.maximum.reduce(np.minimum(t0, t1))
-    t_far = np.minimum.reduce(np.maximum(t0, t1))
-    if t_far < 0.0 or t_near > t_far:
-        return np.inf
-    hit = t_near if t_near > 0.0 else t_far
-    return hit if 0.0 < hit <= max_range else np.inf
 
 
 def make_camera_pose(control_xy: list[float], yaw_deg: float, robot: dict[str, Any], cam: dict[str, Any]) -> np.ndarray:
@@ -209,6 +191,8 @@ class RosPlanningSimNode(Node):
     def set_config(self, config: dict[str, Any], reset: bool = False) -> None:
         with self.lock:
             self.config = copy.deepcopy(config)
+            self.config["robot"] = copy.deepcopy(PLANNING_ROBOT_DEFAULT)
+            self.config["obstacle"] = copy.deepcopy(PLANNING_OBSTACLE_DEFAULT)
             if reset:
                 self.control_xy = list(self.config.get("start", {}).get("xy", [0.0, 0.0]))
                 self.yaw_deg = float(self.config.get("start", {}).get("yaw_deg", 0.0))
