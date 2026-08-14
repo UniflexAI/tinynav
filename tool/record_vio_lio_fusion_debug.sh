@@ -17,7 +17,7 @@
 #   ./tool/record_vio_lio_fusion_debug.sh [--output DIR] [--duration SECONDS]
 #
 # Without --duration, recording runs until Ctrl-C.
-set -uo pipefail
+set -o pipefail  # not -u: /opt/ros/humble/setup.bash itself references unset vars
 
 JETSON_CYCLONEDDS_URI="${JETSON_CYCLONEDDS_URI:-/tinynav/cyclonedds_jetson.xml}"
 
