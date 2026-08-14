@@ -216,6 +216,11 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         source: status?.planningOccupancySource ?? 'depth',
                         onChanged: _setPlanningOccupancySource,
                       ),
+                      const SizedBox(width: 6),
+                      _OdomSourceControl(
+                        source: status?.odomSource ?? 'vio',
+                        onChanged: _setOdomSource,
+                      ),
                     ],
                   ),
                 ),
@@ -307,6 +312,22 @@ class _OperateTabState extends ConsumerState<OperateTab> {
         ),
       ],
     );
+  }
+
+  Future<void> _setOdomSource(String source) async {
+    try {
+      await ref.read(dioProvider).post(
+        '/nav/odom-source',
+        data: {'source': source},
+      );
+      ref.invalidate(deviceStatusProvider);
+    } on DioException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.response?.data?['detail'] ?? e.message ?? 'Failed to switch odom source'),
+        backgroundColor: Colors.red,
+      ));
+    }
   }
 
   Future<void> _setPlanningOccupancySource(String source) async {
@@ -1314,6 +1335,41 @@ class _PlanningSourceButton extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _OdomSourceControl extends StatelessWidget {
+  final String source;
+  final ValueChanged<String> onChanged;
+  const _OdomSourceControl({required this.source, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = source.toLowerCase();
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.65),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _PlanningSourceButton(
+            label: 'VIO',
+            icon: Icons.videocam,
+            selected: normalized == 'vio',
+            onTap: () => onChanged('vio'),
+          ),
+          _PlanningSourceButton(
+            label: 'EKF',
+            icon: Icons.merge_type,
+            selected: normalized == 'ekf',
+            onTap: () => onChanged('ekf'),
+          ),
+        ],
       ),
     );
   }

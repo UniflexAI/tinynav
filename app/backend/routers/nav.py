@@ -138,3 +138,13 @@ def nav_planning_occupancy_source(req: dict):
         raise HTTPException(400, 'source must be depth or lidar')
     effective_source = node.cmd_set_planning_occupancy_source(source)
     return {'ok': True, 'source': effective_source}
+
+
+@router.post('/odom-source')
+def nav_odom_source(req: dict):
+    node = _require_node()
+    source = req.get('source')
+    if source not in ('vio', 'ekf'):
+        raise HTTPException(400, 'source must be vio or ekf')
+    effective_source = node.cmd_set_odom_source(source)
+    return {'ok': True, 'source': effective_source}

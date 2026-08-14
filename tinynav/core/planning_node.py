@@ -252,9 +252,9 @@ def run_raycasting_points_loopy(points, T_sensor_to_world, grid_shape, origin, r
 @dataclass
 class ObstacleConfig:
     robot_z_bottom: float = -0.8
-    robot_z_top: float = 0.3
+    robot_z_top: float = 0.2
     occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.3
+    min_wall_span_m: float = 0.4
     dilation_cells: int = 0
 
 
@@ -565,7 +565,7 @@ class PlanningNode(Node):
         self.lidar_min_obstacle_area_cells = 0
         self.lidar_score_percentile = 0.0
         self.lidar_collision_tolerance = 0
-        self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
+        self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar/points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
             [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.2)

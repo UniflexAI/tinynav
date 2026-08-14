@@ -69,10 +69,10 @@ class RtkMapPoseNode(Node):
         self.declare_parameter("align_json", "")
         self.declare_parameter("fix_topic", "/fix")
         # Heading relative source: "odom" (VIO yaw from /slam/odometry, default)
-        # or "imu" (integrate /lidar_imu gyro). Both are anchored to the map by
+        # or "imu" (integrate /lidar/imu gyro). Both are anchored to the map by
         # the same straight-segment RTK correction.
         self.declare_parameter("heading_source", "odom")
-        self.declare_parameter("imu_topic", "/lidar_imu")
+        self.declare_parameter("imu_topic", "/lidar/imu")
         self.declare_parameter("odom_topic", "/slam/odometry")
         self.declare_parameter("heading_odom_alpha", 0.2)  # odom->map offset LP
         # False (default) = heading is pure odom + a one-time initial offset

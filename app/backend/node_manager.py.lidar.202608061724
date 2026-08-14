@@ -180,7 +180,6 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
         self._current_map_pub = self.create_publisher(String, '/map/current_map', _latched_qos)
         self._planning_config_pub = self.create_publisher(String, '/planning/config', _latched_qos)
-        self._localization_config_pub = self.create_publisher(String, '/localization/config', _latched_qos)
         self._nav_paused = False
         self._nav_active = False
         self._rtk_bridge_status: dict | None = None
@@ -212,10 +211,11 @@ class BackendNode(Ros2NodeManager):
         self._imu_propagation_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
         self._planning_occupancy_source: str = 'depth'
-        self._odom_source: str = 'vio'
         self._planning_log_thread: threading.Thread | None = None
         self._planning_log_stop_event = threading.Event()
         self._unitree_proc: subprocess.Popen | None = None
+        self._a2_time_sync_thread: threading.Thread | None = None
+        self._a2_time_sync_stop_event = threading.Event()
 
         # Battery level from /battery topic (published by unitree_control)
         self._battery: float | None = None
@@ -248,7 +248,6 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(String, '/rtk/status', self._on_rtk_bridge_status, 10)
         self.create_subscription(String, '/rtk/init_status', self._on_rtk_map_status, 10)
         self.create_subscription(String, '/planning/config', self._on_planning_config, 10)
-        self.create_subscription(String, '/localization/config', self._on_localization_config, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -292,16 +291,6 @@ class BackendNode(Ros2NodeManager):
             return
         with self._lock:
             self._planning_occupancy_source = source
-
-    def _on_localization_config(self, msg: String):
-        data = self._decode_json_status(msg.data, '/localization/config')
-        if data is None:
-            return
-        source = data.get('odom_source')
-        if source not in ('vio', 'ekf'):
-            return
-        with self._lock:
-            self._odom_source = source
 
     def _on_rtk_bridge_status(self, msg: String):
         data = self._decode_json_status(msg.data, '/rtk/status')
@@ -460,10 +449,6 @@ class BackendNode(Ros2NodeManager):
             cmd_vel_proc = self._cmd_vel_proc
             self._cmd_vel_proc = None
             self._rtk_yaw_init_active = True
-            was_nav_active = self._nav_active
-        if was_nav_active:
-            self._set_nav_active(False)
-            self.get_logger().info('RTK yaw-init paused navigation before taking /cmd_vel ownership')
         had_cmd_vel_proc = cmd_vel_proc is not None and cmd_vel_proc.poll() is None
         if had_cmd_vel_proc:
             self._kill_proc(cmd_vel_proc)
@@ -488,9 +473,9 @@ class BackendNode(Ros2NodeManager):
                 restart_cmd_vel = (
                     had_cmd_vel_proc
                     and self._nav_nodes_running
+                    and not self._loc_assist_enabled
                     and self._cmd_vel_proc is None
                 )
-                resume_nav = was_nav_active and self._nav_nodes_running
                 self._rtk_yaw_init_thread = None
             if restart_cmd_vel:
                 env = os.environ.copy()
@@ -501,9 +486,6 @@ class BackendNode(Ros2NodeManager):
                     env=env,
                 )
                 self.get_logger().info('RTK yaw-init restarted cmd_vel_control')
-            if resume_nav:
-                self._set_nav_active(True)
-                self.get_logger().info('RTK yaw-init resumed navigation')
             self.get_logger().info('RTK yaw-init stopped')
 
     def _set_nav_active(self, active: bool):
@@ -679,9 +661,7 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warn(f'Invalid nav_flow rtk config: {rtk_config!r}; using off')
             return 'off'
         if mode in {'replace', 'on', 'true', '1', 'yes'}:
-            # rtk comment out
-            # return 'replace' if self._rtk_time_gate_open() else 'off'
-            return 'replace'
+            return 'replace' if self._rtk_time_gate_open() else 'off'
         if mode in {'off', 'false', '0', 'no', ''}:
             return 'off'
         self.get_logger().warn(f'Invalid nav_flow rtk.mode={mode!r}; using off')
@@ -753,40 +733,7 @@ class BackendNode(Ros2NodeManager):
         if zupt is not None and not isinstance(zupt, bool):
             self.get_logger().warn(f'Invalid zupt value: {zupt!r}, ignoring')
             zupt = None
-        lookat = rule.get('lookat')
-        if lookat is not None and not isinstance(lookat, (int, str)):
-            self.get_logger().warn(f'Invalid lookat value: {lookat!r}, ignoring')
-            lookat = None
-        lookat_timeout_s = self._float_rule_value(rule, 'lookat_timeout_s', 6.0, minimum=0.5, maximum=30.0)
-        lookat_yaw_tolerance_deg = self._float_rule_value(
-            rule, 'lookat_yaw_tolerance_deg', 10.0, minimum=1.0, maximum=45.0
-        )
-        return {
-            'target_map': target_map,
-            'poi_list': poi_list,
-            'zupt': zupt,
-            'lookat': lookat,
-            'lookat_timeout_s': lookat_timeout_s,
-            'lookat_yaw_tolerance_deg': lookat_yaw_tolerance_deg,
-        }
-
-    def _float_rule_value(
-        self,
-        rule: dict,
-        key: str,
-        default: float,
-        *,
-        minimum: float,
-        maximum: float,
-    ) -> float:
-        if key not in rule:
-            return default
-        try:
-            value = float(rule[key])
-        except (TypeError, ValueError):
-            self.get_logger().warn(f'Invalid {key} value: {rule.get(key)!r}, using {default}')
-            return default
-        return max(minimum, min(maximum, value))
+        return {'target_map': target_map, 'poi_list': poi_list, 'zupt': zupt}
 
     def _set_active_map_link(self, map_name: str):
         import shutil
@@ -837,194 +784,13 @@ class BackendNode(Ros2NodeManager):
                 next_log_time = time.time() + 30.0
             time.sleep(0.2)
 
-    def _load_pois_by_ref(self) -> dict[int | str, np.ndarray]:
-        pois_file = os.path.join(self.map_path, 'pois.json')
-        if not os.path.exists(pois_file):
-            raise FileNotFoundError('No pois.json found for lookat')
-        with open(pois_file) as f:
-            pois = json.load(f)
-        result: dict[int | str, np.ndarray] = {}
-        for key, poi in pois.items():
-            if not isinstance(poi, dict):
-                continue
-            position = poi.get('position')
-            if not isinstance(position, list) or len(position) < 2:
-                continue
-            try:
-                point = np.array(position[:3], dtype=np.float64)
-            except (TypeError, ValueError):
-                continue
-            if len(point) < 3:
-                point = np.pad(point, (0, 3 - len(point)))
-            try:
-                result[int(key)] = point
-            except (TypeError, ValueError):
-                pass
-            result[str(key)] = point
-            name = poi.get('name')
-            if isinstance(name, str):
-                result[name] = point
-        return result
-
-    def _turn_relative_by_odom_for_lookat(
-        self,
-        target_delta: float,
-        *,
-        timeout_s: float,
-        yaw_tolerance: float,
-        angular_speed: float = 0.4,
-        cmd_rate_hz: float = 10.0,
-    ) -> bool:
-        interval = 1.0 / max(cmd_rate_hz, 1.0)
-        start_wait = time.monotonic()
-        start_yaw = self._latest_odom_yaw()
-        while start_yaw is None:
-            self._publish_cmd_vel(0.0, 0.0)
-            if time.monotonic() - start_wait > min(2.0, timeout_s):
-                self.get_logger().warn('Map handoff lookat skipped: no fresh odometry yaw')
-                return False
-            time.sleep(interval)
-            start_yaw = self._latest_odom_yaw()
-
-        if abs(target_delta) <= yaw_tolerance:
-            self._publish_cmd_vel(0.0, 0.0)
-            return True
-
-        angular_z = math.copysign(abs(angular_speed), target_delta)
-        start_time = time.monotonic()
-        previous_yaw = start_yaw
-        accumulated_delta = 0.0
-
-        while True:
-            current_yaw = self._latest_odom_yaw()
-            if current_yaw is None:
-                self._publish_cmd_vel(0.0, 0.0)
-                if time.monotonic() - start_time > timeout_s:
-                    self.get_logger().warn('Map handoff lookat timed out: odometry yaw disappeared')
-                    return False
-                time.sleep(interval)
-                continue
-
-            accumulated_delta += self._wrap_angle(current_yaw - previous_yaw)
-            previous_yaw = current_yaw
-            remaining = target_delta - accumulated_delta
-            if abs(remaining) <= yaw_tolerance:
-                self._publish_cmd_vel(0.0, 0.0)
-                return True
-            if math.copysign(1.0, remaining) != math.copysign(1.0, target_delta):
-                self._publish_cmd_vel(0.0, 0.0)
-                return True
-            if time.monotonic() - start_time > timeout_s:
-                self.get_logger().warn(
-                    f'Map handoff lookat timed out: target_delta={target_delta:.3f} '
-                    f'accumulated_delta={accumulated_delta:.3f} remaining={remaining:.3f}'
-                )
-                self._publish_cmd_vel(0.0, 0.0)
-                return False
-
-            self._publish_cmd_vel(0.0, angular_z)
-            time.sleep(interval)
-
-    def _run_map_handoff_lookat(self, lookat: int | str, timeout_s: float, yaw_tolerance_deg: float) -> None:
-        try:
-            pois = self._load_pois_by_ref()
-        except Exception as exc:
-            self.get_logger().warn(f'Map handoff lookat skipped: {exc}')
-            return
-        if lookat not in pois:
-            self.get_logger().warn(f'Map handoff lookat POI {lookat!r} not found in current map')
-            return
-        with self._lock:
-            pose = dict(self._map_pose) if self._map_pose is not None else None
-        if pose is None:
-            self.get_logger().warn('Map handoff lookat skipped: no current map pose')
-            return
-
-        with self._lock:
-            cmd_vel_proc = self._cmd_vel_proc
-            if cmd_vel_proc is not None and cmd_vel_proc.poll() is None:
-                self._cmd_vel_proc = None
-            else:
-                cmd_vel_proc = None
-        if cmd_vel_proc is not None:
-            self._kill_proc(cmd_vel_proc)
-            self.get_logger().info('Map handoff lookat stopped cmd_vel_control for direct /cmd_vel ownership')
-
-        target = pois[lookat]
-        dx = float(target[0] - pose['x'])
-        dy = float(target[1] - pose['y'])
-        if math.hypot(dx, dy) < 1e-3:
-            self.get_logger().warn(f'Map handoff lookat skipped: POI {lookat!r} is too close')
-            return
-        target_yaw = math.atan2(dy, dx)
-        current_yaw = float(pose.get('yaw', 0.0))
-        target_delta = self._wrap_angle(target_yaw - current_yaw)
-        self.get_logger().info(
-            f'Map handoff lookat started: target={lookat!r}, '
-            f'delta_deg={math.degrees(target_delta):.1f}, timeout_s={timeout_s:.1f}, '
-            f'tolerance_deg={yaw_tolerance_deg:.1f}'
-        )
-        ok = self._turn_relative_by_odom_for_lookat(
-            target_delta,
-            timeout_s=timeout_s,
-            yaw_tolerance=math.radians(yaw_tolerance_deg),
-        )
-        self.get_logger().info(f'Map handoff lookat {"finished" if ok else "continued after timeout"}')
-
-    def _maybe_seed_map_handoff(
-        self, source_map: str, target_map: str, T_source_to_odom_live: np.ndarray | None,
-    ) -> str | None:
-        """If a calibrated map_handoff_from_<source_map>.json edge exists inside the target
-        map's own directory (see tool/calibrate_map_transform.py), compute a seed
-        T_from_map_to_odom for the target map and write it to a temp file map_node.py can be
-        launched with, so nav on the target map doesn't wait on a fresh cold relocalization.
-        Returns None (map_node falls back to its normal cold-start behavior) if there's no
-        edge for this map pair, or if we don't have a live source-map pose to seed from.
-        """
-        if T_source_to_odom_live is None:
-            self.get_logger().warning(
-                f'Map handoff {source_map}->{target_map}: no live source-map pose available, '
-                'target map will cold-start relocalization as usual'
-            )
-            return None
-        edge_path = os.path.join(self.tinynav_db_path, 'maps', target_map, f'map_handoff_from_{source_map}.json')
-        if not os.path.exists(edge_path):
-            return None
-        try:
-            with open(edge_path) as f:
-                edge = json.load(f)
-            source_to_target = np.array(edge['mapA_to_mapB'])
-            T_target_to_odom_seed = T_source_to_odom_live @ np.linalg.inv(source_to_target)
-        except Exception as exc:
-            self.get_logger().error(f'Map handoff {source_map}->{target_map}: failed to apply edge {edge_path}: {exc}')
-            return None
-        seed_path = f'/tmp/map_handoff_seed_{source_map}_to_{target_map}.npy'
-        np.save(seed_path, T_target_to_odom_seed)
-        self.get_logger().info(
-            f'Map handoff {source_map}->{target_map}: seeded T_from_map_to_odom from {edge_path} -> {seed_path}'
-        )
-        return seed_path
-
     def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
         target_map = rule['target_map']
         poi_list = rule['poi_list']
         self.get_logger().info(
             f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
         )
-        # Snapshot the live source-map localization NOW, before cmd_stop_nav_nodes/
-        # _set_active_map_link tear down this session's state below -- this is the one
-        # (map_pose, odom_pose) pair we have to seed the target map's T_from_map_to_odom
-        # with, if a calibrated edge exists for this map pair (see _maybe_seed_map_handoff).
-        T_source_to_odom_live = self._compute_live_map_to_odom()
         try:
-            lookat = rule.get('lookat')
-            if lookat is not None:
-                self._run_map_handoff_lookat(
-                    lookat,
-                    timeout_s=float(rule.get('lookat_timeout_s', 6.0)),
-                    yaw_tolerance_deg=float(rule.get('lookat_yaw_tolerance_deg', 10.0)),
-                )
-
             # Stop current map_node/control hard before changing the active map.
             self.cmd_stop_nav_nodes()
             self.state = 'idle'
@@ -1057,8 +823,7 @@ class BackendNode(Ros2NodeManager):
                 # Give the device time to apply the ZUPT change before restarting nav nodes.
                 time.sleep(3)
 
-            seed_transform_path = self._maybe_seed_map_handoff(source_map, target_map, T_source_to_odom_live)
-            self.cmd_start_nav_nodes(initial_map_to_odom_transform_path=seed_transform_path)
+            self.cmd_start_nav_nodes()
 
             if not self._wait_for_map_handoff_localization(target_map):
                 self.state = 'idle'
@@ -1344,29 +1109,6 @@ class BackendNode(Ros2NodeManager):
             [    2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx), 1 - 2*(qx*qx + qy*qy)],
         ])
 
-    @classmethod
-    def _pose_dict_to_matrix(cls, pose: dict) -> np.ndarray:
-        T = np.eye(4)
-        T[:3, :3] = cls._quat_to_rot(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
-        T[:3, 3] = [pose['x'], pose['y'], pose['z']]
-        return T
-
-    def _compute_live_map_to_odom(self) -> np.ndarray | None:
-        """T_from_map_to_odom for the CURRENTLY active map, from whatever pose_in_map and
-        pose_in_odom this session has already observed -- used to seed the next map at a
-        handoff (see _run_map_handoff) instead of that map waiting on a fresh cold
-        relocalization. _odom_pose_at_kf is odom frozen at the same keyframe _map_pose came
-        from (see _on_pose_in_map), so the pair is already time-synchronized.
-        """
-        with self._lock:
-            map_pose = self._map_pose
-            odom_pose = self._odom_pose_at_kf or self._odom_pose
-        if map_pose is None or odom_pose is None:
-            return None
-        pose_in_map = self._pose_dict_to_matrix(map_pose)
-        pose_in_odom = self._pose_dict_to_matrix(odom_pose)
-        return pose_in_odom @ np.linalg.inv(pose_in_map)
-
     def _transform_path_via_tf(self, path: list) -> list:
         """Transform map-frame path points to odom (world) frame via TF lookup."""
         if not path:
@@ -1605,7 +1347,6 @@ class BackendNode(Ros2NodeManager):
             nav_active = self._nav_active
             loc_assist = self._loc_assist_enabled
             planning_occupancy_source = self._planning_occupancy_source
-            odom_source = self._odom_source
             vio_guard_enabled = self._sensor_mode == 'looper'
             vio_status = self._vio_status if vio_guard_enabled else None
             vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
@@ -1631,7 +1372,6 @@ class BackendNode(Ros2NodeManager):
             'debugRecording': self.debug_recording,
             'locAssistEnabled': loc_assist,
             'planningOccupancySource': planning_occupancy_source,
-            'odomSource': odom_source,
             'vioGuardEnabled': vio_guard_enabled,
             'vioStatus': vio_status,
             'vioGuardStopped': vio_guard_stopped,
@@ -1753,39 +1493,54 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().info(f'Planning occupancy_source requested from frontend: {source}')
         return source
 
-    def cmd_set_odom_source(self, source: str):
-        if source not in ('vio', 'ekf'):
-            raise ValueError(f"Invalid odom_source: {source!r}")
-        with self._lock:
-            self._odom_source = source
-        self._localization_config_pub.publish(String(data=json.dumps({'odom_source': source})))
-        self.get_logger().info(f'Localization odom_source requested from frontend: {source}')
-        return source
-
     def _stop_sensor_procs(self):
         self._planning_log_stop_event.set()
+        self._stop_a2_time_sync_loop()
         with self._lock:
             self._planning_occupancy_source = 'depth'
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_imu_propagation_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
 
-    def _planning_env(self, env: dict) -> dict:
+    def _lidar_env(self, env: dict) -> dict:
         """env for planning_node, matching the RMW the current _sensor_mode needs.
 
         In 'looper' mode planning_node subscribes to the Hesai lidar driver on a
-        separate host -- cross-vendor RTPS with FastDDS's default multi-interface
-        locator advertisement doesn't reliably reach it on this robot's network.
-        Every planning_node launch site (initial start, restart-after-map-build,
-        emergency-stop restart) must use this so the CycloneDDS override doesn't
-        silently drop out on one of the paths (see cyclonedds_jetson.xml).
+        separate host (the Unitree A2 board, reachable over enP8p1s0) -- cross-vendor
+        RTPS with FastDDS's default multi-interface locator advertisement doesn't
+        reliably reach it on this robot's network. Every planning_node launch site
+        (initial start, restart-after-map-build, emergency-stop restart) must use
+        this so the CycloneDDS override doesn't silently drop out on one of the
+        paths (see scripts/cyclonedds_lidar.xml).
+
+        This config deliberately lists ONLY enP8p1s0, not also the Looper's
+        enx020000000a01 -- advertising both to the A2 board's writer offers it a
+        second, unreachable locator (A2 has no route to the Looper's link-local
+        subnet), and the resulting ICMP-unreachable churn on that dead path can
+        starve the *valid* enP8p1s0 delivery too (observed: SEDP discovery still
+        succeeds since it rides multicast, but /lidar_points data never arrives).
+        planning_node never talks to the Looper directly -- it only needs
+        looper_bridge_node's local republish -- so it doesn't need that interface.
         """
         if self._sensor_mode == 'looper':
             cyclone_env = env.copy()
             cyclone_env['RMW_IMPLEMENTATION'] = 'rmw_cyclonedds_cpp'
-            cyclone_env['CYCLONEDDS_URI'] = '/tinynav/cyclonedds_jetson.xml'
+            cyclone_env['CYCLONEDDS_URI'] = '/tinynav/scripts/cyclonedds_lidar.xml'
             return cyclone_env
         return env
+
+    def _looper_env(self, env: dict) -> dict:
+        """env for looper_bridge_node, which subscribes to the Looper module's own
+        DDS participant over enx020000000a01.
+
+        Kept on its own single-interface config (scripts/cyclonedds_looper.xml),
+        not shared with _lidar_env's enP8p1s0 -- see _lidar_env docstring for why
+        advertising both interfaces from one participant is unreliable.
+        """
+        cyclone_env = env.copy()
+        cyclone_env['RMW_IMPLEMENTATION'] = 'rmw_cyclonedds_cpp'
+        cyclone_env['CYCLONEDDS_URI'] = '/tinynav/scripts/cyclonedds_looper.xml'
+        return cyclone_env
 
     def _sync_looper_time(self):
         """Sync the Looper module clock before starting Looper-dependent nodes.
@@ -1811,20 +1566,118 @@ class BackendNode(Ros2NodeManager):
                     time.sleep(1.0)
         raise RuntimeError(f'Looper time sync failed after {max_attempts} attempts: {last_error}')
 
+    def _sync_a2_time(self):
+        """Sync the Unitree A2 board's system clock to this host's.
+
+        A2's own chrony has no reachable server (`chronyc sources` shows its
+        only configured peer at 0/8 reachability, `timedatectl` reports
+        "System clock synchronized: no"), and separately its clock runs fast
+        against this host by roughly 1% (~10ms/sec, measured empirically --
+        chrony's own frequency correction is a normal ~10ppm, nowhere near
+        enough to explain that, and there's no cron/timer on A2 touching the
+        clock either; the clocksource is `tsc`, so this looks like a TSC
+        calibration issue on that board rather than anything ntp-related).
+        lidar_sync_callback in planning_node pairs /lidar_points (stamped with
+        A2's clock) with /slam/odometry_visual (this host's clock) via an
+        ApproximateTimeSynchronizer with only 150ms slop -- at a 1% drift
+        rate a single sync at launch runs back out of that budget within
+        ~15 seconds, so this must be called on a short interval for as long
+        as looper mode is running, not just once (see _start_a2_time_sync_loop).
+        Even though /lidar_points itself is reachable end-to-end (see
+        _lidar_env), a stale clock means lidar_sync_callback silently never
+        fires.
+
+        Unlike _sync_looper_time(), a failure here is NOT fatal: planning_node
+        still has depth-based occupancy as a fallback, so a lidar clock hiccup
+        shouldn't block the rest of the looper-mode launch -- it just means no
+        lidar-based obstacle avoidance until the next successful sync.
+
+        A fresh SSH handshake alone costs ~100ms on this link -- enough by
+        itself to blow most of the 150ms slop budget if paid between reading
+        our own clock and setting A2's. Opening one multiplexed control
+        connection first and sending the actual `date -s` over that gets
+        residual skew down to ~40ms... but only from the SECOND command
+        through a given master onward -- the first multiplexed command after
+        -M/-fN pays its own ~150-200ms one-time channel-setup cost (observed
+        empirically, cause not fully diagnosed). So send one throwaway
+        warm-up command before the timed one.
+
+        Uses a fresh, unique control-socket path per call (not a fixed name)
+        -- reusing one path across calls hit a real failure mode: the very
+        next master creation after a `-O exit` can race the old socket file's
+        teardown, leaving later `-S ctrl_path` client connections hanging
+        against a dead socket until they time out, rather than failing fast.
+        Observed in practice: the first 4 calls on a fixed path succeeded,
+        then every call after that hung for the full 8s timeout and fell
+        through to an unanswerable interactive password prompt.
+        """
+        ctrl_path = f'/tmp/a2_ssh_ctrl_{os.getpid()}_{threading.get_ident()}_{time.time_ns()}'
+        ssh_target = 'unitree@192.168.123.162'
+
+        def _close_master():
+            subprocess.run(['ssh', '-S', ctrl_path, '-O', 'exit', ssh_target],
+                            capture_output=True, timeout=5)
+
+        try:
+            subprocess.run(
+                ['sshpass', '-p', 'Unitree#24226', 'ssh',
+                 '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=8',
+                 '-M', '-S', ctrl_path, '-fN', '-o', 'ControlPersist=20',
+                 ssh_target],
+                check=True, timeout=10, capture_output=True,
+            )
+            subprocess.run(['ssh', '-S', ctrl_path, ssh_target, 'true'],
+                            check=True, timeout=8, capture_output=True)  # pay the cold-start cost here, not in the timed call below
+            epoch = subprocess.check_output(['date', '+%s.%N']).decode().strip()
+            subprocess.run(
+                ['ssh', '-S', ctrl_path, ssh_target,
+                 f"echo 'Unitree#24226' | sudo -S date -s @{epoch}"],
+                check=True, timeout=8, capture_output=True,
+            )
+            self.get_logger().info('A2 board time sync completed')
+        except Exception as e:
+            self.get_logger().error(f'A2 board time sync failed (non-fatal, continuing without lidar): {e}')
+        finally:
+            _close_master()
+
+    def _start_a2_time_sync_loop(self, interval_s: float = 3.0):
+        """Keep re-syncing A2's clock for as long as looper mode runs.
+
+        See _sync_a2_time for why a one-shot sync isn't enough: A2's clock
+        drifts ~15-20ms/sec (measured: a clean, linear +0.51s over 30s of
+        2s-spaced samples -- not scheduling jitter), so it's back out of the
+        150ms sync slop within ~10s of any single sync. At a 3s interval,
+        worst-case accumulated drift (~3s * 20ms/s = 60ms) plus this sync
+        call's own ~50ms residual stays comfortably under the 150ms budget;
+        5s cut it too close (~85ms + ~50ms residual).
+        """
+        self._a2_time_sync_stop_event.clear()
+
+        def _loop():
+            while not self._a2_time_sync_stop_event.wait(interval_s):
+                self._sync_a2_time()
+
+        self._a2_time_sync_thread = threading.Thread(target=_loop, daemon=True)
+        self._a2_time_sync_thread.start()
+
+    def _stop_a2_time_sync_loop(self):
+        self._a2_time_sync_stop_event.set()
+
     def _launch_sensor_procs(self, env: dict):
         """Start sensor procs based on current _sensor_mode."""
         if self._sensor_mode == 'looper':
             self._sync_looper_time()
-            cyclone_env = self._planning_env(env)
+            self._sync_a2_time()
+            self._start_a2_time_sync_loop()
             self._looper_bridge_proc = self._launch_proc(
                 'looper_bridge',
                 ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
-                env=cyclone_env,
+                env=self._looper_env(env),
             )
             self._planning_proc = self._launch_proc(
                 'planning',
                 ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-                env=cyclone_env,
+                env=self._lidar_env(env),
             )
         elif self._sensor_mode == 'realsense':
             self._realsense_proc = self._launch_proc(
@@ -1857,7 +1710,7 @@ class BackendNode(Ros2NodeManager):
     # Nav nodes toggle                                                     #
     # ------------------------------------------------------------------ #
 
-    def cmd_start_nav_nodes(self, initial_map_to_odom_transform_path: str | None = None):
+    def cmd_start_nav_nodes(self):
         self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -1867,8 +1720,6 @@ class BackendNode(Ros2NodeManager):
         ]
         if self._load_nav_flow_enable_first_done():
             map_node_cmd.append('--enable_first_done')
-        if initial_map_to_odom_transform_path is not None:
-            map_node_cmd += ['--initial_map_to_odom_transform', initial_map_to_odom_transform_path]
         # Decide RTK mode once here, matching MapNode which also decides once at
         # its own startup -- neither side re-checks this while nav is running.
         self._nav_rtk_mode = self._load_nav_flow_rtk_mode()
@@ -1881,10 +1732,9 @@ class BackendNode(Ros2NodeManager):
         rtk_mode = self._nav_rtk_mode
         with self._lock:
             loc_assist_requested = self._loc_assist_enabled
-        # RTK-enabled maps still use visual relocalization while RTK is not ACTIVE.
-        # If RTK later reaches NEED_YAW_INIT, the yaw-init loop will stop assist and
-        # take direct /cmd_vel ownership before RTK replaces the map transform.
-        loc_assist = loc_assist_requested
+        loc_assist = loc_assist_requested and rtk_mode != 'replace'
+        if loc_assist_requested and rtk_mode == 'replace':
+            self.get_logger().info('Localization assist ignored for RTK map')
         if loc_assist:
             # Don't start cmd_vel_control yet; start localization assist sweep
             self._start_loc_assist(_env)
@@ -1896,7 +1746,6 @@ class BackendNode(Ros2NodeManager):
             )
         with self._lock:
             self._nav_nodes_running = True
-            self._odom_source = 'vio'
         self.get_logger().info('Nav nodes started')
 
     def cmd_stop_nav_nodes(self):
@@ -1910,7 +1759,6 @@ class BackendNode(Ros2NodeManager):
         self._cmd_vel_proc = None
         with self._lock:
             self._nav_nodes_running = False
-            self._odom_source = 'vio'
             self._localized = False
             self._map_pose = None
             self._global_path = []
@@ -1936,7 +1784,7 @@ class BackendNode(Ros2NodeManager):
         self._planning_proc = self._launch_proc(
             'planning',
             ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
-            env=self._planning_env(_env),
+            env=self._lidar_env(_env),
         )
         self._nav_rtk_mode = self._load_nav_flow_rtk_mode()
         self._publish_current_map_for_rtk()
@@ -1953,7 +1801,6 @@ class BackendNode(Ros2NodeManager):
         )
         with self._lock:
             self._nav_nodes_running = True
-            self._odom_source = 'vio'
             self._localized = False
             self._map_pose = None
             self._global_path = []
@@ -1975,6 +1822,9 @@ class BackendNode(Ros2NodeManager):
 
     def _start_loc_assist(self, env: dict):
         """Start the yaw sweep thread (no cmd_vel_control process)."""
+        if self._nav_rtk_mode == 'replace':
+            self.get_logger().info('Localization assist sweep skipped for RTK map')
+            return
         if self._loc_assist_thread is not None and self._loc_assist_thread.is_alive():
             self.get_logger().info('Localization assist sweep already running')
             return
@@ -2002,13 +1852,13 @@ class BackendNode(Ros2NodeManager):
 
     def _loc_assist_loop(self):
         """
-        Fixed yaw assist pattern:
-        - Face the initial direction, wait dwell_s
-        - Turn left 10° from the initial direction, wait dwell_s
-        - Return to the initial direction, wait dwell_s
-        - Turn right 10° from the initial direction, wait dwell_s
-        - Return to the initial direction, wait dwell_s
-        - Repeat until localized
+        Yaw sweep pattern:
+        - Start facing current direction, wait dwell_s
+        - Turn CW 20°, wait dwell_s
+        - Turn CCW 40° (net -20° from start), wait dwell_s
+        - Turn CW 60° (net +40° from start), wait dwell_s
+        - Turn CCW 80° (net -40° from start), wait dwell_s
+        - ... expanding sweep until localized
 
         The turn amount is closed-loop against SLAM odometry yaw. While turning,
         publish cmd_vel continuously so downstream controllers do not need to
@@ -2018,40 +1868,36 @@ class BackendNode(Ros2NodeManager):
         angular_speed = 0.4  # rad/s
         cmd_rate_hz = 10.0
         yaw_tolerance = math.radians(2.0)
-        side_yaw_rad = math.radians(10.0)
+        step_deg = 20.0
+        step_rad = math.radians(step_deg)
         stop = self._loc_assist_stop_event
 
-        interval = 1.0 / max(cmd_rate_hz, 1.0)
-        start_wait = time.monotonic()
-        initial_yaw = self._latest_odom_yaw()
-        while initial_yaw is None:
-            if self._should_stop_loc_assist(stop):
-                return
-            self._publish_cmd_vel(0.0, 0.0)
-            if time.monotonic() - start_wait > 5.0:
-                self.get_logger().warn('Localization assist waiting for fresh odometry yaw')
-                start_wait = time.monotonic()
-            time.sleep(interval)
-            initial_yaw = self._latest_odom_yaw()
+        # Dwell at initial position
+        if self._wait_or_localized(dwell_s, stop):
+            return
 
-        yaw_offsets = [0.0, side_yaw_rad, 0.0, -side_yaw_rad, 0.0]
+        turn_index = 1  # 1, 2, 3, 4, ...
+        direction = 1   # +1 = CW, -1 = CCW
 
         while not stop.is_set():
-            for yaw_offset in yaw_offsets:
-                if abs(yaw_offset) > 1e-6:
-                    self.get_logger().info(
-                        f'Localization assist target yaw offset: {math.degrees(yaw_offset):.1f} deg'
-                    )
-                if self._turn_to_odom_yaw(
-                    target_yaw=self._wrap_angle(initial_yaw + yaw_offset),
-                    angular_speed=angular_speed,
-                    cmd_rate_hz=cmd_rate_hz,
-                    yaw_tolerance=yaw_tolerance,
-                    stop=stop,
-                ):
-                    return
-                if self._wait_or_localized(dwell_s, stop):
-                    return
+            # Turn relative to the current odom yaw. Positive angular.z is CCW,
+            # so the previous CW command maps to a negative target delta.
+            angle = turn_index * step_rad
+            target_delta = -direction * angle
+            if self._turn_relative_by_odom(
+                target_delta=target_delta,
+                angular_speed=angular_speed,
+                cmd_rate_hz=cmd_rate_hz,
+                yaw_tolerance=yaw_tolerance,
+                stop=stop,
+            ):
+                return
+            # Dwell
+            if self._wait_or_localized(dwell_s, stop):
+                return
+            # Next sweep: increase index, flip direction
+            turn_index += 1
+            direction *= -1
 
     @staticmethod
     def _wrap_angle(angle: float) -> float:
@@ -2134,49 +1980,6 @@ class BackendNode(Ros2NodeManager):
                 self._publish_cmd_vel(0.0, 0.0)
                 return False
 
-            self._publish_cmd_vel(0.0, angular_z)
-            time.sleep(interval)
-
-    def _turn_to_odom_yaw(
-        self,
-        target_yaw: float,
-        angular_speed: float,
-        cmd_rate_hz: float,
-        yaw_tolerance: float,
-        stop: threading.Event,
-    ) -> bool:
-        """
-        Turn to an absolute odometry yaw. Returns True if the assist loop should
-        stop because localization succeeded or the stop event was set.
-        """
-        interval = 1.0 / max(cmd_rate_hz, 1.0)
-        start_time = time.monotonic()
-        max_duration = math.pi / max(angular_speed, 1e-3) + 3.0
-
-        while True:
-            if self._should_stop_loc_assist(stop):
-                return True
-
-            current_yaw = self._latest_odom_yaw()
-            if current_yaw is None:
-                self._publish_cmd_vel(0.0, 0.0)
-                time.sleep(interval)
-                continue
-
-            error = self._wrap_angle(target_yaw - current_yaw)
-            if abs(error) <= yaw_tolerance:
-                self._publish_cmd_vel(0.0, 0.0)
-                return False
-
-            if time.monotonic() - start_time > max_duration:
-                self.get_logger().warn(
-                    f'Localization assist turn timeout: target_yaw={target_yaw:.3f} '
-                    f'current_yaw={current_yaw:.3f} error={error:.3f}'
-                )
-                self._publish_cmd_vel(0.0, 0.0)
-                return False
-
-            angular_z = math.copysign(abs(angular_speed), error)
             self._publish_cmd_vel(0.0, angular_z)
             time.sleep(interval)
 
@@ -2275,8 +2078,8 @@ class BackendNode(Ros2NodeManager):
         '/camera/camera/infra1/image_rect_raw',
         '/camera/camera/depth/image_rect_raw',
         '/camera/camera/infra1/camera_info',
-        '/camera/camera/vio_100hz',
-        '/camera/camera/vio_image',
+        '/insight/vio_100hz',
+        '/insight/vio_20hz',
         '/tf_static',
         '/slam/odometry_visual',
         '/slam/depth',
@@ -2285,7 +2088,7 @@ class BackendNode(Ros2NodeManager):
         '/planning/trajectory_path',
         '/planning/occupied_voxels',
         '/planning/footprint',
-        '/lidar/points',
+        '/lidar_points',
     ]
 
     def cmd_debug_record_start(self):
@@ -2304,12 +2107,13 @@ class BackendNode(Ros2NodeManager):
                  '--max-cache-size', '2147483648']
                 + self._DEBUG_RECORD_TOPICS
             )
-            # /lidar/points is published by the Hesai driver under CycloneDDS on a
-            # separate host (see _launch_sensor_procs); this recorder needs the same
-            # RMW to actually reach it.
+            # /lidar_points is published by the Hesai driver under CycloneDDS on a
+            # separate host (see _lidar_env); this recorder needs the same RMW to
+            # actually reach it. The other recorded topics are local republishes
+            # from looper_bridge_node, so the lidar-only interface list is enough.
             self._debug_record_proc = self._spawn(cmd, extra_env={
                 'RMW_IMPLEMENTATION': 'rmw_cyclonedds_cpp',
-                'CYCLONEDDS_URI': '/tinynav/cyclonedds_jetson.xml',
+                'CYCLONEDDS_URI': '/tinynav/scripts/cyclonedds_lidar.xml',
             })
             self._debug_record_path = output_dir
             self.get_logger().info(f'Debug recording started → {output_dir}')
