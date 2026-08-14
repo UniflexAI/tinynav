@@ -180,6 +180,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
         self._current_map_pub = self.create_publisher(String, '/map/current_map', _latched_qos)
         self._planning_config_pub = self.create_publisher(String, '/planning/config', _latched_qos)
+        self._localization_config_pub = self.create_publisher(String, '/localization/config', _latched_qos)
         self._nav_paused = False
         self._nav_active = False
         self._rtk_bridge_status: dict | None = None
@@ -211,6 +212,7 @@ class BackendNode(Ros2NodeManager):
         self._imu_propagation_proc: subprocess.Popen | None = None
         self._planning_proc: subprocess.Popen | None = None
         self._planning_occupancy_source: str = 'depth'
+        self._odom_source: str = 'vio'
         self._planning_log_thread: threading.Thread | None = None
         self._planning_log_stop_event = threading.Event()
         self._unitree_proc: subprocess.Popen | None = None
@@ -246,6 +248,7 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(String, '/rtk/status', self._on_rtk_bridge_status, 10)
         self.create_subscription(String, '/rtk/init_status', self._on_rtk_map_status, 10)
         self.create_subscription(String, '/planning/config', self._on_planning_config, 10)
+        self.create_subscription(String, '/localization/config', self._on_localization_config, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -289,6 +292,16 @@ class BackendNode(Ros2NodeManager):
             return
         with self._lock:
             self._planning_occupancy_source = source
+
+    def _on_localization_config(self, msg: String):
+        data = self._decode_json_status(msg.data, '/localization/config')
+        if data is None:
+            return
+        source = data.get('odom_source')
+        if source not in ('vio', 'ekf'):
+            return
+        with self._lock:
+            self._odom_source = source
 
     def _on_rtk_bridge_status(self, msg: String):
         data = self._decode_json_status(msg.data, '/rtk/status')
@@ -1592,6 +1605,7 @@ class BackendNode(Ros2NodeManager):
             nav_active = self._nav_active
             loc_assist = self._loc_assist_enabled
             planning_occupancy_source = self._planning_occupancy_source
+            odom_source = self._odom_source
             vio_guard_enabled = self._sensor_mode == 'looper'
             vio_status = self._vio_status if vio_guard_enabled else None
             vio_guard_stopped = self._vio_guard_stopped if vio_guard_enabled else False
@@ -1617,6 +1631,7 @@ class BackendNode(Ros2NodeManager):
             'debugRecording': self.debug_recording,
             'locAssistEnabled': loc_assist,
             'planningOccupancySource': planning_occupancy_source,
+            'odomSource': odom_source,
             'vioGuardEnabled': vio_guard_enabled,
             'vioStatus': vio_status,
             'vioGuardStopped': vio_guard_stopped,
@@ -1736,6 +1751,15 @@ class BackendNode(Ros2NodeManager):
             self._planning_occupancy_source = source
         self._planning_config_pub.publish(String(data=json.dumps({'occupancy_source': source})))
         self.get_logger().info(f'Planning occupancy_source requested from frontend: {source}')
+        return source
+
+    def cmd_set_odom_source(self, source: str):
+        if source not in ('vio', 'ekf'):
+            raise ValueError(f"Invalid odom_source: {source!r}")
+        with self._lock:
+            self._odom_source = source
+        self._localization_config_pub.publish(String(data=json.dumps({'odom_source': source})))
+        self.get_logger().info(f'Localization odom_source requested from frontend: {source}')
         return source
 
     def _stop_sensor_procs(self):
@@ -1872,6 +1896,7 @@ class BackendNode(Ros2NodeManager):
             )
         with self._lock:
             self._nav_nodes_running = True
+            self._odom_source = 'vio'
         self.get_logger().info('Nav nodes started')
 
     def cmd_stop_nav_nodes(self):
@@ -1885,6 +1910,7 @@ class BackendNode(Ros2NodeManager):
         self._cmd_vel_proc = None
         with self._lock:
             self._nav_nodes_running = False
+            self._odom_source = 'vio'
             self._localized = False
             self._map_pose = None
             self._global_path = []
@@ -1927,6 +1953,7 @@ class BackendNode(Ros2NodeManager):
         )
         with self._lock:
             self._nav_nodes_running = True
+            self._odom_source = 'vio'
             self._localized = False
             self._map_pose = None
             self._global_path = []

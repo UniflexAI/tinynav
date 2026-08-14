@@ -11,6 +11,11 @@ Topics
             /rtk/map_pose             → ekf_update_pos3   (3-DOF, pos only, absolute)
             (all updates publish to both /slam/odometry_fused and _100hz)
 
+Always running (wired into scripts/start_app.sh), but map_node only consumes its
+output when live-toggled: node_manager's 'VIO'/'EKF' operate-tab button publishes
+{"odom_source": "vio"|"ekf"} on /localization/config, which map_node reads to pick
+between /slam/odometry (default) and /slam/odometry_fused for continuous_odom_callback.
+
 Ported from xinghan/qrcode for the beijing/A2 rig, which has no wheel-odometry/QR/robot_odom
 publishers -- those subscriptions are left in place (harmless no-ops here) so this stays a
 drop-in upgrade if any of those sources shows up later, exactly as on the reference branch.

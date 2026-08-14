@@ -50,6 +50,7 @@ class DeviceStatus {
   final bool debugRecording;
   final bool locAssistEnabled;
   final String planningOccupancySource;
+  final String odomSource;
   final String rtkMode;
   final bool rtkBridgeOnline;
   final String? rtkReceiverStage;
@@ -75,6 +76,7 @@ class DeviceStatus {
     required this.debugRecording,
     required this.locAssistEnabled,
     required this.planningOccupancySource,
+    required this.odomSource,
     required this.rtkMode,
     required this.rtkBridgeOnline,
     this.rtkReceiverStage,
@@ -105,6 +107,7 @@ class DeviceStatus {
         debugRecording: json['debugRecording'] as bool? ?? false,
         locAssistEnabled: json['locAssistEnabled'] as bool? ?? false,
         planningOccupancySource: json['planningOccupancySource'] as String? ?? 'depth',
+        odomSource: json['odomSource'] as String? ?? 'vio',
         rtkMode: json['rtkMode'] as String? ?? 'off',
         rtkBridgeOnline: json['rtkBridgeOnline'] as bool? ?? false,
         rtkReceiverStage: json['rtkReceiverStage'] as String?,

@@ -446,7 +446,20 @@ class MapNode(Node):
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
-        self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
+        # 'vio' (default) or 'ekf', live-toggled via /localization/config -- see
+        # _continuous_odom_vio_callback / _continuous_odom_ekf_callback below.
+        self.odom_source = 'vio'
+        self.continuous_odom_sub = self.create_subscription(
+            Odometry, '/slam/odometry', self._continuous_odom_vio_callback, 100)
+        self.continuous_odom_ekf_sub = self.create_subscription(
+            Odometry, '/slam/odometry_fused', self._continuous_odom_ekf_callback, 100)
+        _localization_config_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.localization_config_sub = self.create_subscription(
+            String, '/localization/config', self.localization_config_callback, _localization_config_qos)
         self.rtk_map_pose_sub = self.create_subscription(Odometry, '/rtk/map_pose', self.rtk_map_pose_callback, 20)
         self.rtk_init_status_sub = self.create_subscription(String, '/rtk/init_status', self.rtk_init_status_callback, 10)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
@@ -1129,6 +1142,16 @@ class MapNode(Node):
             self.baseline = -Tx / fx
             self.destroy_subscription(self.camera_info_sub)
 
+    def _continuous_odom_vio_callback(self, odom_msg: Odometry):
+        if self.odom_source != 'vio':
+            return
+        self.continuous_odom_callback(odom_msg)
+
+    def _continuous_odom_ekf_callback(self, odom_msg: Odometry):
+        if self.odom_source != 'ekf':
+            return
+        self.continuous_odom_callback(odom_msg)
+
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
         self.latest_odom_pose, _ = msg2np(odom_msg)
@@ -1139,6 +1162,24 @@ class MapNode(Node):
             self.relocation_pub.publish(np2msg(pose_in_world, self.latest_odom_stamp_msg, "world", "camera"))
             self.first_done = True
             self.get_logger().info(f"Published seeded map-handoff pose: xyz={pose_in_world[:3, 3]}")
+
+    def localization_config_callback(self, msg: String):
+        try:
+            config = json.loads(msg.data)
+        except json.JSONDecodeError as exc:
+            self.get_logger().warning(f"Failed to parse /localization/config: {exc}")
+            return
+        if not isinstance(config, dict):
+            return
+        if "odom_source" in config:
+            odom_source = config["odom_source"]
+            if odom_source not in ("vio", "ekf"):
+                self.get_logger().warning(f"Invalid localization odom_source: {odom_source!r} (must be 'vio' or 'ekf')")
+            else:
+                old = self.odom_source
+                self.odom_source = odom_source
+                if old != odom_source:
+                    self.get_logger().info(f"Updated localization odom_source: {old} -> {odom_source}")
 
     def rtk_init_status_callback(self, msg: String):
         if self.rtk_mode != "replace":
