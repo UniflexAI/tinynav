@@ -280,6 +280,24 @@ def goal_heading_error(traj_end, target):
     fwd_y = 2.0 * (qy * qz - qw * qx)
     return abs(np.arctan2(fwd_x * dy - fwd_y * dx, fwd_x * dx + fwd_y * dy))
 
+# heading error is weighted like distance (1 rad ~ 1 m) far from the goal, then faded out
+# linearly inside HEADING_FADE_DIST so bearing noise cannot dominate the distance term on arrival
+HEADING_WEIGHT = 100.0
+HEADING_FADE_DIST = 2.0
+
+def trajectory_cost(traj, param, score, target_end, last_param, reverse_gate_penalty=0.0, heading_weight=HEADING_WEIGHT):
+    """Cost of one candidate trajectory: collision, goal distance, end heading, control smoothness."""
+    dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
+    heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / HEADING_FADE_DIST)
+    return (
+        score * 100000
+        + 100 * dist
+        + heading_weight * heading
+        + 10 * abs(last_param[0] - param[0])
+        + 10 * abs(last_param[1] - param[1])
+        + reverse_gate_penalty
+    )
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -583,12 +601,8 @@ class PlanningNode(Node):
                 # regular trajectory penalty
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
 
-                # 1 rad of end-heading error costs like 1 m, so a target behind turns the robot instead of stalling at vx=omega=0
-                heading = goal_heading_error(traj[-1], target_end)
-
-                return score * 100000 + 100 * dist + 100 * heading + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return trajectory_cost(traj, param, score, target_end, self.last_param, reverse_gate_penalty)
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
