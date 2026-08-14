@@ -23,6 +23,12 @@ const GRID_STEP_M = 1.0;
 const fields = {
   targetX: document.getElementById("targetX"),
   targetY: document.getElementById("targetY"),
+  camWidth: document.getElementById("camWidth"),
+  camHeight: document.getElementById("camHeight"),
+  camFx: document.getElementById("camFx"),
+  camFy: document.getElementById("camFy"),
+  camMaxRange: document.getElementById("camMaxRange"),
+  camMountHeight: document.getElementById("camMountHeight"),
   objectName: document.getElementById("objectName"),
   objectX: document.getElementById("objectX"),
   objectY: document.getElementById("objectY"),
@@ -31,11 +37,18 @@ const fields = {
   objectSZ: document.getElementById("objectSZ"),
   configText: document.getElementById("configText"),
   robotSummary: document.getElementById("robotSummary"),
+  cameraSummary: document.getElementById("cameraSummary"),
 };
 
 const editableFields = [
   fields.targetX,
   fields.targetY,
+  fields.camWidth,
+  fields.camHeight,
+  fields.camFx,
+  fields.camFy,
+  fields.camMaxRange,
+  fields.camMountHeight,
   fields.objectName,
   fields.objectX,
   fields.objectY,
@@ -48,10 +61,34 @@ function sceneBounds() {
   return { xMin: -0.5, xMax: 9.5, yMin: -5.0, yMax: 5.0 };
 }
 
-function worldToCanvasOn(targetCanvas, x, y) {
+function canvasLogicalSize(targetCanvas) {
+  return {
+    width: Math.max(1, targetCanvas.clientWidth || targetCanvas.width),
+    height: Math.max(1, targetCanvas.clientHeight || targetCanvas.height),
+  };
+}
+
+function sceneView(targetCanvas) {
   const b = sceneBounds();
-  const px = ((y - b.yMin) / (b.yMax - b.yMin)) * targetCanvas.width;
-  const py = targetCanvas.height - ((x - b.xMin) / (b.xMax - b.xMin)) * targetCanvas.height;
+  const size = canvasLogicalSize(targetCanvas);
+  const worldW = b.yMax - b.yMin;
+  const worldH = b.xMax - b.xMin;
+  const pad = 12;
+  const availW = Math.max(1, size.width - pad * 2);
+  const availH = Math.max(1, size.height - pad * 2);
+  const scale = Math.min(availW / worldW, availH / worldH);
+  return {
+    b,
+    scale,
+    offsetX: pad + (availW - worldW * scale) / 2,
+    offsetY: pad + (availH - worldH * scale) / 2,
+  };
+}
+
+function worldToCanvasOn(targetCanvas, x, y) {
+  const view = sceneView(targetCanvas);
+  const px = view.offsetX + (y - view.b.yMin) * view.scale;
+  const py = view.offsetY + (view.b.xMax - x) * view.scale;
   return [px, py];
 }
 
@@ -60,10 +97,24 @@ function worldToCanvas(x, y) {
 }
 
 function canvasToWorld(px, py) {
-  const b = sceneBounds();
-  const y = b.yMin + (px / canvas.width) * (b.yMax - b.yMin);
-  const x = b.xMin + ((canvas.height - py) / canvas.height) * (b.xMax - b.xMin);
+  const view = sceneView(canvas);
+  const y = view.b.yMin + (px - view.offsetX) / view.scale;
+  const x = view.b.xMax - (py - view.offsetY) / view.scale;
   return [x, y];
+}
+
+function syncSceneCanvasSize() {
+  const cssW = Math.max(1, Math.round(canvas.clientWidth));
+  const cssH = Math.max(1, Math.round(canvas.clientHeight));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const nextW = Math.max(1, Math.round(cssW * dpr));
+  const nextH = Math.max(1, Math.round(cssH * dpr));
+  if (canvas.width !== nextW || canvas.height !== nextH) {
+    canvas.width = nextW;
+    canvas.height = nextH;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { width: cssW, height: cssH };
 }
 
 function selectedObject() {
@@ -77,8 +128,9 @@ function hitTestTarget(px, py) {
 }
 
 function drawGrid(drawCtx, targetCanvas, mapper) {
+  const size = canvasLogicalSize(targetCanvas);
   drawCtx.fillStyle = "#fbfcfd";
-  drawCtx.fillRect(0, 0, targetCanvas.width, targetCanvas.height);
+  drawCtx.fillRect(0, 0, size.width, size.height);
   drawCtx.strokeStyle = "#e0e7ee";
   drawCtx.lineWidth = 1;
   const b = sceneBounds();
@@ -124,6 +176,9 @@ function drawObjects(drawCtx, mapper, highlightSelected) {
 }
 
 function drawStartTarget(drawCtx, mapper) {
+  drawCtx.save();
+  drawCtx.textAlign = "center";
+  drawCtx.textBaseline = "alphabetic";
   const [sx, sy] = config.start.xy;
   const [spx, spy] = mapper(sx, sy);
   drawCtx.fillStyle = "#24a148";
@@ -148,6 +203,7 @@ function drawStartTarget(drawCtx, mapper) {
   drawCtx.arc(tpx, tpy, 7, 0, Math.PI * 2);
   drawCtx.fill();
   drawCtx.fillText("target", tpx, tpy - 12);
+  drawCtx.restore();
 }
 
 function cameraPose() {
@@ -176,9 +232,29 @@ function robotSummaryHtml() {
   ].join("<br />");
 }
 
+function cameraFovDeg(size, focal) {
+  const half = Math.max(1, Number(size) || 1) / 2;
+  const f = Math.max(1e-6, Number(focal) || 1);
+  return (2 * Math.atan(half / f) * 180) / Math.PI;
+}
+
+function cameraSummaryHtml() {
+  const cam = config.camera || {};
+  const width = Number(cam.width || 0);
+  const height = Number(cam.image_height || cam.height || 0);
+  const fx = Number(cam.fx || 0);
+  const fy = Number(cam.fy || 0);
+  return [
+    `HFOV: <code>${cameraFovDeg(width, fx).toFixed(1)}°</code>`,
+    `VFOV: <code>${cameraFovDeg(height, fy).toFixed(1)}°</code>`,
+    `resolution: <code>${width} x ${height}</code>`,
+  ].join("<br />");
+}
+
 function drawScene() {
   if (!config) return;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const size = syncSceneCanvasSize();
+  ctx.clearRect(0, 0, size.width, size.height);
   drawGrid(ctx, canvas, worldToCanvas);
   drawEsdfSceneOverlay();
   drawObjects(ctx, worldToCanvas, true);
@@ -233,10 +309,16 @@ function drawEsdfSceneOverlay() {
 }
 
 function drawEsdfLegend() {
-  const x = canvas.width - 178;
+  const size = canvasLogicalSize(canvas);
+  const boxW = 154;
+  const boxH = 58;
+  const x = Math.max(12, size.width - boxW - 16);
   const y = 16;
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "rgba(255,255,255,0.88)";
-  ctx.fillRect(x, y, 154, 58);
+  ctx.fillRect(x, y, boxW, boxH);
   ctx.fillStyle = "#17202a";
   ctx.font = "12px system-ui";
   ctx.fillText("ESDF clearance", x + 12, y + 18);
@@ -253,6 +335,7 @@ function drawEsdfLegend() {
   ctx.fillStyle = "#5c6975";
   ctx.fillText("near", x + 12, y + 53);
   ctx.fillText("clear", x + 106, y + 53);
+  ctx.restore();
 }
 
 function drawPath(points, color, width, alpha = 1) {
@@ -271,11 +354,37 @@ function drawPath(points, color, width, alpha = 1) {
   ctx.restore();
 }
 
+function drawHudPanel(lines) {
+  const size = canvasLogicalSize(canvas);
+  const view = sceneView(canvas);
+  const pad = 10;
+  const lineH = 18;
+  const boxPadX = 12;
+  const boxPadY = 10;
+  ctx.save();
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.font = "13px system-ui";
+  const textW = Math.max(0, ...lines.map((line) => ctx.measureText(line).width));
+  const boxW = Math.min(size.width - pad * 2, Math.ceil(textW + boxPadX * 2));
+  const boxH = boxPadY * 2 + lines.length * lineH;
+  const x = Math.min(Math.max(pad, view.offsetX + 8), Math.max(pad, size.width - boxW - pad));
+  const y = Math.min(Math.max(pad, view.offsetY + 8), Math.max(pad, size.height - boxH - pad));
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  ctx.fillRect(x, y, boxW, boxH);
+  ctx.beginPath();
+  ctx.rect(x, y, boxW, boxH);
+  ctx.clip();
+  ctx.fillStyle = "#17202a";
+  lines.forEach((line, index) => {
+    ctx.fillText(line, x + boxPadX, y + boxPadY + (index + 1) * lineH - 4);
+  });
+  ctx.restore();
+}
+
 function drawRealtimeOverlay() {
   if (!currentFrame) {
-    ctx.fillStyle = "#5c6975";
-    ctx.font = "15px system-ui";
-    ctx.fillText("Click Realtime to start live planning.", 22, 30);
+    drawHudPanel(["Click Realtime to start live planning."]);
     return;
   }
 
@@ -291,16 +400,16 @@ function drawRealtimeOverlay() {
     ctx.arc(rx, ry, 5, 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.fillStyle = "rgba(255,255,255,0.9)";
-  ctx.fillRect(12, 12, 210, currentFrame.should_reverse || currentFrame.selected_is_reverse ? 92 : 72);
-  ctx.fillStyle = "#17202a";
-  ctx.font = "13px system-ui";
-  ctx.fillText(`realtime tick ${Math.max(0, realtimePath.length - 1)}`, 24, 34);
-  ctx.fillText(`cmd [${currentFrame.selected_param.map((v) => Number(v).toFixed(2)).join(", ")}]`, 24, 54);
-  ctx.fillText(`clearance ${Number(currentFrame.front_clearance).toFixed(2)}m`, 24, 74);
+
+  const lines = [
+    `realtime tick ${Math.max(0, realtimePath.length - 1)}`,
+    `cmd [${(currentFrame.selected_param || []).map((v) => Number(v).toFixed(2)).join(", ")}]`,
+    `clearance ${Number(currentFrame.front_clearance || 0).toFixed(2)}m`,
+  ];
   if (currentFrame.should_reverse || currentFrame.selected_is_reverse) {
-    ctx.fillText(`reverse ${currentFrame.selected_is_reverse ? "selected" : "gated"}`, 24, 94);
+    lines.push(`reverse ${currentFrame.selected_is_reverse ? "selected" : "gated"}`);
   }
+  drawHudPanel(lines);
 }
 
 function colorize(value, mode) {
@@ -404,8 +513,15 @@ function drawFootprint(footprint) {
 
 function refreshFields() {
   const obj = selectedObject();
+  const cam = config.camera || (config.camera = {});
   fields.targetX.value = config.target[0];
   fields.targetY.value = config.target[1];
+  fields.camWidth.value = cam.width ?? 160;
+  fields.camHeight.value = cam.image_height ?? cam.height ?? 100;
+  fields.camFx.value = cam.fx ?? 80;
+  fields.camFy.value = cam.fy ?? 25;
+  fields.camMaxRange.value = cam.max_range ?? 6.0;
+  fields.camMountHeight.value = cam.mount_height ?? 0.45;
   if (obj) {
     fields.objectName.value = obj.name;
     fields.objectX.value = obj.center[0];
@@ -416,13 +532,21 @@ function refreshFields() {
   }
   fields.configText.value = JSON.stringify(config, null, 2);
   fields.robotSummary.innerHTML = robotSummaryHtml();
+  fields.cameraSummary.innerHTML = cameraSummaryHtml();
   drawScene();
 }
 
 function applyFieldChanges() {
   const obj = selectedObject();
+  const cam = config.camera || (config.camera = {});
   config.target[0] = Number(fields.targetX.value);
   config.target[1] = Number(fields.targetY.value);
+  cam.width = Math.max(16, Math.round(Number(fields.camWidth.value) || 160));
+  cam.image_height = Math.max(16, Math.round(Number(fields.camHeight.value) || 100));
+  cam.fx = Math.max(1, Number(fields.camFx.value) || 80);
+  cam.fy = Math.max(1, Number(fields.camFy.value) || 25);
+  cam.max_range = Math.max(0.5, Number(fields.camMaxRange.value) || 6.0);
+  cam.mount_height = Math.max(0.05, Number(fields.camMountHeight.value) || 0.45);
   if (obj) {
     obj.name = fields.objectName.value || obj.name;
     obj.center[0] = Number(fields.objectX.value);
@@ -613,8 +737,8 @@ document.getElementById("deleteObject").addEventListener("click", () => {
 
 canvas.addEventListener("pointerdown", (event) => {
   const rect = canvas.getBoundingClientRect();
-  const px = ((event.clientX - rect.left) / rect.width) * canvas.width;
-  const py = ((event.clientY - rect.top) / rect.height) * canvas.height;
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
   if (hitTestTarget(px, py)) {
     const [wx, wy] = canvasToWorld(px, py);
     dragState = { type: "target", dx: config.target[0] - wx, dy: config.target[1] - wy };
@@ -635,8 +759,8 @@ canvas.addEventListener("pointerdown", (event) => {
 canvas.addEventListener("pointermove", (event) => {
   if (!dragState) return;
   const rect = canvas.getBoundingClientRect();
-  const px = ((event.clientX - rect.left) / rect.width) * canvas.width;
-  const py = ((event.clientY - rect.top) / rect.height) * canvas.height;
+  const px = event.clientX - rect.left;
+  const py = event.clientY - rect.top;
   const [wx, wy] = canvasToWorld(px, py);
   if (dragState.type === "target") {
     config.target[0] = Number((wx + dragState.dx).toFixed(2));
@@ -657,3 +781,10 @@ canvas.addEventListener("pointerup", () => {
 
 loadDefault();
 syncControlsLayout();
+window.addEventListener("resize", () => {
+  syncControlsLayout();
+  drawScene();
+});
+if (typeof ResizeObserver !== "undefined") {
+  new ResizeObserver(() => drawScene()).observe(canvas);
+}

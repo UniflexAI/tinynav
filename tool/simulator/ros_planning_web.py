@@ -65,8 +65,8 @@ def default_config() -> dict[str, Any]:
         "camera": {
             "width": 160,
             "image_height": 100,
-            "fx": 120.0,
-            "fy": 120.0,
+            "fx": 80.0,
+            "fy": 25.0,
             "max_range": 6.0,
             "mount_height": 0.45,
         },
