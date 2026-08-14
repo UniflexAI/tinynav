@@ -181,12 +181,6 @@ textarea {
   margin-bottom: 8px;
 }
 
-.diagnostic-note {
-  color: #5c6975;
-  font-size: 13px;
-  margin-bottom: 8px;
-}
-
 .image-grid {
   display: grid;
   grid-template-columns: 1fr;

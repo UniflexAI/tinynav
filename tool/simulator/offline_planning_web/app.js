@@ -16,8 +16,7 @@ const depthCanvas = document.getElementById("depthCanvas");
 const depthCtx = depthCanvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const realtimeButton = document.getElementById("realtimeButton");
-const diagnosticNote = document.getElementById("diagnosticNote");
-const GRID_DIVISIONS = 20;
+const GRID_STEP_M = 1.0;
 
 const fields = {
   targetX: document.getElementById("targetX"),
@@ -32,8 +31,19 @@ const fields = {
   robotSummary: document.getElementById("robotSummary"),
 };
 
+const editableFields = [
+  fields.targetX,
+  fields.targetY,
+  fields.objectName,
+  fields.objectX,
+  fields.objectY,
+  fields.objectSX,
+  fields.objectSY,
+  fields.objectSZ,
+];
+
 function sceneBounds() {
-  return { xMin: -0.5, xMax: 5.0, yMin: -2.8, yMax: 2.8 };
+  return { xMin: -0.5, xMax: 9.5, yMin: -5.0, yMax: 5.0 };
 }
 
 function worldToCanvasOn(targetCanvas, x, y) {
@@ -70,8 +80,9 @@ function drawGrid(drawCtx, targetCanvas, mapper) {
   drawCtx.strokeStyle = "#e0e7ee";
   drawCtx.lineWidth = 1;
   const b = sceneBounds();
-  for (let i = 0; i <= GRID_DIVISIONS; i += 1) {
-    const x = b.xMin + ((b.xMax - b.xMin) * i) / GRID_DIVISIONS;
+  const x0 = Math.ceil(b.xMin / GRID_STEP_M) * GRID_STEP_M;
+  const y0 = Math.ceil(b.yMin / GRID_STEP_M) * GRID_STEP_M;
+  for (let x = x0; x <= b.xMax + 1e-9; x += GRID_STEP_M) {
     const [px0, py] = mapper(x, b.yMin);
     const [px1] = mapper(x, b.yMax);
     drawCtx.beginPath();
@@ -79,8 +90,7 @@ function drawGrid(drawCtx, targetCanvas, mapper) {
     drawCtx.lineTo(px1, py);
     drawCtx.stroke();
   }
-  for (let i = 0; i <= GRID_DIVISIONS; i += 1) {
-    const y = b.yMin + ((b.yMax - b.yMin) * i) / GRID_DIVISIONS;
+  for (let y = y0; y <= b.yMax + 1e-9; y += GRID_STEP_M) {
     const [px, py0] = mapper(b.xMin, y);
     const [, py1] = mapper(b.xMax, y);
     drawCtx.beginPath();
@@ -291,14 +301,6 @@ function drawRealtimeOverlay() {
   }
 }
 
-function drawDiagnostic(step = 0) {
-  if (!currentFrame) {
-    diagnosticNote.textContent = "Run the closed-loop simulation to generate per-step perception snapshots.";
-    return;
-  }
-  diagnosticNote.textContent = "Depth updates here; ESDF safety layer is fused into the scene canvas.";
-}
-
 function colorize(value, mode) {
   const t = Math.max(0, Math.min(1, value / 255));
   if (mode === "depth") {
@@ -336,15 +338,16 @@ function drawU8Canvas(targetCanvas, targetCtx, payload, mode) {
   offscreenCtx.putImageData(image, 0, 0);
   targetCtx.imageSmoothingEnabled = false;
   targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
-  targetCtx.drawImage(offscreen, 0, 0, targetCanvas.width, targetCanvas.height);
+  targetCtx.save();
+  targetCtx.scale(-1, 1);
+  targetCtx.drawImage(offscreen, -targetCanvas.width, 0, targetCanvas.width, targetCanvas.height);
+  targetCtx.restore();
 }
 
 function drawRealtimeFrame(frame) {
   currentFrame = frame;
   drawU8Canvas(depthCanvas, depthCtx, frame.depth_u8, "depth");
   drawScene();
-  const esdfState = frame.esdf_u8 ? "ESDF live" : "waiting for ESDF";
-  diagnosticNote.textContent = `${esdfState}; depth updates here. Valid trajectories: ${frame.valid_trajectories}, clearance: ${Number(frame.front_clearance).toFixed(2)}m, reverse: ${frame.selected_is_reverse ? "selected" : frame.should_reverse ? "gated" : "no"}, recovery: ${frame.recovery_reason || "normal"}.`;
 }
 
 function drawHeadingArrow(drawCtx, mapper, xy, yawDeg, color, length = 0.45) {
@@ -543,15 +546,11 @@ async function loadDefault() {
   statusEl.textContent = "Ready";
 }
 
-Object.values(fields).forEach((field) => {
-  if (field !== fields.configText && typeof field.addEventListener === "function") {
-    field.addEventListener("change", () => {
-      if (field === fields.targetX || field === fields.targetY || field === fields.objectName || field === fields.objectX || field === fields.objectY || field === fields.objectSX || field === fields.objectSY || field === fields.objectSZ) {
-        applyFieldChanges();
-      }
-      noteSceneEdited(true, true);
-    });
-  }
+editableFields.forEach((field) => {
+  field.addEventListener("change", () => {
+    applyFieldChanges();
+    noteSceneEdited(true, true);
+  });
 });
 
 realtimeButton.addEventListener("click", toggleRealtime);
