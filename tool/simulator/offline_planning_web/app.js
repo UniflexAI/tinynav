@@ -348,8 +348,9 @@ function drawU8Canvas(targetCanvas, targetCtx, payload, mode) {
 
 function setControlsVisible(visible) {
   controlsPanel.classList.toggle("is-hidden", !visible);
+  controlsPanel.classList.toggle("is-visible", visible);
   controlsToggle.setAttribute("aria-expanded", String(visible));
-  controlsToggle.textContent = visible ? "Controls" : "Controls";
+  controlsToggle.textContent = visible ? "Hide Controls" : "Show Controls";
 }
 
 function syncControlsLayout() {
@@ -656,4 +657,3 @@ canvas.addEventListener("pointerup", () => {
 
 loadDefault();
 syncControlsLayout();
-window.addEventListener("resize", syncControlsLayout);

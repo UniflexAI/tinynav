@@ -123,7 +123,8 @@ button.danger {
 }
 
 .controls-toggle {
-  display: none;
+  display: inline-flex;
+  align-items: center;
 }
 
 .robot-note {
@@ -223,11 +224,6 @@ textarea {
 @media (max-width: 1180px) {
   .app {
     grid-template-columns: 1fr;
-  }
-
-  .controls-toggle {
-    display: inline-flex;
-    align-items: center;
   }
 
   .controls {
