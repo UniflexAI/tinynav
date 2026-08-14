@@ -39,7 +39,7 @@ class LooperBridgeNode(Node):
         # clock, not wall time (confirmed: neither an NTP-style device time sync nor a
         # full device reboot changes that -- it's not a transient offset, it's what the
         # firmware stamps with). planning_node's lidar_sync_callback needs /slam/depth
-        # and /slam/odometry_visual to line up with /lidar_points' real wall-clock stamps
+        # and /slam/odometry_visual to line up with /lidar/points' real wall-clock stamps
         # (from the Hesai driver on a separate host, the A2 board), so estimate the
         # device-clock -> wall-clock offset once at startup (median of the first samples,
         # to average out per-message reception jitter) and add it to every device stamp,

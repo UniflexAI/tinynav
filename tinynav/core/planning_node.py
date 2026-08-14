@@ -565,7 +565,7 @@ class PlanningNode(Node):
         self.lidar_min_obstacle_area_cells = 0
         self.lidar_score_percentile = 0.0
         self.lidar_collision_tolerance = 0
-        self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar_points')
+        self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar/points')
         self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
         self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
             [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.2)

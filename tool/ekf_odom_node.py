@@ -6,7 +6,7 @@ Topics
             /slam/odometry_100hz      → ekf_predict  (100Hz) → /slam/odometry_fused_100hz
   Update:   /robot/odom, /robot_odom  → ekf_update_pose6  (6-DOF, delta-referenced, huge-noise z)
             /wheel/odom_camera        → ekf_update_pose6  (6-DOF, delta-referenced)
-            /lio/odom                 → ekf_update_pose6  (6-DOF, delta-referenced)
+            /lidar/odom               → ekf_update_pose6  (6-DOF, delta-referenced)
             /qr/odom                  → ekf_update_pose6  (6-DOF, absolute)
             /rtk/map_pose             → ekf_update_pos3   (3-DOF, pos only, absolute)
             (all updates publish to both /slam/odometry_fused and _100hz)
@@ -22,13 +22,13 @@ Two real adaptations:
   world frame) would silently corrupt the filter. /rtk/map_pose is the one already aligned
   into map/world frame (via rtk_align.json, see map_node.py's own RTK-replace logic), so
   that's the correct topic to subscribe to here.
-- Lidar: subscribes to /lio/odom (super_lio, ~/workspace/super-lio on the A2's onboard PC;
+- Lidar: subscribes to /lidar/odom (super_lio, ~/workspace/super-lio on the A2's onboard PC;
   not published by anything in this repo) instead of the reference branch's
   /lidar/odom_camera, conjugated through T_LIDAR_CAM since it reports poses/deltas in the
-  lidar's own sensor frame. /lidar_points itself was not flowing when this was ported (the
-  raw hesai_ros_driver process was alive but not actually publishing) -- confirmed on the A2
-  board directly, independent of any cross-machine RMW/CycloneDDS config, so this is a lidar
-  driver/hardware issue to chase separately, not a topic-wiring one.
+  lidar's own sensor frame. The A2's onboard hesai_ros_driver/lidar firmware was renamed from
+  /lidar_points+/lidar_imu to /lidar/points+/lidar/imu; super_lio's hesai.yaml and this
+  node's subscriptions were updated to match, confirmed flowing live on the A2 board
+  (/lidar/points @10Hz, /lidar/imu @200Hz, /lidar/odom @10Hz).
 """
 
 from __future__ import annotations
@@ -96,10 +96,10 @@ T_BASE_CAM = np.array([
 ])
 
 # lidar -> camera extrinsic, same one planning_node.py's lidar_sync_callback already uses to
-# raycast /lidar_points into the depth-camera-aligned occupancy grid (see T_lidar_to_cam
+# raycast /lidar/points into the depth-camera-aligned occupancy grid (see T_lidar_to_cam
 # there): Unitree's factory lidar->base_link extrinsic composed with the fixed camera<->body
 # rotation and this rig's B2_CONFIG camera mount offset (camera_x=0.3), then the
-# planning_node-documented on-robot-measured override for the translation. /lio/odom (from
+# planning_node-documented on-robot-measured override for the translation. /lidar/odom (from
 # super_lio, subscribed below) reports poses/deltas in the lidar's own sensor frame, not
 # camera frame -- without this conjugation the lidar's own rotation axes leak into the wrong
 # nominal-state axes, exactly like the T_BASE_CAM case above.
@@ -319,7 +319,7 @@ class EKFOdomNode(Node):
         self.create_subscription(
             Odometry, '/wheel/odom_camera', self._wheel_cb,  100)
         self.create_subscription(
-            Odometry, '/lio/odom',          self._lidar_cb,   50)
+            Odometry, '/lidar/odom',        self._lidar_cb,   50)
         self.create_subscription(
             Odometry, '/qr/odom',           self._qr_cb,      10)
         self.create_subscription(
