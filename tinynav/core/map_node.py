@@ -489,27 +489,41 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
+    def select_relocalization_candidates(self, query_vlad: np.ndarray) -> list[tuple[int, float]]:
+        """(map keyframe timestamp, VLAD similarity) to try PnP against, best last.
+
+        A hook so a subclass can drop candidates retrieval alone cannot tell apart —
+        the whole-map top-k here is blind to where the robot actually is."""
+        return [
+            (int(self.vlad_timestamps[idx_in_map]), float(similarity))
+            for idx_in_map, similarity in find_loop(
+                query_vlad,
+                self.map_vlad_descriptors,
+                -1.0,
+                self.relocalization_loop_top_k,
+            )
+        ]
+
+    def rank_relocalization_candidates(self, pnp_candidates: list, candidate_timestamps: list[int]) -> tuple[bool, np.ndarray, float]:
+        """Pick the pose among the surviving candidates. `candidate_timestamps` is
+        parallel to `pnp_candidates` so an override can see where each one sits in the
+        map (the batch call below only ever reports the winner)."""
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        return success, best_pose_in_camera, pose_cov_weight
+
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
 
         query_vlad = self.get_vlad_descriptor(keyframe)
-        idx_and_similarity_array = find_loop(
-            query_vlad,
-            self.map_vlad_descriptors,
-            -1.0,
-            self.relocalization_loop_top_k,
-        )
-        if len(idx_and_similarity_array) == 0:
+        candidates = self.select_relocalization_candidates(query_vlad)
+        if len(candidates) == 0:
             print("VLAD: no relocalization candidates")
             return False, np.eye(4), -np.inf
-        candidate_timestamps = [
-            int(self.vlad_timestamps[idx_in_map])
-            for idx_in_map, _similarity in idx_and_similarity_array
-        ]
 
         pnp_candidates = []
-        for timestamp_in_map in candidate_timestamps:
+        pnp_timestamps = []
+        for timestamp_in_map, _similarity in candidates:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
@@ -525,8 +539,9 @@ class MapNode(Node):
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+            pnp_timestamps.append(timestamp_in_map)
 
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        success, best_pose_in_camera, pose_cov_weight = self.rank_relocalization_candidates(pnp_candidates, pnp_timestamps)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
