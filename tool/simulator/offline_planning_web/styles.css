@@ -223,7 +223,34 @@ textarea {
   display: block;
   border: 1px solid #d8e0e7;
   border-radius: 6px;
-  background: #101820;
+  background: #0b1020;
+  image-rendering: pixelated;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.depth-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #5c6975;
+}
+
+.depth-legend-bar {
+  flex: 1;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid #d0d7df;
+  background: linear-gradient(
+    90deg,
+    #ffe650 0%,
+    #ff7828 18%,
+    #ec3462 36%,
+    #9c40ff 55%,
+    #3878ff 75%,
+    #0c1c48 100%
+  );
 }
 
 #status {

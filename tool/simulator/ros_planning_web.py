@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """ROS-backed planning simulator web server.
 
-The web UI owns the editable scene. This process publishes synthetic
-/slam/depth, /slam/odometry_visual, /slam/odometry and /control/target_pose,
-then renders outputs from the real planning_node + cmd_vel_control loop.
+Web UI edits the scene. This process publishes synthetic /slam/depth,
+/slam/odometry(_visual), /control/target_pose, then mirrors outputs from the
+real planning_node + cmd_vel_control loop.
 """
 
 from __future__ import annotations
 
 import copy
-import json
 import math
 import os
 import subprocess
@@ -25,23 +24,26 @@ from cv_bridge import CvBridge
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from geometry_msgs.msg import Point32, Twist
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path as RosPath
+from pydantic import BaseModel
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
-from pydantic import BaseModel
 
 from tinynav.core.planning_node import GO2_CONFIG, ObstacleConfig
-
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "offline_planning_web"
 PLANNING_ROBOT_DEFAULT = asdict(GO2_CONFIG)
 PLANNING_OBSTACLE_DEFAULT = asdict(ObstacleConfig())
+
+
+def _box(name: str, center: list[float], size: list[float]) -> dict[str, Any]:
+    return {"name": name, "kind": "box", "center": center, "size": size}
 
 
 @dataclass
@@ -59,6 +61,8 @@ class SimObject:
 
 
 def default_config() -> dict[str, Any]:
+    # Fences + ground plane give valid depth so free-space carving works when
+    # boxes move (planning core stays unchanged).
     return {
         "name": "ros_planning_sim",
         "robot": copy.deepcopy(PLANNING_ROBOT_DEFAULT),
@@ -67,59 +71,70 @@ def default_config() -> dict[str, Any]:
             "image_height": 100,
             "fx": 80.0,
             "fy": 25.0,
-            "max_range": 6.0,
+            "max_range": 15.0,
             "mount_height": 0.45,
         },
         "start": {"xy": [0.0, 0.0], "yaw_deg": 0.0},
         "target": [4.0, 0.0, 0.0],
         "obstacle": copy.deepcopy(PLANNING_OBSTACLE_DEFAULT),
         "objects": [
-            {"name": "left_wall", "kind": "box", "center": [2.0, 1.0, 0.35], "size": [3.2, 0.25, 1.3]},
-            {"name": "right_wall", "kind": "box", "center": [2.0, -1.0, 0.35], "size": [3.2, 0.25, 1.3]},
-            {"name": "center_box", "kind": "box", "center": [1.65, 0.0, 0.25], "size": [0.45, 0.55, 0.5]},
+            _box("fence_back", [-0.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
+            _box("fence_front", [9.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
+            _box("fence_left", [4.5, 5.05, 0.6], [10.0, 0.2, 1.2]),
+            _box("fence_right", [4.5, -5.05, 0.6], [10.0, 0.2, 1.2]),
+            _box("left_wall", [2.0, 1.0, 0.35], [3.2, 0.25, 1.3]),
+            _box("right_wall", [2.0, -1.0, 0.35], [3.2, 0.25, 1.3]),
+            _box("center_box", [1.65, 0.0, 0.25], [0.45, 0.55, 0.5]),
         ],
     }
 
 
+def cam_size(cam: dict[str, Any]) -> tuple[int, int]:
+    return int(cam["width"]), int(cam.get("image_height", cam.get("height", 100)))
+
+
 def make_camera_pose(control_xy: list[float], yaw_deg: float, robot: dict[str, Any], cam: dict[str, Any]) -> np.ndarray:
     yaw = math.radians(float(yaw_deg))
-    forward = np.array([math.cos(yaw), math.sin(yaw), 0.0], dtype=np.float64)
-    left = np.array([-math.sin(yaw), math.cos(yaw), 0.0], dtype=np.float64)
-    right = np.array([math.sin(yaw), -math.cos(yaw), 0.0], dtype=np.float64)
-    down = np.array([0.0, 0.0, -1.0], dtype=np.float64)
-    rot = np.column_stack([right, down, forward])
-    pos = np.array([control_xy[0], control_xy[1], 0.0], dtype=np.float64)
-    pos += forward * (float(robot.get("camera_x", 0.0)) - float(robot.get("control_x", 0.0)))
-    pos += left * (float(robot.get("camera_y", 0.0)) - float(robot.get("control_y", 0.0)))
-    pos[2] = float(cam.get("mount_height", 0.45))
-    T = np.eye(4, dtype=np.float64)
-    T[:3, :3] = rot
+    forward = np.array([math.cos(yaw), math.sin(yaw), 0.0])
+    left = np.array([-math.sin(yaw), math.cos(yaw), 0.0])
+    right = np.array([math.sin(yaw), -math.cos(yaw), 0.0])
+    down = np.array([0.0, 0.0, -1.0])
+    pos = np.array([control_xy[0], control_xy[1], float(cam.get("mount_height", 0.45))])
+    pos[:2] += forward[:2] * (float(robot.get("camera_x", 0.0)) - float(robot.get("control_x", 0.0)))
+    pos[:2] += left[:2] * (float(robot.get("camera_y", 0.0)) - float(robot.get("control_y", 0.0)))
+    T = np.eye(4)
+    T[:3, :3] = np.column_stack([right, down, forward])
     T[:3, 3] = pos
     return T
 
 
 def render_depth(objects: list[SimObject], T_cam_to_world: np.ndarray, cam: dict[str, Any]) -> np.ndarray:
-    width = int(cam["width"])
-    height = int(cam.get("image_height", cam.get("height", 100)))
-    fx = float(cam["fx"])
-    fy = float(cam["fy"])
-    cx = (width - 1) / 2.0
-    cy = (height - 1) / 2.0
+    width, height = cam_size(cam)
+    fx, fy = float(cam["fx"]), float(cam["fy"])
     max_range = float(cam["max_range"])
+    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
+
     us, vs = np.meshgrid(np.arange(width, dtype=np.float64), np.arange(height, dtype=np.float64))
     rays_cam = np.stack([(us - cx) / fx, (vs - cy) / fy, np.ones_like(us)], axis=-1)
     rays_cam /= np.linalg.norm(rays_cam, axis=-1, keepdims=True)
-    rays_world = rays_cam @ T_cam_to_world[:3, :3].T
-    rays_flat = rays_world.reshape((-1, 3))
-    z_flat = rays_cam[..., 2].reshape(-1)
-    best = np.full(rays_flat.shape[0], np.inf, dtype=np.float64)
+    rays = (rays_cam @ T_cam_to_world[:3, :3].T).reshape((-1, 3))
+    z_cam = rays_cam[..., 2].reshape(-1)
     origin = T_cam_to_world[:3, 3]
+    best = np.full(rays.shape[0], np.inf)
+
+    # Ground plane z=0 → valid returns for downward rays.
+    ground_z = float(cam.get("ground_z", 0.0))
+    dz = rays[:, 2]
+    down = dz < -1e-9
+    t_ground = np.full(rays.shape[0], np.inf)
+    t_ground[down] = (ground_z - origin[2]) / dz[down]
+    hit_ground = down & (t_ground > 1e-4) & (t_ground <= max_range)
+    best = np.where(hit_ground, t_ground, best)
 
     for obj in objects:
         box_min, box_max = obj.bounds
-        inv_d = np.divide(1.0, rays_flat, out=np.full_like(rays_flat, np.inf), where=np.abs(rays_flat) > 1e-9)
-        t0 = (box_min - origin) * inv_d
-        t1 = (box_max - origin) * inv_d
+        inv = np.divide(1.0, rays, out=np.full_like(rays, np.inf), where=np.abs(rays) > 1e-9)
+        t0, t1 = (box_min - origin) * inv, (box_max - origin) * inv
         t_near = np.maximum.reduce(np.minimum(t0, t1), axis=1)
         t_far = np.minimum.reduce(np.maximum(t0, t1), axis=1)
         hit = np.where(t_near > 0.0, t_near, t_far)
@@ -127,14 +142,14 @@ def render_depth(objects: list[SimObject], T_cam_to_world: np.ndarray, cam: dict
         best = np.where(valid & (hit < best), hit, best)
 
     depth = np.zeros(best.shape[0], dtype=np.float32)
-    finite = np.isfinite(best)
-    depth[finite] = (best[finite] * z_flat[finite]).astype(np.float32)
+    ok = np.isfinite(best)
+    depth[ok] = (best[ok] * z_cam[ok]).astype(np.float32)
     return depth.reshape((height, width))
 
 
 def image_u8_payload(image: np.ndarray, vmin: float, vmax: float) -> dict[str, Any]:
-    clipped = np.clip((image.astype(np.float32) - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
-    u8 = np.round(clipped * 255.0).astype(np.uint8)
+    u8 = np.clip((image.astype(np.float32) - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
+    u8 = np.round(u8 * 255.0).astype(np.uint8)
     return {"width": int(u8.shape[1]), "height": int(u8.shape[0]), "data": u8.ravel().tolist()}
 
 
@@ -144,14 +159,19 @@ def odom_from_T(T: np.ndarray, stamp, frame_id: str = "world", child_frame_id: s
     msg.header.stamp = stamp
     msg.header.frame_id = frame_id
     msg.child_frame_id = child_frame_id
-    msg.pose.pose.position.x = float(T[0, 3])
-    msg.pose.pose.position.y = float(T[1, 3])
-    msg.pose.pose.position.z = float(T[2, 3])
-    msg.pose.pose.orientation.x = float(quat[0])
-    msg.pose.pose.orientation.y = float(quat[1])
-    msg.pose.pose.orientation.z = float(quat[2])
-    msg.pose.pose.orientation.w = float(quat[3])
+    msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z = map(float, T[:3, 3])
+    msg.pose.pose.orientation.x, msg.pose.pose.orientation.y, msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = map(float, quat)
     return msg
+
+
+def grid_payload(msg: OccupancyGrid, data_u8: np.ndarray) -> dict[str, Any]:
+    return {
+        "width": int(data_u8.shape[1]),
+        "height": int(data_u8.shape[0]),
+        "data": data_u8.ravel().tolist(),
+        "origin": [float(msg.info.origin.position.x), float(msg.info.origin.position.y)],
+        "resolution": float(msg.info.resolution),
+    }
 
 
 class RosPlanningSimNode(Node):
@@ -176,17 +196,16 @@ class RosPlanningSimNode(Node):
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
         self.target_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         self.camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
-        latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.nav_active_pub = self.create_publisher(Bool, "/nav/active", latched_qos)
-        self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched_qos)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.nav_active_pub = self.create_publisher(Bool, "/nav/active", latched)
+        self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched)
 
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)
         self.create_subscription(RosPath, "/planning/trajectory_path", self.path_callback, 10)
         self.create_subscription(PointCloud, "/planning/footprint", self.footprint_callback, 10)
         self.create_subscription(OccupancyGrid, "/planning/obstacle_mask", self.obstacle_callback, 10)
         self.create_subscription(OccupancyGrid, "/planning/occupancy_grid", self.esdf_callback, 10)
-
-        self.timer = self.create_timer(1.0 / 8.0, self.tick)
+        self.create_timer(1.0 / 8.0, self.tick)
 
     def set_config(self, config: dict[str, Any], reset: bool = False) -> None:
         with self.lock:
@@ -212,52 +231,31 @@ class RosPlanningSimNode(Node):
 
     def footprint_callback(self, msg: PointCloud) -> None:
         with self.lock:
-            # PlanningNode publishes 21 points per edge. Keep corners for UI.
-            points = msg.points
-            if len(points) >= 64:
-                idxs = [0, 21, 42, 63, 0]
-                self.last_footprint = [[float(points[i].x), float(points[i].y)] for i in idxs]
-            else:
-                self.last_footprint = [[float(p.x), float(p.y)] for p in points]
+            pts = msg.points
+            # PlanningNode publishes 21 samples/edge; keep corners for UI.
+            idxs = [0, 21, 42, 63, 0] if len(pts) >= 64 else range(len(pts))
+            self.last_footprint = [[float(pts[i].x), float(pts[i].y)] for i in idxs]
 
     def obstacle_callback(self, msg: OccupancyGrid) -> None:
         data = np.asarray(msg.data, dtype=np.int16).reshape((msg.info.width, msg.info.height), order="F")
-        u8 = np.where(data > 0, 255, 0).astype(np.uint8)
         with self.lock:
-            self.last_obstacle_mask = {
-                "width": int(u8.shape[1]),
-                "height": int(u8.shape[0]),
-                "data": u8.ravel().tolist(),
-                "origin": [float(msg.info.origin.position.x), float(msg.info.origin.position.y)],
-                "resolution": float(msg.info.resolution),
-            }
+            self.last_obstacle_mask = grid_payload(msg, np.where(data > 0, 255, 0).astype(np.uint8))
 
     def esdf_callback(self, msg: OccupancyGrid) -> None:
         data = np.asarray(msg.data, dtype=np.int16).reshape((msg.info.width, msg.info.height), order="F")
-        risk = np.clip(data, 0, 120).astype(np.float32) / 120.0
-        clearance_u8 = np.round((1.0 - risk) * 255.0).astype(np.uint8)
+        clearance = np.round((1.0 - np.clip(data, 0, 120).astype(np.float32) / 120.0) * 255.0).astype(np.uint8)
         with self.lock:
-            self.last_esdf_grid = {
-                "width": int(clearance_u8.shape[1]),
-                "height": int(clearance_u8.shape[0]),
-                "data": clearance_u8.ravel().tolist(),
-                "origin": [float(msg.info.origin.position.x), float(msg.info.origin.position.y)],
-                "resolution": float(msg.info.resolution),
-            }
+            self.last_esdf_grid = grid_payload(msg, clearance)
 
     def publish_camera_info(self, stamp, config: dict[str, Any]) -> None:
         cam = config["camera"]
-        width = int(cam["width"])
-        height = int(cam.get("image_height", cam.get("height", 100)))
-        fx = float(cam["fx"])
-        fy = float(cam["fy"])
-        cx = (width - 1) / 2.0
-        cy = (height - 1) / 2.0
+        width, height = cam_size(cam)
+        fx, fy = float(cam["fx"]), float(cam["fy"])
+        cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
         msg = CameraInfo()
         msg.header.stamp = stamp
         msg.header.frame_id = "camera"
-        msg.width = width
-        msg.height = height
+        msg.width, msg.height = width, height
         msg.k = [fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0]
         msg.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, -0.06 * fx, 0.0, 0.0, 1.0, 0.0]
         self.camera_info_pub.publish(msg)
@@ -275,12 +273,10 @@ class RosPlanningSimNode(Node):
         self.target_pub.publish(msg)
 
     def integrate_cmd(self, dt: float) -> None:
-        vx = float(self.last_cmd.linear.x)
-        wz = float(self.last_cmd.angular.z)
         yaw = math.radians(self.yaw_deg)
-        self.control_xy[0] += math.cos(yaw) * vx * dt
-        self.control_xy[1] += math.sin(yaw) * vx * dt
-        self.yaw_deg = (self.yaw_deg + math.degrees(wz * dt) + 180.0) % 360.0 - 180.0
+        self.control_xy[0] += math.cos(yaw) * self.last_cmd.linear.x * dt
+        self.control_xy[1] += math.sin(yaw) * self.last_cmd.linear.x * dt
+        self.yaw_deg = (self.yaw_deg + math.degrees(self.last_cmd.angular.z * dt) + 180.0) % 360.0 - 180.0
 
     def tick(self) -> None:
         with self.lock:
@@ -298,7 +294,6 @@ class RosPlanningSimNode(Node):
         objects = [SimObject(**obj) for obj in config.get("objects", [])]
         T_cam = make_camera_pose(config["start"]["xy"], yaw_deg, config["robot"], config["camera"])
         depth = render_depth(objects, T_cam, config["camera"])
-
         with self.lock:
             self.last_depth = depth
 
@@ -317,9 +312,9 @@ class RosPlanningSimNode(Node):
 
     def frame(self) -> dict[str, Any]:
         with self.lock:
-            cam = self.config["camera"]
+            xy = [float(self.control_xy[0]), float(self.control_xy[1])]
             return {
-                "robot_xy": [float(self.control_xy[0]), float(self.control_xy[1])],
+                "robot_xy": xy,
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": copy.deepcopy(self.last_footprint),
                 "selected_trajectory_xy": copy.deepcopy(self.last_path),
@@ -328,10 +323,10 @@ class RosPlanningSimNode(Node):
                 "front_clearance": 0.0,
                 "valid_trajectories": len(self.last_path),
                 "obstacle_cells": int(sum(1 for v in (self.last_obstacle_mask or {}).get("data", []) if v)),
-                "depth_u8": image_u8_payload(self.last_depth, 0.0, float(cam["max_range"])),
+                "depth_u8": image_u8_payload(self.last_depth, 0.0, float(self.config["camera"]["max_range"])),
                 "obstacle_u8": self.last_obstacle_mask,
                 "esdf_u8": self.last_esdf_grid,
-                "next_start": {"xy": [float(self.control_xy[0]), float(self.control_xy[1])], "yaw_deg": float(self.yaw_deg)},
+                "next_start": {"xy": xy, "yaw_deg": float(self.yaw_deg)},
             }
 
 
@@ -345,20 +340,25 @@ app = FastAPI(title="TinyNav ROS Planning Simulator")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 SIM_NODE: RosPlanningSimNode | None = None
 EXECUTOR: MultiThreadedExecutor | None = None
-ROS_THREAD: threading.Thread | None = None
 PROCS: list[subprocess.Popen] = []
 
 
 def start_ros() -> None:
-    global SIM_NODE, EXECUTOR, ROS_THREAD
+    global SIM_NODE, EXECUTOR
     if SIM_NODE is not None:
         return
     rclpy.init(args=None)
     SIM_NODE = RosPlanningSimNode()
     EXECUTOR = MultiThreadedExecutor(num_threads=4)
     EXECUTOR.add_node(SIM_NODE)
-    ROS_THREAD = threading.Thread(target=EXECUTOR.spin, daemon=True)
-    ROS_THREAD.start()
+    threading.Thread(target=EXECUTOR.spin, daemon=True).start()
+
+
+def _spawn_if_needed(script: str, cwd: Path, env: dict[str, str]) -> None:
+    marker = script
+    if any(p.poll() is None and marker in " ".join(p.args) for p in PROCS):
+        return
+    PROCS.append(subprocess.Popen(["uv", "run", "python", script], cwd=str(cwd), env=env))
 
 
 @app.on_event("startup")
@@ -394,23 +394,19 @@ def realtime_step(request: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="ROS simulator is not ready")
     if not isinstance(request.config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
-    SIM_NODE.set_config(json.loads(json.dumps(request.config)), reset=bool(request.reset))
+    SIM_NODE.set_config(copy.deepcopy(request.config), reset=bool(request.reset))
     return {"frame": SIM_NODE.frame()}
 
 
 @app.post("/api/start-ros-loop")
 def start_ros_loop() -> dict[str, Any]:
     cwd = ROOT.parents[1]
-    child_env = os.environ.copy()
-    child_env.setdefault("OPENBLAS_NUM_THREADS", "1")
-    child_env.setdefault("OMP_NUM_THREADS", "1")
-    child_env.setdefault("MKL_NUM_THREADS", "1")
-    child_env.setdefault("NUMEXPR_NUM_THREADS", "1")
-    if not any(proc.poll() is None and "planning_node.py" in " ".join(proc.args) for proc in PROCS):
-        PROCS.append(subprocess.Popen(["uv", "run", "python", "tinynav/core/planning_node.py"], cwd=str(cwd), env=child_env))
-    if not any(proc.poll() is None and "cmd_vel_control.py" in " ".join(proc.args) for proc in PROCS):
-        PROCS.append(subprocess.Popen(["uv", "run", "python", "tinynav/platforms/cmd_vel_control.py"], cwd=str(cwd), env=child_env))
-    return {"ok": True, "process_count": sum(1 for proc in PROCS if proc.poll() is None)}
+    env = os.environ.copy()
+    for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        env.setdefault(key, "1")
+    _spawn_if_needed("tinynav/core/planning_node.py", cwd, env)
+    _spawn_if_needed("tinynav/platforms/cmd_vel_control.py", cwd, env)
+    return {"ok": True, "process_count": sum(p.poll() is None for p in PROCS)}
 
 
 @app.get("/api/sim-state")
