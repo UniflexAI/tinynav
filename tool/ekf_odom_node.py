@@ -6,20 +6,28 @@ Topics
             /slam/odometry_100hz      → ekf_predict  (100Hz) → /slam/odometry_fused_100hz
   Update:   /robot/odom, /robot_odom  → ekf_update_pose6  (6-DOF, delta-referenced, huge-noise z)
             /wheel/odom_camera        → ekf_update_pose6  (6-DOF, delta-referenced)
-            /lidar/odom_camera        → ekf_update_pose6  (6-DOF, delta-referenced)
+            /lio/odom                 → ekf_update_pose6  (6-DOF, delta-referenced)
             /qr/odom                  → ekf_update_pose6  (6-DOF, absolute)
             /rtk/map_pose             → ekf_update_pos3   (3-DOF, pos only, absolute)
             (all updates publish to both /slam/odometry_fused and _100hz)
 
-Ported from xinghan/qrcode for the beijing/A2 rig, which has no wheel/lidar-odometry/QR/
-robot_odom publishers -- those subscriptions are left in place (harmless no-ops here) so this
-stays a drop-in upgrade if any of those sources shows up later, exactly as on the reference
-branch. The one real adaptation is RTK: beijing has no /rtk/odom_camera at all. The nearby
-/rtk/odom publishes in the receiver's own raw ENU frame, which is NOT the VIO/predict source's
-world frame, so feeding it straight into ekf_update_pos3 (which assumes the measurement is
-already in that same world frame) would silently corrupt the filter. /rtk/map_pose is the one
-already aligned into map/world frame (via rtk_align.json, see map_node.py's own RTK-replace
-logic), so that's the correct topic to subscribe to here.
+Ported from xinghan/qrcode for the beijing/A2 rig, which has no wheel-odometry/QR/robot_odom
+publishers -- those subscriptions are left in place (harmless no-ops here) so this stays a
+drop-in upgrade if any of those sources shows up later, exactly as on the reference branch.
+Two real adaptations:
+
+- RTK: beijing has no /rtk/odom_camera at all. The nearby /rtk/odom publishes in the
+  receiver's own raw ENU frame, which is NOT the VIO/predict source's world frame, so feeding
+  it straight into ekf_update_pos3 (which assumes the measurement is already in that same
+  world frame) would silently corrupt the filter. /rtk/map_pose is the one already aligned
+  into map/world frame (via rtk_align.json, see map_node.py's own RTK-replace logic), so
+  that's the correct topic to subscribe to here.
+- Lidar: subscribes to /lio/odom (an external lidar-inertial-odometry node's output, not
+  published by anything in this repo) instead of the reference branch's /lidar/odom_camera.
+  Not live as of this port -- no LIO process was found running on either the Jetson or the
+  A2's onboard PC (only the raw hesai_ros_driver publishing /lidar_points), so this update
+  source is a no-op until that node is started; confirm its actual message type is
+  nav_msgs/Odometry (assumed here, matching every other update source) once it's running.
 """
 
 from __future__ import annotations
@@ -295,7 +303,7 @@ class EKFOdomNode(Node):
         self.create_subscription(
             Odometry, '/wheel/odom_camera', self._wheel_cb,  100)
         self.create_subscription(
-            Odometry, '/lidar/odom_camera', self._lidar_cb,   50)
+            Odometry, '/lio/odom',          self._lidar_cb,   50)
         self.create_subscription(
             Odometry, '/qr/odom',           self._qr_cb,      10)
         self.create_subscription(
