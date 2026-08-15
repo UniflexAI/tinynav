@@ -41,6 +41,7 @@ _MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
 
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
+_DEPTH_TOPIC_LOOPER = '/camera/camera/depth/image_rect_raw'
 
 _IMAGE_TOPICS_REALSENSE = [
     _COLOR_TOPIC_REALSENSE,
@@ -48,13 +49,52 @@ _IMAGE_TOPICS_REALSENSE = [
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
 ]
+# Public preview list stays under /camera/... ; backend stitches camera1 on the right.
 _IMAGE_TOPICS_LOOPER = [
     _COLOR_TOPIC_LOOPER,
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
-    '/slam/depth',
+    _DEPTH_TOPIC_LOOPER,
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
+_LOOPER_NODE_NAMES = {'/insight_full', '/insight_full1'}
+
+
+def _paired_camera1_topic(topic: str) -> str | None:
+    """Map a /camera/camera/... topic to its /camera1/camera/... twin."""
+    prefix = '/camera/camera/'
+    if topic.startswith(prefix):
+        return '/camera1/camera/' + topic[len(prefix):]
+    return None
+
+
+def _to_bgr_preview(arr: np.ndarray) -> np.ndarray:
+    if arr is None or arr.size == 0:
+        return arr
+    if arr.ndim == 2:
+        return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+    if arr.ndim == 3 and arr.shape[2] == 1:
+        return cv2.cvtColor(arr[:, :, 0], cv2.COLOR_GRAY2BGR)
+    return arr
+
+
+def _stitch_side_by_side(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    left = _to_bgr_preview(left)
+    right = _to_bgr_preview(right)
+    h = min(left.shape[0], right.shape[0])
+    if left.shape[0] != h:
+        left = cv2.resize(
+            left,
+            (max(1, int(left.shape[1] * h / left.shape[0])), h),
+            interpolation=cv2.INTER_AREA,
+        )
+    if right.shape[0] != h:
+        right = cv2.resize(
+            right,
+            (max(1, int(right.shape[1] * h / right.shape[0])), h),
+            interpolation=cv2.INTER_AREA,
+        )
+    return np.hstack([left, right])
 _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
 _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
@@ -1396,9 +1436,13 @@ class BackendNode(Ros2NodeManager):
             result = subprocess.run(
                 ['ros2', 'node', 'list'], capture_output=True, text=True, timeout=3
             )
-            if '/insight_full' in result.stdout.splitlines():
+            nodes = set(result.stdout.splitlines())
+            if nodes & _LOOPER_NODE_NAMES:
                 self._sensor_mode = 'looper'
-                self.get_logger().info('Sensor mode: looper — launching looper bridge + planning')
+                self.get_logger().info(
+                    f'Sensor mode: looper ({", ".join(sorted(nodes & _LOOPER_NODE_NAMES))})'
+                    ' — launching looper bridge + planning'
+                )
             else:
                 self._sensor_mode = 'realsense'
                 self.get_logger().info('Sensor mode: realsense — launching driver + perception + planning')
@@ -1417,10 +1461,13 @@ class BackendNode(Ros2NodeManager):
             self._sensor_mode = 'unknown'
 
         topics = _IMAGE_TOPICS_LOOPER if self._sensor_mode == 'looper' else _IMAGE_TOPICS_REALSENSE
+        # logical_topic -> {'left': ndarray|None, 'right': ndarray|None}
+        self._preview_sides: dict[str, dict[str, np.ndarray | None]] = {}
         for topic in topics:
             self._last_frame[topic] = b''
             self._last_frame_time[topic] = 0.0
             self.preview_callbacks[topic] = []
+            self._preview_sides[topic] = {'left': None, 'right': None}
 
     def add_preview_callback(self, topic: str, cb) -> bool:
         """Register a frame callback; creates the ROS subscription on the first caller."""
@@ -1447,82 +1494,134 @@ class BackendNode(Ros2NodeManager):
             self._destroy_image_sub(topic)
 
     def _create_image_sub(self, topic: str):
-        if topic in self._image_subs:
+        """Subscribe to logical /camera/... topic and its /camera1/... twin if present."""
+        if f'{topic}::left' in self._image_subs or topic in self._image_subs:
             return
-        if topic == _COLOR_TOPIC_LOOPER:
-            self._image_subs[topic] = self.create_subscription(
-                CompressedImage, topic,
-                lambda msg, t=topic: self._on_compressed_image(msg, t),
+        self._subscribe_source(topic, logical_topic=topic, side='left')
+        paired = _paired_camera1_topic(topic)
+        if paired is not None:
+            self._subscribe_source(paired, logical_topic=topic, side='right')
+
+    def _subscribe_source(self, ros_topic: str, *, logical_topic: str, side: str):
+        key = f'{logical_topic}::{side}'
+        if key in self._image_subs:
+            return
+        if ros_topic.endswith('/compressed'):
+            self._image_subs[key] = self.create_subscription(
+                CompressedImage, ros_topic,
+                lambda msg, lt=logical_topic, s=side: self._on_compressed_image(msg, lt, s),
                 1,
             )
         else:
-            self._image_subs[topic] = self.create_subscription(
-                Image, topic,
-                lambda msg, t=topic: self._on_image(msg, t),
+            self._image_subs[key] = self.create_subscription(
+                Image, ros_topic,
+                lambda msg, lt=logical_topic, s=side: self._on_image(msg, lt, s),
                 1,
             )
 
     def _destroy_image_sub(self, topic: str):
+        for side in ('left', 'right'):
+            key = f'{topic}::{side}'
+            sub = self._image_subs.pop(key, None)
+            if sub is not None:
+                self.destroy_subscription(sub)
         sub = self._image_subs.pop(topic, None)
         if sub is not None:
             self.destroy_subscription(sub)
+        sides = self._preview_sides.get(topic)
+        if sides is not None:
+            sides['left'] = None
+            sides['right'] = None
 
-    def _on_compressed_image(self, msg: CompressedImage, topic: str):
-        now = time.time()
-        if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
+    def _decode_image_msg(self, msg: Image):
+        enc = (msg.encoding or '').lower()
+        if enc == '32fc1':
+            arr = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            valid = arr[arr > 0]
+            if valid.size > 0:
+                p95 = float(np.percentile(valid, 95))
+                arr = np.clip(arr / (p95 + 1e-6), 0.0, 1.0)
+            else:
+                arr = np.zeros_like(arr, dtype=np.float32)
+            arr = (arr * 255).astype(np.uint8)
+            return cv2.applyColorMap(arr, cv2.COLORMAP_JET)
+        if enc in ('mono16', '16uc1'):
+            arr = np.frombuffer(msg.data, dtype='<u2').reshape(msg.height, msg.width)
+            if msg.is_bigendian:
+                arr = arr.byteswap()
+            depth = arr.astype(np.float32)
+            valid = depth[depth > 0]
+            if valid.size > 0:
+                p95 = float(np.percentile(valid, 95))
+                depth = np.clip(depth / (p95 + 1e-6), 0.0, 1.0)
+            else:
+                depth = np.zeros_like(depth)
+            arr = (depth * 255).astype(np.uint8)
+            return cv2.applyColorMap(arr, cv2.COLORMAP_JET)
+        if enc in ('mono8', '8uc1'):
+            return np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width)
+        arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
+        if arr.shape[2] == 1:
+            return arr[:, :, 0]
+        if enc == 'rgb8':
+            return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        return arr
+
+    def _emit_stitched_preview(self, logical_topic: str):
+        sides = self._preview_sides.get(logical_topic) or {}
+        left = sides.get('left')
+        right = sides.get('right')
+        if left is None and right is None:
             return
-        self._last_frame_time[topic] = now
+        try:
+            if left is not None and right is not None:
+                arr = _stitch_side_by_side(left, right)
+            else:
+                arr = _to_bgr_preview(left if left is not None else right)
+            frame = _encode_preview_jpeg(arr)
+        except Exception:
+            return
+        with self._lock:
+            self._last_frame[logical_topic] = frame
+            callbacks = list(self.preview_callbacks.get(logical_topic, []))
+        for cb in callbacks:
+            try:
+                cb(frame)
+            except Exception:
+                pass
 
+    def _on_compressed_image(self, msg: CompressedImage, logical_topic: str, side: str = 'left'):
         try:
             arr = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
             if arr is None:
                 return
-            frame = _encode_preview_jpeg(arr)
         except Exception:
             return
-
-        with self._lock:
-            self._last_frame[topic] = frame
-        for cb in self.preview_callbacks.get(topic, []):
-            try:
-                cb(frame)
-            except Exception:
-                pass
-
-    def _on_image(self, msg: Image, topic: str):
+        if logical_topic not in self._preview_sides:
+            self._preview_sides[logical_topic] = {'left': None, 'right': None}
+        self._preview_sides[logical_topic][side] = arr
         now = time.time()
-        if now - self._last_frame_time.get(topic, 0.0) < _PREVIEW_MIN_INTERVAL:
+        if now - self._last_frame_time.get(logical_topic, 0.0) < _PREVIEW_MIN_INTERVAL:
             return
-        self._last_frame_time[topic] = now
+        self._last_frame_time[logical_topic] = now
+        self._emit_stitched_preview(logical_topic)
 
+    def _on_image(self, msg: Image, logical_topic: str, side: str = 'left'):
         try:
-            if msg.encoding == '32FC1':
-                arr = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
-                arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-                valid = arr[arr > 0]
-                if valid.size > 0:
-                    p95 = float(np.percentile(valid, 95))
-                    arr = np.clip(arr / (p95 + 1e-6), 0.0, 1.0)
-                arr = (arr * 255).astype(np.uint8)
-                arr = cv2.applyColorMap(arr, cv2.COLORMAP_JET)
-            else:
-                arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, -1)
-                if arr.shape[2] == 1:
-                    arr = arr[:, :, 0]
-                elif msg.encoding == 'rgb8':
-                    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-            frame = _encode_preview_jpeg(arr)
+            arr = self._decode_image_msg(msg)
+            if arr is None:
+                return
         except Exception:
             return
-
-        with self._lock:
-            self._last_frame[topic] = frame
-
-        for cb in self.preview_callbacks.get(topic, []):
-            try:
-                cb(frame)
-            except Exception:
-                pass
+        if logical_topic not in self._preview_sides:
+            self._preview_sides[logical_topic] = {'left': None, 'right': None}
+        self._preview_sides[logical_topic][side] = arr
+        now = time.time()
+        if now - self._last_frame_time.get(logical_topic, 0.0) < _PREVIEW_MIN_INTERVAL:
+            return
+        self._last_frame_time[logical_topic] = now
+        self._emit_stitched_preview(logical_topic)
 
     def get_vio_status(self) -> str:
         with self._lock:

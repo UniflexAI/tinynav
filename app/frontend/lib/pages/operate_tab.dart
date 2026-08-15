@@ -2001,6 +2001,8 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                           '/camera/camera/color/image_raw': 'color',
                           '/camera/camera/infra1/image_rect_raw': 'left',
                           '/camera/camera/infra2/image_rect_raw': 'right',
+                          '/camera/camera/color/image_rect_raw/compressed': 'color',
+                          '/camera/camera/depth/image_rect_raw': 'depth',
                           '/slam/depth': 'depth',
                         };
                         final label = labels[t] ?? t.split('/').last;
