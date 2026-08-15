@@ -135,7 +135,27 @@ final previewStreamProvider =
   }).where((b) => b.isNotEmpty);
 });
 
-/// Streams PlanningState from WS /ws/planning at ~5 fps.
+/// Keep only the latest WS text payload so a slow Flutter web frame cannot
+/// queue decoded snapshots until the tab freezes.
+Stream<String> _coalesceLatestText(Stream<dynamic> input) async* {
+  String? pending;
+  var draining = false;
+
+  await for (final raw in input) {
+    pending = raw as String;
+    if (draining) continue;
+    draining = true;
+    while (pending != null) {
+      final cur = pending;
+      pending = null;
+      yield cur;
+      await Future<void>.delayed(Duration.zero);
+    }
+    draining = false;
+  }
+}
+
+/// Streams PlanningState from WS /ws/planning at ~3 fps.
 final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   final ip = ref.watch(deviceIpProvider);
   if (ip == null) return const Stream.empty();
@@ -143,8 +163,8 @@ final planningStreamProvider = StreamProvider<PlanningState>((ref) {
   final channel = WebSocketChannel.connect(Uri.parse('ws://$ip:8000/ws/planning'));
   ref.onDispose(() => channel.sink.close());
 
-  return channel.stream.map(
-    (data) => PlanningState.fromJson(jsonDecode(data as String) as Map<String, dynamic>),
+  return _coalesceLatestText(channel.stream).map(
+    (data) => PlanningState.fromJson(jsonDecode(data) as Map<String, dynamic>),
   );
 });
 

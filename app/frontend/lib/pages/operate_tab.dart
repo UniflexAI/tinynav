@@ -684,12 +684,12 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                                         if (widget.showEsdf && p?.esdfImage != null)
                                           Opacity(
                                             opacity: 0.85,
-                                            child: Image.memory(p!.esdfImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                            child: _EvictingMemoryImage(bytes: p!.esdfImage!, fit: BoxFit.fill),
                                           ),
                                         if (widget.showObstacle && p?.obstacleImage != null)
                                           Opacity(
                                             opacity: 0.45,
-                                            child: Image.memory(p!.obstacleImage!, fit: BoxFit.fill, gaplessPlayback: true),
+                                            child: _EvictingMemoryImage(bytes: p!.obstacleImage!, fit: BoxFit.fill),
                                           ),
                                         if (p != null)
                                           CustomPaint(
@@ -1920,7 +1920,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
           if (selectedTopic != null && _latestFrame != null)
             GestureDetector(
               onTap: () => _showFullscreen(context),
-              child: Image.memory(_latestFrame!, fit: _previewFit, gaplessPlayback: true),
+              child: _EvictingMemoryImage(bytes: _latestFrame!, fit: _previewFit),
             )
           else
             Center(
@@ -2072,7 +2072,7 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
         children: [
           Center(
             child: _frame != null
-                ? Image.memory(_frame!, fit: widget.fit, gaplessPlayback: true)
+                ? _EvictingMemoryImage(bytes: _frame!, fit: widget.fit)
                 : const CircularProgressIndicator(color: Colors.white54),
           ),
           Positioned(
@@ -2597,5 +2597,50 @@ class _NavProgressOverlay extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Flutter web leaks decoded Image.memory codecs if every unique JPEG is
+/// cached. Evict the previous frame after swapping so walking does not freeze the tab.
+class _EvictingMemoryImage extends StatefulWidget {
+  final Uint8List bytes;
+  final BoxFit fit;
+
+  const _EvictingMemoryImage({required this.bytes, required this.fit});
+
+  @override
+  State<_EvictingMemoryImage> createState() => _EvictingMemoryImageState();
+}
+
+class _EvictingMemoryImageState extends State<_EvictingMemoryImage> {
+  late MemoryImage _provider;
+
+  @override
+  void initState() {
+    super.initState();
+    _provider = MemoryImage(widget.bytes);
+  }
+
+  @override
+  void didUpdateWidget(covariant _EvictingMemoryImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.bytes, widget.bytes)) {
+      final prev = _provider;
+      _provider = MemoryImage(widget.bytes);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        imageCache.evict(prev);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    imageCache.evict(_provider);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Image(image: _provider, fit: widget.fit, gaplessPlayback: true);
   }
 }

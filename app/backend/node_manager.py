@@ -23,7 +23,7 @@ import base64
 import rclpy
 import rclpy.time
 import tf2_ros
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
@@ -96,6 +96,9 @@ def _stitch_side_by_side(left: np.ndarray, right: np.ndarray) -> np.ndarray:
         )
     return np.hstack([left, right])
 _PREVIEW_MIN_INTERVAL = 0.2  # 5 fps
+# Planning WS is 5 fps; processing height/voxels faster than that is wasted CPU.
+_PLANNING_VIZ_MIN_INTERVAL = 0.2
+_SENSOR_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
 _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
 _MAP_HANDOFF_LOCALIZATION_TIMEOUT_S = float(
@@ -189,7 +192,9 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             Odometry, '/map/relocalization', self._on_relocalization, 10
         )
-        self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
+        self.create_subscription(
+            Image, '/planning/height_map', self._on_height_map, _SENSOR_QOS
+        )
         self.create_subscription(
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
         )
@@ -203,8 +208,14 @@ class BackendNode(Ros2NodeManager):
             PointCloud, '/planning/footprint', self._on_footprint, 1
         )
         self.create_subscription(
-            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, _SENSOR_QOS
         )
+        self._last_height_map_time = 0.0
+        self._last_obstacle_mask_time = 0.0
+        self._last_voxel_time = 0.0
+        self._last_footprint_time = 0.0
+        self._planning_viz_wanted_until = 0.0
+        self._voxels_wanted_until = 0.0
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
@@ -1166,7 +1177,16 @@ class BackendNode(Ros2NodeManager):
                 'y': msg.pose.pose.position.y,
             }
 
+    def _planning_viz_active(self) -> bool:
+        return time.monotonic() <= self._planning_viz_wanted_until
+
     def _on_height_map(self, msg: Image):
+        now = time.monotonic()
+        if now - self._last_height_map_time < _PLANNING_VIZ_MIN_INTERVAL:
+            return
+        if not self._planning_viz_active():
+            return
+        self._last_height_map_time = now
         try:
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
             if msg.encoding == 'rgb8':
@@ -1183,6 +1203,12 @@ class BackendNode(Ros2NodeManager):
             pass
 
     def _on_obstacle_mask(self, msg: OccupancyGrid):
+        now = time.monotonic()
+        if now - self._last_obstacle_mask_time < _PLANNING_VIZ_MIN_INTERVAL:
+            return
+        if not self._planning_viz_active():
+            return
+        self._last_obstacle_mask_time = now
         try:
             # Planning node stores OccupancyGrid in Fortran (column-major) order.
             arr = np.array(msg.data, dtype=np.int8)
@@ -1234,6 +1260,12 @@ class BackendNode(Ros2NodeManager):
         The planning node publishes 84 points (4 edges × 21 samples per edge).
         We extract the 4 corner points (first of each edge group).
         """
+        now = time.monotonic()
+        if now - self._last_footprint_time < _PLANNING_VIZ_MIN_INTERVAL:
+            return
+        if not self._planning_viz_active():
+            return
+        self._last_footprint_time = now
         n = len(msg.points)
         if n == 0:
             return
@@ -1252,16 +1284,33 @@ class BackendNode(Ros2NodeManager):
 
     def _on_occupied_voxels(self, msg: PointCloud2):
         """Store a downsampled local 3D occupied voxel cloud for the web UI."""
+        now = time.monotonic()
+        if now - self._last_voxel_time < _PLANNING_VIZ_MIN_INTERVAL:
+            return
+        if not self._planning_viz_active():
+            return
+        if now > self._voxels_wanted_until:
+            return
+        self._last_voxel_time = now
         try:
-            step = max(1, len(msg.data) // max(1, msg.point_step) // 2500)
-            points = []
-            import sensor_msgs_py.point_cloud2 as pc2
-            for i, p in enumerate(pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)):
-                if i % step != 0:
-                    continue
-                points.append({'x': float(p[0]), 'y': float(p[1]), 'z': float(p[2])})
-                if len(points) >= 2500:
-                    break
+            n = int(msg.width) * int(msg.height)
+            if n <= 0 or msg.point_step <= 0:
+                with self._lock:
+                    self._voxel_points = []
+                return
+            dt = np.dtype({
+                'names': ['x', 'y', 'z'],
+                'formats': ['<f4', '<f4', '<f4'],
+                'offsets': [0, 4, 8],
+                'itemsize': int(msg.point_step),
+            })
+            xyz = np.frombuffer(msg.data, dtype=dt, count=n)
+            if n > 800:
+                xyz = xyz[:: max(1, n // 800)][:800]
+            points = [
+                {'x': float(p['x']), 'y': float(p['y']), 'z': float(p['z'])}
+                for p in xyz
+            ]
             with self._lock:
                 self._voxel_points = points
         except Exception:
@@ -1494,13 +1543,10 @@ class BackendNode(Ros2NodeManager):
             self._destroy_image_sub(topic)
 
     def _create_image_sub(self, topic: str):
-        """Subscribe to logical /camera/... topic and its /camera1/... twin if present."""
+        """Subscribe only to the front /camera/... topic. camera1 is not previewed."""
         if f'{topic}::left' in self._image_subs or topic in self._image_subs:
             return
         self._subscribe_source(topic, logical_topic=topic, side='left')
-        paired = _paired_camera1_topic(topic)
-        if paired is not None:
-            self._subscribe_source(paired, logical_topic=topic, side='right')
 
     def _subscribe_source(self, ros_topic: str, *, logical_topic: str, side: str):
         key = f'{logical_topic}::{side}'
@@ -1510,13 +1556,13 @@ class BackendNode(Ros2NodeManager):
             self._image_subs[key] = self.create_subscription(
                 CompressedImage, ros_topic,
                 lambda msg, lt=logical_topic, s=side: self._on_compressed_image(msg, lt, s),
-                1,
+                _SENSOR_QOS,
             )
         else:
             self._image_subs[key] = self.create_subscription(
                 Image, ros_topic,
                 lambda msg, lt=logical_topic, s=side: self._on_image(msg, lt, s),
-                1,
+                _SENSOR_QOS,
             )
 
     def _destroy_image_sub(self, topic: str):
@@ -1592,6 +1638,11 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def _on_compressed_image(self, msg: CompressedImage, logical_topic: str, side: str = 'left'):
+        now = time.time()
+        side_key = f'{logical_topic}::{side}'
+        if now - self._last_frame_time.get(side_key, 0.0) < _PREVIEW_MIN_INTERVAL:
+            return
+        self._last_frame_time[side_key] = now
         try:
             arr = cv2.imdecode(np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
             if arr is None:
@@ -1600,14 +1651,15 @@ class BackendNode(Ros2NodeManager):
             return
         if logical_topic not in self._preview_sides:
             self._preview_sides[logical_topic] = {'left': None, 'right': None}
-        self._preview_sides[logical_topic][side] = arr
-        now = time.time()
-        if now - self._last_frame_time.get(logical_topic, 0.0) < _PREVIEW_MIN_INTERVAL:
-            return
-        self._last_frame_time[logical_topic] = now
+        self._preview_sides[logical_topic][side] = _resize_preview_frame(arr)
         self._emit_stitched_preview(logical_topic)
 
     def _on_image(self, msg: Image, logical_topic: str, side: str = 'left'):
+        now = time.time()
+        side_key = f'{logical_topic}::{side}'
+        if now - self._last_frame_time.get(side_key, 0.0) < _PREVIEW_MIN_INTERVAL:
+            return
+        self._last_frame_time[side_key] = now
         try:
             arr = self._decode_image_msg(msg)
             if arr is None:
@@ -1616,21 +1668,27 @@ class BackendNode(Ros2NodeManager):
             return
         if logical_topic not in self._preview_sides:
             self._preview_sides[logical_topic] = {'left': None, 'right': None}
-        self._preview_sides[logical_topic][side] = arr
-        now = time.time()
-        if now - self._last_frame_time.get(logical_topic, 0.0) < _PREVIEW_MIN_INTERVAL:
-            return
-        self._last_frame_time[logical_topic] = now
+        self._preview_sides[logical_topic][side] = _resize_preview_frame(arr)
         self._emit_stitched_preview(logical_topic)
 
     def get_vio_status(self) -> str:
         with self._lock:
             return self._vio_status
 
-    def get_planning_snapshot(self) -> dict:
+    @staticmethod
+    def _cap_path_pts(pts: list, max_n: int = 400) -> list:
+        if len(pts) <= max_n:
+            return list(pts)
+        step = max(1, len(pts) // max_n)
+        return list(pts[::step][:max_n])
+
+    def get_planning_snapshot(self, include_voxels: bool = False) -> dict:
+        self._planning_viz_wanted_until = time.monotonic() + 1.0
+        if include_voxels:
+            self._voxels_wanted_until = time.monotonic() + 1.0
         with self._lock:
-            path_snapshot = list(self._global_path)
-            final_path_snapshot = list(self._final_global_path)
+            path_snapshot = self._cap_path_pts(self._global_path)
+            final_path_snapshot = self._cap_path_pts(self._final_global_path)
             snapshot = {
                 'localized': self._localized,
                 'odom_pose': self._odom_pose,
@@ -1647,7 +1705,9 @@ class BackendNode(Ros2NodeManager):
                 'nav_target_pose': self._nav_target_pose,
                 'active_nav_pois': list(self._active_nav_pois),
                 'footprint': list(self._footprint),
-                'voxel_points': list(self._voxel_points),
+                # 3D overlay is off by default; shipping 800 xyz dicts at 5 fps
+                # makes Flutter web jsonDecode/GC hitch until the tab freezes.
+                'voxel_points': list(self._voxel_points) if include_voxels else [],
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         snapshot['final_global_path'] = self._transform_path_via_tf(final_path_snapshot)
@@ -2774,7 +2834,8 @@ class NodeRunner:
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True, name='rclpy-spin')
         self._thread.start()
-        if not self._ready.wait(timeout=15.0):
+        # Looper time sync in BackendNode.__init__ can take 15–30s (20 RTT samples).
+        if not self._ready.wait(timeout=60.0):
             raise RuntimeError('rclpy node did not start in time')
 
     def _run(self):

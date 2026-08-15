@@ -151,7 +151,7 @@ async def ws_map_update(ws: WebSocket):
 
 
 # --------------------------------------------------------------------------- #
-# /ws/planning  — polls planning snapshot at 5 fps                            #
+# /ws/planning  — polls planning snapshot at ~3 fps                           #
 # --------------------------------------------------------------------------- #
 
 @router.websocket('/ws/planning')
@@ -163,9 +163,10 @@ async def ws_planning(ws: WebSocket):
         return
     try:
         while True:
-            payload = json.dumps(node.get_planning_snapshot())
+            t0 = time.monotonic()
+            payload = json.dumps(node.get_planning_snapshot(include_voxels=False))
             await ws.send_text(payload)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(max(0.05, 0.35 - (time.monotonic() - t0)))
     except WebSocketDisconnect:
         pass
 
