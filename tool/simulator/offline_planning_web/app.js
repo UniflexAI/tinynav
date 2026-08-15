@@ -409,21 +409,15 @@ function drawRealtimeOverlay() {
     return;
   }
   drawPath(realtimePath, "#0f766e", 4);
-  (currentFrame.candidate_trajectories_xy || []).forEach((path) => drawPath(path, "#8d99a6", 1.1, 0.32));
   drawPath(currentFrame.selected_trajectory_xy, "#00a9c9", 3, 0.95);
   drawFootprint(currentFrame.robot_footprint_xy || []);
   drawHeadingArrow(currentFrame.robot_xy, currentFrame.robot_yaw_deg, "#003f4a");
   if (currentFrame.robot_xy) drawMarker(currentFrame.robot_xy, "", "#003f4a", 5);
 
-  const lines = [
+  drawHudPanel([
     `realtime tick ${Math.max(0, realtimePath.length - 1)}`,
     `cmd [${(currentFrame.selected_param || []).map((v) => Number(v).toFixed(2)).join(", ")}]`,
-    `clearance ${Number(currentFrame.front_clearance || 0).toFixed(2)}m`,
-  ];
-  if (currentFrame.should_reverse || currentFrame.selected_is_reverse) {
-    lines.push(`reverse ${currentFrame.selected_is_reverse ? "selected" : "gated"}`);
-  }
-  drawHudPanel(lines);
+  ]);
 }
 
 function drawScene() {
@@ -596,7 +590,7 @@ async function realtimeTick() {
     const response = await fetch("/api/realtime-step", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config, advance_step: 3, reset: realtimeNeedsReset }),
+      body: JSON.stringify({ config, reset: realtimeNeedsReset }),
     });
     realtimeNeedsReset = false;
     const data = await response.json();

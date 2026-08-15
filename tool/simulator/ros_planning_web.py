@@ -14,7 +14,7 @@ import os
 import subprocess
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -35,29 +35,19 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
 
 from tinynav.core.planning_node import GO2_CONFIG, ObstacleConfig
+from tool.simulator.planning_scene import (
+    SimObject,
+    box,
+    cam_size,
+    image_u8_payload,
+    make_camera_pose_from_config,
+    render_depth,
+)
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "offline_planning_web"
 PLANNING_ROBOT_DEFAULT = asdict(GO2_CONFIG)
 PLANNING_OBSTACLE_DEFAULT = asdict(ObstacleConfig())
-
-
-def _box(name: str, center: list[float], size: list[float]) -> dict[str, Any]:
-    return {"name": name, "kind": "box", "center": center, "size": size}
-
-
-@dataclass
-class SimObject:
-    name: str
-    kind: str
-    center: tuple[float, float, float]
-    size: tuple[float, float, float]
-
-    @property
-    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
-        center = np.asarray(self.center, dtype=np.float64)
-        half = np.asarray(self.size, dtype=np.float64) / 2.0
-        return center - half, center + half
 
 
 def default_config() -> dict[str, Any]:
@@ -78,79 +68,15 @@ def default_config() -> dict[str, Any]:
         "target": [4.0, 0.0, 0.0],
         "obstacle": copy.deepcopy(PLANNING_OBSTACLE_DEFAULT),
         "objects": [
-            _box("fence_back", [-0.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
-            _box("fence_front", [9.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
-            _box("fence_left", [4.5, 5.05, 0.6], [10.0, 0.2, 1.2]),
-            _box("fence_right", [4.5, -5.05, 0.6], [10.0, 0.2, 1.2]),
-            _box("left_wall", [2.0, 1.0, 0.35], [3.2, 0.25, 1.3]),
-            _box("right_wall", [2.0, -1.0, 0.35], [3.2, 0.25, 1.3]),
-            _box("center_box", [1.65, 0.0, 0.25], [0.45, 0.55, 0.5]),
+            box("fence_back", [-0.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
+            box("fence_front", [9.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
+            box("fence_left", [4.5, 5.05, 0.6], [10.0, 0.2, 1.2]),
+            box("fence_right", [4.5, -5.05, 0.6], [10.0, 0.2, 1.2]),
+            box("left_wall", [2.0, 1.0, 0.35], [3.2, 0.25, 1.3]),
+            box("right_wall", [2.0, -1.0, 0.35], [3.2, 0.25, 1.3]),
+            box("center_box", [1.65, 0.0, 0.25], [0.45, 0.55, 0.5]),
         ],
     }
-
-
-def cam_size(cam: dict[str, Any]) -> tuple[int, int]:
-    return int(cam["width"]), int(cam.get("image_height", cam.get("height", 100)))
-
-
-def make_camera_pose(control_xy: list[float], yaw_deg: float, robot: dict[str, Any], cam: dict[str, Any]) -> np.ndarray:
-    yaw = math.radians(float(yaw_deg))
-    forward = np.array([math.cos(yaw), math.sin(yaw), 0.0])
-    left = np.array([-math.sin(yaw), math.cos(yaw), 0.0])
-    right = np.array([math.sin(yaw), -math.cos(yaw), 0.0])
-    down = np.array([0.0, 0.0, -1.0])
-    pos = np.array([control_xy[0], control_xy[1], float(cam.get("mount_height", 0.45))])
-    pos[:2] += forward[:2] * (float(robot.get("camera_x", 0.0)) - float(robot.get("control_x", 0.0)))
-    pos[:2] += left[:2] * (float(robot.get("camera_y", 0.0)) - float(robot.get("control_y", 0.0)))
-    T = np.eye(4)
-    T[:3, :3] = np.column_stack([right, down, forward])
-    T[:3, 3] = pos
-    return T
-
-
-def render_depth(objects: list[SimObject], T_cam_to_world: np.ndarray, cam: dict[str, Any]) -> np.ndarray:
-    width, height = cam_size(cam)
-    fx, fy = float(cam["fx"]), float(cam["fy"])
-    max_range = float(cam["max_range"])
-    cx, cy = (width - 1) / 2.0, (height - 1) / 2.0
-
-    us, vs = np.meshgrid(np.arange(width, dtype=np.float64), np.arange(height, dtype=np.float64))
-    rays_cam = np.stack([(us - cx) / fx, (vs - cy) / fy, np.ones_like(us)], axis=-1)
-    rays_cam /= np.linalg.norm(rays_cam, axis=-1, keepdims=True)
-    rays = (rays_cam @ T_cam_to_world[:3, :3].T).reshape((-1, 3))
-    z_cam = rays_cam[..., 2].reshape(-1)
-    origin = T_cam_to_world[:3, 3]
-    best = np.full(rays.shape[0], np.inf)
-
-    # Ground plane z=0 → valid returns for downward rays.
-    ground_z = float(cam.get("ground_z", 0.0))
-    dz = rays[:, 2]
-    down = dz < -1e-9
-    t_ground = np.full(rays.shape[0], np.inf)
-    t_ground[down] = (ground_z - origin[2]) / dz[down]
-    hit_ground = down & (t_ground > 1e-4) & (t_ground <= max_range)
-    best = np.where(hit_ground, t_ground, best)
-
-    for obj in objects:
-        box_min, box_max = obj.bounds
-        inv = np.divide(1.0, rays, out=np.full_like(rays, np.inf), where=np.abs(rays) > 1e-9)
-        t0, t1 = (box_min - origin) * inv, (box_max - origin) * inv
-        t_near = np.maximum.reduce(np.minimum(t0, t1), axis=1)
-        t_far = np.minimum.reduce(np.maximum(t0, t1), axis=1)
-        hit = np.where(t_near > 0.0, t_near, t_far)
-        valid = (t_far >= 0.0) & (t_near <= t_far) & (hit > 0.0) & (hit <= max_range)
-        best = np.where(valid & (hit < best), hit, best)
-
-    depth = np.zeros(best.shape[0], dtype=np.float32)
-    ok = np.isfinite(best)
-    depth[ok] = (best[ok] * z_cam[ok]).astype(np.float32)
-    return depth.reshape((height, width))
-
-
-def image_u8_payload(image: np.ndarray, vmin: float, vmax: float) -> dict[str, Any]:
-    u8 = np.clip((image.astype(np.float32) - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
-    u8 = np.round(u8 * 255.0).astype(np.uint8)
-    return {"width": int(u8.shape[1]), "height": int(u8.shape[0]), "data": u8.ravel().tolist()}
 
 
 def odom_from_T(T: np.ndarray, stamp, frame_id: str = "world", child_frame_id: str = "camera") -> Odometry:
@@ -292,7 +218,7 @@ class RosPlanningSimNode(Node):
             yaw_deg = float(self.yaw_deg)
 
         objects = [SimObject(**obj) for obj in config.get("objects", [])]
-        T_cam = make_camera_pose(config["start"]["xy"], yaw_deg, config["robot"], config["camera"])
+        T_cam = make_camera_pose_from_config(config["start"]["xy"], yaw_deg, config["robot"], config["camera"])
         depth = render_depth(objects, T_cam, config["camera"])
         with self.lock:
             self.last_depth = depth
@@ -318,11 +244,7 @@ class RosPlanningSimNode(Node):
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": copy.deepcopy(self.last_footprint),
                 "selected_trajectory_xy": copy.deepcopy(self.last_path),
-                "candidate_trajectories_xy": [],
                 "selected_param": [float(self.last_cmd.linear.x), float(self.last_cmd.angular.z)],
-                "front_clearance": 0.0,
-                "valid_trajectories": len(self.last_path),
-                "obstacle_cells": int(sum(1 for v in (self.last_obstacle_mask or {}).get("data", []) if v)),
                 "depth_u8": image_u8_payload(self.last_depth, 0.0, float(self.config["camera"]["max_range"])),
                 "obstacle_u8": self.last_obstacle_mask,
                 "esdf_u8": self.last_esdf_grid,
@@ -333,7 +255,6 @@ class RosPlanningSimNode(Node):
 class RunRequest(BaseModel):
     config: dict[str, Any]
     reset: bool | None = None
-    advance_step: int | None = None
 
 
 app = FastAPI(title="TinyNav ROS Planning Simulator")
@@ -341,6 +262,13 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 SIM_NODE: RosPlanningSimNode | None = None
 EXECUTOR: MultiThreadedExecutor | None = None
 PROCS: list[subprocess.Popen] = []
+REPO_ROOT = ROOT.parents[1]
+CHILD_SCRIPTS = (
+    "tinynav/core/planning_node.py",
+    "tinynav/platforms/cmd_vel_control.py",
+)
+_LAST_PLANNING_RESET = 0.0
+_PLANNING_RESET_COOLDOWN_S = 1.0
 
 
 def start_ros() -> None:
@@ -354,11 +282,68 @@ def start_ros() -> None:
     threading.Thread(target=EXECUTOR.spin, daemon=True).start()
 
 
-def _spawn_if_needed(script: str, cwd: Path, env: dict[str, str]) -> None:
-    marker = script
-    if any(p.poll() is None and marker in " ".join(p.args) for p in PROCS):
+def _child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        env.setdefault(key, "1")
+    return env
+
+
+def _prune_procs() -> None:
+    alive = []
+    for proc in PROCS:
+        if proc.poll() is None:
+            alive.append(proc)
+    PROCS[:] = alive
+
+
+def _stop_script(script: str, grace_s: float = 1.0) -> None:
+    _prune_procs()
+    victims = [p for p in PROCS if script in " ".join(p.args)]
+    for proc in victims:
+        proc.terminate()
+    deadline = time.monotonic() + grace_s
+    for proc in victims:
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1.0)
+    _prune_procs()
+
+
+def _spawn_if_needed(script: str) -> None:
+    _prune_procs()
+    if any(script in " ".join(p.args) for p in PROCS):
         return
-    PROCS.append(subprocess.Popen(["uv", "run", "python", script], cwd=str(cwd), env=env))
+    PROCS.append(subprocess.Popen(["uv", "run", "python", script], cwd=str(REPO_ROOT), env=_child_env()))
+
+
+def ensure_ros_loop(reset_planning: bool = False, force: bool = False) -> int:
+    """Start planning/control children. Optionally restart planning to clear occupancy."""
+    global _LAST_PLANNING_RESET
+    if reset_planning:
+        now = time.monotonic()
+        if force or (now - _LAST_PLANNING_RESET) >= _PLANNING_RESET_COOLDOWN_S:
+            _stop_script("tinynav/core/planning_node.py")
+            _LAST_PLANNING_RESET = now
+    for script in CHILD_SCRIPTS:
+        _spawn_if_needed(script)
+    return sum(1 for p in PROCS if p.poll() is None)
+
+
+def stop_children() -> None:
+    _prune_procs()
+    for proc in list(PROCS):
+        proc.terminate()
+    for proc in list(PROCS):
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=1.0)
+    PROCS.clear()
 
 
 @app.on_event("startup")
@@ -368,8 +353,7 @@ def startup() -> None:
 
 @app.on_event("shutdown")
 def shutdown() -> None:
-    for proc in PROCS:
-        proc.terminate()
+    stop_children()
     if EXECUTOR is not None:
         EXECUTOR.shutdown()
     if SIM_NODE is not None:
@@ -394,19 +378,17 @@ def realtime_step(request: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="ROS simulator is not ready")
     if not isinstance(request.config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
-    SIM_NODE.set_config(copy.deepcopy(request.config), reset=bool(request.reset))
+    reset = bool(request.reset)
+    SIM_NODE.set_config(copy.deepcopy(request.config), reset=reset)
+    # Scene edits set reset=true; restart planning so occupancy/ESDF is not sticky.
+    if reset:
+        ensure_ros_loop(reset_planning=True, force=False)
     return {"frame": SIM_NODE.frame()}
 
 
 @app.post("/api/start-ros-loop")
 def start_ros_loop() -> dict[str, Any]:
-    cwd = ROOT.parents[1]
-    env = os.environ.copy()
-    for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        env.setdefault(key, "1")
-    _spawn_if_needed("tinynav/core/planning_node.py", cwd, env)
-    _spawn_if_needed("tinynav/platforms/cmd_vel_control.py", cwd, env)
-    return {"ok": True, "process_count": sum(p.poll() is None for p in PROCS)}
+    return {"ok": True, "process_count": ensure_ros_loop(reset_planning=True, force=True)}
 
 
 @app.get("/api/sim-state")
