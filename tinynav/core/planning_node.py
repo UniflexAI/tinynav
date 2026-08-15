@@ -1,3 +1,4 @@
+import os
 import rclpy
 import json
 from rclpy.node import Node
@@ -501,6 +502,19 @@ R_BODY_TO_CAM_OPTICAL = np.array([
     [1.0, 0.0, 0.0],
 ])
 
+# Front camera looks +Z (optical). Rear camera is mounted at the butt, same height,
+# yawed 180 deg: optical Ry(pi) and translated along -Z by the front/rear baseline.
+# Default baseline = 2 * camera_x (front at +camera_x, rear at -camera_x in body +x).
+def _make_T_front_cam_to_rear_cam(baseline_m: float) -> np.ndarray:
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = np.array([
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, -1.0],
+    ], dtype=np.float64)
+    T[:3, 3] = [0.0, 0.0, -float(baseline_m)]
+    return T
+
 
 # === PlanningNode class ===
 class PlanningNode(Node):
@@ -528,6 +542,27 @@ class PlanningNode(Node):
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+
+        # Rear Looper (camera1): same model, butt-mounted, looks backward. Occupancy uses the
+        # latest front /slam pose composed with a fixed 180-deg optical extrinsic -- not camera1's
+        # independent VIO world. Enable/disable and baseline via /planning/config or env.
+        self.rear_depth_enabled = os.environ.get('TINYNAV_REAR_DEPTH_OCC', '1') not in ('0', 'false', 'False')
+        self.rear_depth_baseline_m = float(
+            os.environ.get('TINYNAV_REAR_CAM_BASELINE_M', str(max(0.2, 2.0 * abs(self.robot.camera_x))))
+        )
+        self.T_front_cam_to_rear_cam = _make_T_front_cam_to_rear_cam(self.rear_depth_baseline_m)
+        self._rear_depth_sub = None
+        if self.rear_depth_enabled:
+            self._rear_depth_sub = self.create_subscription(
+                Image,
+                '/camera1/camera/depth/image_rect_raw',
+                self.rear_depth_callback,
+                10,
+            )
+            self.get_logger().info(
+                f'Rear depth OCC enabled: topic=/camera1/camera/depth/image_rect_raw '
+                f'baseline={self.rear_depth_baseline_m:.3f}m (Ry=180, same height)'
+            )
 
         # Lidar-driven occupancy grid input (feeds the same rolling grid as depth, see
         # lidar_sync_callback / _plan_and_publish). Lidar scans arrive at a much lower rate
@@ -730,6 +765,36 @@ class PlanningNode(Node):
                 if abs(old - max_linear_speed) > 1e-6:
                     self.get_logger().info(
                         f"Updated planning max_linear_speed: {old:.2f} -> {max_linear_speed:.2f}"
+                    )
+
+        if "rear_depth_enabled" in config:
+            value = config["rear_depth_enabled"]
+            if isinstance(value, bool):
+                enabled = value
+            elif isinstance(value, str):
+                enabled = value.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                enabled = bool(value)
+            old = self.rear_depth_enabled
+            self.rear_depth_enabled = enabled
+            if old != enabled:
+                self.get_logger().info(f"Updated planning rear_depth_enabled: {old} -> {enabled}")
+
+        if "rear_depth_baseline_m" in config:
+            try:
+                baseline = float(config["rear_depth_baseline_m"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning rear_depth_baseline_m: {config.get('rear_depth_baseline_m')!r}"
+                )
+            else:
+                baseline = max(0.05, min(3.0, baseline))
+                old = self.rear_depth_baseline_m
+                self.rear_depth_baseline_m = baseline
+                self.T_front_cam_to_rear_cam = _make_T_front_cam_to_rear_cam(baseline)
+                if abs(old - baseline) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning rear_depth_baseline_m: {old:.3f} -> {baseline:.3f}"
                     )
 
         if "lidar_min_votes" in config:
@@ -1025,6 +1090,37 @@ class PlanningNode(Node):
         self._plan_and_publish(T, init_q, depth_msg.header)
 
     @Timer(name="Lidar Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
+    def rear_depth_callback(self, depth_msg):
+        """Raycast rear Looper depth into the same OCC grid using front pose + fixed extrinsic.
+
+        Does not trigger planning; front sync_callback / lidar path still owns _plan_and_publish.
+        """
+        if not self.rear_depth_enabled:
+            return
+        if self.occupancy_source != 'depth':
+            return
+        if self.K is None or self.last_T is None:
+            return
+        try:
+            if depth_msg.encoding in ('16UC1', 'mono16'):
+                depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32) / 1000.0
+            else:
+                depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+        except Exception as e:
+            self.get_logger().warning(f"rear depth decode failed: {e}")
+            return
+
+        T_rear = self.last_T @ self.T_front_cam_to_rear_cam
+        fx, fy = self.K[0, 0], self.K[1, 1]
+        cx, cy = self.K[0, 2], self.K[1, 2]
+        with Timer(name='rear raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            self._roll_grid_if_needed(self.last_T)
+            new_occ = run_raycasting_loopy(
+                depth, T_rear, self.grid_shape, fx, fy, cx, cy,
+                self.origin, self.step, self.resolution,
+            )
+            self._integrate_occupancy(new_occ)
+
     def lidar_sync_callback(self, lidar_msg, pose_msg):
         if self.occupancy_source != 'lidar':
             return

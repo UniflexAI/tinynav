@@ -1,3 +1,11 @@
+import os
+
+# scipy/numpy pull in OpenBLAS, which otherwise busy-waits on every core.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import rclpy
 import json
 from rclpy.node import Node
@@ -19,8 +27,14 @@ class CmdVelControlNode(Node):
         super().__init__('cmd_vel_control_node')
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
-        self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
+        # /slam/odometry is 100 Hz vio_100hz; this node only needs a pose-present
+        # gate and never reads the message fields. Subscribing to 100 Hz Odometry
+        # in rclpy deserializes two 6x6 covariances per tick and can pin a core.
+        sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.pose_sub = self.create_subscription(
+            Odometry, '/slam/odometry_visual', self.pose_callback, sensor_qos
+        )
+        self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 1)
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -312,14 +326,17 @@ class CmdVelControlNode(Node):
         self.latest_cmd.linear.x = float(vx)
         self.latest_cmd.linear.y = float(vy)
         self.latest_cmd.angular.z = float(vyaw)
-        age = 0.0 if self.last_path_update_time is None else (time.monotonic() - self.last_path_update_time)
-        self.logger.info(
-            "cmd_path_debug "
-            f"raw_vx={raw_vx:.2f} heading_err={heading_err:.2f} "
-            f"backward_segment={is_backward_segment} "
-            f"cmd_vx={self.latest_cmd.linear.x:.2f} cmd_wz={self.latest_cmd.angular.z:.2f} "
-            f"path_age={age:.2f} path_dt_ema={self.path_period_ema:.2f} lookahead={step_idx}"
-        )
+        now_log = time.monotonic()
+        if now_log - self._last_cmd_debug_log_time >= 0.5:
+            age = 0.0 if self.last_path_update_time is None else (now_log - self.last_path_update_time)
+            self._last_cmd_debug_log_time = now_log
+            self.logger.info(
+                "cmd_path_debug "
+                f"raw_vx={raw_vx:.2f} heading_err={heading_err:.2f} "
+                f"backward_segment={is_backward_segment} "
+                f"cmd_vx={self.latest_cmd.linear.x:.2f} cmd_wz={self.latest_cmd.angular.z:.2f} "
+                f"path_age={age:.2f} path_dt_ema={self.path_period_ema:.2f} lookahead={step_idx}"
+            )
 
     def destroy_node(self):
         self.logger.info("Destroying cmd_vel_control connection.")
