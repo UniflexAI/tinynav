@@ -49,12 +49,19 @@ _IMAGE_TOPICS_REALSENSE = [
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
 ]
-# Public preview list stays under /camera/... ; backend stitches camera1 on the right.
+# Preview topics are listed separately. Backend subscribes to at most one
+# selected topic, and only while a /ws/preview client is connected.
 _IMAGE_TOPICS_LOOPER = [
     _COLOR_TOPIC_LOOPER,
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
     _DEPTH_TOPIC_LOOPER,
+]
+_IMAGE_TOPICS_LOOPER_CAM1 = [
+    '/camera1/camera/color/image_rect_raw/compressed',
+    '/camera1/camera/infra1/image_rect_raw',
+    '/camera1/camera/infra2/image_rect_raw',
+    '/camera1/camera/depth/image_rect_raw',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
 _LOOPER_NODE_NAMES = {'/insight_full', '/insight_full1'}
@@ -1509,7 +1516,7 @@ class BackendNode(Ros2NodeManager):
             self.get_logger().warn(f'Sensor detection failed: {e}')
             self._sensor_mode = 'unknown'
 
-        topics = _IMAGE_TOPICS_LOOPER if self._sensor_mode == 'looper' else _IMAGE_TOPICS_REALSENSE
+        topics = self.get_image_topics()
         # logical_topic -> {'left': ndarray|None, 'right': ndarray|None}
         self._preview_sides: dict[str, dict[str, np.ndarray | None]] = {}
         for topic in topics:
@@ -1728,8 +1735,8 @@ class BackendNode(Ros2NodeManager):
 
     def get_image_topics(self) -> list[str]:
         if self._sensor_mode == 'looper':
-            return _IMAGE_TOPICS_LOOPER
-        return _IMAGE_TOPICS_REALSENSE
+            return list(_IMAGE_TOPICS_LOOPER) + list(_IMAGE_TOPICS_LOOPER_CAM1)
+        return list(_IMAGE_TOPICS_REALSENSE)
 
     def get_preview_frame(self, topic: str) -> bytes:
         with self._lock:

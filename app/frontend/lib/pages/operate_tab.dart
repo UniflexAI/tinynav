@@ -1887,20 +1887,6 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     final planning = ref.watch(planningStreamProvider).valueOrNull;
     final activeMap = ref.watch(deviceStatusProvider).valueOrNull?.activeMap;
 
-    // Auto-select color topic on first load
-    ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
-      final topics = next.valueOrNull;
-      if (topics != null && ref.read(selectedPreviewTopicProvider) == null) {
-        final colorTopic = topics.firstWhere(
-          (t) => t.contains('color'),
-          orElse: () => '',
-        );
-        if (colorTopic.isNotEmpty) {
-          ref.read(selectedPreviewTopicProvider.notifier).state = colorTopic;
-        }
-      }
-    });
-
     if (selectedTopic != null) {
       ref.listen<AsyncValue<Uint8List>>(
         previewStreamProvider(selectedTopic),
@@ -2004,6 +1990,10 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                           '/camera/camera/color/image_rect_raw/compressed': 'color',
                           '/camera/camera/depth/image_rect_raw': 'depth',
                           '/slam/depth': 'depth',
+                          '/camera1/camera/color/image_rect_raw/compressed': 'cam1 color',
+                          '/camera1/camera/infra1/image_rect_raw': 'cam1 left',
+                          '/camera1/camera/infra2/image_rect_raw': 'cam1 right',
+                          '/camera1/camera/depth/image_rect_raw': 'cam1 depth',
                         };
                         final label = labels[t] ?? t.split('/').last;
                         return DropdownMenuItem<String?>(
@@ -2014,7 +2004,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                     ],
                     onChanged: (v) {
                       ref.read(selectedPreviewTopicProvider.notifier).state = v;
-                      if (v == null) setState(() => _latestFrame = null);
+                      setState(() => _latestFrame = null);
                     },
                   ),
                 ],

@@ -609,7 +609,7 @@ class PlanningNode(Node):
         self.grid_shape = (80, 80, 40)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 5
+        self.step = 4
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.occupancy_source = 'depth'  # 'depth' or 'lidar' -- exclusive, set live via /planning/config
         self.get_logger().info(f"Planning occupancy_source current: {self.occupancy_source}")
@@ -1269,7 +1269,7 @@ class PlanningNode(Node):
                 dist = np.linalg.norm(traj_end - target_end)
 
                 return (
-                    score * 100000
+                    score * 100
                     + 100 * dist
                     + self.trajectory_smooth_weight * abs(self.last_param[0] - param[0])
                     + self.trajectory_smooth_weight * abs(self.last_param[1] - param[1])
