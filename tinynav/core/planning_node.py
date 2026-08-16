@@ -1097,7 +1097,9 @@ class PlanningNode(Node):
         """
         if not self.rear_depth_enabled:
             return
-        if self.occupancy_source != 'depth':
+        # Depth mode: fill rear of the stereo OCC. Lidar mode: lidar only sees
+        # forward, so the same rear depth is fused into the lidar OCC when camera1 exists.
+        if self.occupancy_source not in ('depth', 'lidar'):
             return
         if self.K is None or self.last_T is None:
             return
@@ -1136,6 +1138,7 @@ class PlanningNode(Node):
             if points_lidar.shape[0] == 0:
                 return
             T, _ = msg2np(pose_msg)
+            self.last_T = T
             T_lidar_to_world = T @ self.T_lidar_to_cam
 
         with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
