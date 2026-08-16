@@ -1,7 +1,10 @@
 import os
 import rclpy
 import json
+import threading
+import multiprocessing as mp
 from rclpy.node import Node
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
@@ -517,6 +520,66 @@ def _make_T_front_cam_to_rear_cam(baseline_m: float) -> np.ndarray:
 
 
 # === PlanningNode class ===
+
+def _rear_depth_worker_main(baseline_m, stop_event, t_shared, k_shared, origin_shared, ready_shared, occ_queue):
+    """Own process + own RMW participant. Kill/join fully drops camera1 DataReader."""
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    rclpy.init()
+    node = Node('planning_rear_depth', use_global_arguments=False)
+    bridge = CvBridge()
+    T_ext = _make_T_front_cam_to_rear_cam(float(baseline_m))
+
+    def cb(depth_msg):
+        if stop_event.is_set():
+            return
+        if int(ready_shared[0]) == 0 or int(ready_shared[1]) == 0:
+            return
+        try:
+            if depth_msg.encoding in ('16UC1', 'mono16'):
+                depth = bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32) / 1000.0
+            else:
+                depth = bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
+        except Exception:
+            return
+        T = np.array(t_shared[:], dtype=np.float64).reshape(4, 4)
+        K = np.array(k_shared[:], dtype=np.float64).reshape(3, 3)
+        T_rear = T @ T_ext
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+        # grid params must match PlanningNode defaults
+        grid_shape = (80, 80, 40)
+        resolution = 0.1
+        origin = np.array(origin_shared[:], dtype=np.float64)
+        step = 4
+        new_occ = run_raycasting_loopy(
+            depth, T_rear, grid_shape, fx, fy, cx, cy, origin, step, resolution,
+        )
+        try:
+            while not occ_queue.empty():
+                try:
+                    occ_queue.get_nowait()
+                except Exception:
+                    break
+            occ_queue.put_nowait(new_occ.astype(np.float32))
+        except Exception:
+            pass
+
+    node.create_subscription(Image, '/camera1/camera/depth/image_rect_raw', cb, 10)
+    try:
+        while not stop_event.is_set() and rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.05)
+    finally:
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
+
+
 class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
@@ -551,18 +614,21 @@ class PlanningNode(Node):
             os.environ.get('TINYNAV_REAR_CAM_BASELINE_M', str(max(0.2, 2.0 * abs(self.robot.camera_x))))
         )
         self.T_front_cam_to_rear_cam = _make_T_front_cam_to_rear_cam(self.rear_depth_baseline_m)
-        self._rear_depth_sub = None
-        if self.rear_depth_enabled:
-            self._rear_depth_sub = self.create_subscription(
-                Image,
-                '/camera1/camera/depth/image_rect_raw',
-                self.rear_depth_callback,
-                10,
-            )
-            self.get_logger().info(
-                f'Rear depth OCC enabled: topic=/camera1/camera/depth/image_rect_raw '
-                f'baseline={self.rear_depth_baseline_m:.3f}m (Ry=180, same height)'
-            )
+        self._executor = None
+        self._occ_lock = threading.Lock()
+        # Rear camera1 runs in a child process so mode switches can kill the whole
+        # DDS participant (in-process destroy_node/context leave zombie readers).
+        self._mp_ctx = mp.get_context('spawn')
+        self._rear_t_shared = self._mp_ctx.Array('d', 16, lock=False)
+        self._rear_k_shared = self._mp_ctx.Array('d', 9, lock=False)
+        self._rear_origin_shared = self._mp_ctx.Array('d', 3, lock=False)
+        self._rear_ready_shared = self._mp_ctx.Array('i', 2, lock=False)  # [has_T, has_K]
+        self._rear_occ_queue = self._mp_ctx.Queue(maxsize=1)
+        self._rear_stop_event = None
+        self._rear_proc = None
+        self._rear_drain_timer = None
+        # Lidar stays in-process on a helper node; exclusive with rear process.
+        self._lidar_node = None
 
         # Lidar-driven occupancy grid input (feeds the same rolling grid as depth, see
         # lidar_sync_callback / _plan_and_publish). Lidar scans arrive at a much lower rate
@@ -600,17 +666,16 @@ class PlanningNode(Node):
         self.lidar_min_obstacle_area_cells = 0
         self.lidar_score_percentile = 0.0
         self.lidar_collision_tolerance = 0
-        self.lidar_sub = message_filters.Subscriber(self, PointCloud2, '/lidar/points')
-        self.lidar_pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
-        self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
-            [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.2)
-        self.lidar_ts.registerCallback(self.lidar_sync_callback)
+        self.lidar_sub = None
+        self.lidar_pose_sub = None
+        self.lidar_ts = None
 
         self.grid_shape = (80, 80, 40)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 4
         self.occupancy_grid = np.zeros(self.grid_shape)
+        self._rear_origin_shared[:] = np.asarray(self.origin, dtype=np.float64).tolist()
         self.occupancy_source = 'depth'  # 'depth' or 'lidar' -- exclusive, set live via /planning/config
         self.get_logger().info(f"Planning occupancy_source current: {self.occupancy_source}")
         self.K = None
@@ -648,6 +713,154 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
+
+    def attach_executor(self, executor):
+        self._executor = executor
+        self._rear_drain_timer = self.create_timer(0.05, self._drain_rear_occ_queue)
+        self._apply_occupancy_subscriptions()
+
+    def _publish_last_T_to_shared(self, T):
+        flat = np.asarray(T, dtype=np.float64).reshape(-1)
+        self._rear_t_shared[:] = flat.tolist()
+        self._rear_ready_shared[0] = 1
+
+    def _publish_K_to_shared(self):
+        if self.K is None:
+            return
+        self._rear_k_shared[:] = np.asarray(self.K, dtype=np.float64).reshape(-1).tolist()
+        self._rear_ready_shared[1] = 1
+
+    def _drain_rear_occ_queue(self):
+        if self._rear_proc is None or self.occupancy_source not in ('depth', 'lidar'):
+            return
+        got = False
+        new_occ = None
+        try:
+            while True:
+                new_occ = self._rear_occ_queue.get_nowait()
+                got = True
+        except Exception:
+            pass
+        if got and new_occ is not None:
+            self._integrate_occupancy(np.asarray(new_occ, dtype=np.float64))
+
+    def _apply_occupancy_subscriptions(self):
+        """Lidar/depth occupancy sources are exclusive; rear camera1 fuses into both."""
+        self._set_lidar_listening(self.occupancy_source == 'lidar')
+        self._set_rear_depth_listening(
+            self.rear_depth_enabled and self.occupancy_source in ('depth', 'lidar')
+        )
+
+    def _set_lidar_listening(self, enabled):
+        if enabled:
+            if self._lidar_node is not None:
+                return
+            if self._executor is None:
+                return
+            self._lidar_node = Node('planning_lidar', use_global_arguments=False)
+            self.lidar_sub = message_filters.Subscriber(self._lidar_node, PointCloud2, '/lidar/points')
+            self.lidar_pose_sub = message_filters.Subscriber(self._lidar_node, Odometry, '/slam/odometry_visual')
+            self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
+                [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.2)
+            self.lidar_ts.registerCallback(self.lidar_sync_callback)
+            self._executor.add_node(self._lidar_node)
+            self.get_logger().info('Subscribed /lidar/points on planning_lidar node')
+            return
+        if self._lidar_node is None:
+            return
+        if self.lidar_sub is not None:
+            try:
+                self.lidar_sub.unregister()
+            except Exception:
+                pass
+            try:
+                self.lidar_pose_sub.unregister()
+            except Exception:
+                pass
+        try:
+            self._executor.remove_node(self._lidar_node)
+        except Exception:
+            pass
+        try:
+            self._lidar_node.destroy_node()
+        except Exception:
+            pass
+        self._lidar_node = None
+        self.lidar_sub = None
+        self.lidar_pose_sub = None
+        self.lidar_ts = None
+        self.get_logger().info('Destroyed planning_lidar node (occupancy_source!=lidar)')
+
+    def _set_rear_depth_listening(self, enabled):
+        if enabled:
+            if self._rear_proc is not None and self._rear_proc.is_alive():
+                return
+            self._publish_K_to_shared()
+            stop_event = self._mp_ctx.Event()
+            proc = self._mp_ctx.Process(
+                target=_rear_depth_worker_main,
+                args=(
+                    self.rear_depth_baseline_m,
+                    stop_event,
+                    self._rear_t_shared,
+                    self._rear_k_shared,
+                    self._rear_origin_shared,
+                    self._rear_ready_shared,
+                    self._rear_occ_queue,
+                ),
+                name='planning_rear_depth',
+                daemon=True,
+            )
+            self._rear_stop_event = stop_event
+            self._rear_proc = proc
+            proc.start()
+            self.get_logger().info(
+                'Started planning_rear_depth process for /camera1/camera/depth/image_rect_raw '
+                f'pid={proc.pid} baseline={self.rear_depth_baseline_m:.3f}m'
+            )
+            return
+        proc = self._rear_proc
+        stop_event = self._rear_stop_event
+        if proc is None and stop_event is None:
+            return
+        if stop_event is not None:
+            try:
+                stop_event.set()
+            except Exception:
+                pass
+        # Drain + cancel_join_thread first. Otherwise Process.join can hang forever
+        # when the child exited with items still buffered on the multiprocessing Queue.
+        try:
+            while True:
+                self._rear_occ_queue.get_nowait()
+        except Exception:
+            pass
+        try:
+            self._rear_occ_queue.cancel_join_thread()
+        except Exception:
+            pass
+        if proc is not None:
+            try:
+                if proc.is_alive():
+                    proc.terminate()
+            except Exception:
+                pass
+            try:
+                proc.join(timeout=1.0)
+            except Exception:
+                pass
+            try:
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=1.0)
+            except Exception:
+                pass
+        self._rear_proc = None
+        self._rear_stop_event = None
+        # Recreate queue so the next depth session does not reuse a cancelled feeder.
+        self._rear_occ_queue = self._mp_ctx.Queue(maxsize=1)
+        self.get_logger().info('Killed planning_rear_depth process (rear depth disabled)')
+
     def planning_config_callback(self, msg: String):
         try:
             config = json.loads(msg.data)
@@ -678,6 +891,7 @@ class PlanningNode(Node):
                 self.occupancy_source = occupancy_source
                 if old != occupancy_source:
                     self.get_logger().info(f"Updated planning occupancy_source: {old} -> {occupancy_source}")
+                    self._apply_occupancy_subscriptions()
 
         if "comfort_radius" in config:
             try:
@@ -779,6 +993,7 @@ class PlanningNode(Node):
             self.rear_depth_enabled = enabled
             if old != enabled:
                 self.get_logger().info(f"Updated planning rear_depth_enabled: {old} -> {enabled}")
+            self._apply_occupancy_subscriptions()
 
         if "rear_depth_baseline_m" in config:
             try:
@@ -893,6 +1108,7 @@ class PlanningNode(Node):
     def info_callback(self, msg):
         if self.K is None:
             self.K = np.array(msg.k).reshape(3, 3)
+            self._publish_K_to_shared()
             # P[0,3] = -fx * baseline
             fx = self.K[0, 0]
             Tx = msg.p[3] # From the right camera's projection matrix
@@ -1035,19 +1251,22 @@ class PlanningNode(Node):
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
     def _roll_grid_if_needed(self, T):
-        center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-        robot_pos = T[:3, 3]
-        delta = robot_pos - center
-        if np.linalg.norm(delta) > .1:
-            new_center = robot_pos
-            new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
-            self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+        with self._occ_lock:
+            center = self.origin + np.array(self.grid_shape) * self.resolution / 2
+            robot_pos = T[:3, 3]
+            delta = robot_pos - center
+            if np.linalg.norm(delta) > .1:
+                new_center = robot_pos
+                new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
+                self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+                self._rear_origin_shared[:] = np.asarray(self.origin, dtype=np.float64).tolist()
 
     def _integrate_occupancy(self, new_occ):
-        self.occupancy_grid *= 0.994
-        self.occupancy_grid += new_occ
-        self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
-        self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+        with self._occ_lock:
+            self.occupancy_grid *= 0.994
+            self.occupancy_grid += new_occ
+            self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -1083,6 +1302,7 @@ class PlanningNode(Node):
             self._integrate_occupancy(new_occ)
 
         self.last_T = T
+        self._publish_last_T_to_shared(T)
         self.last_stamp = stamp
 
         init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y,
@@ -1091,37 +1311,8 @@ class PlanningNode(Node):
 
     @Timer(name="Lidar Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def rear_depth_callback(self, depth_msg):
-        """Raycast rear Looper depth into the same OCC grid using front pose + fixed extrinsic.
-
-        Does not trigger planning; front sync_callback / lidar path still owns _plan_and_publish.
-        """
-        if not self.rear_depth_enabled:
-            return
-        # Depth mode: fill rear of the stereo OCC. Lidar mode: lidar only sees
-        # forward, so the same rear depth is fused into the lidar OCC when camera1 exists.
-        if self.occupancy_source not in ('depth', 'lidar'):
-            return
-        if self.K is None or self.last_T is None:
-            return
-        try:
-            if depth_msg.encoding in ('16UC1', 'mono16'):
-                depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32) / 1000.0
-            else:
-                depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
-        except Exception as e:
-            self.get_logger().warning(f"rear depth decode failed: {e}")
-            return
-
-        T_rear = self.last_T @ self.T_front_cam_to_rear_cam
-        fx, fy = self.K[0, 0], self.K[1, 1]
-        cx, cy = self.K[0, 2], self.K[1, 2]
-        with Timer(name='rear raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self._roll_grid_if_needed(self.last_T)
-            new_occ = run_raycasting_loopy(
-                depth, T_rear, self.grid_shape, fx, fy, cx, cy,
-                self.origin, self.step, self.resolution,
-            )
-            self._integrate_occupancy(new_occ)
+        # Kept for compatibility; camera1 depth is handled in planning_rear_depth process.
+        return
 
     def lidar_sync_callback(self, lidar_msg, pose_msg):
         if self.occupancy_source != 'lidar':
@@ -1139,6 +1330,7 @@ class PlanningNode(Node):
                 return
             T, _ = msg2np(pose_msg)
             self.last_T = T
+            self._publish_last_T_to_shared(T)
             T_lidar_to_world = T @ self.T_lidar_to_cam
 
         with Timer(name='lidar raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -1359,13 +1551,22 @@ class PlanningNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PlanningNode()
-
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    node.attach_executor(executor)
     try:
-        rclpy.spin(node)
-        node.destroy_node()
-        rclpy.shutdown()
+        executor.spin()
     except KeyboardInterrupt:
         pass
+    finally:
+        node._set_lidar_listening(False)
+        node._set_rear_depth_listening(False)
+        try:
+            executor.remove_node(node)
+        except Exception:
+            pass
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

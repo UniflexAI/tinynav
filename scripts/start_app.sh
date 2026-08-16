@@ -13,4 +13,4 @@ tmux new-session -s app \; \
   select-pane -t 1 \; send-keys "python -m http.server $FRONTEND_PORT --directory /tinynav/app/frontend/build/web" C-m \; \
   select-pane -t 2 \; send-keys "cd /tinynav && /tinynav/scripts/run_rtk.sh" C-m \; \
   select-pane -t 3 \; send-keys "cd /tinynav && uv run python /tinynav/rtk/rtk_map_pose_node.py --ros-args -p map_topic:=/map/current_map" C-m \; \
-  select-pane -t 4 \; send-keys "cd /tinynav && RMW_IMPLEMENTATION=rmw_cyclonedds_cpp CYCLONEDDS_URI=/tinynav/cyclonedds_jetson.xml uv run python /tinynav/tool/ekf_odom_node.py" C-m
+ # select-pane -t 4 \; send-keys "cd /tinynav && RMW_IMPLEMENTATION=rmw_cyclonedds_cpp CYCLONEDDS_URI=/tinynav/cyclonedds_jetson.xml uv run python /tinynav/tool/ekf_odom_node.py" C-m
