@@ -46,7 +46,7 @@ from benchmark_mapping import find_closest_pose
 
 
 PoseDict = Dict[int, np.ndarray]
-VIO_IMAGE_TOPIC = "/camera/camera/vio_image"
+VIO_IMAGE_TOPIC = "/camera/camera/vio_100hz"
 
 
 def _load_pose_dict(path: Path) -> PoseDict:

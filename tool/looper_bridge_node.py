@@ -50,7 +50,7 @@ class LooperBridgeNode(Node):
         )
 
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
-        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
+        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_100hz")
         self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
         self.sync = message_filters.TimeSynchronizer(
             [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20
@@ -74,7 +74,7 @@ class LooperBridgeNode(Node):
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
 
         self.get_logger().info(
-            "Bridging /camera/camera/vio_image + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
+            "Bridging /camera/camera/vio_100hz + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
         )
         self.get_logger().info(
             "Bridging /camera/camera/vio_100hz into /slam/odometry."

@@ -193,7 +193,7 @@ trajectory?"
 
 When building a map from a bag, the benchmark automatically detects the source:
 
-- If the bag contains `/camera/camera/vio_image`, it starts `tool/looper_bridge_node.py`.
+- If the bag contains `/camera/camera/vio_100hz`, it starts `tool/looper_bridge_node.py`.
 - Otherwise, it starts `tinynav/core/perception_node.py`.
 
 ### Usage
