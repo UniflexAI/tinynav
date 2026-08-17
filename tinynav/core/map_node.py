@@ -1271,6 +1271,12 @@ class MapNode(Node):
             fwd = odom_pose[:3, :3] @ np.array([0.0, 0.0, 1.0])   # camera forward, odom world
             heading_odom = np.arctan2(fwd[1], fwd[0])
             self._rtk_yaw_offset = heading_odom - psi_map
+            self.get_logger().info(
+                f"Locked _rtk_yaw_offset: odom_source={self.odom_source} "
+                f"heading_odom={np.degrees(heading_odom):.1f}deg psi_map={np.degrees(psi_map):.1f}deg "
+                f"-> _rtk_yaw_offset={np.degrees(self._rtk_yaw_offset):.1f}deg "
+                f"odom_pose_xyz={odom_pose[:3, 3].tolist()}"
+            )
         phi = self._rtk_yaw_offset
         c, s = np.cos(phi), np.sin(phi)
         Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
