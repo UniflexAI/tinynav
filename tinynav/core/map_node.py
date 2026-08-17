@@ -1765,6 +1765,13 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
+            self.get_logger().info(
+                f"POI arrival check: poi_index={self.poi_index} odom_source={self.odom_source} "
+                f"xy_dist={diff_position_norm_xy:.2f}m (thr={self.poi_distance}) "
+                f"z_dist={diff_position_norm_z:.2f}m (thr=2.0, z_disable={self.z_disable}) "
+                f"pose_in_map={pose_in_map_position.tolist()} poi={poi.tolist()}",
+                throttle_duration_sec=1.0,
+            )
             if diff_position_norm_xy < self.poi_distance and (self.z_disable or diff_position_norm_z < 2.0):
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
