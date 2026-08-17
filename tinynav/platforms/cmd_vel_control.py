@@ -3,7 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Bool, Float32
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
@@ -117,23 +117,7 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
-        self.create_subscription(String, ROBOT_CONFIG_TOPIC, self._on_robot_config, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-
-    def _apply_robot_config(self, robot: RobotConfig):
-        self.robot = robot
-        self.cam_forward_offset = float(robot.cam_offset_3d[2])
-        self.T_camera_to_control[2, 3] = -self.cam_forward_offset  # back along camera +z (=forward)
-
-    def _on_robot_config(self, msg: String):
-        try:
-            robot = RobotConfig.from_json(msg.data)
-        except (ValueError, TypeError) as e:
-            self.logger.error(f"Bad {ROBOT_CONFIG_TOPIC} payload ({e}); keeping {self.robot.name}")
-            return
-        self._apply_robot_config(robot)
-        self.logger.info(f"Robot ({ROBOT_CONFIG_TOPIC}): {robot.name}, "
-                         f"cam_forward_offset={self.cam_forward_offset:.3f}m")
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
