@@ -115,7 +115,7 @@ class ObstacleConfig:
     robot_z_bottom: float = -0.45
     robot_z_top: float = 0.2
     occ_threshold: float = 0.05
-    min_wall_span_m: float = 0.1
+    min_wall_span_m: float = 0.05
     ground_band_m: float = 0.3
     dilation_cells: int = 0
 
@@ -372,7 +372,13 @@ class PlanningNode(Node):
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.resolution = 0.05
-        self.obstacle_config = ObstacleConfig()
+        # Ground-anchored span filter (walls/bumps vs stair risers) now applies
+        # everywhere since TINYNAV_CLIMB_PRIOR=0 disables the climb-region relaxation
+        # globally -- so its default is the same single-voxel noise floor as the
+        # floating-obstacle check, to avoid filtering out real low/thin obstacles.
+        # Env-overridable for site tuning without a code edit.
+        self.obstacle_config = ObstacleConfig(
+            min_wall_span_m=float(os.environ.get('TINYNAV_MIN_WALL_SPAN_M', '0.05')))
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
