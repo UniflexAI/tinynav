@@ -139,6 +139,7 @@ def select_target_position_on_path(
     turn_stop_margin: float = 0.25,
     min_turn_distance: float = 0.3,
     turn_window_distance: float = 0.4,
+    outside_offset_m: float = 0.0,
 ) -> np.ndarray:
     """Pick a local-planner target on the global path without looking past sharp turns.
 
@@ -148,6 +149,10 @@ def select_target_position_on_path(
     direction change, while keeping the old distance-based lookahead on straight
     segments. Turn detection uses a short polyline window so voxel-level zigzags do
     not look like real corners.
+
+    When a turn is found and outside_offset_m > 0, the stop point is nudged laterally
+    to the outside of the bend (left turn -> offset right) so constant-curvature
+    local trajectories are pulled away from the inner corner.
     """
     pts = np.asarray(path_points, dtype=np.float64)
     curr = np.asarray(current_position, dtype=np.float64)
@@ -186,7 +191,19 @@ def select_target_position_on_path(
         angle = float(np.arccos(cos_angle))
         if angle >= turn_angle_threshold_rad:
             stop_distance = max(0.0, d - turn_stop_margin)
-            return _interpolate_polyline(nodes, cumulative, stop_distance)
+            stop = _interpolate_polyline(nodes, cumulative, stop_distance)
+            if outside_offset_m <= 0.0:
+                return stop
+            # Left-handed normal of approach tangent; turn_sign > 0 means left turn.
+            tangent = v_prev / prev_norm
+            n_left = np.array([-tangent[1], tangent[0]], dtype=np.float64)
+            turn_sign = float(np.sign(v_prev[0] * v_next[1] - v_prev[1] * v_next[0]))
+            if turn_sign == 0.0:
+                return stop
+            n_out = -turn_sign * n_left
+            out = stop.copy()
+            out[:2] = stop[:2] + n_out * float(outside_offset_m)
+            return out
 
     return _interpolate_polyline(nodes, cumulative, target_distance)
 
@@ -2172,6 +2189,7 @@ class MapNode(Node):
                 turn_stop_margin=0.2,
                 min_turn_distance=0.5,
                 turn_window_distance=0.4,
+                outside_offset_m=0.2,
             )
 
         target_position = paths_in_map[-1]
