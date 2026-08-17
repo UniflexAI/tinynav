@@ -449,6 +449,8 @@ class MapNode(Node):
         # 'vio' (default) or 'ekf', live-toggled via /localization/config -- see
         # _continuous_odom_vio_callback / _continuous_odom_ekf_callback below.
         self.odom_source = 'vio'
+        self._latest_vio_pose_raw = None
+        self._latest_ekf_pose_raw = None
         self.continuous_odom_sub = self.create_subscription(
             Odometry, '/slam/odometry', self._continuous_odom_vio_callback, 100)
         self.continuous_odom_ekf_sub = self.create_subscription(
@@ -1143,11 +1145,16 @@ class MapNode(Node):
             self.destroy_subscription(self.camera_info_sub)
 
     def _continuous_odom_vio_callback(self, odom_msg: Odometry):
+        # Tracked unconditionally (not just while active) so a switch to 'ekf' can
+        # still cross-reference "what was vio's heading right at the switch" -- see
+        # localization_config_callback's _rtk_yaw_offset adjustment.
+        self._latest_vio_pose_raw, _ = msg2np(odom_msg)
         if self.odom_source != 'vio':
             return
         self.continuous_odom_callback(odom_msg)
 
     def _continuous_odom_ekf_callback(self, odom_msg: Odometry):
+        self._latest_ekf_pose_raw, _ = msg2np(odom_msg)
         if self.odom_source != 'ekf':
             return
         self.continuous_odom_callback(odom_msg)
@@ -1198,9 +1205,32 @@ class MapNode(Node):
                     # T_from_map_to_odom directly (see _update_transform_from_rtk_map_pose),
                     # bypassing all of the pose-graph state cleared above. A stale offset
                     # computed against the old odom_source's heading convention rotates
-                    # T_from_map_to_odom wrong by the same kind of frame mismatch. Force it
-                    # to re-lock against the new odom_source on the next RTK fix.
-                    self._rtk_yaw_offset = None
+                    # T_from_map_to_odom wrong by the same kind of frame mismatch.
+                    #
+                    # Re-locking it from scratch (a single fresh heading sample from the new
+                    # source) was tried and did not fix it -- that single sample can itself
+                    # be a noisy/unstable EKF reading right after the switch, with no way to
+                    # catch a bad lock afterward. Instead adjust the *already-validated*
+                    # offset by the measured heading delta between the two sources at this
+                    # instant, using pose trackers that update regardless of which one is
+                    # active (_latest_vio_pose_raw / _latest_ekf_pose_raw). This only assumes
+                    # the two sources agree on heading *right now*, not that either one's
+                    # absolute reading is itself correct.
+                    old_pose_raw = self._latest_vio_pose_raw if old == 'vio' else self._latest_ekf_pose_raw
+                    new_pose_raw = self._latest_vio_pose_raw if odom_source == 'vio' else self._latest_ekf_pose_raw
+                    if self._rtk_yaw_offset is not None and old_pose_raw is not None and new_pose_raw is not None:
+                        old_fwd = old_pose_raw[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                        new_fwd = new_pose_raw[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                        heading_old = np.arctan2(old_fwd[1], old_fwd[0])
+                        heading_new = np.arctan2(new_fwd[1], new_fwd[0])
+                        delta = heading_new - heading_old
+                        self._rtk_yaw_offset += delta
+                        self.get_logger().info(
+                            f"Adjusted _rtk_yaw_offset by {np.degrees(delta):+.1f}deg for "
+                            f"odom_source switch {old} -> {odom_source}"
+                        )
+                    else:
+                        self._rtk_yaw_offset = None
 
     def rtk_init_status_callback(self, msg: String):
         if self.rtk_mode != "replace":
