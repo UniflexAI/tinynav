@@ -688,28 +688,6 @@ class BackendNode(Ros2NodeManager):
             return None
         return None
 
-    def _load_nav_flow_enable_first_done(self) -> bool:
-        config_path = os.path.join(self.map_path, 'nav_flow.json')
-        if not os.path.exists(config_path):
-            return False
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-        except Exception as e:
-            self.get_logger().error(f'Failed to read nav_flow.json: {e}')
-            return False
-        if not isinstance(config, dict):
-            return False
-        value = config.get('enable_first_done', False)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            return value.strip().lower() in {'1', 'true', 'yes', 'on'}
-        if isinstance(value, (int, float)):
-            return bool(value)
-        self.get_logger().warn(f'Invalid nav_flow enable_first_done value: {value!r}')
-        return False
-
     @staticmethod
     def _rtk_time_gate_open() -> bool:
         # Must match MapNode._rtk_time_gate_open in tinynav/core/map_node.py:
@@ -2070,8 +2048,6 @@ class BackendNode(Ros2NodeManager):
             'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
             '--tinynav_map_path', self.map_path,
         ]
-        if self._load_nav_flow_enable_first_done():
-            map_node_cmd.append('--enable_first_done')
         if initial_map_to_odom_transform_path is not None:
             map_node_cmd += ['--initial_map_to_odom_transform', initial_map_to_odom_transform_path]
         # Decide RTK mode once here, matching MapNode which also decides once at
