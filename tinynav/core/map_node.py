@@ -1180,6 +1180,19 @@ class MapNode(Node):
                 self.odom_source = odom_source
                 if old != odom_source:
                     self.get_logger().info(f"Updated localization odom_source: {old} -> {odom_source}")
+                    # compute_transform_from_map_to_odom() pose-graph-optimizes the last
+                    # 100 entries of self.relocalization_poses against pose_graph_used_pose.
+                    # Those two dicts accumulate for the whole session, so right after a
+                    # switch that window is a mix of old-frame and new-frame entries --
+                    # optimizing across a ~100+ deg frame jump (measured between vio and
+                    # ekf) produces a T_from_map_to_odom that matches neither frame. Drop
+                    # all of it and force a fresh relocalization purely in the new frame.
+                    self.T_from_map_to_odom = None
+                    self.relocalization_poses = {}
+                    self.relocalization_pose_weights = {}
+                    self.pose_graph_used_pose = {}
+                    self.odom = {}
+                    self.first_done = False
 
     def rtk_init_status_callback(self, msg: String):
         if self.rtk_mode != "replace":
