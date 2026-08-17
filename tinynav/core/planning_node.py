@@ -525,6 +525,27 @@ class PlanningNode(Node):
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
 
+        # 'vio' (default) or 'ekf', live-toggled via the same /localization/config topic
+        # map_node listens on -- one button switches both nodes together. /slam/odometry_fused
+        # (ekf_odom_node) is tracked unconditionally so a switch can substitute it into
+        # sync_callback/lidar_sync_callback without touching the depth/lidar TimeSynchronizer
+        # wiring above, which stays on /slam/odometry_visual's exact-stamp matching either way.
+        # Was previously VIO-only regardless of map_node's own toggle: map_node's published
+        # /control/target_pose is in whichever frame is active there, and comparing that
+        # against a vio-frame T here silently steered toward the wrong target once map_node
+        # switched to ekf (robot spun in place, never getting closer to the goal).
+        self.odom_source = 'vio'
+        self._latest_ekf_pose = None
+        self.ekf_pose_sub = self.create_subscription(
+            Odometry, '/slam/odometry_fused', self._ekf_pose_callback, 100)
+        _localization_config_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.localization_config_sub = self.create_subscription(
+            String, '/localization/config', self.localization_config_callback, _localization_config_qos)
+
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
@@ -612,6 +633,36 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
+
+    def _ekf_pose_callback(self, msg: Odometry):
+        self._latest_ekf_pose = msg
+
+    def localization_config_callback(self, msg: String):
+        try:
+            config = json.loads(msg.data)
+        except json.JSONDecodeError as exc:
+            self.get_logger().warning(f"Failed to parse /localization/config: {exc}")
+            return
+        if not isinstance(config, dict):
+            return
+        if "odom_source" in config:
+            odom_source = config["odom_source"]
+            if odom_source not in ("vio", "ekf"):
+                self.get_logger().warning(f"Invalid localization odom_source: {odom_source!r} (must be 'vio' or 'ekf')")
+            else:
+                old = self.odom_source
+                self.odom_source = odom_source
+                if old != odom_source:
+                    self.get_logger().info(f"Updated planning odom_source: {old} -> {odom_source}")
+
+    def _active_pose_msg(self, vio_pose_msg: Odometry) -> Odometry:
+        """Pose to actually drive local planning/control from: vio_pose_msg (the
+        TimeSynchronizer-matched /slam/odometry_visual sample) unless odom_source is
+        'ekf' and a fused pose has arrived, matching whichever source map_node is
+        using for /control/target_pose right now."""
+        if self.odom_source == 'ekf' and self._latest_ekf_pose is not None:
+            return self._latest_ekf_pose
+        return vio_pose_msg
 
     def planning_config_callback(self, msg: String):
         try:
@@ -990,6 +1041,7 @@ class PlanningNode(Node):
             return
         if self.K is None:
             return
+        odom_msg = self._active_pose_msg(odom_msg)
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             # The raycaster wants metres. /slam/depth is 32FC1 already in metres,
             # but the camera's own /camera/camera/depth/image_rect_raw is mono16 in
@@ -1028,6 +1080,7 @@ class PlanningNode(Node):
     def lidar_sync_callback(self, lidar_msg, pose_msg):
         if self.occupancy_source != 'lidar':
             return
+        pose_msg = self._active_pose_msg(pose_msg)
         with Timer(name='lidar preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             cloud = pc2.read_points(lidar_msg, field_names=("x", "y", "z"), skip_nans=True)
             if cloud.shape[0] == 0:
