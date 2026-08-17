@@ -379,7 +379,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, z_layers)
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 10
+        self.step = 4
         self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
 
         # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
@@ -460,7 +460,8 @@ class PlanningNode(Node):
         # capture is deliberately slow for mapping stability and replay can afford to
         # be quicker, but the operator's speed is already the best evidence of what
         # this stretch tolerates, so scaling it up just overdrives the tight parts.
-        self.declare_parameter('capture_speed_gain', 1.0)
+        self.declare_parameter('capture_speed_gain',
+                               float(os.environ.get('TINYNAV_CAPTURE_SPEED_GAIN', '1.0')))
         self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
         self.declare_parameter('speed_cap_ttl_s', 2.0)
         self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)
