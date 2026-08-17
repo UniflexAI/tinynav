@@ -1193,6 +1193,14 @@ class MapNode(Node):
                     self.pose_graph_used_pose = {}
                     self.odom = {}
                     self.first_done = False
+                    # _rtk_yaw_offset is locked once from self.latest_odom_pose's heading on
+                    # the first RTK fix and never recomputed -- while RTK is ACTIVE it drives
+                    # T_from_map_to_odom directly (see _update_transform_from_rtk_map_pose),
+                    # bypassing all of the pose-graph state cleared above. A stale offset
+                    # computed against the old odom_source's heading convention rotates
+                    # T_from_map_to_odom wrong by the same kind of frame mismatch. Force it
+                    # to re-lock against the new odom_source on the next RTK fix.
+                    self._rtk_yaw_offset = None
 
     def rtk_init_status_callback(self, msg: String):
         if self.rtk_mode != "replace":
