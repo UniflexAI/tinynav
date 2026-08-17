@@ -1,5 +1,7 @@
 import argparse
 import copy
+import sys
+import time
 
 import cv2
 import message_filters
@@ -34,6 +36,17 @@ class LooperBridgeNode(Node):
         self.last_pose = None
         self.last_pose_time = None
         self._missing_input_counter = 0
+        self._started_at_mono = time.monotonic()
+        self._last_sync_at_mono: float | None = None
+        self._exit_code = 0
+        self._sync_watchdog_s = float(args.sync_watchdog_s)
+        self._sync_watchdog_grace_s = float(args.sync_watchdog_grace_s)
+        if self._sync_watchdog_s > 0.0:
+            self._sync_watchdog_timer = self.create_timer(2.0, self._sync_watchdog_tick)
+            self.get_logger().info(
+                f"Sync watchdog enabled: timeout={self._sync_watchdog_s:.1f}s "
+                f"startup_grace={self._sync_watchdog_grace_s:.1f}s"
+            )
 
         # The Looper stamps vio_image/depth with its own free-running boot-relative
         # clock, not wall time (confirmed: neither an NTP-style device time sync nor a
@@ -267,25 +280,72 @@ class LooperBridgeNode(Node):
             self.last_keyframe_pose = T_world_camera.copy()
             self.last_keyframe_time = self.stamp_to_sec(stamp)
 
+        self._last_sync_at_mono = time.monotonic()
+
+    def _sync_watchdog_tick(self):
+        if self._sync_watchdog_s <= 0.0:
+            return
+        now = time.monotonic()
+        if self._last_sync_at_mono is None:
+            if now - self._started_at_mono <= self._sync_watchdog_grace_s:
+                return
+            self._request_exit(
+                2,
+                f"sync watchdog: no successful sync within startup grace "
+                f"{self._sync_watchdog_grace_s:.1f}s",
+            )
+            return
+        gap = now - self._last_sync_at_mono
+        if gap <= self._sync_watchdog_s:
+            return
+        self._request_exit(
+            1,
+            f"sync watchdog: no sync_callback for {gap:.1f}s "
+            f"(limit {self._sync_watchdog_s:.1f}s)",
+        )
+
+    def _request_exit(self, code: int, reason: str):
+        if self._exit_code != 0:
+            return
+        self._exit_code = int(code)
+        self.get_logger().error(f"{reason}; exiting for supervisor restart")
+        rclpy.shutdown()
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyframe-translation", type=float, default=0.03)
     parser.add_argument("--keyframe-rotation-deg", type=float, default=1.0)
+    parser.add_argument(
+        "--sync-watchdog-s",
+        type=float,
+        default=12.0,
+        help="Exit if sync_callback is silent for this many seconds (0 disables).",
+    )
+    parser.add_argument(
+        "--sync-watchdog-grace-s",
+        type=float,
+        default=45.0,
+        help="Allow this long after startup before the first sync_callback.",
+    )
     return parser.parse_args()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = LooperBridgeNode(parse_args())
+    exit_code = 0
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        exit_code = int(getattr(node, "_exit_code", 0) or 0)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+    if exit_code != 0:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

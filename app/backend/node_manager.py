@@ -265,6 +265,11 @@ class BackendNode(Ros2NodeManager):
         self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
         self._last_frame_time: dict[str, float] = {}
         self._looper_bridge_proc: subprocess.Popen | None = None
+        self._looper_bridge_want_running = False
+        self._looper_bridge_last_restart_mono = 0.0
+        self._looper_bridge_restart_cooldown_s = float(
+            os.environ.get('TINYNAV_LOOPER_RESTART_COOLDOWN_S', '10')
+        )
         self._realsense_proc: subprocess.Popen | None = None
         self._perception_proc: subprocess.Popen | None = None
         self._imu_propagation_proc: subprocess.Popen | None = None
@@ -309,6 +314,7 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(String, '/localization/config', self._on_localization_config, 10)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
+        self.create_timer(2.0, self._supervise_looper_bridge)
 
     # ------------------------------------------------------------------ #
     # ROS callbacks                                                        #
@@ -1928,10 +1934,45 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().info(f'Localization odom_source requested from frontend: {source}')
         return source
 
+    def _looper_bridge_cmd(self) -> list[str]:
+        return [
+            'uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py',
+            '--sync-watchdog-s', os.environ.get('TINYNAV_LOOPER_SYNC_WATCHDOG_S', '12'),
+            '--sync-watchdog-grace-s', os.environ.get('TINYNAV_LOOPER_SYNC_WATCHDOG_GRACE_S', '45'),
+        ]
+
+    def _launch_looper_bridge(self, env: dict) -> subprocess.Popen:
+        return self._launch_proc('looper_bridge', self._looper_bridge_cmd(), env=env)
+
+    def _supervise_looper_bridge(self):
+        if self._sensor_mode != 'looper' or not self._looper_bridge_want_running:
+            return
+        proc = self._looper_bridge_proc
+        if proc is not None and proc.poll() is None:
+            return
+        now = time.monotonic()
+        if proc is not None and proc.poll() is not None:
+            self.get_logger().warning(
+                f'looper_bridge exited (code={proc.returncode}); supervisor will restart'
+            )
+            self._looper_bridge_proc = None
+        if self._looper_bridge_proc is not None:
+            return
+        if now - self._looper_bridge_last_restart_mono < self._looper_bridge_restart_cooldown_s:
+            return
+        self._looper_bridge_last_restart_mono = now
+        try:
+            cyclone_env = self._planning_env(os.environ.copy())
+            self._looper_bridge_proc = self._launch_looper_bridge(cyclone_env)
+            self.get_logger().info('looper_bridge restarted by supervisor')
+        except Exception as exc:
+            self.get_logger().error(f'looper_bridge restart failed: {exc}')
+
     def _stop_sensor_procs(self):
         self._planning_log_stop_event.set()
         with self._lock:
             self._planning_occupancy_source = 'depth'
+        self._looper_bridge_want_running = False
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_imu_propagation_proc', '_planning_proc'):
             self._kill_proc(getattr(self, attr))
             setattr(self, attr, None)
@@ -1982,11 +2023,9 @@ class BackendNode(Ros2NodeManager):
         if self._sensor_mode == 'looper':
             self._sync_looper_time()
             cyclone_env = self._planning_env(env)
-            self._looper_bridge_proc = self._launch_proc(
-                'looper_bridge',
-                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
-                env=cyclone_env,
-            )
+            self._looper_bridge_want_running = True
+            self._looper_bridge_last_restart_mono = time.monotonic()
+            self._looper_bridge_proc = self._launch_looper_bridge(cyclone_env)
             self._planning_proc = self._launch_proc(
                 'planning',
                 ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
