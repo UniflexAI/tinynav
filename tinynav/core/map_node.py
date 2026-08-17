@@ -1392,8 +1392,20 @@ class MapNode(Node):
         odom, _ = msg2np(keyframe_odom_msg)
 
         if not self.enable_runtime_pose_graph:
-            self.odom[keyframe_odom_timestamp] = odom
-            self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+            # pose_graph_used_pose must stay in whatever frame self.latest_odom_pose is
+            # currently using (see odom_source / localization_config_callback) --
+            # compute_transform_from_map_to_odom solves T_from_map_to_odom directly from
+            # this dict, and try_publish_nav_path/_publish_target_pose_from_path apply
+            # that T to self.latest_odom_pose. Mixing a VIO-frame T with an EKF-frame
+            # latest_odom_pose (or vice versa) produced a garbage target pose -- the
+            # robot would spin in place trying to reach it. Falls back to the raw VIO
+            # keyframe odom (`odom`) if EKF is selected but hasn't produced a pose yet.
+            if self.odom_source == 'ekf' and self.latest_odom_pose is not None:
+                pose_for_graph = self.latest_odom_pose
+            else:
+                pose_for_graph = odom
+            self.odom[keyframe_odom_timestamp] = pose_for_graph
+            self.pose_graph_used_pose[keyframe_image_timestamp] = pose_for_graph
             self.last_keyframe_timestamp = keyframe_odom_timestamp
             return
 
