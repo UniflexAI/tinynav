@@ -34,7 +34,8 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
 
-from tinynav.core.planning_node import GO2_CONFIG, ObstacleConfig
+from tinynav.core.planning_node import ObstacleConfig
+from tinynav.core.robot_specs import GO2_CONFIG
 from tool.simulator.planning_scene import (
     SimObject,
     box,
