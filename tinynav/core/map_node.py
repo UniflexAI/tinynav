@@ -2,7 +2,7 @@ import rclpy
 import os
 import time
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Point32
 from nav_msgs.msg import Path, Odometry
 from std_msgs.msg import Bool, String, Float32
 import numpy as np
@@ -11,7 +11,7 @@ import json
 
 import heapq
 from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, PointCloud
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
 import cv2
@@ -28,7 +28,8 @@ from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
-from tinynav.core.path_speed import PathSpeedIndex
+from tinynav.core.path_speed import PathSpeedIndex, bake as bake_path_speed
+from tinynav.core.path_climb import PathClimbIndex, bake as bake_path_climb, n_climbing
 logger = logging.getLogger(__name__)
 
 
@@ -206,6 +207,28 @@ def lookahead_distance_m(speed_cap_mps: float) -> float:
     return float(np.clip(speed * _LOOKAHEAD_S, _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
 
 
+# ── climb prior ─────────────────────────────────────────────────────────────── #
+# Where the capture path climbs, as geometry planning_node applies per cell (it relaxes
+# the obstacle z-span filter near these points -- see climb_region_radius_m there).
+CLIMB_REGION_TOPIC = '/planning/climb_region'
+# The same prior collapsed to "is the robot itself on it", which is all the app's
+# indicator wanted. Kept separate so neither has to answer the other's question.
+ON_STAIRS_TOPIC = '/planning/on_stairs'
+# Timer rate for the map-frame priors published here.
+MAP_PRIOR_HZ = 2.0
+# Send-side cull only -- NOT the region's width, which the planner owns
+# (climb_region_radius_m).
+CLIMB_REGION_CULL_M = 3.5
+# False = don't derive the region from the capture path at all: no labels are loaded or
+# baked, the region publishes empty, and the planner falls back to its strict span filter
+# everywhere -- i.e. unmodified upstream behaviour. The prior is only worth having while
+# the labels are trustworthy; per-map VIO z is noisy enough that a false band RELAXES the
+# obstacle filter on flat ground, so being able to switch it off is a safety valve, not a
+# debug flag. A ROS parameter (`climb_prior`) like planning_node's own climb knobs, so a
+# site can disable it from the launch without a rebuild.
+CLIMB_PRIOR_DEFAULT = True
+
+
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
         """Initialization
@@ -239,6 +262,10 @@ class MapNode(Node):
         # Capture-speed prior: the operator's local speed (path_speed.npy) at the
         # robot's pose-in-map. planning_node caps peak forward speed by it.
         self.speed_cap_pub = self.create_publisher(Float32, "/planning/speed_cap", 10)
+        # Climb prior: the capture samples labelled climbing, as geometry planning_node
+        # applies per cell, plus the collapsed "am I on it" flag for the app.
+        self.climb_region_pub = self.create_publisher(PointCloud, CLIMB_REGION_TOPIC, 10)
+        self.on_stairs_pub = self.create_publisher(Bool, ON_STAIRS_TOPIC, 10)
 
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
@@ -266,8 +293,11 @@ class MapNode(Node):
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
-        speed_path = f"{tinynav_map_path}/path_speed.npy"
-        self.speed_index = PathSpeedIndex.load(speed_path) if os.path.exists(speed_path) else None
+        self.speed_index = None
+        self.climb_index = None
+        self.declare_parameter('climb_prior', CLIMB_PRIOR_DEFAULT)
+        self._climb_prior = bool(self.get_parameter('climb_prior').value)
+        self.load_map_priors(tinynav_map_path)
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
         self.vlad_timestamps = list(self.map_poses.keys())
@@ -331,6 +361,68 @@ class MapNode(Node):
 
         self._save_completed = False
         self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
+        # Its own timer, not nav_target_timer_callback: that one returns early without
+        # POIs, and the planner needs the climb region whenever it is planning at all.
+        self.map_prior_timer = self.create_timer(1.0 / MAP_PRIOR_HZ, self.tick_map_priors)
+
+    def load_map_priors(self, tinynav_map_path: str) -> None:
+        """Load this map's capture-path priors — speed and climb. One method so a node
+        that swaps maps at runtime refreshes both in one call.
+
+        Never raises: a bad or missing prior degrades to "no data" (planning falls back
+        to vx_max for speed, and to its strict span filter everywhere for climb), which
+        is the safe direction and must not stop nav."""
+        speed_path = f"{tinynav_map_path}/path_speed.npy"
+        try:
+            # Bakes when missing OR stale -- a reloop rewrites poses.npy and every prior
+            # derived from it, so the check is on the mtime, not just existence.
+            self.get_logger().info(f"[speed] {bake_path_speed(tinynav_map_path)}")
+            self.speed_index = (PathSpeedIndex.load(speed_path)
+                                if os.path.exists(speed_path) else None)
+        except Exception as exc:
+            self.get_logger().error(f"[speed] {speed_path} unusable: {exc}")
+            self.speed_index = None
+
+        climb_path = f"{tinynav_map_path}/path_climb.npy"
+        self.climb_index = None
+        if not self._climb_prior:
+            # Before the bake, so switching off also stops writing labels nothing reads.
+            self.get_logger().info(
+                "[climb] climb_prior=false — no climb prior, strict everywhere")
+            return
+        try:
+            self.get_logger().info(f"[climb] {bake_path_climb(tinynav_map_path)}")
+            if os.path.exists(climb_path):
+                self.climb_index = PathClimbIndex.load(climb_path)
+        except Exception as exc:
+            self.get_logger().error(f"[climb] {climb_path} unusable: {exc}")
+            return
+        if self.climb_index is None:
+            self.get_logger().warning(
+                f"[climb] no labels for {tinynav_map_path} — strict everywhere")
+            return
+        self.get_logger().info(
+            f"[climb] {n_climbing(self.climb_index.pts)}/"
+            f"{len(self.climb_index.pts)} capture samples labelled climbing")
+
+    def tick_map_priors(self) -> None:
+        """Publish the climbing samples around the robot, in the odom frame planning
+        works in. Empty (but still published) when there is no prior or no fix, so a
+        stale region never outlives the map it came from."""
+        T = self.T_from_map_to_odom
+        msg = PointCloud()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "world"
+        on_stairs = False
+        if self.climb_index is not None and T is not None and self.latest_odom_pose is not None:
+            here = (np.linalg.inv(T) @ self.latest_odom_pose)[:3, 3]
+            on_stairs = self.climb_index.on_stairs(here)
+            pts_in_map = self.climb_index.climbing_within(here, CLIMB_REGION_CULL_M)
+            pts_in_odom = (T[:3, :3] @ pts_in_map.T + T[:3, 3:4]).T
+            msg.points = [Point32(x=float(p[0]), y=float(p[1]), z=float(p[2]))
+                          for p in pts_in_odom]
+        self.climb_region_pub.publish(msg)
+        self.on_stairs_pub.publish(Bool(data=bool(on_stairs)))
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)

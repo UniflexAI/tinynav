@@ -15,8 +15,11 @@ Pure numpy; no ROS. Rides on `poses.npy` (timestamp -> 4x4) which build_map save
 using the timestamps to recover speed. Shared lookup scaffolding lives in path_prior.
 """
 from __future__ import annotations
+import os
+
 import numpy as np
-from tinynav.core.path_prior import poses_to_positions, horizontal_arclength, PathSampleIndex
+from tinynav.core.path_prior import (
+    poses_to_positions, horizontal_arclength, is_stale, PathSampleIndex)
 
 # Defaults (tunable).
 WIN_M = 1.0            # half-window horizontal arclength (m) for local speed aggregation
@@ -75,3 +78,22 @@ class PathSpeedIndex(PathSampleIndex):
         the online clearance schedule still governs)."""
         v = self.nearest_value(position_xyz)
         return v if (v is not None and np.isfinite(v) and v > 0.0) else float('inf')
+
+
+def bake(map_path: str, force: bool = False) -> str:
+    """Write `path_speed.npy` into `map_path`; returns a one-line summary.
+
+    The counterpart of `path_climb.bake`, with the same contract: rebake when the
+    labels are older than the poses, and never raise for an unusable map -- no speed
+    prior means planning falls back to vx_max, which is the fail-safe."""
+    out_path = os.path.join(map_path, 'path_speed.npy')
+    if not force and not is_stale(map_path, 'path_speed.npy'):
+        return 'path_speed.npy: already baked'
+    poses_path = os.path.join(map_path, 'poses.npy')
+    if not os.path.exists(poses_path):
+        return 'path_speed.npy: skipped, no poses.npy'
+    speeds = compute_path_speed(np.load(poses_path, allow_pickle=True).item())
+    np.save(out_path, speeds)
+    finite = np.isfinite(speeds[:, 3])
+    med = float(np.median(speeds[finite, 3])) if finite.any() else float('nan')
+    return f'path_speed.npy: median capture speed {med:.2f} m/s'

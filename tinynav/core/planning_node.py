@@ -7,7 +7,6 @@ heading for turn-in-place candidates), subject to a hard collision filter and a
 reverse gate.
 """
 
-import os
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
 from dataclasses import dataclass
@@ -373,12 +372,14 @@ class PlanningNode(Node):
 
         self.resolution = 0.05
         # Ground-anchored span filter (walls/bumps vs stair risers) now applies
-        # everywhere since TINYNAV_CLIMB_PRIOR=0 disables the climb-region relaxation
-        # globally -- so its default is the same single-voxel noise floor as the
+        # everywhere when map_node's `climb_prior` parameter is false (no climb-region
+        # relaxation at all) -- so its default is the same single-voxel noise floor as the
         # floating-obstacle check, to avoid filtering out real low/thin obstacles.
-        # Env-overridable for site tuning without a code edit.
+        # A ROS parameter, like the climb knobs below, so a site can retune from the
+        # launch without a code edit.
+        self.declare_parameter('min_wall_span_m', ObstacleConfig.min_wall_span_m)
         self.obstacle_config = ObstacleConfig(
-            min_wall_span_m=float(os.environ.get('TINYNAV_MIN_WALL_SPAN_M', '0.05')))
+            min_wall_span_m=float(self.get_parameter('min_wall_span_m').value))
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
@@ -439,18 +440,16 @@ class PlanningNode(Node):
         # No message, or a stale stream, means no region, i.e. strict everywhere.
         # Both radius and span are deliberately small: a relaxed cell cannot see an
         # obstacle shorter than the span, and the labels that open these regions are
-        # inferred from path z, which VIO drift fakes. Measured on n2n3-backward: 21
-        # labelled runs, 4 real, 61% of the route relaxed at radius 1.5. Env-overridable
-        # so the site can be retuned without a code edit.
-        self.declare_parameter('climb_region_radius_m',
-                               float(os.environ.get('TINYNAV_CLIMB_REGION_RADIUS_M', '0.75')))
+        # inferred from path z, which VIO drift fakes -- a generous radius relaxed most
+        # of a route on the strength of a handful of real runs. A ROS parameter, so a
+        # site can be retuned from the launch without a code edit.
+        self.declare_parameter('climb_region_radius_m', 0.75)
         self._climb_region_cells = int(round(
             float(self.get_parameter('climb_region_radius_m').value) / self.resolution))
         self.declare_parameter('climb_region_ttl_s', 3.0)
         self._climb_region_ttl_ns = int(float(self.get_parameter('climb_region_ttl_s').value) * 1e9)
         # 0.2 keeps a ~0.15m riser reading as a step while a 0.2m+ obstacle survives.
-        self.declare_parameter('climb_min_wall_span_m',
-                               float(os.environ.get('TINYNAV_CLIMB_MIN_WALL_SPAN_M', '0.2')))
+        self.declare_parameter('climb_min_wall_span_m', 0.2)
         self._climb_min_wall_span_m = float(self.get_parameter('climb_min_wall_span_m').value)
         self._climb_points = np.empty((0, 2))
         self._climb_stamp_ns = None
@@ -466,8 +465,7 @@ class PlanningNode(Node):
         # capture is deliberately slow for mapping stability and replay can afford to
         # be quicker, but the operator's speed is already the best evidence of what
         # this stretch tolerates, so scaling it up just overdrives the tight parts.
-        self.declare_parameter('capture_speed_gain',
-                               float(os.environ.get('TINYNAV_CAPTURE_SPEED_GAIN', '1.0')))
+        self.declare_parameter('capture_speed_gain', 1.0)
         self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
         self.declare_parameter('speed_cap_ttl_s', 2.0)
         self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)

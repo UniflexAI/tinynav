@@ -38,6 +38,7 @@ from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.path_speed import compute_path_speed
+from tinynav.core.path_climb import compute_path_climb, n_climbing
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
 from tinynav.tinynav_cpp_bind import pose_graph_solve
@@ -889,6 +890,18 @@ class BuildMapNode(Node):
             self.get_logger().info(f"Saved path_speed.npy (median capture speed {med:.2f} m/s)")
         except Exception as e:
             self.get_logger().error(f"Failed to compute path_speed: {e}")
+
+        # Climb prior: where the capture path went up or down, so the planner can treat
+        # a riser there as a step rather than a wall. Same poses, same failure policy --
+        # no labels means strict everywhere, which is the safe direction.
+        try:
+            path_climb = compute_path_climb(self.pose_graph_used_pose)
+            np.save(f"{self.map_save_path}/path_climb.npy", path_climb)
+            self.get_logger().info(
+                f"Saved path_climb.npy ({n_climbing(path_climb)}/{len(path_climb)} "
+                "samples climbing)")
+        except Exception as e:
+            self.get_logger().error(f"Failed to compute path_climb: {e}")
 
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
