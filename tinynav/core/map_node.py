@@ -439,6 +439,7 @@ class MapNode(Node):
         tinynav_db_path: str,
         tinynav_map_path: str,
         verbose_timer: bool = True,
+        enable_first_done: bool = False,
         initial_map_to_odom_transform_path: str | None = None,
     ):
         """Initialization
@@ -447,6 +448,7 @@ class MapNode(Node):
             tinynav_db_path (str): Directory to store output data.
             tinynav_map_path (str): Directory to load the pre-built map.
             verbose_timer (bool): Whether to use verbose timer output.
+            enable_first_done (bool): If true, stop keyframe relocalization after the first success.
             initial_map_to_odom_transform_path (str | None): Path to a .npy 4x4
                 T_from_map_to_odom to seed this session with (map handoff), instead of
                 waiting for a fresh cold relocalization/RTK fix.
@@ -454,6 +456,7 @@ class MapNode(Node):
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
+        self.enable_first_done = enable_first_done
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
@@ -469,6 +472,8 @@ class MapNode(Node):
         # 'vio' (default) or 'ekf', live-toggled via /localization/config -- see
         # _continuous_odom_vio_callback / _continuous_odom_ekf_callback below.
         self.odom_source = 'vio'
+        self._latest_vio_pose_raw = None
+        self._latest_ekf_pose_raw = None
         self.continuous_odom_sub = self.create_subscription(
             Odometry, '/slam/odometry', self._continuous_odom_vio_callback, 100)
         self.continuous_odom_ekf_sub = self.create_subscription(
@@ -480,6 +485,12 @@ class MapNode(Node):
         )
         self.localization_config_sub = self.create_subscription(
             String, '/localization/config', self.localization_config_callback, _localization_config_qos)
+        # Set when an odom_source switch needs to adjust _rtk_yaw_offset but the new
+        # source hadn't published anything to this node yet -- resolved in
+        # _continuous_odom_vio_callback / _continuous_odom_ekf_callback. See
+        # localization_config_callback for why this exists.
+        self._pending_rtk_yaw_adjust_heading_old = None
+        self._pending_rtk_yaw_adjust_source = None
         self.rtk_map_pose_sub = self.create_subscription(Odometry, '/rtk/map_pose', self.rtk_map_pose_callback, 20)
         self.rtk_init_status_sub = self.create_subscription(String, '/rtk/init_status', self.rtk_init_status_callback, 10)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
@@ -513,9 +524,9 @@ class MapNode(Node):
         self.relocalization_threshold = 0.70
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 50
-        self.night_relocalization_min_match_count = 30
-        self.night_relocalization_min_landmark_count = 50
-        self.night_relocalization_min_inlier_count = 30
+        self.night_relocalization_min_match_count = 40
+        self.night_relocalization_min_landmark_count = 60
+        self.night_relocalization_min_inlier_count = 40
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
@@ -629,9 +640,18 @@ class MapNode(Node):
         # relocalization -- node_manager's _on_relocalization sets its own _localized=True
         # off that same topic, so this needs no other changes to how "localized" is tracked.
         self._seed_map_to_odom_pending = False
+        self._handoff_map_pose = None
+        self._rebind_handoff_pending = False
+        self._localization_config_seen = False
+        self._seed_ready_after = None
         if initial_map_to_odom_transform_path is not None:
             self.T_from_map_to_odom = np.load(initial_map_to_odom_transform_path)
             self._seed_map_to_odom_pending = True
+            # Wait briefly for /localization/config so the seed is applied in the
+            # active odom frame (ekf vs vio). Otherwise the first /slam/odometry
+            # (vio, the default) consumes the seed, then vio->ekf clears T and
+            # navigation waits for RTK/visual reloc.
+            self._seed_ready_after = time.monotonic() + 0.5
             self.get_logger().info(
                 f"Seeded T_from_map_to_odom from {initial_map_to_odom_transform_path} for map handoff"
             )
@@ -1225,12 +1245,38 @@ class MapNode(Node):
             self.baseline = -Tx / fx
             self.destroy_subscription(self.camera_info_sub)
 
+    def _apply_rtk_yaw_adjustment(self, heading_old: float, new_pose_raw: np.ndarray, source_label: str) -> None:
+        new_fwd = new_pose_raw[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        heading_new = np.arctan2(new_fwd[1], new_fwd[0])
+        delta = heading_new - heading_old
+        self._rtk_yaw_offset += delta
+        self.get_logger().info(
+            f"Adjusted _rtk_yaw_offset by {np.degrees(delta):+.1f}deg for odom_source switch -> {source_label}"
+        )
+
     def _continuous_odom_vio_callback(self, odom_msg: Odometry):
+        # Tracked unconditionally (not just while active) so a switch to 'ekf' can
+        # still cross-reference "what was vio's heading right at the switch" -- see
+        # localization_config_callback's _rtk_yaw_offset adjustment.
+        self._latest_vio_pose_raw, _ = msg2np(odom_msg)
+        if (self._pending_rtk_yaw_adjust_source == 'vio'
+                and self._pending_rtk_yaw_adjust_heading_old is not None
+                and self._rtk_yaw_offset is not None):
+            self._apply_rtk_yaw_adjustment(self._pending_rtk_yaw_adjust_heading_old, self._latest_vio_pose_raw, 'vio')
+            self._pending_rtk_yaw_adjust_heading_old = None
+            self._pending_rtk_yaw_adjust_source = None
         if self.odom_source != 'vio':
             return
         self.continuous_odom_callback(odom_msg)
 
     def _continuous_odom_ekf_callback(self, odom_msg: Odometry):
+        self._latest_ekf_pose_raw, _ = msg2np(odom_msg)
+        if (self._pending_rtk_yaw_adjust_source == 'ekf'
+                and self._pending_rtk_yaw_adjust_heading_old is not None
+                and self._rtk_yaw_offset is not None):
+            self._apply_rtk_yaw_adjustment(self._pending_rtk_yaw_adjust_heading_old, self._latest_ekf_pose_raw, 'ekf')
+            self._pending_rtk_yaw_adjust_heading_old = None
+            self._pending_rtk_yaw_adjust_source = None
         if self.odom_source != 'ekf':
             return
         self.continuous_odom_callback(odom_msg)
@@ -1239,12 +1285,45 @@ class MapNode(Node):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
         self.latest_odom_pose, _ = msg2np(odom_msg)
         self.latest_odom_stamp_msg = odom_msg.header.stamp
+        if self._rebind_handoff_pending:
+            if self._rebind_handoff_to_current_odom():
+                self._rebind_handoff_pending = False
         if self._seed_map_to_odom_pending:
-            self._seed_map_to_odom_pending = False
-            pose_in_world = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
-            self.relocation_pub.publish(np2msg(pose_in_world, self.latest_odom_stamp_msg, "world", "camera"))
-            self.first_done = True
-            self.get_logger().info(f"Published seeded map-handoff pose: xyz={pose_in_world[:3, 3]}")
+            if (
+                not self._localization_config_seen
+                and self._seed_ready_after is not None
+                and time.monotonic() < self._seed_ready_after
+            ):
+                return
+            self._apply_map_handoff_seed()
+
+
+    def _apply_map_handoff_seed(self) -> None:
+        if not self._seed_map_to_odom_pending or self.T_from_map_to_odom is None or self.latest_odom_pose is None:
+            return
+        self._seed_map_to_odom_pending = False
+        pose_in_world = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
+        self._handoff_map_pose = pose_in_world.copy()
+        self.relocation_pub.publish(np2msg(pose_in_world, self.latest_odom_stamp_msg, "world", "camera"))
+        self.first_done = True
+        self.get_logger().info(
+            f"Published seeded map-handoff pose: xyz={pose_in_world[:3, 3]} odom_source={self.odom_source}"
+        )
+
+    def _rebind_handoff_to_current_odom(self) -> bool:
+        if self._handoff_map_pose is None or self.latest_odom_pose is None:
+            return False
+        if self._has_active_rtk_transform():
+            return False
+        self.T_from_map_to_odom = self.latest_odom_pose @ np.linalg.inv(self._handoff_map_pose)
+        stamp = self.latest_odom_stamp_msg or self.get_clock().now().to_msg()
+        self.relocation_pub.publish(np2msg(self._handoff_map_pose, stamp, "world", "camera"))
+        self.first_done = True
+        xyz = self._handoff_map_pose[:3, 3]
+        self.get_logger().info(
+            f"Re-bound map-handoff seed to odom_source={self.odom_source} xyz={xyz}"
+        )
+        return True
 
     def localization_config_callback(self, msg: String):
         try:
@@ -1261,8 +1340,82 @@ class MapNode(Node):
             else:
                 old = self.odom_source
                 self.odom_source = odom_source
+                self._localization_config_seen = True
+                if self._seed_map_to_odom_pending:
+                    new_pose_raw = self._latest_vio_pose_raw if odom_source == 'vio' else self._latest_ekf_pose_raw
+                    if new_pose_raw is not None:
+                        self.latest_odom_pose = new_pose_raw
+                        self._apply_map_handoff_seed()
                 if old != odom_source:
                     self.get_logger().info(f"Updated localization odom_source: {old} -> {odom_source}")
+                    # compute_transform_from_map_to_odom() pose-graph-optimizes the last
+                    # 100 entries of self.relocalization_poses against pose_graph_used_pose.
+                    # Those two dicts accumulate for the whole session, so right after a
+                    # switch that window is a mix of old-frame and new-frame entries --
+                    # optimizing across a ~100+ deg frame jump (measured between vio and
+                    # ekf) produces a T_from_map_to_odom that matches neither frame. Drop
+                    # all of it and force a fresh relocalization purely in the new frame.
+                    self.relocalization_poses = {}
+                    self.relocalization_pose_weights = {}
+                    self.pose_graph_used_pose = {}
+                    self.odom = {}
+                    # Keep a map-handoff seed. Clearing T here used to throw away the
+                    # calibrated handoff pose, so EKF mode could not plan until RTK or
+                    # visual reloc rebuilt T. Rebind the same map pose into the new
+                    # odom frame instead.
+                    if self._handoff_map_pose is not None and not self._has_active_rtk_transform():
+                        self.T_from_map_to_odom = None
+                        self.first_done = False
+                        self._rebind_handoff_pending = True
+                        new_pose_raw = self._latest_vio_pose_raw if odom_source == 'vio' else self._latest_ekf_pose_raw
+                        if new_pose_raw is not None:
+                            self.latest_odom_pose = new_pose_raw
+                            if self._rebind_handoff_to_current_odom():
+                                self._rebind_handoff_pending = False
+                    elif self._seed_map_to_odom_pending:
+                        self.first_done = False
+                    else:
+                        self.T_from_map_to_odom = None
+                        self.first_done = False
+                    # _rtk_yaw_offset is locked once from self.latest_odom_pose's heading on
+                    # the first RTK fix and never recomputed -- while RTK is ACTIVE it drives
+                    # T_from_map_to_odom directly (see _update_transform_from_rtk_map_pose),
+                    # bypassing all of the pose-graph state cleared above. A stale offset
+                    # computed against the old odom_source's heading convention rotates
+                    # T_from_map_to_odom wrong by the same kind of frame mismatch.
+                    #
+                    # Re-locking it from scratch (a single fresh heading sample from the new
+                    # source) was tried and did not fix it -- that single sample can itself
+                    # be a noisy/unstable EKF reading right after the switch, with no way to
+                    # catch a bad lock afterward. Instead adjust the *already-validated*
+                    # offset by the measured heading delta between the two sources at this
+                    # instant, using pose trackers that update regardless of which one is
+                    # active (_latest_vio_pose_raw / _latest_ekf_pose_raw). This only assumes
+                    # the two sources agree on heading *right now*, not that either one's
+                    # absolute reading is itself correct.
+                    old_pose_raw = self._latest_vio_pose_raw if old == 'vio' else self._latest_ekf_pose_raw
+                    new_pose_raw = self._latest_vio_pose_raw if odom_source == 'vio' else self._latest_ekf_pose_raw
+                    if self._rtk_yaw_offset is not None and old_pose_raw is not None:
+                        old_fwd = old_pose_raw[:3, :3] @ np.array([0.0, 0.0, 1.0])
+                        heading_old = np.arctan2(old_fwd[1], old_fwd[0])
+                        if new_pose_raw is not None:
+                            self._apply_rtk_yaw_adjustment(heading_old, new_pose_raw, odom_source)
+                        else:
+                            # The new source hasn't published anything to this (just-restarted
+                            # or just-switched) node yet -- e.g. odom_source flipped seconds
+                            # after map_node itself restarted, before the first
+                            # /slam/odometry_fused message arrived. Defer: apply the same
+                            # adjustment the moment that source's callback next fires (see
+                            # _continuous_odom_vio_callback / _continuous_odom_ekf_callback),
+                            # instead of falling through to a from-scratch re-lock.
+                            self._pending_rtk_yaw_adjust_heading_old = heading_old
+                            self._pending_rtk_yaw_adjust_source = odom_source
+                            self.get_logger().info(
+                                f"_rtk_yaw_offset adjustment deferred: no {odom_source} pose yet "
+                                f"(will apply on its first message)"
+                            )
+                    else:
+                        self._rtk_yaw_offset = None
 
     def rtk_init_status_callback(self, msg: String):
         if self.rtk_mode != "replace":
@@ -1333,6 +1486,12 @@ class MapNode(Node):
             fwd = odom_pose[:3, :3] @ np.array([0.0, 0.0, 1.0])   # camera forward, odom world
             heading_odom = np.arctan2(fwd[1], fwd[0])
             self._rtk_yaw_offset = heading_odom - psi_map
+            self.get_logger().info(
+                f"Locked _rtk_yaw_offset: odom_source={self.odom_source} "
+                f"heading_odom={np.degrees(heading_odom):.1f}deg psi_map={np.degrees(psi_map):.1f}deg "
+                f"-> _rtk_yaw_offset={np.degrees(self._rtk_yaw_offset):.1f}deg "
+                f"odom_pose_xyz={odom_pose[:3, 3].tolist()}"
+            )
         phi = self._rtk_yaw_offset
         c, s = np.cos(phi), np.sin(phi)
         Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
@@ -1454,10 +1613,11 @@ class MapNode(Node):
             return
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
-        if success:
-            self.compute_transform_from_map_to_odom()
-            self.first_done = True
+        if not (self.enable_first_done and self.first_done):
+            success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+            if success:
+                self.compute_transform_from_map_to_odom()
+                self.first_done = True
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -1474,8 +1634,20 @@ class MapNode(Node):
         odom, _ = msg2np(keyframe_odom_msg)
 
         if not self.enable_runtime_pose_graph:
-            self.odom[keyframe_odom_timestamp] = odom
-            self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+            # pose_graph_used_pose must stay in whatever frame self.latest_odom_pose is
+            # currently using (see odom_source / localization_config_callback) --
+            # compute_transform_from_map_to_odom solves T_from_map_to_odom directly from
+            # this dict, and try_publish_nav_path/_publish_target_pose_from_path apply
+            # that T to self.latest_odom_pose. Mixing a VIO-frame T with an EKF-frame
+            # latest_odom_pose (or vice versa) produced a garbage target pose -- the
+            # robot would spin in place trying to reach it. Falls back to the raw VIO
+            # keyframe odom (`odom`) if EKF is selected but hasn't produced a pose yet.
+            if self.odom_source == 'ekf' and self.latest_odom_pose is not None:
+                pose_for_graph = self.latest_odom_pose
+            else:
+                pose_for_graph = odom
+            self.odom[keyframe_odom_timestamp] = pose_for_graph
+            self.pose_graph_used_pose[keyframe_image_timestamp] = pose_for_graph
             self.last_keyframe_timestamp = keyframe_odom_timestamp
             return
 
@@ -1828,6 +2000,13 @@ class MapNode(Node):
             poi = self.pois[self.poi_index]
             diff_position_norm_xy = np.linalg.norm(poi[:2] - pose_in_map_position[:2])
             diff_position_norm_z = np.linalg.norm(poi[2] - pose_in_map_position[2])
+            self.get_logger().info(
+                f"POI arrival check: poi_index={self.poi_index} odom_source={self.odom_source} "
+                f"xy_dist={diff_position_norm_xy:.2f}m (thr={self.poi_distance}) "
+                f"z_dist={diff_position_norm_z:.2f}m (thr=2.0, z_disable={self.z_disable}) "
+                f"pose_in_map={pose_in_map_position.tolist()} poi={poi.tolist()}",
+                throttle_duration_sec=1.0,
+            )
             if diff_position_norm_xy < self.poi_distance and (self.z_disable or diff_position_norm_z < 2.0):
                 arrived_msg = String()
                 arrived_msg.data = json.dumps(self._nav_progress_payload(
@@ -2292,6 +2471,14 @@ class MapNode(Node):
                 target_position_in_map[2] = pose_in_map[:3, 3][2]
             T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
             target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+            self.get_logger().info(
+                f"target_pose_debug: odom_source={self.odom_source} "
+                f"pose_in_origin_odom_xyz={pose_in_origin_odom[:3, 3].tolist()} "
+                f"pose_in_map_xyz={pose_in_map[:3, 3].tolist()} "
+                f"target_position_in_map={target_position_in_map.tolist()} "
+                f"target_position_in_odom={target_position_in_odom.tolist()}",
+                throttle_duration_sec=1.0,
+            )
             dummy_pose = np.eye(4)
             dummy_pose[:3, 3] = target_position_in_odom
             self.target_pose_pub.publish(np2msg(
@@ -2444,6 +2631,12 @@ def main(args=None):
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
     parser.add_argument(
+        "--enable_first_done",
+        action="store_true",
+        default=False,
+        help="Skip keyframe relocalization after the first successful relocalization",
+    )
+    parser.add_argument(
         "--initial_map_to_odom_transform",
         type=str,
         default=None,
@@ -2458,6 +2651,7 @@ def main(args=None):
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
                    verbose_timer=parsed_args.verbose_timer,
+                   enable_first_done=parsed_args.enable_first_done,
                    initial_map_to_odom_transform_path=parsed_args.initial_map_to_odom_transform)
 
     rclpy.spin(node)

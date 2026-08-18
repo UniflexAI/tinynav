@@ -161,6 +161,7 @@ class BackendNode(Ros2NodeManager):
         # Planning / localization state (read via get_planning_snapshot)
         self._odom_pose: dict | None = None
         self._odom_pose_received_at: float | None = None
+        self._ekf_odom_pose: dict | None = None
         self._odom_pose_at_kf: dict | None = None  # odom pose snapshotted at last mapPose update
         self._map_pose: dict | None = None
         self._localized: bool = False
@@ -191,6 +192,7 @@ class BackendNode(Ros2NodeManager):
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
         self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
+        self.create_subscription(Odometry, '/slam/odometry_fused', self._on_ekf_odom, 10)
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
@@ -698,6 +700,28 @@ class BackendNode(Ros2NodeManager):
             return now.hour >= 18
         return now.hour >= 19
 
+    def _load_nav_flow_enable_first_done(self) -> bool:
+        config_path = os.path.join(self.map_path, 'nav_flow.json')
+        if not os.path.exists(config_path):
+            return False
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read nav_flow.json: {e}')
+            return False
+        if not isinstance(config, dict):
+            return False
+        value = config.get('enable_first_done', False)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+        if isinstance(value, (int, float)):
+            return bool(value)
+        self.get_logger().warn(f'Invalid nav_flow enable_first_done value: {value!r}')
+        return False
+
     def _load_nav_flow_rtk_mode(self) -> str:
         config_path = os.path.join(self.map_path, 'nav_flow.json')
         if not os.path.exists(config_path):
@@ -967,6 +991,17 @@ class BackendNode(Ros2NodeManager):
             self._publish_cmd_vel(0.0, angular_z)
             time.sleep(interval)
 
+    def _get_pose_for_lookat(self, *, max_wait_s: float = 2.0) -> dict | None:
+        """Return map-frame pose for lookat, waiting briefly for a fresh /mapping/current_pose_in_map update."""
+        deadline = time.monotonic() + max(0.0, max_wait_s)
+        while True:
+            with self._lock:
+                if self._map_pose is not None:
+                    return dict(self._map_pose)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.05)
+
     def _run_map_handoff_lookat(self, lookat: int | str, timeout_s: float, yaw_tolerance_deg: float) -> None:
         try:
             pois = self._load_pois_by_ref()
@@ -976,8 +1011,12 @@ class BackendNode(Ros2NodeManager):
         if lookat not in pois:
             self.get_logger().warn(f'Map handoff lookat POI {lookat!r} not found in current map')
             return
-        with self._lock:
-            pose = dict(self._map_pose) if self._map_pose is not None else None
+
+        # Stop path following before taking direct /cmd_vel ownership for the in-place turn.
+        self._set_nav_active(False)
+        self._publish_cmd_vel(0.0, 0.0)
+
+        pose = self._get_pose_for_lookat()
         if pose is None:
             self.get_logger().warn('Map handoff lookat skipped: no current map pose')
             return
@@ -1011,6 +1050,7 @@ class BackendNode(Ros2NodeManager):
             timeout_s=timeout_s,
             yaw_tolerance=math.radians(yaw_tolerance_deg),
         )
+        self._publish_cmd_vel(0.0, 0.0)
         self.get_logger().info(f'Map handoff lookat {"finished" if ok else "continued after timeout"}')
 
     def _maybe_seed_map_handoff(
@@ -1052,6 +1092,7 @@ class BackendNode(Ros2NodeManager):
         poi_list = rule['poi_list']
         self.get_logger().info(
             f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
+            + (f", lookat={rule.get('lookat')!r}" if rule.get('lookat') is not None else '')
         )
         # Snapshot the live source-map localization NOW, before cmd_stop_nav_nodes/
         # _set_active_map_link tear down this session's state below -- this is the one
@@ -1136,13 +1177,25 @@ class BackendNode(Ros2NodeManager):
             except Exception:
                 pass
 
+    def _on_ekf_odom(self, msg: Odometry):
+        pose = self._odom_to_dict(msg, source='ekf')
+        with self._lock:
+            self._ekf_odom_pose = pose
+
+    def _active_odom_pose_locked(self) -> dict | None:
+        if self._odom_source == 'ekf':
+            return self._ekf_odom_pose or self._odom_pose_at_kf or self._odom_pose
+        return self._odom_pose_at_kf or self._odom_pose
+
     def _on_pose_in_map(self, msg: Odometry):
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
             was_localized = self._localized
             self.current_pose = pose
             self._map_pose = pose
-            self._odom_pose_at_kf = self._odom_pose  # freeze odom at this keyframe
+            self._odom_pose_at_kf = (
+                self._ekf_odom_pose if self._odom_source == 'ekf' else self._odom_pose
+            )
             self._localized = True
         if not was_localized:
             self._on_localization_achieved()
@@ -1440,11 +1493,21 @@ class BackendNode(Ros2NodeManager):
         """
         with self._lock:
             map_pose = self._map_pose
-            odom_pose = self._odom_pose_at_kf or self._odom_pose
+            odom_source = self._odom_source
+            odom_pose = self._active_odom_pose_locked()
         if map_pose is None or odom_pose is None:
+            self.get_logger().warning(
+                f'Map handoff seed skipped: map_pose={map_pose is not None} '
+                f'odom_pose={odom_pose is not None} odom_source={odom_source}'
+            )
             return None
         pose_in_map = self._pose_dict_to_matrix(map_pose)
         pose_in_odom = self._pose_dict_to_matrix(odom_pose)
+        self.get_logger().info(
+            f'Map handoff live T_from_map_to_odom using odom_source={odom_source} '
+            f'odom_xyz=({odom_pose["x"]:.2f},{odom_pose["y"]:.2f},{odom_pose["z"]:.2f}) '
+            f'map_xyz=({map_pose["x"]:.2f},{map_pose["y"]:.2f},{map_pose["z"]:.2f})'
+        )
         return pose_in_odom @ np.linalg.inv(pose_in_map)
 
     def _transform_path_via_tf(self, path: list) -> list:
@@ -1908,9 +1971,21 @@ class BackendNode(Ros2NodeManager):
             raise ValueError(f"Invalid odom_source: {source!r}")
         with self._lock:
             self._odom_source = source
-        self._localization_config_pub.publish(String(data=json.dumps({'odom_source': source})))
+        self._publish_odom_source_config(source)
         self.get_logger().info(f'Localization odom_source requested from frontend: {source}')
         return source
+
+    def _publish_odom_source_config(self, source: str | None = None) -> str:
+        with self._lock:
+            effective = self._odom_source if source is None else source
+        if effective not in ('vio', 'ekf'):
+            effective = 'vio'
+        self._localization_config_pub.publish(String(data=json.dumps({'odom_source': effective})))
+        return effective
+
+    def _sync_odom_source_to_nodes(self) -> None:
+        source = self._publish_odom_source_config()
+        self.get_logger().info(f'Re-applied localization odom_source to map/planning nodes: {source}')
 
     def _looper_bridge_cmd(self) -> list[str]:
         return [
@@ -2048,6 +2123,8 @@ class BackendNode(Ros2NodeManager):
             'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
             '--tinynav_map_path', self.map_path,
         ]
+        if self._load_nav_flow_enable_first_done():
+            map_node_cmd.append('--enable_first_done')
         if initial_map_to_odom_transform_path is not None:
             map_node_cmd += ['--initial_map_to_odom_transform', initial_map_to_odom_transform_path]
         # Decide RTK mode once here, matching MapNode which also decides once at
@@ -2077,7 +2154,7 @@ class BackendNode(Ros2NodeManager):
             )
         with self._lock:
             self._nav_nodes_running = True
-            self._odom_source = 'vio'
+        self._sync_odom_source_to_nodes()
         self.get_logger().info('Nav nodes started')
 
     def cmd_stop_nav_nodes(self):
@@ -2091,7 +2168,6 @@ class BackendNode(Ros2NodeManager):
         self._cmd_vel_proc = None
         with self._lock:
             self._nav_nodes_running = False
-            self._odom_source = 'vio'
             self._localized = False
             self._map_pose = None
             self._global_path = []
@@ -2121,10 +2197,15 @@ class BackendNode(Ros2NodeManager):
         )
         self._nav_rtk_mode = self._load_nav_flow_rtk_mode()
         self._publish_current_map_for_rtk()
+        map_node_cmd = [
+            'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+            '--tinynav_map_path', self.map_path,
+        ]
+        if self._load_nav_flow_enable_first_done():
+            map_node_cmd.append('--enable_first_done')
         self._map_node_proc = self._launch_proc(
             'map_node',
-            ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
-             '--tinynav_map_path', self.map_path],
+            map_node_cmd,
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
@@ -2134,12 +2215,12 @@ class BackendNode(Ros2NodeManager):
         )
         with self._lock:
             self._nav_nodes_running = True
-            self._odom_source = 'vio'
             self._localized = False
             self._map_pose = None
             self._global_path = []
             self._final_global_path = []
             self._nav_target_pose = None
+        self._sync_odom_source_to_nodes()
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')

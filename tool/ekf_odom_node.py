@@ -417,18 +417,19 @@ class EKFOdomNode(Node):
         self._update_pose6(msg, R_QR, GATE['qr'], 'qr')
 
     def _rtk_cb(self, msg: Odometry) -> None:
-        T, _ = msg2np(msg)
-        stamp = _stamp_to_sec(msg.header.stamp)
-        if self._state is None:
-            self._init(T, stamp)
-            return
-        self._state, ok = ekf_update_pos3(
-            self._state, T[:3, 3], R_RTK, GATE['rtk'])
-        if not ok:
-            self.get_logger().warn('rtk: outlier rejected',
-                                   throttle_duration_sec=1.0)
-        else:
-            self._publish()
+        return 
+        # T, _ = msg2np(msg)
+        # stamp = _stamp_to_sec(msg.header.stamp)
+        # if self._state is None:
+        #     self._init(T, stamp)
+        #     return
+        # self._state, ok = ekf_update_pos3(
+        #     self._state, T[:3, 3], R_RTK, GATE['rtk'])
+        # if not ok:
+        #     self.get_logger().warn('rtk: outlier rejected',
+        #                            throttle_duration_sec=1.0)
+        # else:
+        #     self._publish()
 
     # ---- helpers ----
 

@@ -62,7 +62,18 @@ class LooperBridgeNode(Node):
         self._device_clock_offset_samples = []
         self._device_clock_offset_warmup_count = 20
 
-        self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
+        image_reliability = (
+            ReliabilityPolicy.BEST_EFFORT
+            if args.image_reliability == "best_effort"
+            else ReliabilityPolicy.RELIABLE
+        )
+        # Looper (insight_full) currently publishes images as RELIABLE; a BEST_EFFORT
+        # subscriber will not match until the device publisher QoS is changed too.
+        self.image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=max(1, int(args.image_qos_depth)),
+            reliability=image_reliability,
+        )
         self.tf_static_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -70,19 +81,33 @@ class LooperBridgeNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
 
-        self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
+        self.camera_info_sub = self.create_subscription(
+            CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, 10
+        )
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
 
         self.vio_100hz_sub = self.create_subscription(
             PoseStamped, "/camera/camera/vio_100hz", self.vio_100hz_callback, 50
         )
 
-        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
-        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
-        self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
-        self.sync = message_filters.TimeSynchronizer(
-            [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20
+        self.depth_sub = message_filters.Subscriber(
+            self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.image_qos
         )
+        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
+        self.image_sub = message_filters.Subscriber(
+            self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.image_qos
+        )
+        sync_queue = max(2, int(args.sync_queue_size))
+        if args.sync_slop > 0.0:
+            self.sync = message_filters.ApproximateTimeSynchronizer(
+                [self.depth_sub, self.pose_sub, self.image_sub],
+                queue_size=sync_queue,
+                slop=float(args.sync_slop),
+            )
+        else:
+            self.sync = message_filters.TimeSynchronizer(
+                [self.depth_sub, self.pose_sub, self.image_sub], queue_size=sync_queue
+            )
         self.sync.registerCallback(self.sync_callback)
 
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
@@ -106,6 +131,15 @@ class LooperBridgeNode(Node):
         )
         self.get_logger().info(
             "Bridging /camera/camera/vio_100hz into /slam/odometry."
+        )
+        sync_mode = (
+            f"approximate slop={args.sync_slop:.3f}s"
+            if args.sync_slop > 0.0
+            else "exact"
+        )
+        self.get_logger().info(
+            f"Image QoS: reliability={args.image_reliability}, depth={self.image_qos.depth}; "
+            f"sync={sync_mode}, queue={sync_queue}"
         )
 
     def vio_100hz_callback(self, pose_msg: PoseStamped):
@@ -327,6 +361,30 @@ def parse_args():
         type=float,
         default=45.0,
         help="Allow this long after startup before the first sync_callback.",
+    )
+    parser.add_argument(
+        "--image-reliability",
+        choices=("reliable", "best_effort"),
+        default="reliable",
+        help="Image/depth subscriber reliability (must match Looper publisher).",
+    )
+    parser.add_argument(
+        "--image-qos-depth",
+        type=int,
+        default=5,
+        help="Image/depth subscriber history depth.",
+    )
+    parser.add_argument(
+        "--sync-queue-size",
+        type=int,
+        default=10,
+        help="message_filters sync queue size.",
+    )
+    parser.add_argument(
+        "--sync-slop",
+        type=float,
+        default=0.0,
+        help="If >0, use ApproximateTimeSynchronizer with this slop (seconds).",
     )
     return parser.parse_args()
 

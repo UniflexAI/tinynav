@@ -216,15 +216,9 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                         source: status?.planningOccupancySource ?? 'depth',
                         onChanged: _setPlanningOccupancySource,
                       ),
-                      const SizedBox(width: 6),
-                      _OdomSourceControl(
-                        source: status?.odomSource ?? 'vio',
-                        onChanged: _setOdomSource,
-                      ),
                     ],
                   ),
                 ),
-              if (!_showGlobalMap)
                 Positioned(
                   top: 8,
                   right: 8,
@@ -232,34 +226,41 @@ class _OperateTabState extends ConsumerState<OperateTab> {
                     crossAxisAlignment: CrossAxisAlignment.end,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _LocalViewModeButton(
-                            show3d: _showLocal3d,
-                            onTap: () => setState(() => _showLocal3d = !_showLocal3d),
-                          ),
-                          const SizedBox(width: 6),
-                          _LocalMapScaleButton(
-                            fillViewport: _localMapFill,
-                            onTap: () => setState(() => _localMapFill = !_localMapFill),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      _LayerTogglePanel(
-                        showObstacle: _showObstacle,
-                        showEsdf: _showEsdf,
-                        showTrajectory: _showTrajectory,
-                        showGlobalPath: _showGlobalPath,
-                        showFootprint: _showFootprint,
-                        onChanged: (obs, esdf, traj, gp, fp) => setState(() {
-                          _showObstacle = obs;
-                          _showEsdf = esdf;
-                          _showTrajectory = traj;
-                          _showGlobalPath = gp;
-                          _showFootprint = fp;
-                        }),
+                      if (!_showGlobalMap) ...[
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _LocalViewModeButton(
+                              show3d: _showLocal3d,
+                              onTap: () => setState(() => _showLocal3d = !_showLocal3d),
+                            ),
+                            const SizedBox(width: 6),
+                            _LocalMapScaleButton(
+                              fillViewport: _localMapFill,
+                              onTap: () => setState(() => _localMapFill = !_localMapFill),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        _LayerTogglePanel(
+                          showObstacle: _showObstacle,
+                          showEsdf: _showEsdf,
+                          showTrajectory: _showTrajectory,
+                          showGlobalPath: _showGlobalPath,
+                          showFootprint: _showFootprint,
+                          onChanged: (obs, esdf, traj, gp, fp) => setState(() {
+                            _showObstacle = obs;
+                            _showEsdf = esdf;
+                            _showTrajectory = traj;
+                            _showGlobalPath = gp;
+                            _showFootprint = fp;
+                          }),
+                        ),
+                        const SizedBox(height: 6),
+                      ],
+                      _OdomSourceControl(
+                        source: status?.odomSource ?? 'vio',
+                        onChanged: _setOdomSource,
                       ),
                     ],
                   ),
