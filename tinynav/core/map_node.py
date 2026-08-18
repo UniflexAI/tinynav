@@ -2314,6 +2314,14 @@ class MapNode(Node):
                 target_position_in_map[2] = pose_in_map[:3, 3][2]
             T = pose_in_origin_odom @ np.linalg.inv(pose_in_map)
             target_position_in_odom = T[:3, :3] @ target_position_in_map + T[:3, 3]
+            self.get_logger().info(
+                f"target_pose_debug: odom_source={self.odom_source} "
+                f"pose_in_origin_odom_xyz={pose_in_origin_odom[:3, 3].tolist()} "
+                f"pose_in_map_xyz={pose_in_map[:3, 3].tolist()} "
+                f"target_position_in_map={target_position_in_map.tolist()} "
+                f"target_position_in_odom={target_position_in_odom.tolist()}",
+                throttle_duration_sec=1.0,
+            )
             dummy_pose = np.eye(4)
             dummy_pose[:3, 3] = target_position_in_odom
             self.target_pose_pub.publish(np2msg(
