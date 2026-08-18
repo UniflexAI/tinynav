@@ -3,7 +3,7 @@ sys.path.append(".")
 sys.path.append("/tinynav/tinynav/core")
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.math_utils import theta_star
+from tinynav.core.math_utils import theta_star, stall_check
 import numpy as np
 
 def angle_diff_from_two_rotation_matrix(R1, R2):
@@ -86,9 +86,44 @@ def test_theta_star():
         assert point[0] == ground_truth_path[i][0]
         assert point[1] == ground_truth_path[i][1]
 
+def test_stall_check_progress_resets_timer():
+    # steady progress: each call drops remaining by more than the eps, never stalls
+    last_remaining, last_time = None, None
+    for t, remaining in [(0.0, 5.0), (1.0, 4.0), (2.0, 3.0)]:
+        last_remaining, last_time, stalled = stall_check(
+            last_remaining, last_time, remaining, t, progress_eps=0.05, timeout_s=8.0,
+        )
+        assert not stalled
+        assert last_remaining == remaining
+        assert last_time == t
+
+def test_stall_check_under_timeout_does_not_stall():
+    last_remaining, last_time, stalled = stall_check(
+        5.0, 0.0, 5.0, 5.0, progress_eps=0.05, timeout_s=8.0,
+    )
+    assert not stalled
+    # unchanged: still no progress, but timeout hasn't elapsed
+    assert last_remaining == 5.0
+    assert last_time == 0.0
+
+def test_stall_check_forces_replan_after_timeout():
+    last_remaining, last_time, stalled = stall_check(
+        5.0, 0.0, 5.0, 9.0, progress_eps=0.05, timeout_s=8.0,
+    )
+    assert stalled
+    # tiny wobble, well under progress_eps, must not be read as progress
+    last_remaining, last_time, stalled = stall_check(
+        5.0, 0.0, 4.98, 9.0, progress_eps=0.05, timeout_s=8.0,
+    )
+    assert stalled
+
 if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
     print("Pose graph solve test passed.")
     test_theta_star()
     print("A* test passed.")
+    test_stall_check_progress_resets_timer()
+    test_stall_check_under_timeout_does_not_stall()
+    test_stall_check_forces_replan_after_timeout()
+    print("Stall check tests passed.")

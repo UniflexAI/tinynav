@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
+from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers, stall_check
 from sensor_msgs.msg import Image, CameraInfo
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -274,6 +274,13 @@ class MapNode(Node):
         self._speed_estimate: float | None = None
         self.cached_nav_path_in_map = None
         self.cached_nav_path_poi_index = -1
+        # Deviation-based replan (below) only catches drift off the path. This catches
+        # the case where the robot is stuck on-path -- e.g. a new obstacle it cannot
+        # get around without a fresh route.
+        self._last_progress_remaining: float | None = None
+        self._last_progress_time: float | None = None
+        self.stall_progress_eps = 0.05  # m, noise floor below which movement isn't progress
+        self.stall_timeout_s = 8.0
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -316,6 +323,8 @@ class MapNode(Node):
             self._speed_estimate = None
             self.cached_nav_path_in_map = None
             self.cached_nav_path_poi_index = -1
+            self._last_progress_remaining = None
+            self._last_progress_time = None
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
@@ -657,6 +666,8 @@ class MapNode(Node):
             self._speed_estimate = None
             self.cached_nav_path_in_map = None
             self.cached_nav_path_poi_index = -1
+            self._last_progress_remaining = None
+            self._last_progress_time = None
             self.poi_change_pub.publish(np2msg(np.eye(4), self.get_clock().now().to_msg(), "world", "map"))
             if self.poi_index >= len(self.pois) and not self._nav_completed:
                 self._nav_completed = True
@@ -673,12 +684,28 @@ class MapNode(Node):
             closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
             if np.linalg.norm(paths[closest_idx, :2] - pos[:2]) > 0.5:
                 needs_replan = True
+            else:
+                remaining_now = sum(
+                    np.linalg.norm(paths[i + 1] - paths[i])
+                    for i in range(closest_idx, len(paths) - 1)
+                ) if closest_idx < len(paths) - 1 else 0.0
+                self._last_progress_remaining, self._last_progress_time, stalled = stall_check(
+                    self._last_progress_remaining, self._last_progress_time, remaining_now,
+                    time.time(), self.stall_progress_eps, self.stall_timeout_s,
+                )
+                if stalled:
+                    self.get_logger().warning(
+                        f"No progress for {self.stall_timeout_s:.0f}s despite being on-path, forcing replan"
+                    )
+                    needs_replan = True
 
         if needs_replan:
             paths = self.generate_nav_path_in_map(pose_in_map=pose_in_map, target_poi=poi)
             if paths is not None:
                 self.cached_nav_path_in_map = paths
                 self.cached_nav_path_poi_index = self.poi_index
+                self._last_progress_remaining = None
+                self._last_progress_time = None
             else:
                 self.cached_nav_path_in_map = None
                 self.cached_nav_path_poi_index = -1
