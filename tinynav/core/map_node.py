@@ -462,6 +462,12 @@ class MapNode(Node):
         )
         self.localization_config_sub = self.create_subscription(
             String, '/localization/config', self.localization_config_callback, _localization_config_qos)
+        # Set when an odom_source switch needs to adjust _rtk_yaw_offset but the new
+        # source hadn't published anything to this node yet -- resolved in
+        # _continuous_odom_vio_callback / _continuous_odom_ekf_callback. See
+        # localization_config_callback for why this exists.
+        self._pending_rtk_yaw_adjust_heading_old = None
+        self._pending_rtk_yaw_adjust_source = None
         self.rtk_map_pose_sub = self.create_subscription(Odometry, '/rtk/map_pose', self.rtk_map_pose_callback, 20)
         self.rtk_init_status_sub = self.create_subscription(String, '/rtk/init_status', self.rtk_init_status_callback, 10)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
@@ -1144,17 +1150,38 @@ class MapNode(Node):
             self.baseline = -Tx / fx
             self.destroy_subscription(self.camera_info_sub)
 
+    def _apply_rtk_yaw_adjustment(self, heading_old: float, new_pose_raw: np.ndarray, source_label: str) -> None:
+        new_fwd = new_pose_raw[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        heading_new = np.arctan2(new_fwd[1], new_fwd[0])
+        delta = heading_new - heading_old
+        self._rtk_yaw_offset += delta
+        self.get_logger().info(
+            f"Adjusted _rtk_yaw_offset by {np.degrees(delta):+.1f}deg for odom_source switch -> {source_label}"
+        )
+
     def _continuous_odom_vio_callback(self, odom_msg: Odometry):
         # Tracked unconditionally (not just while active) so a switch to 'ekf' can
         # still cross-reference "what was vio's heading right at the switch" -- see
         # localization_config_callback's _rtk_yaw_offset adjustment.
         self._latest_vio_pose_raw, _ = msg2np(odom_msg)
+        if (self._pending_rtk_yaw_adjust_source == 'vio'
+                and self._pending_rtk_yaw_adjust_heading_old is not None
+                and self._rtk_yaw_offset is not None):
+            self._apply_rtk_yaw_adjustment(self._pending_rtk_yaw_adjust_heading_old, self._latest_vio_pose_raw, 'vio')
+            self._pending_rtk_yaw_adjust_heading_old = None
+            self._pending_rtk_yaw_adjust_source = None
         if self.odom_source != 'vio':
             return
         self.continuous_odom_callback(odom_msg)
 
     def _continuous_odom_ekf_callback(self, odom_msg: Odometry):
         self._latest_ekf_pose_raw, _ = msg2np(odom_msg)
+        if (self._pending_rtk_yaw_adjust_source == 'ekf'
+                and self._pending_rtk_yaw_adjust_heading_old is not None
+                and self._rtk_yaw_offset is not None):
+            self._apply_rtk_yaw_adjustment(self._pending_rtk_yaw_adjust_heading_old, self._latest_ekf_pose_raw, 'ekf')
+            self._pending_rtk_yaw_adjust_heading_old = None
+            self._pending_rtk_yaw_adjust_source = None
         if self.odom_source != 'ekf':
             return
         self.continuous_odom_callback(odom_msg)
@@ -1218,17 +1245,25 @@ class MapNode(Node):
                     # absolute reading is itself correct.
                     old_pose_raw = self._latest_vio_pose_raw if old == 'vio' else self._latest_ekf_pose_raw
                     new_pose_raw = self._latest_vio_pose_raw if odom_source == 'vio' else self._latest_ekf_pose_raw
-                    if self._rtk_yaw_offset is not None and old_pose_raw is not None and new_pose_raw is not None:
+                    if self._rtk_yaw_offset is not None and old_pose_raw is not None:
                         old_fwd = old_pose_raw[:3, :3] @ np.array([0.0, 0.0, 1.0])
-                        new_fwd = new_pose_raw[:3, :3] @ np.array([0.0, 0.0, 1.0])
                         heading_old = np.arctan2(old_fwd[1], old_fwd[0])
-                        heading_new = np.arctan2(new_fwd[1], new_fwd[0])
-                        delta = heading_new - heading_old
-                        self._rtk_yaw_offset += delta
-                        self.get_logger().info(
-                            f"Adjusted _rtk_yaw_offset by {np.degrees(delta):+.1f}deg for "
-                            f"odom_source switch {old} -> {odom_source}"
-                        )
+                        if new_pose_raw is not None:
+                            self._apply_rtk_yaw_adjustment(heading_old, new_pose_raw, odom_source)
+                        else:
+                            # The new source hasn't published anything to this (just-restarted
+                            # or just-switched) node yet -- e.g. odom_source flipped seconds
+                            # after map_node itself restarted, before the first
+                            # /slam/odometry_fused message arrived. Defer: apply the same
+                            # adjustment the moment that source's callback next fires (see
+                            # _continuous_odom_vio_callback / _continuous_odom_ekf_callback),
+                            # instead of falling through to a from-scratch re-lock.
+                            self._pending_rtk_yaw_adjust_heading_old = heading_old
+                            self._pending_rtk_yaw_adjust_source = odom_source
+                            self.get_logger().info(
+                                f"_rtk_yaw_offset adjustment deferred: no {odom_source} pose yet "
+                                f"(will apply on its first message)"
+                            )
                     else:
                         self._rtk_yaw_offset = None
 
