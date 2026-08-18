@@ -218,8 +218,9 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
     two lookups against the global route (path_dist_map, remaining_map -- see
     build_route_fields), which share ESDF_map's shape, origin and resolution.
     :return: per trajectory, the obstacle score (inf on collision), the step index of the
-             minimum clearance, the mean distance from the trajectory center to the route,
-             and the route arc length still ahead of its end cell.
+             minimum clearance, the worst (max) distance from the trajectory center to the
+             route over the whole trajectory, and the route arc length still ahead of its
+             end cell.
     """
     scores = []
     occ_points = []
@@ -231,11 +232,16 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
         traj = trajectories[t]
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
-        path_cost_sum = 0.0
+        path_cost_max = 0.0
         path_cost_n = 0
+        traveled_arc = 0.0
 
         for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
+            if i > 0:
+                dx = x_world - traj[i - 1, 0]
+                dy = y_world - traj[i - 1, 1]
+                traveled_arc += (dx * dx + dy * dy) ** 0.5
             qx, qy, qz, qw = traj[i, 3], traj[i, 4], traj[i, 5], traj[i, 6]
 
             # world XY forward from quaternion (body +Z forward)
@@ -275,20 +281,30 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
                         min_dist_for_traj = dist
                         closest_step_for_traj = i
                     if k == 0:  # route adherence is measured on the center only
-                        path_cost_sum += float(path_dist_map[x_img, y_img])
+                        center_path_dist = float(path_dist_map[x_img, y_img])
+                        if center_path_dist > path_cost_max:
+                            path_cost_max = center_path_dist
                         path_cost_n += 1
 
         if path_cost_n > 0:
-            path_costs.append(path_cost_sum / path_cost_n)
+            path_costs.append(path_cost_max)
         else:
             path_costs.append(1e3)  # the whole trajectory left the grid
 
         end_x_img = int((traj[-1, 0] - origin[0]) / resolution)
         end_y_img = int((traj[-1, 1] - origin[1]) / resolution)
         if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
-            end_remainings.append(float(remaining_map[end_x_img, end_y_img]))
+            end_remaining = float(remaining_map[end_x_img, end_y_img])
         else:
-            end_remainings.append(1e3)
+            end_remaining = 1e3
+
+        start_x_img = int((traj[0, 0] - origin[0]) / resolution)
+        start_y_img = int((traj[0, 1] - origin[1]) / resolution)
+        if 0 <= start_x_img < ESDF_rows and 0 <= start_y_img < ESDF_cols:
+            start_remaining = float(remaining_map[start_x_img, start_y_img])
+            if start_remaining < 1e3:
+                end_remaining = max(end_remaining, start_remaining - traveled_arc)
+        end_remainings.append(end_remaining)
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
