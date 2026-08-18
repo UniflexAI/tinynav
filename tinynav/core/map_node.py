@@ -537,6 +537,7 @@ class MapNode(Node):
         self.planning_reverse_enter_threshold = self._load_planning_reverse_enter_threshold(tinynav_map_path)
         self.planning_terrain_mode = self._load_planning_terrain_mode(tinynav_map_path)
         self.planning_only_straight_back = self._load_planning_bool(tinynav_map_path, "only_straight_back", False)
+        self.planning_target_pose_avoid_obstable = self._load_target_pose_avoid_obstable(tinynav_map_path)
         self.planning_max_linear_speed = self._load_planning_max_linear_speed(tinynav_map_path)
         self.planning_lidar_min_votes = self._load_planning_int(tinynav_map_path, "lidar_min_votes", None, minimum=1, maximum=50)
         self.planning_lidar_min_obstacle_area_cells = self._load_planning_int(
@@ -1133,6 +1134,7 @@ class MapNode(Node):
             "dilation_cells": self.planning_dilation_cells,
             "terrain_mode": self.planning_terrain_mode,
             "only_straight_back": self.planning_only_straight_back,
+            "target_pose_avoid_obstable": self.planning_target_pose_avoid_obstable,
             "max_linear_speed": self.planning_max_linear_speed,
         }
         if self.planning_comfort_radius is not None:

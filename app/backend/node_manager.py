@@ -1187,6 +1187,12 @@ class BackendNode(Ros2NodeManager):
             return self._ekf_odom_pose or self._odom_pose_at_kf or self._odom_pose
         return self._odom_pose_at_kf or self._odom_pose
 
+    def _live_odom_pose_locked(self) -> dict | None:
+        # Live pose for planning canvas overlays. Must match planning_node odom frame.
+        if self._odom_source == 'ekf':
+            return self._ekf_odom_pose or self._odom_pose
+        return self._odom_pose
+
     def _on_pose_in_map(self, msg: Odometry):
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
@@ -1745,7 +1751,7 @@ class BackendNode(Ros2NodeManager):
             final_path_snapshot = self._cap_path_pts(self._final_global_path)
             snapshot = {
                 'localized': self._localized,
-                'odom_pose': self._odom_pose,
+                'odom_pose': self._live_odom_pose_locked(),
                 'odom_pose_at_kf': self._odom_pose_at_kf,
                 'map_pose': self._map_pose,
                 'esdf_image': base64.b64encode(self._esdf_bytes).decode() if self._esdf_bytes else None,

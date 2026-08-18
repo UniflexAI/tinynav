@@ -737,6 +737,7 @@ class PlanningNode(Node):
         self._global_plan_in_map = None
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
+        self.target_pose_avoid_obstable = False
         self._fallback_target_pose = None
         self._last_override_target_pose = None
         self._last_override_publish_time = 0.0
@@ -1005,6 +1006,33 @@ class PlanningNode(Node):
                         f"reverse_speed={self.reverse_speed:.2f}, reverse_omegas={list(self.reverse_omegas)})"
                     )
 
+        if "target_pose_avoid_obstable" in config:
+            value = config["target_pose_avoid_obstable"]
+            if isinstance(value, bool):
+                enabled = value
+            elif isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("true", "1", "yes", "on"):
+                    enabled = True
+                elif normalized in ("false", "0", "no", "off"):
+                    enabled = False
+                else:
+                    self.get_logger().warning(
+                        f"Invalid planning target_pose_avoid_obstable: {config.get('target_pose_avoid_obstable')!r}"
+                    )
+                    enabled = self.target_pose_avoid_obstable
+            else:
+                self.get_logger().warning(
+                    f"Invalid planning target_pose_avoid_obstable: {config.get('target_pose_avoid_obstable')!r}"
+                )
+                enabled = self.target_pose_avoid_obstable
+            old = self.target_pose_avoid_obstable
+            self.target_pose_avoid_obstable = enabled
+            if old != enabled:
+                self.get_logger().info(
+                    f"Updated planning target_pose_avoid_obstable: {old} -> {enabled}"
+                )
+
         if "only_straight_back" in config:
             value = config["only_straight_back"]
             if isinstance(value, bool):
@@ -1265,6 +1293,8 @@ class PlanningNode(Node):
     def _resolve_effective_target_pose(self, T, esdf_map, stamp):
         if self.target_pose is None:
             return None
+        if not self.target_pose_avoid_obstable:
+            return self.target_pose
         target_clearance = self._esdf_clearance_at(self.target_pose, esdf_map)
         stuck = self._is_stuck(T[:3, 3])
         need_fallback = (target_clearance >= 0.0 and target_clearance < self._fallback_min_clearance_m) or stuck
@@ -1493,7 +1523,10 @@ class PlanningNode(Node):
 
         init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y,
                             odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-        self._plan_and_publish(T, init_q, depth_msg.header)
+        # Keep legacy sensor timestamp in VIO/depth mode; in EKF mode publish with EKF odom stamp
+        # so footprint/path follow the same pose-time domain as odom_fused.
+        publish_header = odom_msg.header if self.odom_source == 'ekf' else depth_msg.header
+        self._plan_and_publish(T, init_q, publish_header)
 
     @Timer(name="Lidar Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def rear_depth_callback(self, depth_msg):
@@ -1527,7 +1560,8 @@ class PlanningNode(Node):
 
         init_q = np.array([pose_msg.pose.pose.orientation.x, pose_msg.pose.pose.orientation.y,
                             pose_msg.pose.pose.orientation.z, pose_msg.pose.pose.orientation.w])
-        self._plan_and_publish(T, init_q, lidar_msg.header)
+        publish_header = pose_msg.header if self.odom_source == 'ekf' else lidar_msg.header
+        self._plan_and_publish(T, init_q, publish_header)
 
     def _plan_and_publish(self, T, init_q, header):
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
