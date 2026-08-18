@@ -18,6 +18,7 @@ import time
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
+from tf2_ros import Buffer, TransformException, TransformListener
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Float32, Header, String
 from codetiming import Timer
@@ -730,7 +731,22 @@ class PlanningNode(Node):
         self._last_lidar_filter_log_time = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
+        self.target_pose_pub = self.create_publisher(Odometry, '/control/target_pose', 10)
+        self.create_subscription(Path, '/mapping/global_plan', self.global_plan_callback, 1)
         self.target_pose = None
+        self._global_plan_in_map = None
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self._fallback_target_pose = None
+        self._last_override_target_pose = None
+        self._last_override_publish_time = 0.0
+        self._last_fallback_log_time = 0.0
+        self._stuck_anchor_position = None
+        self._stuck_anchor_time = None
+        self._stuck_timeout_s = 3.0
+        self._stuck_move_threshold_m = 0.08
+        self._fallback_min_clearance_m = max(self.robot.safety_radius + 0.05, self.robot.comfort_radius + 0.05)
+        self._fallback_min_progress_m = 0.20
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -1152,9 +1168,127 @@ class PlanningNode(Node):
 
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self._fallback_target_pose = None
+        self._stuck_anchor_position = None
+        self._stuck_anchor_time = None
+
+    def global_plan_callback(self, msg):
+        if not msg.poses:
+            self._global_plan_in_map = None
+            return
+        self._global_plan_in_map = np.array([
+            [pose.pose.position.x, pose.pose.position.y, pose.pose.position.z]
+            for pose in msg.poses
+        ], dtype=np.float64)
 
     def target_pose_callback(self, msg):
-        self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        self.target_pose = np.array([
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            msg.pose.pose.position.z,
+        ], dtype=np.float64)
+
+    def _lookup_global_plan_in_world(self):
+        if self._global_plan_in_map is None or len(self._global_plan_in_map) == 0:
+            return None
+        try:
+            tf_msg = self._tf_buffer.lookup_transform('world', 'map', Time())
+        except TransformException:
+            return None
+        q = tf_msg.transform.rotation
+        R = quat_to_matrix(np.array([q.x, q.y, q.z, q.w], dtype=np.float64))
+        t = np.array([
+            tf_msg.transform.translation.x,
+            tf_msg.transform.translation.y,
+            tf_msg.transform.translation.z,
+        ], dtype=np.float64)
+        return (R @ self._global_plan_in_map.T).T + t
+
+    def _esdf_clearance_at(self, point, esdf_map):
+        point_arr = np.asarray(point, dtype=np.float64)
+        origin_arr = np.asarray(self.origin, dtype=np.float64)
+        if esdf_map.ndim >= 3:
+            idx = np.floor((point_arr[:3] - origin_arr[:3]) / self.resolution).astype(np.int32)
+            shape = np.array(esdf_map.shape[:3], dtype=np.int32)
+            if np.any(idx < 0) or np.any(idx >= shape):
+                return -1.0
+            return float(esdf_map[tuple(idx)])
+        idx2 = np.floor((point_arr[:2] - origin_arr[:2]) / self.resolution).astype(np.int32)
+        shape2 = np.array(esdf_map.shape[:2], dtype=np.int32)
+        if np.any(idx2 < 0) or np.any(idx2 >= shape2):
+            return -1.0
+        return float(esdf_map[idx2[0], idx2[1]])
+
+    def _is_stuck(self, robot_position):
+        now = time.monotonic()
+        if self._stuck_anchor_position is None:
+            self._stuck_anchor_position = robot_position.copy()
+            self._stuck_anchor_time = now
+            return False
+        moved = float(np.linalg.norm(robot_position[:2] - self._stuck_anchor_position[:2]))
+        if moved >= self._stuck_move_threshold_m:
+            self._stuck_anchor_position = robot_position.copy()
+            self._stuck_anchor_time = now
+            return False
+        return self._stuck_anchor_time is not None and (now - self._stuck_anchor_time) >= self._stuck_timeout_s
+
+    def _select_fallback_target(self, robot_position, esdf_map):
+        path_world = self._lookup_global_plan_in_world()
+        if path_world is None or len(path_world) == 0:
+            return None
+        closest_idx = int(np.argmin(np.linalg.norm(path_world[:, :2] - robot_position[:2], axis=1)))
+        cumulative = 0.0
+        last = robot_position
+        for i in range(closest_idx, len(path_world)):
+            point = path_world[i]
+            cumulative += float(np.linalg.norm(point[:2] - last[:2]))
+            last = point
+            if cumulative < self._fallback_min_progress_m:
+                continue
+            if self._esdf_clearance_at(point, esdf_map) >= self._fallback_min_clearance_m:
+                return point.copy()
+        return None
+
+    def _publish_override_target_pose(self, target_pose, stamp):
+        msg = Odometry()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'world'
+        msg.child_frame_id = 'camera'
+        msg.pose.pose.position.x = float(target_pose[0])
+        msg.pose.pose.position.y = float(target_pose[1])
+        msg.pose.pose.position.z = float(target_pose[2])
+        msg.pose.pose.orientation.w = 1.0
+        self.target_pose_pub.publish(msg)
+        self._last_override_target_pose = target_pose.copy()
+        self._last_override_publish_time = time.monotonic()
+
+    def _resolve_effective_target_pose(self, T, esdf_map, stamp):
+        if self.target_pose is None:
+            return None
+        target_clearance = self._esdf_clearance_at(self.target_pose, esdf_map)
+        stuck = self._is_stuck(T[:3, 3])
+        need_fallback = (target_clearance >= 0.0 and target_clearance < self._fallback_min_clearance_m) or stuck
+        if not need_fallback:
+            self._fallback_target_pose = None
+            return self.target_pose
+        fallback = self._select_fallback_target(T[:3, 3], esdf_map)
+        if fallback is None:
+            return self.target_pose
+        self._fallback_target_pose = fallback
+        now = time.monotonic()
+        should_publish = (
+            self._last_override_target_pose is None
+            or float(np.linalg.norm(fallback[:2] - self._last_override_target_pose[:2])) > 0.05
+            or now - self._last_override_publish_time > 1.0
+        )
+        if should_publish:
+            self._publish_override_target_pose(fallback, stamp)
+        if now - self._last_fallback_log_time > 0.5:
+            self._last_fallback_log_time = now
+            self.get_logger().warning(
+                f"Fallback target_pose applied: stuck={stuck} target_clearance={target_clearance:.2f} fallback={fallback.tolist()}"
+            )
+        return fallback
 
     def info_callback(self, msg):
         if self.K is None:
@@ -1462,6 +1596,7 @@ class PlanningNode(Node):
         with Timer(name='cc', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=2.0)
             self.front_clearance_pub.publish(Float32(data=float(front_clearance)))
+            effective_target_pose = self._resolve_effective_target_pose(T, ESDF_map, header.stamp)
             enter_threshold = self.reverse_enter_threshold
             should_reverse = front_clearance <= enter_threshold
             valid_traj_count = int(np.sum(np.isfinite(scores)))
@@ -1532,7 +1667,7 @@ class PlanningNode(Node):
                 costs = np.full(len(trajectories), float("inf"), dtype=np.float64)
                 costs[selected_index] = 0.0
             else:
-                costs = np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))])
+                costs = np.array([cost_function(trajectories[i], params[i], scores[i], effective_target_pose) for i in range(len(trajectories))])
                 top_indices = np.argsort(costs, kind='stable')[:top_k]
             selected_index = int(top_indices[0])
             selected_param = params[selected_index]
@@ -1540,8 +1675,8 @@ class PlanningNode(Node):
             selected_cost = float(costs[selected_index])
             selected_is_reverse = bool(selected_param[0] < 0.0)
             target_dist = float("nan")
-            if self.target_pose is not None:
-                target_dist = float(np.linalg.norm(trajectories[selected_index][-1, :3] - self.target_pose))
+            if effective_target_pose is not None:
+                target_dist = float(np.linalg.norm(trajectories[selected_index][-1, :3] - effective_target_pose))
             now_debug = time.monotonic()
             should_log_debug = (
                 now_debug - self._last_avoidance_debug_log_time > 0.5
@@ -1576,7 +1711,7 @@ class PlanningNode(Node):
             path.header = header
             path.header.frame_id = "world"
 
-            if self.target_pose is None:
+            if effective_target_pose is None:
                 return
 
             if all_collision:

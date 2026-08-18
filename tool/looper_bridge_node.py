@@ -286,13 +286,7 @@ class LooperBridgeNode(Node):
         self.odom_visual_pub.publish(odom_msg)
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
-        disparity_vis_msg = self.build_disparity_vis(depth_m, stamp)
-
-        self.get_logger().info(
-            "sync_callback: "
-            f"t={self.stamp_to_sec(stamp):.3f}, "
-            f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}"
-        )
+        disparity_vis_msg = None
 
         image_out = copy.deepcopy(image_msg)
         image_out.header.stamp = stamp
@@ -303,7 +297,8 @@ class LooperBridgeNode(Node):
         camera_info_out.header.frame_id = "camera"
 
         self.depth_pub.publish(depth_out)
-        self.disparity_pub_vis.publish(disparity_vis_msg)
+        if disparity_vis_msg is not None:
+            self.disparity_pub_vis.publish(disparity_vis_msg)
         self.slam_camera_info_pub.publish(camera_info_out)
         self.camera_info_alias_pub.publish(camera_info_out)
 
