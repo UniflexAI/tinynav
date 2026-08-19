@@ -328,7 +328,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 6
+        self.step = 4
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
