@@ -108,7 +108,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    dilation_cells: int = 0
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -328,7 +328,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 10
+        self.step = 6
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
@@ -581,7 +581,7 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
 
-                return score * 100000 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
+                return score * 200 + 100 * dist + 10 * abs(self.last_param[0] - param[0]) + 10 * abs(self.last_param[1] - param[1]) + reverse_gate_penalty
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
