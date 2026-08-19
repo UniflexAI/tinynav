@@ -161,11 +161,11 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 @dataclass
 class ObstacleConfig:
     robot_z_bottom: float = -0.45
-    robot_z_top: float = 0.2
+    robot_z_top: float = 0.6
     occ_threshold: float = 0.05
     min_wall_span_m: float = 0.1
-    ground_band_m: float = 0.3
-    dilation_cells: int = 0
+    ground_band_m: float = 2.0
+    dilation_cells: int = 4
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
@@ -428,7 +428,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, z_layers)
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 10
+        self.step = 4
         self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
 
         # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
@@ -439,8 +439,8 @@ class PlanningNode(Node):
         # the prior may raise the target above it, up to vx_hard_max (hardware absolute).
         # Depth latency (~100ms) + raycast makes the effective clearance smaller than
         # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
-        self.declare_parameter('vx_max', 0.6)        # open-space target when NO capture prior (fallback)
-        self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (hardware)
+        self.declare_parameter('vx_max', 0.8)        # open-space target when NO capture prior (fallback)
+        self.declare_parameter('vx_hard_max', 2.0)   # absolute forward-speed ceiling (hardware)
         self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
         self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
         self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target

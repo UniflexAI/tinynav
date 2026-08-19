@@ -181,6 +181,30 @@ _ARRIVE_M = 0.5
 # ...and for a POI that carries an arrival heading, where being 0.5m out matters.
 _ARRIVE_HEADING_M = 0.2
 
+# The target pose is a carrot at a TIME horizon, so how far along the path it sits has
+# to ride the speed actually being driven -- which is the capture-speed prior this node
+# already publishes on /planning/speed_cap. It used to be a flat 2.5m (0.5 m/s x 5s), so
+# where the operator crept at 0.2 m/s the carrot sat 12.5s ahead, aiming past the tight
+# stretch the slow capture speed was warning about.
+_LOOKAHEAD_S = 5.0
+# No prior (off-path, or a map with no path_speed.npy): planning falls back to vx_max for
+# the speed, so the carrot falls back to the same number.
+_NO_CAP_SPEED_MPS = 0.6
+# Bounds on the resulting distance. These are planning's [vx_min, vx_hard_max] x
+# _LOOKAHEAD_S -- the span of speeds it can actually command -- expressed as metres so
+# this node needs none of planning's parameters to stay consistent with it.
+_LOOKAHEAD_MIN_M = 1.0
+_LOOKAHEAD_MAX_M = 5.0
+
+
+def lookahead_distance_m(speed_cap_mps: float) -> float:
+    """How far along the path the target pose sits, given the capture-speed prior.
+
+    `speed_cap_mps` is what /planning/speed_cap carries: +inf (or NaN) means off-path or
+    no prior, the same sentinel planning treats as "no data"."""
+    speed = (speed_cap_mps if np.isfinite(speed_cap_mps) else _NO_CAP_SPEED_MPS)
+    return float(np.clip(speed * _LOOKAHEAD_S, _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
+
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
@@ -489,27 +513,41 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
+    def select_relocalization_candidates(self, query_vlad: np.ndarray) -> list[tuple[int, float]]:
+        """(map keyframe timestamp, VLAD similarity) to try PnP against, best last.
+
+        A hook so a subclass can drop candidates retrieval alone cannot tell apart —
+        the whole-map top-k here is blind to where the robot actually is."""
+        return [
+            (int(self.vlad_timestamps[idx_in_map]), float(similarity))
+            for idx_in_map, similarity in find_loop(
+                query_vlad,
+                self.map_vlad_descriptors,
+                -1.0,
+                self.relocalization_loop_top_k,
+            )
+        ]
+
+    def rank_relocalization_candidates(self, pnp_candidates: list, candidate_timestamps: list[int]) -> tuple[bool, np.ndarray, float]:
+        """Pick the pose among the surviving candidates. `candidate_timestamps` is
+        parallel to `pnp_candidates` so an override can see where each one sits in the
+        map (the batch call below only ever reports the winner)."""
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        return success, best_pose_in_camera, pose_cov_weight
+
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
 
         query_vlad = self.get_vlad_descriptor(keyframe)
-        idx_and_similarity_array = find_loop(
-            query_vlad,
-            self.map_vlad_descriptors,
-            -1.0,
-            self.relocalization_loop_top_k,
-        )
-        if len(idx_and_similarity_array) == 0:
+        candidates = self.select_relocalization_candidates(query_vlad)
+        if len(candidates) == 0:
             print("VLAD: no relocalization candidates")
             return False, np.eye(4), -np.inf
-        candidate_timestamps = [
-            int(self.vlad_timestamps[idx_in_map])
-            for idx_in_map, _similarity in idx_and_similarity_array
-        ]
 
         pnp_candidates = []
-        for timestamp_in_map in candidate_timestamps:
+        pnp_timestamps = []
+        for timestamp_in_map, _similarity in candidates:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
@@ -525,8 +563,9 @@ class MapNode(Node):
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+            pnp_timestamps.append(timestamp_in_map)
 
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        success, best_pose_in_camera, pose_cov_weight = self.rank_relocalization_candidates(pnp_candidates, pnp_timestamps)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
@@ -767,13 +806,13 @@ class MapNode(Node):
             "estimated_remaining_s": round(estimated_remaining_s, 1),
         })))
 
-        max_speed = 0.5
+        lookahead_m = lookahead_distance_m(cap)
         accumulated_distance = 0.0
         start_point = pos[:3]
         target_position = paths[-1]
         for i in range(closest_idx, len(paths) - 1):
             accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-            if accumulated_distance > max_speed * 5:
+            if accumulated_distance > lookahead_m:
                 target_position = paths[i]
                 break
             start_point = paths[i]
