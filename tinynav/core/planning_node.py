@@ -769,7 +769,7 @@ class PlanningNode(Node):
         self._rear_ready_shared[1] = 1
 
     def _drain_rear_occ_queue(self):
-        if self._rear_proc is None or self.occupancy_source not in ('depth', 'lidar'):
+        if self._rear_proc is None or self.occupancy_source != 'depth':
             return
         got = False
         new_occ = None
@@ -783,11 +783,41 @@ class PlanningNode(Node):
             self._integrate_occupancy(np.asarray(new_occ, dtype=np.float64))
 
     def _apply_occupancy_subscriptions(self):
-        """Lidar/depth occupancy sources are exclusive; rear camera1 fuses into both."""
-        self._set_lidar_listening(self.occupancy_source == 'lidar')
-        self._set_rear_depth_listening(
-            self.rear_depth_enabled and self.occupancy_source in ('depth', 'lidar')
-        )
+        """Exclusive occupancy sensors: lidar XOR (front /slam/depth + rear camera1)."""
+        want_lidar = self.occupancy_source == 'lidar'
+        if want_lidar:
+            self._set_front_depth_listening(False)
+            self._set_rear_depth_listening(False)
+            self._set_lidar_listening(True)
+            return
+        self._set_lidar_listening(False)
+        self._set_front_depth_listening(True)
+        self._set_rear_depth_listening(self.rear_depth_enabled)
+
+    def _set_front_depth_listening(self, enabled):
+        """Subscribe /slam/depth only in depth mode so lidar does not pull front camera DDS."""
+        if enabled:
+            if self.depth_sub is not None:
+                return
+            self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
+            self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+            self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
+            self.ts.registerCallback(self.sync_callback)
+            self.get_logger().info('Subscribed /slam/depth for occupancy_source=depth')
+            return
+        if self.depth_sub is None and self.pose_sub is None:
+            return
+        for sub in (self.depth_sub, self.pose_sub):
+            if sub is None:
+                continue
+            try:
+                sub.unregister()
+            except Exception:
+                pass
+        self.depth_sub = None
+        self.pose_sub = None
+        self.ts = None
+        self.get_logger().info('Unsubscribed /slam/depth (occupancy_source!=depth)')
 
     def _set_lidar_listening(self, enabled):
         if enabled:

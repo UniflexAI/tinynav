@@ -1007,6 +1007,45 @@ class MapNode(Node):
         )
         return None if value is None else int(value)
 
+    def _load_target_pose_avoid_obstable(self, tinynav_map_path: str) -> bool:
+        default_value = False
+        config_path = os.path.join(tinynav_map_path, "nav_flow.json")
+        if not os.path.exists(config_path):
+            return default_value
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as exc:
+            self.get_logger().warning(
+                f"Failed to read nav_flow.json: {exc}; using target_pose_avoid_obstable={default_value}"
+            )
+            return default_value
+        if not isinstance(config, dict):
+            return default_value
+        planning_config = config.get("planning", {})
+        if isinstance(planning_config, dict) and "target_pose_avoid_obstable" in planning_config:
+            value = planning_config.get("target_pose_avoid_obstable")
+        elif "target_pose_avoid_obstable" in config:
+            value = config.get("target_pose_avoid_obstable")
+        else:
+            return default_value
+        if isinstance(value, bool):
+            parsed = value
+        elif isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                parsed = True
+            elif normalized in {"false", "0", "no", "off"}:
+                parsed = False
+            else:
+                self.get_logger().warning(f"Invalid target_pose_avoid_obstable={value!r}; using {default_value}")
+                return default_value
+        else:
+            self.get_logger().warning(f"Invalid target_pose_avoid_obstable={value!r}; using {default_value}")
+            return default_value
+        self.get_logger().info(f"Using target_pose_avoid_obstable={parsed}")
+        return parsed
+
     def _load_planning_bool(self, tinynav_map_path: str, key: str, default_value: bool) -> bool:
         planning_config = self._load_planning_config(tinynav_map_path)
         if key not in planning_config:
