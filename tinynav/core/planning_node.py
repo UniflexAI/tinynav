@@ -131,8 +131,10 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
 
     `min_span_map` is an optional (h,w) array overriding min_wall_span_m per cell,
     which is how a caller marks somewhere a riser should read as a step rather than
-    a wall. Per cell, not a global switch, so low obstacles beside a staircase keep
-    blocking while it is being climbed; the caller owns what the regions mean."""
+    a wall. Cells it relaxes skip the ground-band gate -- on a staircase the ground
+    is the staircase, and the steps ahead sit above the band. Per cell, not a global
+    switch, so low obstacles beside a staircase keep blocking while it is being
+    climbed; the caller owns what the regions mean."""
     config = config or ObstacleConfig()
     h, w, z_dim = occupancy_grid.shape
     z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
@@ -153,9 +155,13 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
         low_z_rel = z_rel_band[np.clip(occ_low, 0, n_z - 1).astype(np.int64)]
         near_ground = low_z_rel <= config.robot_z_bottom + config.ground_band_m
         min_span = config.min_wall_span_m if min_span_map is None else min_span_map
-        # ground-anchored cells: full span filter (wall vs stair/bump);
-        # floating cells: single-voxel span filter just to reject noise
-        span_ok = np.where(near_ground,
+        # A relaxed cell keeps its threshold at any height: mid-climb the steps ahead
+        # start above the ground band, so gating on height would read every riser
+        # above it as a floating obstacle.
+        relaxed = False if min_span_map is None else min_span_map > config.min_wall_span_m
+        # ground-anchored (or caller-relaxed) cells: full span filter (wall vs
+        # stair/bump); floating cells: single-voxel span filter just to reject noise
+        span_ok = np.where(near_ground | relaxed,
                            z_span >= min_span,
                            z_span >= resolution)
         obstacle = has_occ & span_ok
