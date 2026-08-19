@@ -112,10 +112,10 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 @dataclass
 class ObstacleConfig:
-    robot_z_bottom: float = -0.45
+    robot_z_bottom: float = -0.7
     robot_z_top: float = 0.2
     occ_threshold: float = 0.05
-    min_wall_span_m: float = 0.1
+    min_wall_span_m: float = 0.05
     ground_band_m: float = 0.3
     dilation_cells: int = 0
 
@@ -379,7 +379,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, z_layers)
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self.step = 10
+        self.step = 4
         self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
 
         # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
