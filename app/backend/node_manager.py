@@ -1367,25 +1367,31 @@ class BackendNode(Ros2NodeManager):
             pass
 
     def _on_vio_status(self, msg: String):
+        # Status is recorded for UI only. Switching/stopping nav is driven by
+        # looper_bridge numerical health on /slam/vio_source (front|rear|failed).
         status = msg.data.strip().upper()
-        normal = status in _VIO_STATUS_NORMAL
-
         with self._lock:
-            previous_status = self._vio_status
             self._vio_status = status
+
+    def _on_vio_source(self, msg: String):
+        source = msg.data.strip().lower()
+        if source not in ('front', 'rear', 'failed'):
+            return
+        with self._lock:
+            previous = getattr(self, '_vio_bridge_source', None)
+            self._vio_bridge_source = source
             already_stopped = self._vio_guard_stopped
             recovering = self._vio_guard_recovering
             nav_running = self._nav_nodes_running
-
-        if normal:
+        if source != previous:
+            self.get_logger().info(f'Looper VIO source: {previous} -> {source}')
+        if source in ('front', 'rear'):
             if already_stopped and not recovering:
-                self._recover_from_vio_guard_stop(status)
+                self._recover_from_vio_guard_stop(source)
             return
-
         if already_stopped or not nav_running:
             return
-
-        self._stop_for_vio_guard(status, previous_status)
+        self._stop_for_vio_guard(source, previous)
 
     def _stop_for_vio_guard(self, status: str, previous_status: str | None):
         resume_ids = self._remaining_nav_poi_ids_for_resume()
@@ -1560,7 +1566,18 @@ class BackendNode(Ros2NodeManager):
                 self._vio_status_sub = self.create_subscription(
                     String, '/insight/vio_status', self._on_vio_status, 10
                 )
-                self.get_logger().info('Insight VIO guard enabled for looper sensor mode')
+                _vio_source_qos = QoSProfile(
+                    depth=1,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                )
+                self._vio_source_sub = self.create_subscription(
+                    String, '/slam/vio_source', self._on_vio_source, _vio_source_qos
+                )
+                self.get_logger().info(
+                    'Insight VIO guard enabled for looper sensor mode '
+                    '(stop/resume driven by /slam/vio_source)'
+                )
             if self._sensor_mode in ('looper', 'realsense'):
                 _env = os.environ.copy()
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
