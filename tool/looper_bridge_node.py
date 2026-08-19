@@ -1,7 +1,6 @@
 import argparse
 import copy
 
-import cv2
 import message_filters
 import numpy as np
 import rclpy
@@ -62,7 +61,6 @@ class LooperBridgeNode(Node):
             Odometry, "/slam/odometry_visual", 10
         )
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
-        self.disparity_pub_vis = self.create_publisher(Image, "/slam/disparity_vis", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.camera_info_alias_pub = self.create_publisher(
             CameraInfo, "/camera/camera/infra2/camera_info", 10
@@ -163,32 +161,6 @@ class LooperBridgeNode(Node):
         depth_out.header.frame_id = "camera"
         return depth_out
 
-    def build_disparity_vis(self, depth_m: np.ndarray, stamp) -> Image:
-        depth = np.asarray(depth_m, dtype=np.float32)
-
-        valid = np.isfinite(depth) & (depth > 1e-3)
-        disparity_u8 = np.zeros(depth.shape, dtype=np.uint8)
-        if np.any(valid):
-            inv_depth = np.zeros(depth.shape, dtype=np.float32)
-            inv_depth[valid] = 1.0 / depth[valid]
-            disp_min = float(np.min(inv_depth[valid]))
-            disp_max = float(np.max(inv_depth[valid]))
-            if disp_max > disp_min:
-                disparity_u8[valid] = np.clip(
-                    255.0 * (inv_depth[valid] - disp_min) / (disp_max - disp_min),
-                    0.0,
-                    255.0,
-                ).astype(np.uint8)
-            else:
-                disparity_u8[valid] = 255
-
-        disp_color = cv2.applyColorMap(disparity_u8, cv2.COLORMAP_PLASMA)
-        disp_color[~valid] = 0
-        disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding="bgr8")
-        disp_color_msg.header.stamp = stamp
-        disp_color_msg.header.frame_id = "camera"
-        return disp_color_msg
-
     def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
         if self.cached_camera_info is None:
             self.log_missing_inputs()
@@ -201,7 +173,6 @@ class LooperBridgeNode(Node):
         self.odom_visual_pub.publish(odom_msg)
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
-        disparity_vis_msg = self.build_disparity_vis(depth_m, stamp)
 
         self.get_logger().info(
             "sync_callback: "
@@ -218,7 +189,6 @@ class LooperBridgeNode(Node):
         camera_info_out.header.frame_id = "camera"
 
         self.depth_pub.publish(depth_out)
-        self.disparity_pub_vis.publish(disparity_vis_msg)
         self.slam_camera_info_pub.publish(camera_info_out)
         self.camera_info_alias_pub.publish(camera_info_out)
 
