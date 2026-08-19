@@ -5,7 +5,6 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
-from dataclasses import dataclass
 from numba import njit
 import message_filters
 from rclpy.time import Time
@@ -16,7 +15,7 @@ from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
-from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 
 # === Helper functions ===
 @njit(cache=True)
@@ -100,15 +99,6 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
                     occupancy_grid[i, j, k] = 0.1
 
     return occupancy_grid
-
-
-@dataclass
-class ObstacleConfig:
-    robot_z_bottom: float = -0.4
-    robot_z_top: float = 0.4
-    occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
@@ -308,7 +298,8 @@ class PlanningNode(Node):
             f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
             f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
             f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
-            f"safety_r={ROBOT_CONFIG.safety_radius}m)"
+            f"safety_r={ROBOT_CONFIG.safety_radius}m, "
+            f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
@@ -334,7 +325,7 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
-        self.obstacle_config = ObstacleConfig()
+        self.obstacle_config = ROBOT_CONFIG.obstacle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 

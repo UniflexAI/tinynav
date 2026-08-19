@@ -34,7 +34,6 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
 
-from tinynav.core.planning_node import ObstacleConfig
 from tinynav.core.robot_specs import GO2_CONFIG
 from tool.simulator.planning_scene import (
     SimObject,
@@ -47,8 +46,8 @@ from tool.simulator.planning_scene import (
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "offline_planning_web"
-PLANNING_ROBOT_DEFAULT = asdict(GO2_CONFIG)
-PLANNING_OBSTACLE_DEFAULT = asdict(ObstacleConfig())
+PLANNING_ROBOT_DEFAULT = {k: v for k, v in asdict(GO2_CONFIG).items() if k != "obstacle"}
+PLANNING_OBSTACLE_DEFAULT = asdict(GO2_CONFIG.obstacle)
 
 
 def default_config() -> dict[str, Any]:

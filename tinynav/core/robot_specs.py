@@ -1,6 +1,20 @@
 import os
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ObstacleConfig:
+    """Height band + occupancy filters used by planning_node.build_obstacle_map.
+
+    z-band is relative to camera height (T[2, 3]). Taller robots need a wider
+    band so hanging obstacles and low walls still count as collisions.
+    """
+    robot_z_bottom: float = -0.4
+    robot_z_top: float = 0.4
+    occ_threshold: float = 0.1
+    min_wall_span_m: float = 0.2
+    dilation_cells: int = 2
 
 
 @dataclass
@@ -28,6 +42,7 @@ class RobotConfig:
     max_linear_vel: float = 1.0
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
+    obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
 
     @property
     def cam_offset_3d(self):
@@ -52,6 +67,7 @@ GO2_CONFIG = RobotConfig(
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
+    obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
 )
 
 GO2W_CONFIG = RobotConfig(
@@ -60,6 +76,7 @@ GO2W_CONFIG = RobotConfig(
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
+    obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
 )
 
 B2_CONFIG = RobotConfig(
@@ -68,6 +85,7 @@ B2_CONFIG = RobotConfig(
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
+    obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
 B2W_CONFIG = RobotConfig(
@@ -76,6 +94,7 @@ B2W_CONFIG = RobotConfig(
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
+    obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
 G1_CONFIG = RobotConfig(
@@ -84,7 +103,8 @@ G1_CONFIG = RobotConfig(
     camera_x=0.1, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.15,
-    min_linear_vel=0.2,min_angular_vel=0.3
+    min_linear_vel=0.2, min_angular_vel=0.3,
+    obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
 )
 
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
