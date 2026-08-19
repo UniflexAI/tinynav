@@ -448,7 +448,9 @@ class MapNode(Node):
             tinynav_db_path (str): Directory to store output data.
             tinynav_map_path (str): Directory to load the pre-built map.
             verbose_timer (bool): Whether to use verbose timer output.
-            enable_first_done (bool): If true, stop keyframe relocalization after the first success.
+            enable_first_done (bool): If true, lock T_from_map_to_odom after a
+                consensus first-fix (several agreeing relocs) and then skip
+                further visual relocalization.
             initial_map_to_odom_transform_path (str | None): Path to a .npy 4x4
                 T_from_map_to_odom to seed this session with (map handoff), instead of
                 waiting for a fresh cold relocalization/RTK fix.
@@ -464,6 +466,13 @@ class MapNode(Node):
 
         self.bridge = CvBridge()
         self.first_done = False
+        # First-fix consensus (only used when enable_first_done). A single PnP
+        # can pick the wrong map keyframe; later nav then runs on a biased T.
+        self._first_lock_min_observations = max(2, int(os.environ.get('TINYNAV_FIRST_RELOC_COUNT', '3')))
+        self._first_lock_max_xy_m = float(os.environ.get('TINYNAV_FIRST_RELOC_MAX_XY_M', '0.5'))
+        self._first_lock_max_yaw_deg = float(os.environ.get('TINYNAV_FIRST_RELOC_MAX_YAW_DEG', '8.0'))
+        self._first_lock_min_inlier_ratio = float(os.environ.get('TINYNAV_FIRST_RELOC_MIN_INLIER_RATIO', '0.35'))
+        self._pending_first_lock_Ts: list[tuple[int, np.ndarray]] = []
 
         # subs
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
@@ -1655,10 +1664,30 @@ class MapNode(Node):
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
         if not (self.enable_first_done and self.first_done):
-            success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+            success, pose_in_world = self.keyframe_relocalization(
+                keyframe_image_msg.header.stamp,
+                image,
+                publish_reloc=not self.enable_first_done,
+            )
             if success:
+                if self.enable_first_done and not self._accept_first_lock_observation(
+                    keyframe_image_msg.header.stamp, pose_in_world
+                ):
+                    return
                 self.compute_transform_from_map_to_odom()
                 self.first_done = True
+                if (
+                    self.enable_first_done
+                    and self.T_from_map_to_odom is not None
+                    and self.latest_odom_pose is not None
+                ):
+                    locked_pose = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
+                    self.relocation_pub.publish(
+                        np2msg(locked_pose, keyframe_image_msg.header.stamp, "world", "camera")
+                    )
+                    self.get_logger().info(
+                        "First relocalization locked after multi-view / multi-frame consensus"
+                    )
 
     def keyframe_mapping_with_timer(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image):
         with Timer(name="Mapping Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
@@ -1781,10 +1810,94 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
+    def _se3_xy_yaw_close(self, T_a: np.ndarray, T_b: np.ndarray) -> bool:
+        xy = float(np.linalg.norm(T_a[:2, 3] - T_b[:2, 3]))
+        Rrel = T_a[:3, :3].T @ T_b[:3, :3]
+        ang = float(np.arccos(np.clip((np.trace(Rrel) - 1.0) * 0.5, -1.0, 1.0)))
+        return xy <= self._first_lock_max_xy_m and ang <= np.deg2rad(self._first_lock_max_yaw_deg)
+
+    def _accept_first_lock_observation(self, stamp, pose_in_world: np.ndarray) -> bool:
+        timestamp_ns = int(stamp.sec * 1e9) + int(stamp.nanosec)
+        T_odom = self.pose_graph_used_pose.get(timestamp_ns)
+        if T_odom is None:
+            self.relocalization_poses.pop(timestamp_ns, None)
+            self.relocalization_pose_weights.pop(timestamp_ns, None)
+            return False
+        weight = float(self.relocalization_pose_weights.get(timestamp_ns, 0.0))
+        if weight < self._first_lock_min_inlier_ratio:
+            self.get_logger().info(
+                f"First reloc rejected weak PnP inlier_ratio={weight:.2f} "
+                f"< {self._first_lock_min_inlier_ratio:.2f}"
+            )
+            self.relocalization_poses.pop(timestamp_ns, None)
+            self.relocalization_pose_weights.pop(timestamp_ns, None)
+            return False
+        T_obs = T_odom @ np.linalg.inv(pose_in_world)
+        self._pending_first_lock_Ts.append((timestamp_ns, T_obs.copy()))
+        best_cluster: list[tuple[int, np.ndarray]] = []
+        for _, T_i in self._pending_first_lock_Ts:
+            cluster = [
+                (ts_j, T_j)
+                for ts_j, T_j in self._pending_first_lock_Ts
+                if self._se3_xy_yaw_close(T_i, T_j)
+            ]
+            if len(cluster) > len(best_cluster):
+                best_cluster = cluster
+        self.get_logger().info(
+            f"First reloc consensus {len(best_cluster)}/{len(self._pending_first_lock_Ts)} "
+            f"(need {self._first_lock_min_observations})"
+        )
+        if len(best_cluster) < self._first_lock_min_observations:
+            return False
+        keep = {ts for ts, _ in best_cluster}
+        self.relocalization_poses = {
+            k: v for k, v in self.relocalization_poses.items() if k in keep
+        }
+        self.relocalization_pose_weights = {
+            k: v for k, v in self.relocalization_pose_weights.items() if k in keep
+        }
+        return True
+
+    def _first_lock_map_views_agree(self, pnp_candidates: list) -> bool:
+        """Same query must PnP to a consistent pose from at least two map keyframes."""
+        min_inlier_count = self._get_relocalization_pnp_thresholds()[2]
+        worlds: list[np.ndarray] = []
+        for points_3d, points_2d, _timestamp_in_map in pnp_candidates:
+            if len(points_2d) <= 80:
+                continue
+            success, rvec, tvec, inliers = cv2.solvePnPRansac(
+                points_3d, points_2d, self.map_K, None
+            )
+            inlier_count = 0 if inliers is None else len(inliers)
+            if not success or inliers is None or inlier_count < min_inlier_count:
+                continue
+            T_cam = np.eye(4, dtype=np.float64)
+            R_mat, _ = cv2.Rodrigues(rvec)
+            T_cam[:3, :3] = R_mat
+            T_cam[:3, 3] = tvec.reshape(3)
+            worlds.append(np.linalg.inv(T_cam))
+        if len(worlds) < 2:
+            self.get_logger().info(
+                f"First reloc: {len(worlds)} map view(s) passed PnP, need >= 2 agreeing views"
+            )
+            return False
+        best = 1
+        for T_i in worlds:
+            n = sum(1 for T_j in worlds if self._se3_xy_yaw_close(T_i, T_j))
+            best = max(best, n)
+        if best < 2:
+            self.get_logger().info(
+                f"First reloc: {len(worlds)} map PnP views disagree (largest cluster={best})"
+            )
+            return False
+        return True
+
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None, current_odom_pose: np.ndarray | None = None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
         min_match_count, min_landmark_count, min_inlier_count = self._get_relocalization_pnp_thresholds()
+        strict_first = self.enable_first_done and not self.first_done
+        reloc_top_k = max(self.relocalization_loop_top_k, 5) if strict_first else self.relocalization_loop_top_k
 
         # Prefer DINOv2 patch VLAD if the map has a VLAD vocabulary/index.
         # Fall back to SuperPoint BoW if available, then finally to DINO global embedding.
@@ -1796,7 +1909,7 @@ class MapNode(Node):
                 query_vlad,
                 self.map_vlad_descriptors,
                 -1.0,
-                self.relocalization_loop_top_k,
+                reloc_top_k,
             )
             max_similarity = max((s for _, s in idx_and_similarity_array), default=0.0)
             if len(idx_and_similarity_array) == 0:
@@ -1814,7 +1927,7 @@ class MapNode(Node):
                 self.relocalization_bow.timestamps[idx_in_map]
                 for idx_in_map, _bow_score in self.relocalization_bow.query(
                     keyframe_features,
-                    self.relocalization_loop_top_k,
+                    reloc_top_k,
                 )
             ])
             if len(candidate_timestamps) == 0:
@@ -1827,7 +1940,7 @@ class MapNode(Node):
                 query_embedding_normed,
                 self.map_embeddings,
                 self.relocalization_threshold,
-                self.relocalization_loop_top_k,
+                reloc_top_k,
             )
             max_similarity = np.max([similarity for _, similarity in idx_and_similarity_array]) if len(idx_and_similarity_array) > 0 else 0
             if len(idx_and_similarity_array) == 0:
@@ -1866,10 +1979,15 @@ class MapNode(Node):
             if point_count <= min_landmark_count:
                 print(f"not enough landmarks to relocalize, {point_count} <= {min_landmark_count}")
                 continue
-            pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+            pnp_candidates.append(
+                (point_3d_in_world_list, point_2d_in_keyframe_list, timestamp_in_map)
+            )
+
+        if strict_first and not self._first_lock_map_views_agree(pnp_candidates):
+            return False, np.eye(4), -np.inf
 
         success, best_pose_in_camera, pose_cov_weight, best_candidate_index, best_inlier_count, best_point_count = rerank_by_pnp_inliers(
-            pnp_candidates,
+            [(pts3d, pts2d) for pts3d, pts2d, _ts in pnp_candidates],
             self.map_K,
             min_inlier_count=min_inlier_count,
         )
@@ -1887,6 +2005,14 @@ class MapNode(Node):
     def _get_relocalization_pnp_thresholds(self) -> tuple[int, int, int]:
         now_hour = datetime.now().hour
         is_night = now_hour >= 18 or now_hour < 6
+        if self.enable_first_done and not self.first_done:
+            if is_night:
+                return (
+                    self.night_relocalization_min_match_count,
+                    self.night_relocalization_min_landmark_count,
+                    self.night_relocalization_min_inlier_count,
+                )
+            return 60, 90, max(70, self.relocalization_min_inlier_count)
         if is_night:
             return (
                 self.night_relocalization_min_match_count,
@@ -1925,16 +2051,16 @@ class MapNode(Node):
         return point_in_world, inliers
 
     @Timer(name="Relocalization loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
-    def keyframe_relocalization(self, timestamp, image:np.ndarray) -> tuple[bool, np.ndarray]:
+    def keyframe_relocalization(self, timestamp, image:np.ndarray, publish_reloc: bool = True) -> tuple[bool, np.ndarray]:
         features = asyncio.run(self.super_point_extractor.infer(image))
         timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
         current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K, current_odom_pose=current_odom_pose)
         if res:
-            # publish the relocalization pose for debug
             pose_in_world = np.linalg.inv(pose_in_camera)
             timestamp_ns = int(timestamp.sec * 1e9) + int(timestamp.nanosec)
-            self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
+            if publish_reloc:
+                self.relocation_pub.publish(np2msg(pose_in_world, timestamp, "world", "camera"))
             self.relocalization_poses[timestamp_ns] = pose_in_world
             self.relocalization_pose_weights[timestamp_ns] = pose_cov_weight
             return True, pose_in_world
@@ -2675,7 +2801,7 @@ def main(args=None):
         "--enable_first_done",
         action="store_true",
         default=False,
-        help="Skip keyframe relocalization after the first successful relocalization",
+        help="Lock map alignment after a consensus first-fix, then skip further visual reloc",
     )
     parser.add_argument(
         "--initial_map_to_odom_transform",
