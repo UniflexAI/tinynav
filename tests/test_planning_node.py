@@ -185,6 +185,23 @@ def test_min_span_map_still_blocks_taller_verticals():
                               min_span_map=_span_map(config, (1, 1)))[1, 1]
 
 
+def test_min_span_map_relaxes_steps_above_the_ground_band():
+    """Mid-climb the next riser starts above robot_z_bottom + ground_band_m; a relaxed
+    cell must still read it as a step, not as a floating obstacle."""
+    from planning_node import ObstacleConfig, build_obstacle_map
+    config = ObstacleConfig()
+    resolution = 0.05
+    grid, origin = _riser_grid(0.0, config, resolution)
+    base = config.ground_band_m + resolution        # above the ground band
+    lo = int(round(base / resolution))
+    hi = int(round((base + 0.15) / resolution))     # 0.15m riser, below the relaxed threshold
+    grid[1, 1, lo:hi] = 0.2
+    args = (grid, origin, resolution)
+    assert build_obstacle_map(*args, robot_z=0.0, config=config)[1, 1]
+    assert not build_obstacle_map(*args, robot_z=0.0, config=config,
+                                  min_span_map=_span_map(config, (1, 1)))[1, 1]
+
+
 def test_no_min_span_map_is_the_strict_default():
     from planning_node import ObstacleConfig, build_obstacle_map
     config = ObstacleConfig()
