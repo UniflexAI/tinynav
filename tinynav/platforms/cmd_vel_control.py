@@ -3,17 +3,21 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool, Float32, String
+from std_msgs.msg import Bool, Float32
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
 import time
-from tinynav.core.planning_node import ROBOT_CONFIG_TOPIC, RobotConfig
+from tinynav.core.robot_specs import ROBOT_CONFIG
+
+# Module-level logger for cases where self.get_logger() is not available
+logger = logging.getLogger(__name__)
 
 class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
+        self.robot = ROBOT_CONFIG
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
@@ -28,11 +32,12 @@ class CmdVelControlNode(Node):
         )
         # Camera sits this far ahead of the control center; heading must be referenced
         # at the control center or the short path lies behind the camera. Same
-        # RobotConfig the planner uses, published by the chassis bridge on
-        # ROBOT_CONFIG_TOPIC, so it can't drift out of sync with the planner's
-        # footprint geometry (cam_offset_3d forward component = camera_x - control_x).
+        # RobotConfig the planner uses (tinynav.core.robot_specs, selected by ROBOT_TYPE),
+        # so it can't drift out of sync with the planner's footprint geometry
+        # (cam_offset_3d forward component = camera_x - control_x).
         self.T_camera_to_control = self.T_robot_to_camera.copy()
-        self._apply_robot_config(RobotConfig())  # fallback until the bridge publishes
+        self.cam_forward_offset = float(self.robot.cam_offset_3d[2])
+        self.T_camera_to_control[2, 3] = -self.cam_forward_offset  # back along camera +z (=forward)
         self.pose = None
         self.path = None
         self._path_xy = None          # (N,2) cached path XY, updated in path_callback
@@ -46,10 +51,11 @@ class CmdVelControlNode(Node):
         self.path_stale_stop_factor = 5.0
         self.max_linear_acc = 0.6   # m/s^2
         self.max_angular_acc = 0.8  # rad/s^2
-        # Hardware execution limit (upstream's value). Deliberately BELOW the planner's
-        # +/-pi/3 omega sampling: raising it to match the lattice made this clamp a
-        # no-op, which also disabled the radius-preserving vx scale-down it feeds.
-        self.max_angular_speed = 0.8  # rad/s
+        self.max_angular_speed = self.robot.max_angular_vel  # rad/s
+        self.max_forward_speed = self.robot.max_linear_vel  # m/s
+        self.planner_dt = 0.1       # trajectory dt in planning_node
+        # planning_node publishes path with for j in range(..., step=10), so points are ~1.0 s apart.
+        self.path_pose_stride = 10
         self.path_period_ema = 0.12
         # Heading-drift control: PI on heading drift. I learns each device's open-loop
         # yaw bias (zero steady-state error); P provides damping (do not set 0).
@@ -71,12 +77,8 @@ class CmdVelControlNode(Node):
         self.drift_filter_tau = 0.15   # s
         self._drift_lp = None          # low-passed drift state (rad)
         # Static-friction compensation: very small vx often cannot move the robot.
-        # 0.1 (main's value): 0.2 doubled the step this deadzone injects at every stop
-        # and doubled the creep speed the planner's sub-minimum targets get raised to,
-        # which overshot the goal.
-        self.min_effective_linear_speed = 0.1
-        # Yaw deadzone; must stay below the per-device yaw bias we cancel.
-        self.min_effective_angular_speed = 0.03
+        self.min_effective_linear_speed = self.robot.min_linear_vel
+        self.min_effective_angular_speed = self.robot.min_angular_vel
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
         # Rotate-first (upstream's gate, keyed off the planner's own feedforward): when
@@ -115,23 +117,7 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
-        self.create_subscription(String, ROBOT_CONFIG_TOPIC, self._on_robot_config, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
-
-    def _apply_robot_config(self, robot: RobotConfig):
-        self.robot = robot
-        self.cam_forward_offset = float(robot.cam_offset_3d[2])
-        self.T_camera_to_control[2, 3] = -self.cam_forward_offset  # back along camera +z (=forward)
-
-    def _on_robot_config(self, msg: String):
-        try:
-            robot = RobotConfig.from_json(msg.data)
-        except (ValueError, TypeError) as e:
-            self.logger.error(f"Bad {ROBOT_CONFIG_TOPIC} payload ({e}); keeping {self.robot.name}")
-            return
-        self._apply_robot_config(robot)
-        self.logger.info(f"Robot ({ROBOT_CONFIG_TOPIC}): {robot.name}, "
-                         f"cam_forward_offset={self.cam_forward_offset:.3f}m")
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data

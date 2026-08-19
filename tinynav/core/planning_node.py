@@ -7,11 +7,9 @@ heading for turn-in-place candidates), subject to a hard collision filter and a
 reverse gate.
 """
 
-import json
-import os
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass
 from numba import njit
 import cv2
 import rclpy
@@ -20,59 +18,12 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32, Twist
-from std_msgs.msg import Header, Float32, String
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Header, Float32
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
-
-
-ROBOT_CONFIG_TOPIC = '/robot/config'
-
-
-@dataclass
-class RobotConfig:
-    """Robot geometry. Body frame: +x forward, +y left.
-
-    The per-robot values are published by the chassis bridge
-    (platforms/unitree_control.py, selected by TINYNAV_ROBOT) on
-    ROBOT_CONFIG_TOPIC. PlanningNode refuses to plan until that message
-    arrives; the defaults below (go2) only serve non-planning consumers.
-    """
-    name: str = 'go2'
-    shape: str = 'square'
-    length: float = 0.6
-    width: float = 0.3
-    radius: float = 0.3
-    camera_x: float = 0.35
-    camera_y: float = 0.0
-    control_x: float = 0.05
-    control_y: float = 0.0
-    safety_radius: float = 0.2
-
-    @classmethod
-    def from_json(cls, payload: str) -> 'RobotConfig':
-        """Build from a ROBOT_CONFIG_TOPIC message, ignoring unknown fields."""
-        fields = {f.name for f in dataclass_fields(cls)}
-        return cls(**{k: v for k, v in json.loads(payload).items() if k in fields})
-
-    @property
-    def cam_offset_3d(self):
-        """Offset [left, up, forward] from control center to camera in body frame."""
-        return np.array([self.camera_y - self.control_y, 0.0, self.camera_x - self.control_x], dtype=np.float32)
-
-    @property
-    def half_size(self):
-        if self.shape == 'circle':
-            return (self.radius, self.radius)
-        return (self.length / 2.0, self.width / 2.0)
-
-    def footprint_from_control(self):
-        """Returns (front_len, rear_len, half_w) relative to control center."""
-        hl, hw = self.half_size
-        return float(hl - self.control_x), float(hl + self.control_x), float(hw)
-
+from tinynav.core.robot_specs import ROBOT_CONFIG
 
 # === Helper functions ===
 @njit(cache=True)
@@ -223,14 +174,16 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]), vx_max=0.5
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
+    max_linear_vel=0.5, max_angular_vel=np.pi / 3,
 ):
     """Regular sampled lattice (forward-only)."""
     num_steps = int(duration / dt) + 1
 
+    vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
     vx_samples = np.linspace(0.0, vx_max, n_vx)
-    omega_y_samples = np.linspace(-np.pi / 3, np.pi / 3, num_samples)
+    omega_y_samples = np.linspace(-max_angular_vel, max_angular_vel, num_samples)
 
     num_samples = len(vx_samples) * len(omega_y_samples)
 
@@ -395,15 +348,12 @@ class PlanningNode(Node):
 
     def __init__(self, node_name='planning_node'):
         super().__init__(node_name)
-        # Geometry comes from the chassis bridge (latched, so it lands as soon as
-        # we subscribe if it is already up). No fallback on purpose: planning on
-        # guessed footprint/offsets is a collision risk, so sync_callback stays
-        # inert until the real config arrives.
-        self.robot = None
-        self.get_logger().info(f"Waiting for robot config on {ROBOT_CONFIG_TOPIC} before planning")
-        self.create_subscription(
-            String, ROBOT_CONFIG_TOPIC, self._robot_config_callback,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.get_logger().info(
+            f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
+            f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
+            f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
+            f"safety_r={ROBOT_CONFIG.safety_radius}m)"
+        )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
@@ -427,7 +377,15 @@ class PlanningNode(Node):
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.resolution = 0.05
-        self.obstacle_config = ObstacleConfig()
+        # Ground-anchored span filter (walls/bumps vs stair risers) now applies
+        # everywhere when map_node's `climb_prior` parameter is false (no climb-region
+        # relaxation at all) -- so its default is the same single-voxel noise floor as the
+        # floating-obstacle check, to avoid filtering out real low/thin obstacles.
+        # A ROS parameter, like the climb knobs below, so a site can retune from the
+        # launch without a code edit.
+        self.declare_parameter('min_wall_span_m', ObstacleConfig.min_wall_span_m)
+        self.obstacle_config = ObstacleConfig(
+            min_wall_span_m=float(self.get_parameter('min_wall_span_m').value))
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
@@ -488,18 +446,16 @@ class PlanningNode(Node):
         # No message, or a stale stream, means no region, i.e. strict everywhere.
         # Both radius and span are deliberately small: a relaxed cell cannot see an
         # obstacle shorter than the span, and the labels that open these regions are
-        # inferred from path z, which VIO drift fakes. Measured on n2n3-backward: 21
-        # labelled runs, 4 real, 61% of the route relaxed at radius 1.5. Env-overridable
-        # so the site can be retuned without a code edit.
-        self.declare_parameter('climb_region_radius_m',
-                               float(os.environ.get('TINYNAV_CLIMB_REGION_RADIUS_M', '0.75')))
+        # inferred from path z, which VIO drift fakes -- a generous radius relaxed most
+        # of a route on the strength of a handful of real runs. A ROS parameter, so a
+        # site can be retuned from the launch without a code edit.
+        self.declare_parameter('climb_region_radius_m', 0.75)
         self._climb_region_cells = int(round(
             float(self.get_parameter('climb_region_radius_m').value) / self.resolution))
         self.declare_parameter('climb_region_ttl_s', 3.0)
         self._climb_region_ttl_ns = int(float(self.get_parameter('climb_region_ttl_s').value) * 1e9)
         # 0.2 keeps a ~0.15m riser reading as a step while a 0.2m+ obstacle survives.
-        self.declare_parameter('climb_min_wall_span_m',
-                               float(os.environ.get('TINYNAV_CLIMB_MIN_WALL_SPAN_M', '0.2')))
+        self.declare_parameter('climb_min_wall_span_m', 0.2)
         self._climb_min_wall_span_m = float(self.get_parameter('climb_min_wall_span_m').value)
         self._climb_points = np.empty((0, 2))
         self._climb_stamp_ns = None
@@ -523,28 +479,7 @@ class PlanningNode(Node):
         self._speed_cap_stamp_ns = None
         self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
 
-    def _log_robot_config(self, source):
-        self.get_logger().info(
-            f"Robot ({source}): {self.robot.name} ({self.robot.shape} "
-            f"{self.robot.length}x{self.robot.width}m, "
-            f"cam=({self.robot.camera_x},{self.robot.camera_y}), "
-            f"ctrl=({self.robot.control_x},{self.robot.control_y}), "
-            f"safety_r={self.robot.safety_radius}m)"
-        )
-
     # --- callbacks ---------------------------------------------------------
-    def _robot_config_callback(self, msg):
-        """Adopt the geometry published by the chassis bridge. Every consumer of
-        self.robot reads it per-cycle, so a swap takes effect on the next plan."""
-        try:
-            robot = RobotConfig.from_json(msg.data)
-        except (ValueError, TypeError) as e:
-            kept = self.robot.name if self.robot is not None else 'none (still not planning)'
-            self.get_logger().error(f"Bad {ROBOT_CONFIG_TOPIC} payload ({e}); keeping {kept}")
-            return
-        self.robot = robot
-        self._log_robot_config(ROBOT_CONFIG_TOPIC)
-
     def climb_region_callback(self, msg):
         # An empty cloud is a real answer ("no region here"), not a missed message:
         # only the stamp decides freshness.
@@ -643,14 +578,14 @@ class PlanningNode(Node):
 
     def camera_to_robot_center(self, T):
         """World control-center position derived from camera pose T_cam->world."""
-        return T[:3, 3] - T[:3, :3] @ self.robot.cam_offset_3d
+        return T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
 
     def publish_footprint(self, T, stamp):
         """Publish robot footprint rectangle as a PointCloud for RViz."""
         forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         left    = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
         center  = self.camera_to_robot_center(T)
-        fl, rl, hw = self.robot.footprint_from_control()
+        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
         corners = [
             center + forward * fl + left * hw,
             center + forward * fl - left * hw,
@@ -679,7 +614,7 @@ class PlanningNode(Node):
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
         lx, ly = -fy, fx
-        fl, _, hw = self.robot.footprint_from_control()
+        fl, _, hw = ROBOT_CONFIG.footprint_from_control()
         rows, cols = obstacle_mask.shape
         steps = int(max_dist / self.resolution) + 1
         for step in range(steps):
@@ -779,13 +714,6 @@ class PlanningNode(Node):
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
             return
-        # Footprint, camera offset and safety radius all come from self.robot;
-        # without it there is nothing safe to plan against.
-        if self.robot is None:
-            self.get_logger().warn(
-                f"No robot config on {ROBOT_CONFIG_TOPIC} yet — not planning",
-                throttle_duration_sec=5.0)
-            return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             T,_ = msg2np(odom_msg)
@@ -834,14 +762,18 @@ class PlanningNode(Node):
             v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
             # Publish the prior-driven open target so cmd_vel caps to the same ceiling.
             self.forward_speed_cap_pub.publish(Float32(data=float(v_open)))
-            trajectories, params = generate_trajectory_library_3d(init_p=init_p, init_q=init_q, vx_max=v_allow)
+            trajectories, params = generate_trajectory_library_3d(
+                init_p=init_p, init_q=init_q,
+                max_linear_vel=v_allow,
+                max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+            )
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_len, rear_len, half_w = self.robot.footprint_from_control()
-            safety_radius = self.robot.safety_radius
+            front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+            safety_radius = ROBOT_CONFIG.safety_radius
             scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):

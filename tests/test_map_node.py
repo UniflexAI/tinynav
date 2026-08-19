@@ -86,9 +86,35 @@ def test_theta_star():
         assert point[0] == ground_truth_path[i][0]
         assert point[1] == ground_truth_path[i][1]
 
+def test_lookahead_rides_the_capture_speed():
+    """The target pose is a carrot at a fixed TIME horizon, so its distance has to
+    track the speed actually being driven — a flat 2.5m was 12.5s ahead wherever the
+    operator crept at 0.2 m/s, aiming past the stretch that slowness was warning about.
+    """
+    from tinynav.core.map_node import lookahead_distance_m, _LOOKAHEAD_S
+
+    # Constant horizon across the speeds planning can command ([vx_min, vx_hard_max]).
+    for cap in (0.2, 0.5, 0.6, 1.0):
+        assert abs(lookahead_distance_m(cap) / cap - _LOOKAHEAD_S) < 1e-6
+
+    # The old hardcoded 0.5 m/s is preserved exactly where it was right.
+    assert abs(lookahead_distance_m(0.5) - 2.5) < 1e-6
+
+    # Faster than the hardware ceiling clamps rather than flinging the carrot away.
+    assert lookahead_distance_m(3.0) == 5.0
+    assert lookahead_distance_m(0.01) == 1.0
+
+    # Off-path / no path_speed.npy: +inf is speed_cap's "no data" sentinel, and the
+    # fallback matches planning's own (vx_max = 0.6).
+    assert abs(lookahead_distance_m(float("inf")) - 3.0) < 1e-6
+    assert abs(lookahead_distance_m(float("nan")) - 3.0) < 1e-6
+
+
 if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
     print("Pose graph solve test passed.")
     test_theta_star()
     print("A* test passed.")
+    test_lookahead_rides_the_capture_speed()
+    print("Lookahead test passed.")

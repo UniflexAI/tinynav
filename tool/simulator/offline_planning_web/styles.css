@@ -1,0 +1,273 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f5f7f9;
+  color: #17202a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.2fr) 320px minmax(420px, 0.9fr);
+  gap: 16px;
+  min-height: 100vh;
+  padding: 16px;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #dce3ea;
+  border-radius: 8px;
+  padding: 16px;
+  min-width: 0;
+  box-shadow: 0 1px 2px rgba(20, 30, 40, 0.05);
+}
+
+.scene-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+  overflow: hidden;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.panel-head.compact {
+  margin-bottom: 10px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 22px;
+}
+
+h2 {
+  font-size: 15px;
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+
+p {
+  color: #5c6975;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+button {
+  border: 1px solid #b8c5d2;
+  background: #fff;
+  color: #17202a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+button:hover {
+  background: #eef4f8;
+}
+
+button.primary {
+  background: #106b67;
+  color: white;
+  border-color: #106b67;
+  min-width: 86px;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+button.secondary {
+  background: #f3f6f9;
+}
+
+button.danger {
+  color: #9d1b1b;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+#sceneCanvas {
+  width: min(100%, calc(100vh - 190px));
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+  height: auto;
+  max-height: calc(100vh - 190px);
+  display: block;
+  border: 1px solid #ccd6df;
+  border-radius: 6px;
+  background: #fbfcfd;
+}
+
+.controls {
+  overflow: auto;
+}
+
+.controls.is-hidden {
+  display: none;
+}
+
+.controls-toggle {
+  display: inline-flex;
+  align-items: center;
+}
+
+.robot-note {
+  margin-top: 4px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #5c6975;
+}
+
+.robot-summary {
+  padding: 10px 12px;
+  border: 1px solid #d8e0e7;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #33404b;
+}
+
+.robot-summary code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+label {
+  display: grid;
+  grid-template-columns: 1fr 112px;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  font-size: 13px;
+  color: #43505c;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid #c7d1da;
+  border-radius: 6px;
+  padding: 7px 8px;
+  font: inherit;
+  color: #17202a;
+  background: #fff;
+}
+
+summary {
+  cursor: pointer;
+  margin-top: 18px;
+  font-size: 13px;
+  color: #43505c;
+}
+
+textarea {
+  height: 240px;
+  resize: vertical;
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.diagnostics {
+  margin-top: 12px;
+}
+
+.diagnostics summary {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.image-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.image-grid h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #43505c;
+}
+
+.image-grid canvas {
+  width: 100%;
+  aspect-ratio: 8 / 5;
+  display: block;
+  border: 1px solid #d8e0e7;
+  border-radius: 6px;
+  background: #0b1020;
+  image-rendering: pixelated;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.depth-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #5c6975;
+}
+
+.depth-legend-bar {
+  flex: 1;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid #d0d7df;
+  background: linear-gradient(
+    90deg,
+    #ffe650 0%,
+    #ff7828 18%,
+    #ec3462 36%,
+    #9c40ff 55%,
+    #3878ff 75%,
+    #0c1c48 100%
+  );
+}
+
+#status {
+  font-size: 13px;
+  color: #5c6975;
+}
+
+@media (max-width: 1180px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .controls {
+    display: none;
+  }
+
+  .controls.is-visible {
+    display: block;
+  }
+}

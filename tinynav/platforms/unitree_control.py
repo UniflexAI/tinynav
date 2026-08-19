@@ -1,53 +1,46 @@
+import argparse
+import os
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-from unitree_sdk2py.b2.sport.sport_client import SportClient as SportClientB2
 from std_msgs.msg import Float32, String
 from enum import Enum
-import json
-import logging
-import os
 import time
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# Robot geometry lives with the chassis bridge -- the node that knows which
-# machine it is talking to -- and is published on /robot/config (latched) for
-# planning_node / cmd_vel_control. Body frame: +x forward, +y left. Fields must
-# match tinynav.core.planning_node.RobotConfig.
-ROBOT_CONFIGS = {
-    'go2': dict(
-        name='go2', shape='square',
-        length=0.6, width=0.3,
-        camera_x=0.35, camera_y=0.0,
-        control_x=0.05, control_y=0.0,
-        safety_radius=0.1,
-    ),
-    'b2': dict(
-        name='b2', shape='square',
-        length=0.8, width=0.3,
-        camera_x=0.5, camera_y=0.0,
-        control_x=0.0, control_y=0.0,
-        safety_radius=0.1,
-    ),
-}
-DEFAULT_ROBOT = 'go2'
-ROBOT_CONFIG_TOPIC = '/robot/config'
+# go2/b2 are quadrupeds sharing the same SportClient gait API (Move/StandUp/
+# StandDown/BalanceStand/ClassicWalk). go2w/b2w are the wheeled variants of the
+# same chassis — the vendored SDK has no separate go2w/b2w package, so they reuse
+# the go2/b2 SportClient (same gait/lowstate API) as-is. g1 is a humanoid
+# controlled through the FSM-based LocoClient instead, so it needs its own
+# client, lowstate IDL, and stand/sit mapping.
+_QUADRUPED_ROBOT_MODELS = ('go2', 'go2w', 'b2', 'b2w')
+_SUPPORTED_ROBOT_MODELS = _QUADRUPED_ROBOT_MODELS + ('g1',)
+ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
+if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
+    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
 
 
-def resolve_robot_config(name: str | None = None) -> dict:
-    """Geometry for TINYNAV_ROBOT (set in docker-compose), falling back to go2."""
-    key = (name or os.environ.get('TINYNAV_ROBOT') or DEFAULT_ROBOT).strip().lower()
-    if key not in ROBOT_CONFIGS:
-        logger.warning(f"Unknown TINYNAV_ROBOT={key!r}; falling back to {DEFAULT_ROBOT}")
-        key = DEFAULT_ROBOT
-    return ROBOT_CONFIGS[key]
+def _build_sport_client(robot_model: str):
+    if robot_model in ('go2', 'go2w'):
+        from unitree_sdk2py.go2.sport.sport_client import SportClient
+        return SportClient()
+    if robot_model in ('b2', 'b2w'):
+        from unitree_sdk2py.b2.sport.sport_client import SportClient
+        return SportClient()
+    if robot_model == 'g1':
+        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+        return LocoClient()
+    raise ValueError(f"Unsupported robot model: {robot_model}")
 
+
+def _lowstate_type_and_topic(robot_model: str):
+    if robot_model in _QUADRUPED_ROBOT_MODELS:
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
+        return LowState_, "rt/lowstate"
+    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
+    return LowState_, "rt/lowstate"
 
 class RobotStatus(Enum):
     STANDUP = "standup"
@@ -55,17 +48,23 @@ class RobotStatus(Enum):
 
 
 class Ros2UnitreeManagerNode(Node):
-    def __init__(self, networkInterface: str = "enP8p1s0"):
+    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
         super().__init__('ros2_unitree_manager')
+        if robot_model not in _SUPPORTED_ROBOT_MODELS:
+            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
+        self.robot_model = robot_model
+        self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
+
         self.channel = ChannelFactoryInitialize(0, networkInterface)
-        self.sport_client = SportClientB2()
+        self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        self.sport_client.SwitchGait(1)
+        if self.is_quadruped:
+            self.sport_client.ClassicWalk(True)
         self._robot_status = RobotStatus.SITTING
         self.battery = 0.0
         self.last_twist_time = None
-        self.logger = logging.getLogger(__name__)
+        self.logger = self.get_logger()
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -73,23 +72,12 @@ class Ros2UnitreeManagerNode(Node):
         self.action_subscriber = ChannelSubscriber("rt/service/command", String_)
         self.action_subscriber.Init(self.ActionMessageHandler, 10)
 
-        lowstate_subscriber = ChannelSubscriber("rt/lf/lowstate", LowState_)
+        lowstate_type, lowstate_topic = _lowstate_type_and_topic(robot_model)
+        lowstate_subscriber = ChannelSubscriber(lowstate_topic, lowstate_type)
         lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
-        
+
         self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
-
-        # Latched so nodes that start later (planning_node, cmd_vel_control) still
-        # get the geometry without us republishing it on a timer.
-        self.robot_config = resolve_robot_config()
-        self.publisher_robot_config = self.create_publisher(
-            String, ROBOT_CONFIG_TOPIC,
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
-        )
-        config_msg = String()
-        config_msg.data = json.dumps(self.robot_config)
-        self.publisher_robot_config.publish(config_msg)
-        self.logger.info(f"Published robot config on {ROBOT_CONFIG_TOPIC}: {config_msg.data}")
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
 
@@ -100,7 +88,7 @@ class Ros2UnitreeManagerNode(Node):
             time_interval = current_time - self.last_twist_time
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_twist_time = current_time
-        
+
         if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
             self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
             self.sport_client.ClassicWalk(True)
@@ -110,26 +98,40 @@ class Ros2UnitreeManagerNode(Node):
         time.sleep(0.02)
 
     def ActionMessageHandler(self, msg: String_):
+        self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
         if msg.data.split(" ")[0] == "play":
             action_key = msg.data.split(" ")[1]
             if action_key == "sit":
-                self.logger.info("Sitting")
-                self.sport_client.StandDown()
+                if self.is_quadruped:
+                    code = self.sport_client.StandDown()
+                    self.logger.info(f"Sitting: StandDown code={code}")
+                else:
+                    code = self.sport_client.StandUp2Squat()
+                    self.logger.info(f"Sitting: StandUp2Squat code={code}")
                 self._robot_status = RobotStatus.SITTING
             elif action_key == "stand":
-                self.logger.info("Standing")
-                self.sport_client.StandUp()
-                self.sport_client.BalanceStand()
-                self.sport_client.ClassicWalk(True)
-                self.sport_client.SwitchGait(1)
+                if self.is_quadruped:
+                    self.sport_client.StandUp()
+                    self.sport_client.BalanceStand()
+                    self.sport_client.ClassicWalk(True)
+                    self.sport_client.SwitchGait(1)
+                    self.logger.info("Standing: StandUp, BalanceStand, ClassicWalk, SwitchGait(1)")
+                else:
+                    code1 = self.sport_client.Damp()
+                    time.sleep(0.5)
+                    code2 = self.sport_client.Squat2StandUp()
+                    self.logger.info(f"Standing: Damp code={code1}, Squat2StandUp code={code2}")
                 self._robot_status = RobotStatus.STANDUP
-    
+
     def _publish_robot_status(self):
         msg = String()
         msg.data = self._robot_status.value
         self.publisher_robot_status.publish(msg)
 
-    def LowStateMessageHandler(self, msg: LowState_):
+    def LowStateMessageHandler(self, msg):
+        if not self.is_quadruped:
+            # g1's lowstate has no battery field; skip battery reporting.
+            return
         try:
             self.battery = float(msg.bms_state.soc)
             battery_msg = Float32()
@@ -142,8 +144,13 @@ class Ros2UnitreeManagerNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = Ros2UnitreeManagerNode("enP8p1s0")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--network-interface", default="enP8p1s0",
+                        help="Network interface connected to the robot")
+    parsed_args, ros_args = parser.parse_known_args(args=args)
+
+    rclpy.init(args=ros_args)
+    node = Ros2UnitreeManagerNode(parsed_args.network_interface)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
