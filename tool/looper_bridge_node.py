@@ -165,14 +165,11 @@ class LooperBridgeNode(Node):
         self._started_at_mono = time.monotonic()
         self._last_sync_at_mono: float | None = None
         self._exit_code = 0
-        self._sync_watchdog_s = float(args.sync_watchdog_s)
+        # Disabled: covering the front camera stops TimeSynchronizer, and this
+        # watchdog previously killed the whole bridge (including rear VIO fallback).
+        self._sync_watchdog_s = 0.0
         self._sync_watchdog_grace_s = float(args.sync_watchdog_grace_s)
-        if self._sync_watchdog_s > 0.0:
-            self._sync_watchdog_timer = self.create_timer(2.0, self._sync_watchdog_tick)
-            self.get_logger().info(
-                f"Sync watchdog enabled: timeout={self._sync_watchdog_s:.1f}s "
-                f"startup_grace={self._sync_watchdog_grace_s:.1f}s"
-            )
+        self.get_logger().info("Sync watchdog disabled")
 
         # The Looper stamps vio_image/depth with its own free-running boot-relative
         # clock, not wall time (confirmed: neither an NTP-style device time sync nor a
@@ -742,7 +739,7 @@ def parse_args():
     parser.add_argument(
         "--sync-watchdog-s",
         type=float,
-        default=12.0,
+        default=0.0,
         help="Exit if sync_callback is silent for this many seconds (0 disables).",
     )
     parser.add_argument(

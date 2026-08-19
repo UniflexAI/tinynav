@@ -2013,7 +2013,7 @@ class BackendNode(Ros2NodeManager):
     def _looper_bridge_cmd(self) -> list[str]:
         return [
             'uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py',
-            '--sync-watchdog-s', os.environ.get('TINYNAV_LOOPER_SYNC_WATCHDOG_S', '12'),
+            '--sync-watchdog-s', os.environ.get('TINYNAV_LOOPER_SYNC_WATCHDOG_S', '0'),
             '--sync-watchdog-grace-s', os.environ.get('TINYNAV_LOOPER_SYNC_WATCHDOG_GRACE_S', '45'),
         ]
 
