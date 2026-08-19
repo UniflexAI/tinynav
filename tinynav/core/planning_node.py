@@ -747,7 +747,8 @@ class PlanningNode(Node):
         self._stuck_timeout_s = 3.0
         self._stuck_move_threshold_m = 0.08
         self._fallback_min_clearance_m = max(self.robot.safety_radius + 0.05, self.robot.comfort_radius + 0.05)
-        self._fallback_min_progress_m = 0.20
+        # Match map_node target lookahead: max_linear_speed * target_pose_dist_factor (~2.0).
+        self._fallback_lookahead_factor = 2.0
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -1290,22 +1291,52 @@ class PlanningNode(Node):
             return False
         return self._stuck_anchor_time is not None and (now - self._stuck_anchor_time) >= self._stuck_timeout_s
 
-    def _select_fallback_target(self, robot_position, esdf_map):
+    def _closest_point_on_path_xy(self, path, position):
+        if len(path) == 1:
+            pt = path[0].copy()
+            return 0, pt, float(np.linalg.norm(pt[:2] - position[:2]))
+        best_index = 0
+        best_point = path[0].copy()
+        best_distance = np.inf
+        for i in range(len(path) - 1):
+            a = path[i]
+            b = path[i + 1]
+            ab = b[:2] - a[:2]
+            denom = float(np.dot(ab, ab))
+            ratio = 0.0 if denom <= 1e-9 else np.clip(np.dot(position[:2] - a[:2], ab) / denom, 0.0, 1.0)
+            point = a + ratio * (b - a)
+            distance = float(np.linalg.norm(point[:2] - position[:2]))
+            if distance < best_distance:
+                best_index = i
+                best_point = point.copy()
+                best_distance = distance
+        return best_index, best_point, best_distance
+
+    def _point_ahead_on_path(self, path, start_position, distance_ahead):
+        """Point distance_ahead along global plan from closest projection onto the path."""
+        if path is None or len(path) == 0:
+            return None
+        closest_index, current, _ = self._closest_point_on_path_xy(path, start_position)
+        remaining = float(distance_ahead)
+        for i in range(closest_index + 1, len(path)):
+            nxt = path[i]
+            seg = float(np.linalg.norm(nxt[:2] - current[:2]))
+            if seg < 1e-9:
+                current = nxt
+                continue
+            if seg >= remaining:
+                ratio = remaining / seg
+                return current + ratio * (nxt - current)
+            remaining -= seg
+            current = nxt
+        return path[-1].copy()
+
+    def _select_fallback_target(self, robot_position, esdf_map, stuck=False):
         path_world = self._lookup_global_plan_in_world()
         if path_world is None or len(path_world) == 0:
             return None
-        closest_idx = int(np.argmin(np.linalg.norm(path_world[:, :2] - robot_position[:2], axis=1)))
-        cumulative = 0.0
-        last = robot_position
-        for i in range(closest_idx, len(path_world)):
-            point = path_world[i]
-            cumulative += float(np.linalg.norm(point[:2] - last[:2]))
-            last = point
-            if cumulative < self._fallback_min_progress_m:
-                continue
-            if self._esdf_clearance_at(point, esdf_map) >= self._fallback_min_clearance_m:
-                return point.copy()
-        return None
+        lookahead = max(0.5, float(self.max_linear_speed) * float(self._fallback_lookahead_factor))
+        return self._point_ahead_on_path(path_world, robot_position, lookahead)
 
     def _publish_override_target_pose(self, target_pose, stamp):
         msg = Odometry()
@@ -1331,7 +1362,7 @@ class PlanningNode(Node):
         if not need_fallback:
             self._fallback_target_pose = None
             return self.target_pose
-        fallback = self._select_fallback_target(T[:3, 3], esdf_map)
+        fallback = self._select_fallback_target(T[:3, 3], esdf_map, stuck=stuck)
         if fallback is None:
             return self.target_pose
         self._fallback_target_pose = fallback
@@ -1346,7 +1377,9 @@ class PlanningNode(Node):
         if now - self._last_fallback_log_time > 0.5:
             self._last_fallback_log_time = now
             self.get_logger().warning(
-                f"Fallback target_pose applied: stuck={stuck} target_clearance={target_clearance:.2f} fallback={fallback.tolist()}"
+                f"Fallback target_pose applied: stuck={stuck} target_clearance={target_clearance:.2f} "
+                f"lookahead={max(0.5, float(self.max_linear_speed) * float(self._fallback_lookahead_factor)):.2f} "
+                f"fallback={fallback.tolist()}"
             )
         return fallback
 

@@ -533,9 +533,9 @@ class MapNode(Node):
         self.relocalization_threshold = 0.70
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 50
-        self.night_relocalization_min_match_count = 40
-        self.night_relocalization_min_landmark_count = 60
-        self.night_relocalization_min_inlier_count = 40
+        self.night_relocalization_min_match_count = 30
+        self.night_relocalization_min_landmark_count = 50
+        self.night_relocalization_min_inlier_count = 30
         self.relocalization_odom_prior_threshold = 3.0  # meters, skip candidates too far from odom prediction
         self.target_pose_dist_factor = self._load_target_pose_dist_factor(tinynav_map_path)
         self.select_target_position_on_path_on = self._load_select_target_position_on_path_on(tinynav_map_path)
