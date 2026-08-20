@@ -194,9 +194,10 @@ class MapFileInfo {
         resolution: (json['resolution'] as num).toDouble(),
         width: json['width'] as int,
         height: json['height'] as int,
-        pois: (json['pois'] as List)
-            .map((p) => Poi.fromJson(p as Map<String, dynamic>))
-            .toList(),
+        pois: visiblePois(
+            (json['pois'] as List)
+                .map((p) => Poi.fromJson(p as Map<String, dynamic>)),
+          ),
       );
 }
 
@@ -312,9 +313,11 @@ class PlanningState {
               (j['nav_target_pose']['y'] as num).toDouble(),
             )
           : null,
-      activeNavPois: (j['active_nav_pois'] as List? ?? []).map((p) {
-        return Poi.fromJson(p as Map<String, dynamic>);
-      }).toList(),
+      activeNavPois: visiblePois(
+        (j['active_nav_pois'] as List? ?? []).map(
+          (p) => Poi.fromJson(p as Map<String, dynamic>),
+        ),
+      ),
       footprint: (j['footprint'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;
         return TrajPoint((m['x'] as num).toDouble(), (m['y'] as num).toDouble());
@@ -400,6 +403,7 @@ class Poi {
   final double x;
   final double y;
   final double z;
+  final bool notDisplay;
 
   const Poi({
     required this.id,
@@ -407,7 +411,10 @@ class Poi {
     required this.x,
     required this.y,
     required this.z,
+    this.notDisplay = false,
   });
+
+  bool get isDisplayed => !notDisplay;
 
   factory Poi.fromJson(Map<String, dynamic> json) {
     final pos = json['position'] as List;
@@ -417,6 +424,11 @@ class Poi {
       x: (pos[0] as num).toDouble(),
       y: (pos[1] as num).toDouble(),
       z: (pos[2] as num).toDouble(),
+      notDisplay: json['not_display'] as bool? ?? false,
     );
   }
 }
+
+List<Poi> visiblePois(Iterable<Poi> pois) =>
+    pois.where((poi) => poi.isDisplayed).toList();
+

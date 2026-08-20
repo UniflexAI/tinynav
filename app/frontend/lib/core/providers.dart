@@ -246,7 +246,7 @@ final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
   try {
     final resp = await dio.get('/map/pois');
     final list = (resp.data['pois'] as List).cast<Map<String, dynamic>>();
-    return list.map(Poi.fromJson).toList();
+    return visiblePois(list.map(Poi.fromJson));
   } on DioException catch (e) {
     if (e.response?.statusCode == 503) return [];
     rethrow;

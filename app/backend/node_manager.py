@@ -29,6 +29,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
+from app.backend.poi_utils import visible_pois
 from tool.ros2_node_manager import Ros2NodeManager
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
@@ -1780,7 +1781,7 @@ class BackendNode(Ros2NodeManager):
                 'map_final_global_path': final_path_snapshot,
                 'grid_info': self._grid_info,
                 'nav_target_pose': self._nav_target_pose,
-                'active_nav_pois': list(self._active_nav_pois),
+                'active_nav_pois': visible_pois({str(i): p for i, p in enumerate(self._active_nav_pois)}),
                 'footprint': list(self._footprint),
                 # 3D overlay is off by default; shipping 800 xyz dicts at 5 fps
                 # makes Flutter web jsonDecode/GC hitch until the tab freezes.

@@ -2,7 +2,7 @@
 POI management — reads/writes pois.json in the map directory.
 
 pois.json schema:
-  { "<id_str>": {"id": int, "name": str, "position": [x, y, z]} }
+  { "<id_str>": {"id": int, "name": str, "position": [x, y, z], "not_display": bool?} }
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ..poi_utils import visible_pois
 from ..state import runner
 
 router = APIRouter(tags=['poi'])
@@ -51,7 +52,7 @@ class PoiCreateRequest(BaseModel):
 def list_pois():
     node = _require_node()
     pois = _load_pois(node)
-    return {'pois': list(pois.values())}
+    return {'pois': visible_pois(pois)}
 
 
 @router.post('/map/pois')

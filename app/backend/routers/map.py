@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
+from ..poi_utils import visible_pois
 from ..map_renderer import render_map
 from ..state import runner
 
@@ -203,7 +204,7 @@ def map_preview_info(map_name: str):
     pois_file = os.path.join(path, 'pois.json')
     if os.path.exists(pois_file):
         with open(pois_file) as f:
-            pois = list(json.load(f).values())
+            pois = visible_pois(json.load(f))
 
     return {
         'imageUrl': f'/map/preview/{map_name}/image',
