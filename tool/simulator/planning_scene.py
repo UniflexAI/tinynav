@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from tool.simulator.map_volume import MapVolume, raycast_map
+
 
 @dataclass
 class SimObject:
@@ -70,8 +72,13 @@ def make_camera_pose_from_config(
     )
 
 
-def render_depth(objects: list[SimObject], T_cam_to_world: np.ndarray, cam: dict[str, Any]) -> np.ndarray:
-    """Pinhole depth with optional ground plane (default z=0)."""
+def render_depth(
+    objects: list[SimObject],
+    T_cam_to_world: np.ndarray,
+    cam: dict[str, Any],
+    map_volume: MapVolume | None = None,
+) -> np.ndarray:
+    """Pinhole depth with optional ground plane (default z=0) and map voxels."""
     width, height = cam_size(cam)
     fx, fy = float(cam["fx"]), float(cam["fy"])
     max_range = float(cam["max_range"])
@@ -92,6 +99,10 @@ def render_depth(objects: list[SimObject], T_cam_to_world: np.ndarray, cam: dict
     t_ground[down] = (ground_z - origin[2]) / dz[down]
     hit_ground = down & (t_ground > 1e-4) & (t_ground <= max_range)
     best = np.where(hit_ground, t_ground, best)
+
+    if map_volume is not None:
+        t_map = raycast_map(origin, rays, z_cam, max_range, map_volume)
+        best = np.where(np.isfinite(t_map) & (t_map < best), t_map, best)
 
     for obj in objects:
         box_min, box_max = obj.bounds

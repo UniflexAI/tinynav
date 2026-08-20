@@ -8,6 +8,7 @@ real planning_node + cmd_vel_control loop.
 
 from __future__ import annotations
 
+import base64
 import copy
 import math
 import os
@@ -18,6 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
@@ -35,9 +37,10 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
 
 from tinynav.core.robot_specs import GO2_CONFIG
+from tinynav.core import robot_specs as robot_specs_mod
+from tool.simulator.map_volume import MapVolume
 from tool.simulator.planning_scene import (
     SimObject,
-    box,
     cam_size,
     image_u8_payload,
     make_camera_pose_from_config,
@@ -46,36 +49,52 @@ from tool.simulator.planning_scene import (
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "offline_planning_web"
-PLANNING_ROBOT_DEFAULT = {k: v for k, v in asdict(GO2_CONFIG).items() if k != "obstacle"}
-PLANNING_OBSTACLE_DEFAULT = asdict(GO2_CONFIG.obstacle)
+REPO_ROOT = ROOT.parents[1]
 
 
-def default_config() -> dict[str, Any]:
-    # Fences + ground plane give valid depth so free-space carving works when
-    # boxes move (planning core stays unchanged).
+def _default_tinynav_db_path() -> Path:
+    env = os.environ.get("TINYNAV_DB_PATH")
+    if env:
+        return Path(env).expanduser()
+    repo_db = REPO_ROOT / "tinynav_db"
+    if (repo_db / "maps").is_dir():
+        return repo_db
+    return Path("/tinynav/tinynav_db")
+
+
+MAPS_ROOT = _default_tinynav_db_path() / "maps"
+CAMERA_DEFAULTS = {
+    "width": 160,
+    "image_height": 100,
+    "fx": 80.0,
+    "fy": 50.0,
+    "max_range": 15.0,
+    "mount_height": 0.45,
+}
+ROBOT_PRESETS = {
+    name.removesuffix("_CONFIG").lower(): asdict(getattr(robot_specs_mod, name))
+    for name in dir(robot_specs_mod)
+    if name.endswith("_CONFIG") and name != "ROBOT_CONFIG"
+}
+
+
+def _robot_dict(name: str | None = None) -> dict[str, Any]:
+    key = (name or GO2_CONFIG.name).strip().lower()
+    return copy.deepcopy(ROBOT_PRESETS.get(key, asdict(GO2_CONFIG)))
+
+
+def default_config(robot_name: str | None = None) -> dict[str, Any]:
+    robot = _robot_dict(robot_name)
     return {
         "name": "ros_planning_sim",
-        "robot": copy.deepcopy(PLANNING_ROBOT_DEFAULT),
-        "camera": {
-            "width": 160,
-            "image_height": 100,
-            "fx": 80.0,
-            "fy": 25.0,
-            "max_range": 15.0,
-            "mount_height": 0.45,
-        },
+        "robot": robot,
+        "obstacle": copy.deepcopy(robot.get("obstacle") or {}),
+        "camera": copy.deepcopy(CAMERA_DEFAULTS),
         "start": {"xy": [0.0, 0.0], "yaw_deg": 0.0},
         "target": [4.0, 0.0, 0.0],
-        "obstacle": copy.deepcopy(PLANNING_OBSTACLE_DEFAULT),
-        "objects": [
-            box("fence_back", [-0.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
-            box("fence_front", [9.35, 0.0, 0.6], [0.2, 10.2, 1.2]),
-            box("fence_left", [4.5, 5.05, 0.6], [10.0, 0.2, 1.2]),
-            box("fence_right", [4.5, -5.05, 0.6], [10.0, 0.2, 1.2]),
-            box("left_wall", [2.0, 1.0, 0.35], [3.2, 0.25, 1.3]),
-            box("right_wall", [2.0, -1.0, 0.35], [3.2, 0.25, 1.3]),
-            box("center_box", [1.65, 0.0, 0.25], [0.45, 0.55, 0.5]),
-        ],
+        "map_path": None,
+        "map_name": None,
+        "objects": [],
     }
 
 
@@ -100,12 +119,95 @@ def grid_payload(msg: OccupancyGrid, data_u8: np.ndarray) -> dict[str, Any]:
     }
 
 
+def rgb_payload(image: np.ndarray) -> dict[str, Any]:
+    rgb = np.ascontiguousarray(image, dtype=np.uint8)
+    h, w = rgb.shape[:2]
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".png", bgr)
+    if not ok:
+        raise RuntimeError("failed to encode map background PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+    return {"width": int(w), "height": int(h), "mime": "image/png", "data_url": data_url}
+
+
+_MAP_CACHE: dict[str, MapVolume] = {}
+
+
+def load_map_volume(map_path: str | None) -> MapVolume | None:
+    if not map_path:
+        return None
+    path = str(Path(map_path).expanduser().resolve())
+    cached = _MAP_CACHE.get(path)
+    if cached is not None:
+        return cached
+    volume = MapVolume.load(path)
+    _MAP_CACHE[path] = volume
+    return volume
+
+
+def resolve_map_path(map_name: str | None = None, map_path: str | None = None) -> str:
+    if map_name:
+        candidate = (MAPS_ROOT / map_name).resolve()
+        if MAPS_ROOT.resolve() not in candidate.parents and candidate != MAPS_ROOT.resolve():
+            raise ValueError(f"Invalid map name: {map_name!r}")
+        if not candidate.is_dir():
+            raise FileNotFoundError(f"Map folder not found: {candidate}")
+        return str(candidate)
+    if map_path:
+        return str(Path(map_path).expanduser().resolve())
+    raise ValueError("map_name or map_path is required")
+
+
+def list_map_catalog() -> list[dict[str, Any]]:
+    root = MAPS_ROOT
+    if not root.is_dir():
+        return []
+    entries: list[dict[str, Any]] = []
+    for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir():
+            continue
+        if not (child / "occupancy_grid.npy").is_file():
+            continue
+        entries.append({"name": child.name, "path": str(child.resolve())})
+    return entries
+
+
+def map_config_for_path(map_path: str, start_xy: list[float] | None = None, yaw_deg: float = 0.0) -> dict[str, Any]:
+    volume = load_map_volume(map_path)
+    if volume is None:
+        raise FileNotFoundError(f"Could not load map at {map_path}")
+    robot_name = None
+    camera = copy.deepcopy(CAMERA_DEFAULTS)
+    if SIM_NODE is not None:
+        robot_name = SIM_NODE.config.get("robot", {}).get("name")
+        camera = copy.deepcopy(SIM_NODE.config.get("camera") or camera)
+    config = default_config(robot_name)
+    config["camera"] = camera
+    if start_xy is None:
+        start_xy = list(volume.default_start_xy())
+    z = float(volume.origin[2])
+    config.update({
+        "name": Path(map_path).name,
+        "map_path": volume.map_path,
+        "map_name": Path(map_path).name,
+        "start": {"xy": [float(start_xy[0]), float(start_xy[1])], "yaw_deg": float(yaw_deg)},
+        "target": [float(start_xy[0]) + 2.0, float(start_xy[1]), z],
+        "objects": [],
+    })
+    config["camera"]["ground_z"] = z
+    return config
+
+
 class RosPlanningSimNode(Node):
     def __init__(self):
         super().__init__("tinynav_ros_planning_sim")
         self.bridge = CvBridge()
         self.lock = threading.RLock()
         self.config = default_config()
+        self.map_volume: MapVolume | None = None
+        self.map_info: dict[str, Any] | None = None
+        self.map_background: dict[str, Any] | None = None
+        self._apply_map_from_config(self.config)
         self.control_xy = list(self.config["start"]["xy"])
         self.yaw_deg = float(self.config["start"]["yaw_deg"])
         self.last_update = time.monotonic()
@@ -133,11 +235,39 @@ class RosPlanningSimNode(Node):
         self.create_subscription(OccupancyGrid, "/planning/occupancy_grid", self.esdf_callback, 10)
         self.create_timer(1.0 / 8.0, self.tick)
 
+    def _apply_map_from_config(self, config: dict[str, Any]) -> None:
+        map_path = config.get("map_path")
+        if not map_path:
+            self.map_volume = None
+            self.map_info = None
+            self.map_background = None
+            return
+        try:
+            volume = load_map_volume(str(map_path))
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            self.get_logger().error(f"Map load failed: {exc}")
+            self.map_volume = None
+            self.map_info = None
+            self.map_background = None
+            return
+        self.map_volume = volume
+        self.map_info = volume.info().as_dict()
+        self.map_background = rgb_payload(volume.background_rgb())
+        config["map_path"] = volume.map_path
+        cam = config.setdefault("camera", {})
+        cam["ground_z"] = float(volume.origin[2])
+
     def set_config(self, config: dict[str, Any], reset: bool = False) -> None:
         with self.lock:
+            prev_map = self.config.get("map_path")
             self.config = copy.deepcopy(config)
-            self.config["robot"] = copy.deepcopy(PLANNING_ROBOT_DEFAULT)
-            self.config["obstacle"] = copy.deepcopy(PLANNING_OBSTACLE_DEFAULT)
+            robot = self.config.get("robot")
+            if not isinstance(robot, dict):
+                robot = _robot_dict()
+                self.config["robot"] = robot
+            self.config["obstacle"] = copy.deepcopy(robot.get("obstacle") or {})
+            if self.config.get("map_path") != prev_map:
+                self._apply_map_from_config(self.config)
             if reset:
                 self.control_xy = list(self.config.get("start", {}).get("xy", [0.0, 0.0]))
                 self.yaw_deg = float(self.config.get("start", {}).get("yaw_deg", 0.0))
@@ -216,10 +346,11 @@ class RosPlanningSimNode(Node):
             config.setdefault("start", {})["xy"] = [float(self.control_xy[0]), float(self.control_xy[1])]
             config["start"]["yaw_deg"] = float(self.yaw_deg)
             yaw_deg = float(self.yaw_deg)
+            map_volume = self.map_volume
 
         objects = [SimObject(**obj) for obj in config.get("objects", [])]
         T_cam = make_camera_pose_from_config(config["start"]["xy"], yaw_deg, config["robot"], config["camera"])
-        depth = render_depth(objects, T_cam, config["camera"])
+        depth = render_depth(objects, T_cam, config["camera"], map_volume=map_volume)
         with self.lock:
             self.last_depth = depth
 
@@ -257,18 +388,30 @@ class RunRequest(BaseModel):
     reset: bool | None = None
 
 
+class LoadMapRequest(BaseModel):
+    map_name: str | None = None
+    map_path: str | None = None
+    start_xy: list[float] | None = None
+    yaw_deg: float = 0.0
+
+
 app = FastAPI(title="TinyNav ROS Planning Simulator")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 SIM_NODE: RosPlanningSimNode | None = None
 EXECUTOR: MultiThreadedExecutor | None = None
 PROCS: list[subprocess.Popen] = []
-REPO_ROOT = ROOT.parents[1]
 CHILD_SCRIPTS = (
     "tinynav/core/planning_node.py",
     "tinynav/platforms/cmd_vel_control.py",
 )
 _LAST_PLANNING_RESET = 0.0
 _PLANNING_RESET_COOLDOWN_S = 1.0
+
+
+def _require_sim() -> RosPlanningSimNode:
+    if SIM_NODE is None:
+        raise HTTPException(status_code=503, detail="ROS simulator is not ready")
+    return SIM_NODE
 
 
 def start_ros() -> None:
@@ -282,10 +425,17 @@ def start_ros() -> None:
     threading.Thread(target=EXECUTOR.spin, daemon=True).start()
 
 
+def _active_robot_type() -> str:
+    if SIM_NODE is None:
+        return "go2"
+    return str(SIM_NODE.config.get("robot", {}).get("name", "go2")).strip().lower()
+
+
 def _child_env() -> dict[str, str]:
     env = os.environ.copy()
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(key, "1")
+    env["ROBOT_TYPE"] = _active_robot_type()
     return env
 
 
@@ -372,18 +522,67 @@ def get_default_config() -> dict[str, Any]:
     return default_config()
 
 
-@app.post("/api/realtime-step")
-def realtime_step(request: RunRequest) -> dict[str, Any]:
-    if SIM_NODE is None:
-        raise HTTPException(status_code=503, detail="ROS simulator is not ready")
+@app.get("/api/map-catalog")
+def map_catalog() -> dict[str, Any]:
+    root = MAPS_ROOT
+    maps = list_map_catalog()
+    return {
+        "maps_root": str(root.resolve() if root.exists() else root),
+        "maps_root_exists": root.is_dir(),
+        "maps": maps,
+    }
+
+
+@app.post("/api/load-map")
+def load_map(request: LoadMapRequest) -> dict[str, Any]:
+    try:
+        resolved = resolve_map_path(request.map_name, request.map_path)
+        config = map_config_for_path(resolved, request.start_xy, request.yaw_deg)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if SIM_NODE is not None:
+        SIM_NODE.set_config(config, reset=True)
+    volume = load_map_volume(config["map_path"])
+    return {
+        "config": config,
+        "map_info": volume.info().as_dict() if volume else None,
+        "map_background": rgb_payload(volume.background_rgb()) if volume else None,
+    }
+
+
+@app.get("/api/map-info")
+def map_info(map_path: str) -> dict[str, Any]:
+    try:
+        volume = load_map_volume(map_path)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if volume is None:
+        raise HTTPException(status_code=400, detail="map_path is required")
+    return {
+        "map_info": volume.info().as_dict(),
+        "map_background": rgb_payload(volume.background_rgb()),
+    }
+
+
+@app.get("/api/robot-presets")
+def get_robot_presets() -> dict[str, Any]:
+    return {"presets": [{"name": name, "robot": copy.deepcopy(robot)} for name, robot in ROBOT_PRESETS.items()]}
+
+
+@app.post("/api/update-config")
+def update_config(request: RunRequest) -> dict[str, Any]:
+    node = _require_sim()
     if not isinstance(request.config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
     reset = bool(request.reset)
-    SIM_NODE.set_config(copy.deepcopy(request.config), reset=reset)
-    # Scene edits set reset=true; restart planning so occupancy/ESDF is not sticky.
-    if reset:
-        ensure_ros_loop(reset_planning=True, force=False)
-    return {"frame": SIM_NODE.frame()}
+    prev_robot = node.config.get("robot", {}).get("name")
+    node.set_config(copy.deepcopy(request.config), reset=reset)
+    robot_changed = prev_robot != node.config.get("robot", {}).get("name")
+    if robot_changed:
+        _stop_script("tinynav/platforms/cmd_vel_control.py")
+    if reset or robot_changed:
+        ensure_ros_loop(reset_planning=True, force=robot_changed)
+    return {"ok": True, "robot_changed": robot_changed}
 
 
 @app.post("/api/start-ros-loop")
@@ -393,9 +592,7 @@ def start_ros_loop() -> dict[str, Any]:
 
 @app.get("/api/sim-state")
 def sim_state() -> dict[str, Any]:
-    if SIM_NODE is None:
-        raise HTTPException(status_code=503, detail="ROS simulator is not ready")
-    return {"frame": SIM_NODE.frame()}
+    return {"frame": _require_sim().frame()}
 
 
 def main() -> None:
