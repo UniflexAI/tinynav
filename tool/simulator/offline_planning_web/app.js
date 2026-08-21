@@ -1,5 +1,6 @@
 const REALTIME_TICK_DELAY_MS = 33;
 const GRID_STEP_M = 1.0;
+const MARKER_HIT_RADIUS = window.matchMedia?.("(pointer: coarse)").matches ? 22 : 14;
 const DEFAULT_SCENE = { xMin: -0.8, xMax: 9.8, yMin: -5.4, yMax: 5.4 };
 const LAB_VIEW_HALF_M = 5.0;
 let sceneBounds = { ...DEFAULT_SCENE };
@@ -645,8 +646,12 @@ function setControlsVisible(visible) {
   controlsToggle.textContent = visible ? "Hide Controls" : "Show Controls";
 }
 
+let lastControlsWide = null;
 function syncControlsLayout() {
-  setControlsVisible(window.innerWidth > 1180);
+  const wide = window.innerWidth > 1180;
+  if (wide === lastControlsWide) return;
+  lastControlsWide = wide;
+  setControlsVisible(wide);
 }
 
 function drawRealtimeFrame(frame) {
@@ -756,18 +761,18 @@ function editScene() {
 
 function hitTestTarget(px, py, targetCanvas = canvas, bounds = sceneBounds) {
   const [tpx, tpy] = worldToCanvas(config.target[0], config.target[1], targetCanvas, bounds);
-  return Math.hypot(px - tpx, py - tpy) <= 14;
+  return Math.hypot(px - tpx, py - tpy) <= MARKER_HIT_RADIUS;
 }
 
 function hitTestStart(px, py, targetCanvas = canvas, bounds = sceneBounds) {
   const [sx, sy] = worldToCanvas(config.start.xy[0], config.start.xy[1], targetCanvas, bounds);
-  return Math.hypot(px - sx, py - sy) <= 14;
+  return Math.hypot(px - sx, py - sy) <= MARKER_HIT_RADIUS;
 }
 
 function hitTestRobot(px, py, targetCanvas = canvas, bounds = sceneBounds) {
   const xy = robotDragXY();
   const [rx, ry] = worldToCanvas(xy[0], xy[1], targetCanvas, bounds);
-  return Math.hypot(px - rx, py - ry) <= 14;
+  return Math.hypot(px - rx, py - ry) <= MARKER_HIT_RADIUS;
 }
 
 function hitTestObject(px, py) {

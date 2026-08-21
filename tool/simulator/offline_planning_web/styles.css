@@ -33,7 +33,8 @@ body {
 .scene-panel {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 32px);
+  max-height: calc(100vh - 32px); /* dvh fallback below overrides where supported, avoids mobile toolbar jump */
+  max-height: calc(100dvh - 32px);
   overflow: hidden;
 }
 
@@ -113,15 +114,18 @@ button.danger {
 }
 
 #sceneCanvas {
-  width: min(100%, calc(100vh - 190px));
+  width: min(100%, calc(100vh - 190px)); /* dvh fallback below overrides where supported, avoids mobile toolbar jump */
+  width: min(100%, calc(100dvh - 190px));
   max-width: 100%;
   aspect-ratio: 1 / 1;
   height: auto;
   max-height: calc(100vh - 190px);
+  max-height: calc(100dvh - 190px);
   display: block;
   border: 1px solid #ccd6df;
   border-radius: 6px;
   background: #fbfcfd;
+  touch-action: none;
 }
 
 .controls {
@@ -236,6 +240,7 @@ textarea {
 #mapCanvas {
   aspect-ratio: 4 / 3;
   cursor: grab;
+  touch-action: none;
 }
 
 #mapCanvas:active {
@@ -287,5 +292,40 @@ textarea {
 
   .controls.is-visible {
     display: block;
+  }
+}
+
+@media (max-width: 640px) {
+  .app {
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .panel {
+    padding: 12px;
+  }
+
+  button {
+    padding: 10px 12px;
+    min-height: 40px;
+  }
+
+  .toolbar button,
+  .header-actions button {
+    flex: 1 1 auto;
+  }
+
+  label {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  label input,
+  label select {
+    min-height: 40px;
+  }
+
+  .image-grid {
+    grid-template-columns: 1fr;
   }
 }
