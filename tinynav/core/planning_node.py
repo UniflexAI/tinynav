@@ -733,6 +733,9 @@ class PlanningNode(Node):
         self.heading_cost_weight = 0.0
         self.pivot_recovery_score_threshold = 0.2
         self.pivot_omega_min = 0.2
+        self.pivot_hold_duration = 0.8
+        self._pivot_active_until_time = 0.0
+        self._pivot_omega_sign = 0.0
 
         self.smoothed_velocity = 0.0
         self._last_avoidance_debug_log_time = 0.0
@@ -1288,6 +1291,22 @@ class PlanningNode(Node):
                         f"Updated planning pivot_recovery_score_threshold: {old:.2f} -> {threshold:.2f}"
                     )
 
+        if "pivot_hold_duration" in config:
+            try:
+                duration = float(config["pivot_hold_duration"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning pivot_hold_duration: {config.get('pivot_hold_duration')!r}"
+                )
+            else:
+                duration = max(0.0, min(3.0, duration))
+                old = self.pivot_hold_duration
+                self.pivot_hold_duration = duration
+                if abs(old - duration) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning pivot_hold_duration: {old:.2f} -> {duration:.2f}"
+                    )
+
     def _update_reverse_behavior(self):
         if self.terrain_mode == "stairs":
             self.reverse_speed = 0.15
@@ -1781,11 +1800,16 @@ class PlanningNode(Node):
                     self._staged_reverse_until_time,
                     now_cc + self.staged_reverse_duration,
                 )
+            pivot_hold_active = now_cc < self._pivot_active_until_time
+            if pivot_hold_active:
+                should_reverse = True
+                self._staged_reverse_until_time = 0.0
+
             if self.only_straight_back and now_cc < self._staged_reverse_until_time:
                 should_reverse = True
             elif not should_reverse:
                 self._staged_reverse_until_time = 0.0
-            self._reverse_active = should_reverse
+            self._reverse_active = should_reverse and not pivot_hold_active
 
             valid_traj_count = int(np.sum(np.isfinite(scores)))
             all_collision = valid_traj_count == 0
@@ -1817,14 +1841,22 @@ class PlanningNode(Node):
                 finite_indices = pivot_indices[finite_mask]
                 finite_scores = pivot_scores[finite_mask]
                 pivot_costs = finite_scores.astype(np.float64) * 100.0
-                if np.isfinite(target_side_y) and abs(target_side_y) > 0.05:
+                if pivot_hold_active and self._pivot_omega_sign != 0.0:
+                    wrong_side = params[finite_indices, 1] * self._pivot_omega_sign < 0.0
+                    pivot_costs = pivot_costs + wrong_side.astype(np.float64) * 1e6
+                elif np.isfinite(target_side_y) and abs(target_side_y) > 0.05:
                     preferred_sign = np.sign(target_side_y)
                     wrong_side = params[finite_indices, 1] * preferred_sign < 0.0
                     pivot_costs = pivot_costs + wrong_side.astype(np.float64) * 20.0
                 best = int(np.argmin(pivot_costs))
-                return int(finite_indices[best]), "pivot"
+                return int(finite_indices[best]), "pivot_hold" if pivot_hold_active else "pivot"
 
             def choose_recovery_index():
+                if pivot_hold_active:
+                    pivot_index, pivot_reason = choose_pivot_index()
+                    if pivot_index is not None:
+                        return pivot_index, pivot_reason
+
                 best_reverse_score = float("inf")
                 best_reverse_index = None
                 if len(recovery_indices) > 0:
@@ -1963,6 +1995,13 @@ class PlanningNode(Node):
             selected_cost = float(costs[selected_index])
             selected_is_reverse = bool(selected_param[0] < 0.0)
             selected_is_pivot = bool(abs(selected_param[0]) < 1e-6 and abs(selected_param[1]) >= self.pivot_omega_min)
+            if selected_is_pivot and self.pivot_hold_duration > 0.0:
+                self._pivot_active_until_time = max(self._pivot_active_until_time, now_cc + self.pivot_hold_duration)
+                self._pivot_omega_sign = float(np.sign(selected_param[1]))
+                self._staged_reverse_until_time = 0.0
+            elif not selected_is_pivot and not pivot_hold_active:
+                self._pivot_active_until_time = 0.0
+                self._pivot_omega_sign = 0.0
             selected_breakdown = cost_breakdown(
                 trajectories[selected_index],
                 selected_param,
@@ -2000,6 +2039,9 @@ class PlanningNode(Node):
                     f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
                     f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} selected_pivot={selected_is_pivot} "
                     f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
+                    f"pivot_hold_active={pivot_hold_active} "
+                    f"pivot_hold_left={max(0.0, self._pivot_active_until_time - now_cc):.2f} "
+                    f"pivot_omega_sign={self._pivot_omega_sign:.0f} "
                     f"target_robot_x={target_robot_x:.2f} target_robot_y={target_robot_y:.2f} "
                     f"target_dist={target_dist:.2f} heading_error={selected_breakdown['heading_error']:.2f} "
                     f"target_yaw={selected_breakdown['target_yaw']:.2f} traj_yaw={selected_breakdown['traj_yaw']:.2f} "
@@ -2019,6 +2061,7 @@ class PlanningNode(Node):
                     f"trajectory_smooth_weight={self.trajectory_smooth_weight:.1f} "
                     f"heading_cost_weight={self.heading_cost_weight:.1f} "
                     f"pivot_recovery_score_threshold={self.pivot_recovery_score_threshold:.2f} "
+                    f"pivot_hold_duration={self.pivot_hold_duration:.2f} "
                     f"target_side_y={target_side_y:.2f} "
                     f"only_straight_back={self.only_straight_back} "
                     f"staged_reverse_duration={self.staged_reverse_duration:.2f}"
