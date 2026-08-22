@@ -1767,7 +1767,10 @@ class PlanningNode(Node):
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = float(np.linalg.norm(traj_end - target_end))
                 esdf_cost = float(score * 100)
-                target_cost = float(100 * dist)
+                target_cost_scale = 1.0
+                if np.isfinite(front_clearance):
+                    target_cost_scale = float(np.clip(front_clearance / 1.0, 0.35, 1.0))
+                target_cost = float(100 * dist * target_cost_scale)
                 smooth_vx_cost = float(self.trajectory_smooth_weight * abs(self.last_param[0] - param[0]))
                 smooth_omega_cost = float(self.trajectory_smooth_weight * abs(self.last_param[1] - param[1]))
                 heading_error, target_yaw, traj_yaw = trajectory_heading_debug(traj, target_pose)
@@ -1777,6 +1780,7 @@ class PlanningNode(Node):
                     "dist": dist,
                     "esdf_cost": esdf_cost,
                     "target_cost": target_cost,
+                    "target_cost_scale": target_cost_scale,
                     "smooth_vx_cost": smooth_vx_cost,
                     "smooth_omega_cost": smooth_omega_cost,
                     "reverse_gate_penalty": float(reverse_gate_penalty),
@@ -1832,6 +1836,7 @@ class PlanningNode(Node):
                     f"target_yaw={selected_breakdown['target_yaw']:.2f} traj_yaw={selected_breakdown['traj_yaw']:.2f} "
                     f"esdf_cost={selected_breakdown['esdf_cost']:.1f} "
                     f"target_cost={selected_breakdown['target_cost']:.1f} "
+                    f"target_cost_scale={selected_breakdown['target_cost_scale']:.2f} "
                     f"smooth_vx_cost={selected_breakdown['smooth_vx_cost']:.1f} "
                     f"smooth_omega_cost={selected_breakdown['smooth_omega_cost']:.1f} "
                     f"reverse_gate_penalty={selected_breakdown['reverse_gate_penalty']:.1f} "
