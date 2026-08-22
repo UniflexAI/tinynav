@@ -720,12 +720,17 @@ class PlanningNode(Node):
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
         self.reverse_enter_threshold = 0.30
+        self.reverse_exit_threshold = 0.45
+        self._reverse_active = False
+        self.staged_reverse_duration = 1.0
+        self._staged_reverse_until_time = 0.0
         self.terrain_mode = "normal"
         self.max_linear_speed = 0.5
         self.only_straight_back = False
         self.reverse_speed = 0.3
         self.reverse_omegas = (0.0, -0.5, 0.5)
         self.trajectory_smooth_weight = 10.0
+        self.heading_cost_weight = 0.0
 
         self.smoothed_velocity = 0.0
         self._last_avoidance_debug_log_time = 0.0
@@ -1016,9 +1021,43 @@ class PlanningNode(Node):
                 reverse_enter_threshold = max(0.0, min(2.0, reverse_enter_threshold))
                 old = self.reverse_enter_threshold
                 self.reverse_enter_threshold = reverse_enter_threshold
+                self.reverse_exit_threshold = max(self.reverse_exit_threshold, self.reverse_enter_threshold)
                 if abs(old - reverse_enter_threshold) > 1e-6:
                     self.get_logger().info(
                         f"Updated planning reverse_enter_threshold: {old:.2f} -> {reverse_enter_threshold:.2f}"
+                    )
+
+        if "reverse_exit_threshold" in config:
+            try:
+                reverse_exit_threshold = float(config["reverse_exit_threshold"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning reverse_exit_threshold: {config.get('reverse_exit_threshold')!r}"
+                )
+            else:
+                reverse_exit_threshold = max(0.0, min(3.0, reverse_exit_threshold))
+                reverse_exit_threshold = max(reverse_exit_threshold, self.reverse_enter_threshold)
+                old = self.reverse_exit_threshold
+                self.reverse_exit_threshold = reverse_exit_threshold
+                if abs(old - reverse_exit_threshold) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning reverse_exit_threshold: {old:.2f} -> {reverse_exit_threshold:.2f}"
+                    )
+
+        if "staged_reverse_duration" in config:
+            try:
+                staged_reverse_duration = float(config["staged_reverse_duration"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning staged_reverse_duration: {config.get('staged_reverse_duration')!r}"
+                )
+            else:
+                staged_reverse_duration = max(0.0, min(5.0, staged_reverse_duration))
+                old = self.staged_reverse_duration
+                self.staged_reverse_duration = staged_reverse_duration
+                if abs(old - staged_reverse_duration) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning staged_reverse_duration: {old:.2f} -> {staged_reverse_duration:.2f}"
                     )
 
         if "terrain_mode" in config:
@@ -1213,6 +1252,22 @@ class PlanningNode(Node):
                 if abs(old - smooth_weight) > 1e-6:
                     self.get_logger().info(
                         f"Updated planning trajectory_smooth_weight: {old:.1f} -> {smooth_weight:.1f}"
+                    )
+
+        if "heading_cost_weight" in config:
+            try:
+                heading_cost_weight = float(config["heading_cost_weight"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning heading_cost_weight: {config.get('heading_cost_weight')!r}"
+                )
+            else:
+                heading_cost_weight = max(0.0, min(300.0, heading_cost_weight))
+                old = self.heading_cost_weight
+                self.heading_cost_weight = heading_cost_weight
+                if abs(old - heading_cost_weight) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning heading_cost_weight: {old:.1f} -> {heading_cost_weight:.1f}"
                     )
 
     def _update_reverse_behavior(self):
@@ -1696,7 +1751,24 @@ class PlanningNode(Node):
             self.front_clearance_pub.publish(Float32(data=float(front_clearance)))
             effective_target_pose = self._resolve_effective_target_pose(T, ESDF_map, header.stamp)
             enter_threshold = self.reverse_enter_threshold
-            should_reverse = front_clearance <= enter_threshold
+            exit_threshold = max(self.reverse_exit_threshold, enter_threshold)
+            now_cc = time.monotonic()
+            if self._reverse_active:
+                should_reverse = front_clearance < exit_threshold
+            else:
+                should_reverse = front_clearance <= enter_threshold
+
+            if self.only_straight_back and should_reverse:
+                self._staged_reverse_until_time = max(
+                    self._staged_reverse_until_time,
+                    now_cc + self.staged_reverse_duration,
+                )
+            if self.only_straight_back and now_cc < self._staged_reverse_until_time:
+                should_reverse = True
+            elif not should_reverse:
+                self._staged_reverse_until_time = 0.0
+            self._reverse_active = should_reverse
+
             valid_traj_count = int(np.sum(np.isfinite(scores)))
             all_collision = valid_traj_count == 0
             recovery_indices = np.flatnonzero(params[:, 0] < 0.0)
@@ -1771,12 +1843,16 @@ class PlanningNode(Node):
                 smooth_vx_cost = float(self.trajectory_smooth_weight * abs(self.last_param[0] - param[0]))
                 smooth_omega_cost = float(self.trajectory_smooth_weight * abs(self.last_param[1] - param[1]))
                 heading_error, target_yaw, traj_yaw = trajectory_heading_debug(traj, target_pose)
-                total = esdf_cost + target_cost + smooth_vx_cost + smooth_omega_cost + reverse_gate_penalty
+                heading_cost = 0.0
+                if self.heading_cost_weight > 0.0 and not is_backward_traj and np.isfinite(heading_error):
+                    heading_cost = float(self.heading_cost_weight * heading_error)
+                total = esdf_cost + target_cost + heading_cost + smooth_vx_cost + smooth_omega_cost + reverse_gate_penalty
                 return {
                     "total": total,
                     "dist": dist,
                     "esdf_cost": esdf_cost,
                     "target_cost": target_cost,
+                    "heading_cost": heading_cost,
                     "smooth_vx_cost": smooth_vx_cost,
                     "smooth_omega_cost": smooth_omega_cost,
                     "reverse_gate_penalty": float(reverse_gate_penalty),
@@ -1822,7 +1898,10 @@ class PlanningNode(Node):
                 self.get_logger().info(
                     "planning_avoidance_debug "
                     f"front_clearance={front_clearance:.2f} enter_threshold={enter_threshold:.2f} "
-                    f"should_reverse={should_reverse} all_collision={all_collision} "
+                    f"exit_threshold={exit_threshold:.2f} "
+                    f"should_reverse={should_reverse} reverse_active={self._reverse_active} "
+                    f"staged_reverse_left={max(0.0, self._staged_reverse_until_time - now_cc):.2f} "
+                    f"all_collision={all_collision} "
                     f"valid_traj_count={valid_traj_count}/{len(trajectories)} "
                     f"recovery_reason={recovery_reason} "
                     f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
@@ -1832,6 +1911,7 @@ class PlanningNode(Node):
                     f"target_yaw={selected_breakdown['target_yaw']:.2f} traj_yaw={selected_breakdown['traj_yaw']:.2f} "
                     f"esdf_cost={selected_breakdown['esdf_cost']:.1f} "
                     f"target_cost={selected_breakdown['target_cost']:.1f} "
+                    f"heading_cost={selected_breakdown['heading_cost']:.1f} "
                     f"smooth_vx_cost={selected_breakdown['smooth_vx_cost']:.1f} "
                     f"smooth_omega_cost={selected_breakdown['smooth_omega_cost']:.1f} "
                     f"reverse_gate_penalty={selected_breakdown['reverse_gate_penalty']:.1f} "
@@ -1842,7 +1922,10 @@ class PlanningNode(Node):
                     f"lidar_min_obstacle_area_cells={self.lidar_min_obstacle_area_cells} "
                     f"lidar_score_percentile={self.lidar_score_percentile:.1f} "
                     f"lidar_collision_tolerance={self.lidar_collision_tolerance} "
-                    f"trajectory_smooth_weight={self.trajectory_smooth_weight:.1f}"
+                    f"trajectory_smooth_weight={self.trajectory_smooth_weight:.1f} "
+                    f"heading_cost_weight={self.heading_cost_weight:.1f} "
+                    f"only_straight_back={self.only_straight_back} "
+                    f"staged_reverse_duration={self.staged_reverse_duration:.2f}"
                 )
             self.last_param = selected_param
 
