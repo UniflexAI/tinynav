@@ -86,15 +86,46 @@ def _robot_dict(name: str | None = None) -> dict[str, Any]:
 def default_config(robot_name: str | None = None) -> dict[str, Any]:
     robot = _robot_dict(robot_name)
     return {
-        "name": "ros_planning_sim",
+        "name": "l_turn_tug_of_war",
         "robot": robot,
         "obstacle": copy.deepcopy(robot.get("obstacle") or {}),
         "camera": copy.deepcopy(CAMERA_DEFAULTS),
         "start": {"xy": [0.0, 0.0], "yaw_deg": 0.0},
-        "target": [4.0, 0.0, 0.0],
+        "target": [2.55, 1.75, 0.0],
         "map_path": None,
         "map_name": None,
-        "objects": [],
+        "objects": [
+            {
+                "name": "lower_corridor_wall",
+                "kind": "box",
+                "center": [1.25, -0.62, 0.45],
+                "size": [3.0, 0.18, 1.2],
+            },
+            {
+                "name": "upper_corridor_wall",
+                "kind": "box",
+                "center": [0.95, 0.62, 0.45],
+                "size": [1.9, 0.18, 1.2],
+            },
+            {
+                "name": "inside_corner_block",
+                "kind": "box",
+                "center": [1.82, 0.45, 0.45],
+                "size": [0.55, 0.35, 1.2],
+            },
+            {
+                "name": "left_turn_inner_wall",
+                "kind": "box",
+                "center": [2.05, 1.35, 0.45],
+                "size": [0.18, 1.35, 1.2],
+            },
+            {
+                "name": "left_turn_outer_wall",
+                "kind": "box",
+                "center": [3.05, 1.15, 0.45],
+                "size": [0.18, 1.8, 1.2],
+            },
+        ],
     }
 
 
