@@ -731,6 +731,8 @@ class PlanningNode(Node):
         self.reverse_omegas = (0.0, -0.5, 0.5)
         self.trajectory_smooth_weight = 10.0
         self.heading_cost_weight = 0.0
+        self.pivot_recovery_score_threshold = 0.2
+        self.pivot_omega_min = 0.2
 
         self.smoothed_velocity = 0.0
         self._last_avoidance_debug_log_time = 0.0
@@ -1270,6 +1272,22 @@ class PlanningNode(Node):
                         f"Updated planning heading_cost_weight: {old:.1f} -> {heading_cost_weight:.1f}"
                     )
 
+        if "pivot_recovery_score_threshold" in config:
+            try:
+                threshold = float(config["pivot_recovery_score_threshold"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning pivot_recovery_score_threshold: {config.get('pivot_recovery_score_threshold')!r}"
+                )
+            else:
+                threshold = max(0.0, min(10.0, threshold))
+                old = self.pivot_recovery_score_threshold
+                self.pivot_recovery_score_threshold = threshold
+                if abs(old - threshold) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning pivot_recovery_score_threshold: {old:.2f} -> {threshold:.2f}"
+                    )
+
     def _update_reverse_behavior(self):
         if self.terrain_mode == "stairs":
             self.reverse_speed = 0.15
@@ -1772,16 +1790,63 @@ class PlanningNode(Node):
             valid_traj_count = int(np.sum(np.isfinite(scores)))
             all_collision = valid_traj_count == 0
             recovery_indices = np.flatnonzero(params[:, 0] < 0.0)
+            pivot_indices = np.flatnonzero((np.abs(params[:, 0]) < 1e-6) & (np.abs(params[:, 1]) >= self.pivot_omega_min))
+
+            def target_side_in_robot_frame(target_pose):
+                if target_pose is None:
+                    return float("nan")
+                center = self.camera_to_robot_center(T)
+                delta = np.array(target_pose[:3], dtype=np.float64) - center
+                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                forward_norm = float(np.linalg.norm(forward[:2]))
+                if forward_norm < 1e-6:
+                    return float("nan")
+                fwd_xy = forward[:2] / forward_norm
+                left_xy = np.array([-fwd_xy[1], fwd_xy[0]], dtype=np.float64)
+                return float(np.dot(delta[:2], left_xy))
+
+            target_side_y = target_side_in_robot_frame(effective_target_pose)
+
+            def choose_pivot_index():
+                if len(pivot_indices) == 0:
+                    return None, "none"
+                pivot_scores = scores[pivot_indices]
+                finite_mask = np.isfinite(pivot_scores)
+                if not np.any(finite_mask):
+                    return None, "none"
+                finite_indices = pivot_indices[finite_mask]
+                finite_scores = pivot_scores[finite_mask]
+                pivot_costs = finite_scores.astype(np.float64) * 100.0
+                if np.isfinite(target_side_y) and abs(target_side_y) > 0.05:
+                    preferred_sign = np.sign(target_side_y)
+                    wrong_side = params[finite_indices, 1] * preferred_sign < 0.0
+                    pivot_costs = pivot_costs + wrong_side.astype(np.float64) * 20.0
+                best = int(np.argmin(pivot_costs))
+                return int(finite_indices[best]), "pivot"
 
             def choose_recovery_index():
+                best_reverse_score = float("inf")
+                best_reverse_index = None
+                if len(recovery_indices) > 0:
+                    recovery_scores = scores[recovery_indices]
+                    finite_mask = np.isfinite(recovery_scores)
+                    if np.any(finite_mask):
+                        finite_indices = recovery_indices[finite_mask]
+                        finite_scores = recovery_scores[finite_mask]
+                        best_pos = int(np.argmin(finite_scores))
+                        best_reverse_score = float(finite_scores[best_pos])
+                        best_reverse_index = int(finite_indices[best_pos])
+                        if best_reverse_score <= self.pivot_recovery_score_threshold:
+                            return best_reverse_index, "finite"
+
+                pivot_index, pivot_reason = choose_pivot_index()
+                if pivot_index is not None:
+                    return pivot_index, pivot_reason
+
+                if best_reverse_index is not None:
+                    return best_reverse_index, "finite_poor"
                 if len(recovery_indices) == 0:
                     return 0, "none"
-                recovery_scores = scores[recovery_indices]
-                finite_mask = np.isfinite(recovery_scores)
-                if np.any(finite_mask):
-                    finite_indices = recovery_indices[finite_mask]
-                    finite_scores = recovery_scores[finite_mask]
-                    return int(finite_indices[int(np.argmin(finite_scores))]), "finite"
 
                 ignore_steps = min(3, trajectories.shape[1] - 1)
                 delayed_scores, _ = score_trajectories_by_ESDF(
@@ -1845,8 +1910,9 @@ class PlanningNode(Node):
             def cost_breakdown(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
+                is_pivot_traj = abs(param[0]) < 1e-6 and abs(param[1]) >= self.pivot_omega_min
                 reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
+                if should_reverse and not is_backward_traj and not is_pivot_traj:
                     reverse_gate_penalty = 1e9
                 elif not should_reverse and is_backward_traj:
                     reverse_gate_penalty = 1e9
@@ -1896,6 +1962,7 @@ class PlanningNode(Node):
             selected_score = float(scores[selected_index])
             selected_cost = float(costs[selected_index])
             selected_is_reverse = bool(selected_param[0] < 0.0)
+            selected_is_pivot = bool(abs(selected_param[0]) < 1e-6 and abs(selected_param[1]) >= self.pivot_omega_min)
             selected_breakdown = cost_breakdown(
                 trajectories[selected_index],
                 selected_param,
@@ -1909,6 +1976,7 @@ class PlanningNode(Node):
                 or all_collision
                 or should_reverse
                 or selected_is_reverse
+                or selected_is_pivot
             )
             if should_log_debug:
                 self._last_avoidance_debug_log_time = now_debug
@@ -1930,7 +1998,7 @@ class PlanningNode(Node):
                     f"valid_traj_count={valid_traj_count}/{len(trajectories)} "
                     f"recovery_reason={recovery_reason} "
                     f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
-                    f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} "
+                    f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} selected_pivot={selected_is_pivot} "
                     f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
                     f"target_robot_x={target_robot_x:.2f} target_robot_y={target_robot_y:.2f} "
                     f"target_dist={target_dist:.2f} heading_error={selected_breakdown['heading_error']:.2f} "
@@ -1950,6 +2018,8 @@ class PlanningNode(Node):
                     f"lidar_collision_tolerance={self.lidar_collision_tolerance} "
                     f"trajectory_smooth_weight={self.trajectory_smooth_weight:.1f} "
                     f"heading_cost_weight={self.heading_cost_weight:.1f} "
+                    f"pivot_recovery_score_threshold={self.pivot_recovery_score_threshold:.2f} "
+                    f"target_side_y={target_side_y:.2f} "
                     f"only_straight_back={self.only_straight_back} "
                     f"staged_reverse_duration={self.staged_reverse_duration:.2f}"
                     f"{reverse_debug}"
