@@ -6,7 +6,7 @@ import os
 from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
-from planning_node import run_raycasting_loopy
+from planning_node import run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -143,5 +143,74 @@ def test_run_raycasting_comparison():
             print_diffs(py_occupancy_grid, cpp_occupancy_grid, "Vectorized", "C++")
         assert False, "Implementations do not match."
 
+def test_build_route_fields_no_route():
+    path_dist_map, remaining_map, has_route = build_route_fields(
+        [], (20, 20), np.array([0.0, 0.0]), 0.1,
+    )
+    assert not has_route
+    assert np.all(path_dist_map == 1e3)
+    assert np.all(remaining_map == 1e3)
+
+def test_build_route_fields_straight_line():
+    origin = np.array([0.0, 0.0])
+    resolution = 0.1
+    # a straight 4m route along x, at y=2.5
+    route_xy = [(0.5, 2.5), (4.5, 2.5)]
+    path_dist_map, remaining_map, has_route = build_route_fields(
+        route_xy, (50, 50), origin, resolution,
+    )
+    assert has_route
+
+    def cell(x, y):
+        return int((x - origin[0]) / resolution), int((y - origin[1]) / resolution)
+
+    start_r, start_c = cell(0.5, 2.5)
+    end_r, end_c = cell(4.5, 2.5)
+    on_route_r, on_route_c = cell(2.5, 2.5)
+    off_route_r, off_route_c = cell(2.5, 0.5)
+
+    assert abs(remaining_map[start_r, start_c] - 4.0) < 0.2
+    assert abs(remaining_map[end_r, end_c] - 0.0) < 0.2
+    assert abs(remaining_map[on_route_r, on_route_c] - 2.0) < 0.2
+    # on the line: nearest route cell is itself
+    assert path_dist_map[on_route_r, on_route_c] < resolution
+    # 2m off the line: distance to the route should reflect that
+    assert abs(path_dist_map[off_route_r, off_route_c] - 2.0) < 0.2
+
+def test_score_trajectories_by_esdf_route_terms():
+    origin = np.array([0.0, 0.0])
+    resolution = 0.1
+    route_xy = [(0.5, 2.5), (4.5, 2.5)]
+    path_dist_map, remaining_map, has_route = build_route_fields(
+        route_xy, (50, 50), origin, resolution,
+    )
+    assert has_route
+
+    ESDF_map = np.full((50, 50), 5.0, dtype=np.float32)  # far from every obstacle
+
+    # a trajectory that tracks the route from start to end
+    on_route_traj = np.array([[
+        [x, 2.5, 0.0, 0.0, 0.0, 0.0, 1.0] for x in np.linspace(0.6, 4.4, 5)
+    ]])
+    scores, occ_points, path_costs, end_remainings = score_trajectories_by_ESDF(
+        on_route_traj, ESDF_map, path_dist_map, remaining_map, origin, resolution,
+    )
+    assert scores[0] == 0.0  # nothing anywhere near safety_radius
+    assert path_costs[0] < resolution  # trajectory center never leaves the route
+    assert abs(end_remainings[0] - 0.0) < 0.2  # ends at the route's end
+
+    # a trajectory that runs parallel to the route, 2m off to the side
+    off_route_traj = np.array([[
+        [x, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0] for x in np.linspace(0.6, 4.4, 5)
+    ]])
+    _, _, off_path_costs, _ = score_trajectories_by_ESDF(
+        off_route_traj, ESDF_map, path_dist_map, remaining_map, origin, resolution,
+    )
+    assert abs(off_path_costs[0] - 2.0) < 0.2
+
 if __name__ == "__main__":
     test_run_raycasting_comparison()
+    test_build_route_fields_no_route()
+    test_build_route_fields_straight_line()
+    test_score_trajectories_by_esdf_route_terms()
+    print("Route field tests passed.")
