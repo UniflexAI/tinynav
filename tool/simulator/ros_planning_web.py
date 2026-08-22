@@ -104,14 +104,8 @@ def default_config(robot_name: str | None = None) -> dict[str, Any]:
             {
                 "name": "upper_corridor_wall",
                 "kind": "box",
-                "center": [0.95, 0.62, 0.45],
-                "size": [1.9, 0.18, 1.2],
-            },
-            {
-                "name": "inside_corner_block",
-                "kind": "box",
-                "center": [1.82, 0.45, 0.45],
-                "size": [0.55, 0.35, 1.2],
+                "center": [1.15, 0.62, 0.45],
+                "size": [2.3, 0.18, 1.2],
             },
             {
                 "name": "left_turn_inner_wall",
