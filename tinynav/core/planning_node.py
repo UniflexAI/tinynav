@@ -1825,6 +1825,23 @@ class PlanningNode(Node):
                 traj_yaw = math.atan2(float(forward[1]), float(forward[0]))
                 return abs(_wrap_angle(target_yaw - traj_yaw)), target_yaw, traj_yaw
 
+            def target_in_robot_frame(target_pose):
+                if target_pose is None:
+                    return float("nan"), float("nan")
+                center = self.camera_to_robot_center(T)
+                delta = np.array(target_pose[:3], dtype=np.float64) - center
+                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                forward_norm = float(np.linalg.norm(forward[:2]))
+                if forward_norm < 1e-6:
+                    return float("nan"), float("nan")
+                fwd_xy = forward[:2] / forward_norm
+                left_xy = np.array([-fwd_xy[1], fwd_xy[0]], dtype=np.float64)
+                target_robot_x = float(np.dot(delta[:2], fwd_xy))
+                target_robot_y = float(np.dot(delta[:2], left_xy))
+                return target_robot_x, target_robot_y
+
+            target_robot_x, target_robot_y = target_in_robot_frame(effective_target_pose)
+
             def cost_breakdown(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
@@ -1895,6 +1912,14 @@ class PlanningNode(Node):
             )
             if should_log_debug:
                 self._last_avoidance_debug_log_time = now_debug
+                reverse_debug = ""
+                if should_reverse or selected_is_reverse:
+                    reverse_parts = []
+                    for idx in recovery_indices:
+                        reverse_parts.append(
+                            f"{int(idx)}:om={params[idx, 1]:.2f},score={scores[idx]:.2f},cost={costs[idx]:.1f}"
+                        )
+                    reverse_debug = " reverse_candidates=[" + ";".join(reverse_parts) + "]"
                 self.get_logger().info(
                     "planning_avoidance_debug "
                     f"front_clearance={front_clearance:.2f} enter_threshold={enter_threshold:.2f} "
@@ -1907,6 +1932,7 @@ class PlanningNode(Node):
                     f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
                     f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} "
                     f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
+                    f"target_robot_x={target_robot_x:.2f} target_robot_y={target_robot_y:.2f} "
                     f"target_dist={target_dist:.2f} heading_error={selected_breakdown['heading_error']:.2f} "
                     f"target_yaw={selected_breakdown['target_yaw']:.2f} traj_yaw={selected_breakdown['traj_yaw']:.2f} "
                     f"esdf_cost={selected_breakdown['esdf_cost']:.1f} "
@@ -1926,6 +1952,7 @@ class PlanningNode(Node):
                     f"heading_cost_weight={self.heading_cost_weight:.1f} "
                     f"only_straight_back={self.only_straight_back} "
                     f"staged_reverse_duration={self.staged_reverse_duration:.2f}"
+                    f"{reverse_debug}"
                 )
             self.last_param = selected_param
 
