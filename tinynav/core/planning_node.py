@@ -1751,32 +1751,7 @@ class PlanningNode(Node):
                 if np.linalg.norm(forward[:2]) < 1e-6:
                     return float("nan"), target_yaw, float("nan")
                 traj_yaw = math.atan2(float(forward[1]), float(forward[0]))
-                heading_delta = _wrap_angle(target_yaw - traj_yaw)
-                return abs(heading_delta), target_yaw, traj_yaw
-
-            def robot_target_heading_error(target_pose):
-                if target_pose is None:
-                    return float("nan"), 0.0
-                center = self.camera_to_robot_center(T)
-                to_target = np.array(target_pose[:3], dtype=np.float64) - center
-                if np.linalg.norm(to_target[:2]) < 1e-6:
-                    return 0.0, 0.0
-                target_yaw = math.atan2(float(to_target[1]), float(to_target[0]))
-                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                if np.linalg.norm(forward[:2]) < 1e-6:
-                    return float("nan"), 0.0
-                robot_yaw = math.atan2(float(forward[1]), float(forward[0]))
-                heading_delta = _wrap_angle(target_yaw - robot_yaw)
-                return abs(heading_delta), float(np.sign(heading_delta))
-
-            robot_heading_error, target_turn_sign = robot_target_heading_error(effective_target_pose)
-            turn_in_place_mode = (
-                np.isfinite(robot_heading_error)
-                and robot_heading_error > 0.75
-                and front_clearance < 0.9
-                and not should_reverse
-                and not all_collision
-            )
+                return abs(_wrap_angle(target_yaw - traj_yaw)), target_yaw, traj_yaw
 
             def cost_breakdown(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
@@ -1795,15 +1770,8 @@ class PlanningNode(Node):
                 target_cost = float(100 * dist)
                 smooth_vx_cost = float(self.trajectory_smooth_weight * abs(self.last_param[0] - param[0]))
                 smooth_omega_cost = float(self.trajectory_smooth_weight * abs(self.last_param[1] - param[1]))
-                turn_in_place_cost = 0.0
-                if turn_in_place_mode and not is_backward_traj:
-                    forward_penalty = 160.0 * min(max(param[0], 0.0) / max(self.max_linear_speed, 1e-6), 1.0)
-                    wrong_turn_penalty = 160.0 if param[1] * target_turn_sign < -0.05 else 0.0
-                    no_turn_penalty = 80.0 if abs(param[1]) < 0.15 else 0.0
-                    correct_turn_bonus = -80.0 if param[1] * target_turn_sign > 0.25 and param[0] <= 0.15 else 0.0
-                    turn_in_place_cost = float(forward_penalty + wrong_turn_penalty + no_turn_penalty + correct_turn_bonus)
                 heading_error, target_yaw, traj_yaw = trajectory_heading_debug(traj, target_pose)
-                total = esdf_cost + target_cost + smooth_vx_cost + smooth_omega_cost + turn_in_place_cost + reverse_gate_penalty
+                total = esdf_cost + target_cost + smooth_vx_cost + smooth_omega_cost + reverse_gate_penalty
                 return {
                     "total": total,
                     "dist": dist,
@@ -1811,7 +1779,6 @@ class PlanningNode(Node):
                     "target_cost": target_cost,
                     "smooth_vx_cost": smooth_vx_cost,
                     "smooth_omega_cost": smooth_omega_cost,
-                    "turn_in_place_cost": turn_in_place_cost,
                     "reverse_gate_penalty": float(reverse_gate_penalty),
                     "heading_error": float(heading_error),
                     "target_yaw": float(target_yaw),
@@ -1867,9 +1834,6 @@ class PlanningNode(Node):
                     f"target_cost={selected_breakdown['target_cost']:.1f} "
                     f"smooth_vx_cost={selected_breakdown['smooth_vx_cost']:.1f} "
                     f"smooth_omega_cost={selected_breakdown['smooth_omega_cost']:.1f} "
-                    f"turn_in_place_mode={turn_in_place_mode} "
-                    f"robot_heading_error={robot_heading_error:.2f} "
-                    f"turn_in_place_cost={selected_breakdown['turn_in_place_cost']:.1f} "
                     f"reverse_gate_penalty={selected_breakdown['reverse_gate_penalty']:.1f} "
                     f"last_vx={self.last_param[0]:.2f} "
                     f"last_omega={self.last_param[1]:.2f} source={self.occupancy_source} "
