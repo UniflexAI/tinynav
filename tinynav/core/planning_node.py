@@ -1,4 +1,5 @@
 import os
+import math
 import rclpy
 import json
 import threading
@@ -1734,27 +1735,58 @@ class PlanningNode(Node):
                 straight_reverse = recovery_indices[int(np.argmin(np.abs(params[recovery_indices, 1])))]
                 return int(straight_reverse), "fallback_straight"
 
-            def cost_function(traj, param, score, target_pose):
+            def _wrap_angle(angle: float) -> float:
+                return math.atan2(math.sin(angle), math.cos(angle))
+
+            def trajectory_heading_debug(traj, target_pose):
+                if target_pose is None:
+                    return float("nan"), float("nan"), float("nan")
+                traj_end = np.array(traj[-1, :3], dtype=np.float64)
+                to_target = np.array(target_pose[:3], dtype=np.float64) - traj_end
+                if np.linalg.norm(to_target[:2]) < 1e-6:
+                    return 0.0, float("nan"), float("nan")
+                target_yaw = math.atan2(float(to_target[1]), float(to_target[0]))
+                q = np.array(traj[-1, 3:7], dtype=np.float64)
+                forward = quat_to_matrix(q) @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                if np.linalg.norm(forward[:2]) < 1e-6:
+                    return float("nan"), target_yaw, float("nan")
+                traj_yaw = math.atan2(float(forward[1]), float(forward[0]))
+                return abs(_wrap_angle(target_yaw - traj_yaw)), target_yaw, traj_yaw
+
+            def cost_breakdown(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
                 reverse_gate_penalty = 0.0
                 if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                    reverse_gate_penalty = 1e9
                 elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                    reverse_gate_penalty = 1e9
 
                 # regular trajectory penalty
-                traj_end = np.array(traj[-1,:3])
+                traj_end = np.array(traj[-1, :3])
                 target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
+                dist = float(np.linalg.norm(traj_end - target_end))
+                esdf_cost = float(score * 100)
+                target_cost = float(100 * dist)
+                smooth_vx_cost = float(self.trajectory_smooth_weight * abs(self.last_param[0] - param[0]))
+                smooth_omega_cost = float(self.trajectory_smooth_weight * abs(self.last_param[1] - param[1]))
+                heading_error, target_yaw, traj_yaw = trajectory_heading_debug(traj, target_pose)
+                total = esdf_cost + target_cost + smooth_vx_cost + smooth_omega_cost + reverse_gate_penalty
+                return {
+                    "total": total,
+                    "dist": dist,
+                    "esdf_cost": esdf_cost,
+                    "target_cost": target_cost,
+                    "smooth_vx_cost": smooth_vx_cost,
+                    "smooth_omega_cost": smooth_omega_cost,
+                    "reverse_gate_penalty": float(reverse_gate_penalty),
+                    "heading_error": float(heading_error),
+                    "target_yaw": float(target_yaw),
+                    "traj_yaw": float(traj_yaw),
+                }
 
-                return (
-                    score * 100
-                    + 100 * dist
-                    + self.trajectory_smooth_weight * abs(self.last_param[0] - param[0])
-                    + self.trajectory_smooth_weight * abs(self.last_param[1] - param[1])
-                    + reverse_gate_penalty
-                )
+            def cost_function(traj, param, score, target_pose):
+                return cost_breakdown(traj, param, score, target_pose)["total"]
 
             top_k = 1
             recovery_reason = "normal"
@@ -1771,9 +1803,13 @@ class PlanningNode(Node):
             selected_score = float(scores[selected_index])
             selected_cost = float(costs[selected_index])
             selected_is_reverse = bool(selected_param[0] < 0.0)
-            target_dist = float("nan")
-            if effective_target_pose is not None:
-                target_dist = float(np.linalg.norm(trajectories[selected_index][-1, :3] - effective_target_pose))
+            selected_breakdown = cost_breakdown(
+                trajectories[selected_index],
+                selected_param,
+                selected_score,
+                effective_target_pose,
+            )
+            target_dist = selected_breakdown["dist"]
             now_debug = time.monotonic()
             should_log_debug = (
                 now_debug - self._last_avoidance_debug_log_time > 0.5
@@ -1792,7 +1828,14 @@ class PlanningNode(Node):
                     f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
                     f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} "
                     f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
-                    f"target_dist={target_dist:.2f} last_vx={self.last_param[0]:.2f} "
+                    f"target_dist={target_dist:.2f} heading_error={selected_breakdown['heading_error']:.2f} "
+                    f"target_yaw={selected_breakdown['target_yaw']:.2f} traj_yaw={selected_breakdown['traj_yaw']:.2f} "
+                    f"esdf_cost={selected_breakdown['esdf_cost']:.1f} "
+                    f"target_cost={selected_breakdown['target_cost']:.1f} "
+                    f"smooth_vx_cost={selected_breakdown['smooth_vx_cost']:.1f} "
+                    f"smooth_omega_cost={selected_breakdown['smooth_omega_cost']:.1f} "
+                    f"reverse_gate_penalty={selected_breakdown['reverse_gate_penalty']:.1f} "
+                    f"last_vx={self.last_param[0]:.2f} "
                     f"last_omega={self.last_param[1]:.2f} source={self.occupancy_source} "
                     f"dilation_cells={self.obstacle_config.dilation_cells} "
                     f"lidar_min_votes={self.lidar_min_votes} "
