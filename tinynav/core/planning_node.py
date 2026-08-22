@@ -1753,49 +1753,6 @@ class PlanningNode(Node):
                 traj_yaw = math.atan2(float(forward[1]), float(forward[0]))
                 return abs(_wrap_angle(target_yaw - traj_yaw)), target_yaw, traj_yaw
 
-            def target_blocked_info(target_pose):
-                if target_pose is None:
-                    return False, 0.0, float("nan"), float("nan")
-                center = self.camera_to_robot_center(T)
-                target = np.array(target_pose[:3], dtype=np.float64)
-                delta = target - center
-                dist_xy = float(np.linalg.norm(delta[:2]))
-                if dist_xy < 1e-6:
-                    return False, 0.0, 0.0, 0.0
-
-                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                forward_norm = float(np.linalg.norm(forward[:2]))
-                if forward_norm < 1e-6:
-                    return False, 0.0, float("nan"), float("nan")
-                fwd_xy = forward[:2] / forward_norm
-                left_xy = np.array([-fwd_xy[1], fwd_xy[0]], dtype=np.float64)
-                forward_dist = float(np.dot(delta[:2], fwd_xy))
-                lateral_dist = float(np.dot(delta[:2], left_xy))
-                side_sign = float(np.sign(lateral_dist))
-
-                ray_len = min(dist_xy, 2.0)
-                steps = max(2, int(ray_len / self.resolution))
-                blocked = False
-                rows, cols = obstacle_mask.shape
-                for i in range(1, steps + 1):
-                    d = min(i * self.resolution, ray_len)
-                    p = center[:2] + delta[:2] / dist_xy * d
-                    xi = int((p[0] - self.origin[0]) / self.resolution)
-                    yi = int((p[1] - self.origin[1]) / self.resolution)
-                    if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
-                        blocked = True
-                        break
-                return blocked, side_sign, forward_dist, lateral_dist
-
-            target_line_blocked, target_side_sign, target_forward_dist, target_lateral_dist = target_blocked_info(effective_target_pose)
-            early_turn_bias_on = (
-                target_line_blocked
-                and target_side_sign != 0.0
-                and target_forward_dist > 0.2
-                and abs(target_lateral_dist) > 0.35
-                and not should_reverse
-            )
-
             def cost_breakdown(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
@@ -1813,11 +1770,8 @@ class PlanningNode(Node):
                 target_cost = float(100 * dist)
                 smooth_vx_cost = float(self.trajectory_smooth_weight * abs(self.last_param[0] - param[0]))
                 smooth_omega_cost = float(self.trajectory_smooth_weight * abs(self.last_param[1] - param[1]))
-                early_turn_penalty = 0.0
-                if early_turn_bias_on and not is_backward_traj and param[0] > 0.0 and param[1] * target_side_sign > 0.05:
-                    early_turn_penalty = float(80.0 * min(abs(param[1]) / 0.7, 1.0))
                 heading_error, target_yaw, traj_yaw = trajectory_heading_debug(traj, target_pose)
-                total = esdf_cost + target_cost + smooth_vx_cost + smooth_omega_cost + early_turn_penalty + reverse_gate_penalty
+                total = esdf_cost + target_cost + smooth_vx_cost + smooth_omega_cost + reverse_gate_penalty
                 return {
                     "total": total,
                     "dist": dist,
@@ -1825,7 +1779,6 @@ class PlanningNode(Node):
                     "target_cost": target_cost,
                     "smooth_vx_cost": smooth_vx_cost,
                     "smooth_omega_cost": smooth_omega_cost,
-                    "early_turn_penalty": early_turn_penalty,
                     "reverse_gate_penalty": float(reverse_gate_penalty),
                     "heading_error": float(heading_error),
                     "target_yaw": float(target_yaw),
@@ -1881,10 +1834,6 @@ class PlanningNode(Node):
                     f"target_cost={selected_breakdown['target_cost']:.1f} "
                     f"smooth_vx_cost={selected_breakdown['smooth_vx_cost']:.1f} "
                     f"smooth_omega_cost={selected_breakdown['smooth_omega_cost']:.1f} "
-                    f"early_turn_bias_on={early_turn_bias_on} "
-                    f"target_line_blocked={target_line_blocked} "
-                    f"target_lateral_dist={target_lateral_dist:.2f} "
-                    f"early_turn_penalty={selected_breakdown['early_turn_penalty']:.1f} "
                     f"reverse_gate_penalty={selected_breakdown['reverse_gate_penalty']:.1f} "
                     f"last_vx={self.last_param[0]:.2f} "
                     f"last_omega={self.last_param[1]:.2f} source={self.occupancy_source} "
