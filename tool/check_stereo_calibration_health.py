@@ -356,8 +356,15 @@ class StereoCalibrationHealthNode(Node):
         color_gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
 
         self.num_extrinsic_frames += 1
-        left_corners, left_ids, _ = self.aruco_detector.detectMarkers(left)
-        color_corners, color_ids, _ = self.aruco_detector.detectMarkers(color_gray)
+        try:
+            left_corners, left_ids, _ = self.aruco_detector.detectMarkers(left)
+            color_corners, color_ids, _ = self.aruco_detector.detectMarkers(color_gray)
+        except cv2.error:
+            # A degenerate candidate quad in this specific frame can make OpenCV's aruco
+            # detector throw (CORNER_REFINE_CONTOUR trades the SUBPIX hang risk for this
+            # rarer but real failure mode) -- skip just this one frame.
+            self.maybe_log_extrinsic_debug()
+            return
         if left_ids is None or color_ids is None:
             self.maybe_log_extrinsic_debug()
             return
