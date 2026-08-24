@@ -10,9 +10,6 @@ from planning_node import (
     run_raycasting_loopy,
     generate_trajectory_library_3d,
     goal_heading_error,
-    trajectory_cost,
-    HEADING_WEIGHT,
-    HEADING_FADE_DIST,
 )
 from tinynav.core.math_utils import matrix_to_quat
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
@@ -156,13 +153,29 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
                       [-1.0, 0.0, 0.0],
                       [0.0, -1.0, 0.0]])
 
-def _pick(target, heading_weight=HEADING_WEIGHT):
-    """Lowest-cost (vx, omega) from the planner's own trajectory_cost, with a clear ESDF
+# mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
+# the weights (100000/100/100/10/10) and heading fade distance (2.0) in sync by hand
+_HEADING_WEIGHT = 100.0
+_HEADING_FADE_DIST = 2.0
+
+def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
+    dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
+    heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / _HEADING_FADE_DIST)
+    return (
+        score * 100000
+        + 100 * dist
+        + heading_weight * heading
+        + 10 * abs(last_param[0] - param[0])
+        + 10 * abs(last_param[1] - param[1])
+    )
+
+def _pick(target, heading_weight=_HEADING_WEIGHT):
+    """Lowest-cost (vx, omega) from the planner's own cost terms, with a clear ESDF
     (score=0), no reverse gating and a standing start."""
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     last_param = np.zeros(2)
     costs = [
-        trajectory_cost(trajectories[i], params[i], 0.0, target, last_param, heading_weight=heading_weight)
+        _trajectory_cost(trajectories[i], params[i], 0.0, target, last_param, heading_weight=heading_weight)
         for i in range(len(trajectories))
     ]
     return params[np.argsort(costs, kind='stable')[0]]
@@ -203,7 +216,7 @@ def test_heading_fades_within_arrival_radius():
     # the pick must still be the trajectory that lands closest to the goal
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     close = np.array([0.4, 0.3, 0.0])
-    assert np.linalg.norm(close) < HEADING_FADE_DIST
+    assert np.linalg.norm(close) < _HEADING_FADE_DIST
 
     dists = [np.linalg.norm(trajectories[i][-1, :3] - close) for i in range(len(trajectories))]
     nearest = int(np.argmin(dists))
@@ -220,12 +233,12 @@ def test_heading_fade_is_monotonic_in_distance():
 
     def heading_term(range_m):
         target = np.array([0.0, range_m, 0.0])  # 90 deg off the nose at every range
-        return trajectory_cost(traj, param, 0.0, target, last_param) - 100 * range_m
+        return _trajectory_cost(traj, param, 0.0, target, last_param) - 100 * range_m
 
     terms = [heading_term(r) for r in (0.5, 1.0, 2.0, 4.0)]
     assert terms[0] < terms[1] < terms[2], f"heading penalty not growing with range: {terms}"
     assert abs(terms[2] - terms[3]) < 1e-9, f"heading penalty not saturated past the fade distance: {terms}"
-    assert abs(terms[2] - HEADING_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
+    assert abs(terms[2] - _HEADING_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
 
 if __name__ == "__main__":
     test_goal_heading_error()
