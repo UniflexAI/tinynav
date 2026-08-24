@@ -5,6 +5,7 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation
+from scipy.spatial.transform import Rotation as R
 from numba import njit
 import message_filters
 from rclpy.time import Time
@@ -267,18 +268,13 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         occ_points.append(closest_step_for_traj)
     return scores, occ_points
 
-@njit(cache=True)
 def goal_heading_error(traj_end, target):
-    """Absolute yaw error between a trajectory's end heading and the bearing to the target.
-    Degenerate input (target at the end point, heading straight up) scores 0."""
+    """Absolute yaw error between a trajectory's end heading and the bearing to the target."""
     dx = target[0] - traj_end[0]
     dy = target[1] - traj_end[1]
-    qx, qy, qz, qw = traj_end[3], traj_end[4], traj_end[5], traj_end[6]
-
-    # world XY forward from quaternion (body +Z forward)
-    fwd_x = 2.0 * (qx * qz + qw * qy)
-    fwd_y = 2.0 * (qy * qz - qw * qx)
-    return abs(np.arctan2(fwd_x * dy - fwd_y * dx, fwd_x * dx + fwd_y * dy))
+    yaw1 = R.from_quat(traj_end[3:7]).as_euler("xyz")[2] + np.pi / 2
+    yaw2 = np.arctan2(dy, dx)
+    return abs(np.arctan2(np.sin(yaw2 - yaw1), np.cos(yaw2 - yaw1)))
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
