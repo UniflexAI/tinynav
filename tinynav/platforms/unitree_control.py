@@ -6,6 +6,7 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscri
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from std_msgs.msg import Float32, String
+from nav_msgs.msg import Odometry
 from enum import Enum
 import time
 
@@ -84,6 +85,17 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
+        # Chassis odometry, republished onto the ROS bus. rt/utlidar/robot_odom
+        # is the leg odometry wrapped as nav_msgs/Odometry, not lidar odometry:
+        # it matches rt/sportmodestate.position exactly and keeps publishing with
+        # the lidar removed.
+        if self.is_quadruped:
+            from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
+            self.publisher_chassis_odom = self.create_publisher(Odometry, '/unitree/odometry', 10)
+            self._last_chassis_odom_time = 0.0
+            self.chassis_odom_subscriber = ChannelSubscriber("rt/utlidar/robot_odom", Odometry_)
+            self.chassis_odom_subscriber.Init(self.ChassisOdomMessageHandler, 10)
+
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
 
     # twist message handler
@@ -146,6 +158,36 @@ class Ros2UnitreeManagerNode(Node):
         msg = String()
         msg.data = self._robot_status.value
         self.publisher_robot_status.publish(msg)
+
+    def ChassisOdomMessageHandler(self, msg):
+        # Already a nav_msgs Odometry on the wire; cap it at 50Hz.
+        now = time.time()
+        if now - self._last_chassis_odom_time < 0.02:
+            return
+        self._last_chassis_odom_time = now
+        try:
+            odom = Odometry()
+            # Restamped on the ROS clock: the chassis stamp is its own timebase.
+            odom.header.stamp = self.get_clock().now().to_msg()
+            # The chassis's own odom origin; unrelated to tinynav's "world".
+            odom.header.frame_id = "odom"
+            odom.child_frame_id = "base_link"
+            p, q = msg.pose.pose.position, msg.pose.pose.orientation
+            odom.pose.pose.position.x = float(p.x)
+            odom.pose.pose.position.y = float(p.y)
+            odom.pose.pose.position.z = float(p.z)
+            odom.pose.pose.orientation.x = float(q.x)
+            odom.pose.pose.orientation.y = float(q.y)
+            odom.pose.pose.orientation.z = float(q.z)
+            odom.pose.pose.orientation.w = float(q.w)
+            v, w = msg.twist.twist.linear, msg.twist.twist.angular
+            odom.twist.twist.linear.x = float(v.x)
+            odom.twist.twist.linear.y = float(v.y)
+            odom.twist.twist.linear.z = float(v.z)
+            odom.twist.twist.angular.z = float(w.z)
+            self.publisher_chassis_odom.publish(odom)
+        except Exception as e:
+            self.logger.error(f"Error in ChassisOdomMessageHandler: {e}")
 
     def LowStateMessageHandler(self, msg):
         if not self.is_quadruped:
