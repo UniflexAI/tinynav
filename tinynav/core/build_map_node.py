@@ -24,7 +24,7 @@ from rclpy.serialization import deserialize_message
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
 from rosgraph_msgs.msg import Clock
 from rosidl_runtime_py.utilities import get_message
-from scipy.ndimage import distance_transform_edt
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage, PointCloud2
 from std_msgs.msg import Bool, Float32, Header, ColorRGBA
@@ -243,16 +243,32 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
         f"global_origin={global_origin.tolist()}, voxels={voxels}"
     )
 
-    # Compute SDF as voxel distance to nearest odom seed using SciPy EDT.
+    # Distance to the nearest odom seed. A full-grid EDT gives the same answer but
+    # allocates ~72 bytes per voxel (int32 feature transform + float64 temporaries),
+    # which is what OOMs a large site: 145M voxels needs ~10GB. The seeds are a few
+    # thousand points, so query them with a KD-tree, a slab of voxels at a time.
     def _compute_sdf():
         if len(odom_positions) == 0:
             return np.full(global_grid_shape, np.inf, dtype=np.float32)
-        seed_mask = np.ones(global_grid_shape, dtype=np.uint8)
         odom_positions_np = np.asarray(odom_positions, dtype=np.float32)
         seed_indices = np.rint((odom_positions_np - global_origin) / resolution).astype(np.int32)
         seed_indices = np.clip(seed_indices, 0, global_grid_shape - 1)
-        seed_mask[seed_indices[:, 0], seed_indices[:, 1], seed_indices[:, 2]] = 0
-        return distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
+        # Seeds snapped to voxel centres, in the same index-space metric the EDT used.
+        tree = cKDTree(np.unique(seed_indices, axis=0).astype(np.float64) * resolution)
+
+        nx, ny, nz = (int(n) for n in global_grid_shape)
+        sdf = np.empty((nx, ny, nz), dtype=np.float32)
+        ys = np.arange(ny, dtype=np.float32) * resolution
+        zs = np.arange(nz, dtype=np.float32) * resolution
+        # ~1M query points per slab: measured, the whole stage then costs ~6 bytes per voxel,
+        # against ~72 for the EDT, and runs no slower.
+        slab = max(1, int(1_000_000 // max(1, ny * nz)))
+        for x0 in range(0, nx, slab):
+            xs = np.arange(x0, min(x0 + slab, nx), dtype=np.float32) * resolution
+            points = np.stack(np.meshgrid(xs, ys, zs, indexing='ij'), axis=-1).reshape(-1, 3)
+            distances, _ = tree.query(points, workers=-1)
+            sdf[x0:x0 + len(xs)] = distances.reshape(len(xs), ny, nz).astype(np.float32)
+        return sdf
 
     if stage_timer is not None:
         with stage_timer.timed("occupancy_sdf"):
@@ -265,6 +281,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
 
     grid_type[global_grid > 0] = 2  # Occupied
     grid_type[global_grid < 0] = 1  # Free
+    del global_grid  # nothing below reads it, and it is 4 bytes per voxel
 
     x_y_plane = np.max(grid_type, axis=2)
     x_y_plane_image = np.zeros_like(x_y_plane, dtype=np.float32)
