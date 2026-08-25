@@ -17,6 +17,10 @@ import time
 # client, lowstate IDL, and stand/sit mapping.
 _QUADRUPED_ROBOT_MODELS = ('go2', 'go2w', 'b2', 'b2w')
 _SUPPORTED_ROBOT_MODELS = _QUADRUPED_ROBOT_MODELS + ('g1',)
+# SportClient.SwitchGait exists only on b2; go2's client has no such method, so
+# calling it there raises AttributeError -- inside a DDS reader callback, which is
+# fatal for the whole subscription (see ActionMessageHandler).
+_SWITCH_GAIT_ROBOT_MODELS = ('b2', 'b2w')
 ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
 if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
@@ -54,6 +58,7 @@ class Ros2UnitreeManagerNode(Node):
             raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
+        self.has_switch_gait = robot_model in _SWITCH_GAIT_ROBOT_MODELS
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = _build_sport_client(robot_model)
@@ -99,6 +104,16 @@ class Ros2UnitreeManagerNode(Node):
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
+        # unitree_sdk2py's reader thread calls this with no except around it, so an
+        # exception escaping here kills that thread and the subscription goes deaf
+        # for the rest of the run -- every later sit/stand silently dropped, while
+        # the process still looks healthy. One bad action must not cost the channel.
+        try:
+            self._play_action(msg)
+        except Exception:
+            self.logger.exception("action failed")
+
+    def _play_action(self, msg: String_):
         if msg.data.split(" ")[0] == "play":
             action_key = msg.data.split(" ")[1]
             if action_key == "sit":
@@ -114,8 +129,12 @@ class Ros2UnitreeManagerNode(Node):
                     self.sport_client.StandUp()
                     self.sport_client.BalanceStand()
                     self.sport_client.ClassicWalk(True)
-                    self.sport_client.SwitchGait(1)
-                    self.logger.info("Standing: StandUp, BalanceStand, ClassicWalk, SwitchGait(1)")
+                    if self.has_switch_gait:
+                        self.sport_client.SwitchGait(1)
+                    self.logger.info(
+                        "Standing: StandUp, BalanceStand, ClassicWalk"
+                        + (", SwitchGait(1)" if self.has_switch_gait else "")
+                    )
                 else:
                     code1 = self.sport_client.Damp()
                     time.sleep(0.5)
