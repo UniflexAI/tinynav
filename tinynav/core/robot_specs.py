@@ -43,6 +43,11 @@ class RobotConfig:
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
+    # Arm gesture map_node plays on POI arrival before advancing to the next POI
+    # (see unitree_sdk2py's g1_arm_action_client action_map for valid names).
+    # None means no arrival action for this robot.
+    arrival_action: str | None = None
+    arrival_action_hold_s: float = 5.0
 
     @property
     def cam_offset_3d(self):
@@ -105,6 +110,7 @@ G1_CONFIG = RobotConfig(
     safety_radius=0.15,
     min_linear_vel=0.2, min_angular_vel=0.3,
     obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
+    arrival_action='high wave',
 )
 
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()

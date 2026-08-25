@@ -35,6 +35,18 @@ def _build_sport_client(robot_model: str):
     raise ValueError(f"Unsupported robot model: {robot_model}")
 
 
+def _build_arm_action_client(robot_model: str):
+    """g1 only: humanoid arm gestures (wave/shake hand/etc.), separate from
+    the LocoClient's stand/sit FSM. Returns (client, action_map) or (None, None)."""
+    if robot_model != 'g1':
+        return None, None
+    from unitree_sdk2py.g1.arm.g1_arm_action_client import G1ArmActionClient, action_map
+    client = G1ArmActionClient()
+    client.SetTimeout(10.0)
+    client.Init()
+    return client, action_map
+
+
 def _lowstate_type_and_topic(robot_model: str):
     if robot_model in _QUADRUPED_ROBOT_MODELS:
         from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
@@ -60,6 +72,7 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
+        self.arm_action_client, self.arm_action_map = _build_arm_action_client(robot_model)
         if self.is_quadruped:
             self.sport_client.ClassicWalk(True)
         self._robot_status = RobotStatus.SITTING
@@ -99,8 +112,9 @@ class Ros2UnitreeManagerNode(Node):
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
-        if msg.data.split(" ")[0] == "play":
-            action_key = msg.data.split(" ")[1]
+        parts = msg.data.split(" ", 1)
+        if parts[0] == "play" and len(parts) > 1:
+            action_key = parts[1]
             if action_key == "sit":
                 if self.is_quadruped:
                     code = self.sport_client.StandDown()
@@ -120,6 +134,11 @@ class Ros2UnitreeManagerNode(Node):
                     code2 = self.sport_client.Squat2StandUp()
                     self.logger.info(f"Standing: Damp code={code1}, Squat2StandUp code={code2}")
                 self._robot_status = RobotStatus.STANDUP
+            elif self.arm_action_client is not None and action_key in self.arm_action_map:
+                code = self.arm_action_client.ExecuteAction(self.arm_action_map[action_key])
+                self.logger.info(f"Arm action {action_key!r}: code={code}")
+            else:
+                self.logger.warning(f"Unknown or unsupported action: {action_key!r}")
 
     def _publish_robot_status(self):
         msg = String()
