@@ -158,6 +158,11 @@ class BackendNode(Ros2NodeManager):
         self._global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
         self._voxel_points: list = []
+        # Subscribed only while someone is watching the planning stream: decoding
+        # the cloud into points costs more than everything else this node does per
+        # frame, and it feeds nothing but that view.
+        self._voxel_sub = None
+        self._planning_watchers = 0
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
@@ -187,9 +192,6 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(
             PointCloud, '/planning/footprint', self._on_footprint, 1
         )
-        self.create_subscription(
-            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
-        )
 
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
@@ -216,8 +218,9 @@ class BackendNode(Ros2NodeManager):
         # Sensor mode detection and image subscriptions
         self._sensor_mode: str = 'unknown'  # 'looper' | 'realsense' | 'unknown'
         self._image_subs: dict = {}
-        # Guards _image_subs alone. Separate from self._lock because destroying a
-        # subscription waits for in-flight callbacks, and those take self._lock.
+        # Guards the subscription slots -- _image_subs and _voxel_sub. Separate from
+        # self._lock because destroying a subscription waits for in-flight
+        # callbacks, and those take self._lock.
         self._subs_lock = threading.Lock()
         self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
         self._last_frame_time: dict[str, float] = {}
@@ -574,6 +577,37 @@ class BackendNode(Ros2NodeManager):
                 # self._lock is released here: destroy waits for in-flight
                 # callbacks, which take it.
                 self.destroy_subscription(self._image_subs.pop(topic))
+
+    def add_planning_watcher(self):
+        """Register a planning-stream viewer; subscribes on the first one."""
+        with self._lock:
+            self._planning_watchers += 1
+        self._sync_voxel_sub()
+
+    def remove_planning_watcher(self):
+        """Unregister a viewer; drops the subscription when the last one leaves."""
+        with self._lock:
+            self._planning_watchers = max(0, self._planning_watchers - 1)
+        self._sync_voxel_sub()
+
+    def _sync_voxel_sub(self):
+        """Make the voxel subscription match whether anyone is watching.
+
+        Same shape as _sync_image_sub, and for the same reason: the count is
+        re-read here so a decision taken by a caller cannot be acted on after it
+        has gone stale."""
+        with self._subs_lock:
+            with self._lock:
+                wanted = self._planning_watchers > 0
+            if wanted and self._voxel_sub is None:
+                self._voxel_sub = self.create_subscription(
+                    PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+                )
+            elif not wanted and self._voxel_sub is not None:
+                self.destroy_subscription(self._voxel_sub)
+                self._voxel_sub = None
+                with self._lock:
+                    self._voxel_points = []
 
     def _make_image_sub(self, topic: str):
         if topic == _COLOR_TOPIC_LOOPER:
