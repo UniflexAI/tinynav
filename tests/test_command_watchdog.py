@@ -56,10 +56,12 @@ def test_nonzero_attempt_stays_armed_until_confirmed_stop():
     assert watchdog.consume_expiration(10.5001)
 
 
-def test_clear_disarms_watchdog():
+def test_confirmed_stop_disarms_watchdog():
     watchdog = VelocityCommandWatchdog(0.5)
-    watchdog.observe_nonzero(10.0)
-    watchdog.clear()
+    generation = watchdog.observe_nonzero(10.0)
+    stop_generation = watchdog.request_stop()
+    assert stop_generation == generation
+    watchdog.confirm_stop(stop_generation)
     assert not watchdog.consume_expiration(20.0)
 
 
@@ -79,18 +81,27 @@ def test_normal_completion_does_not_require_stop():
 def test_explicit_stop_covers_inflight_generation():
     watchdog = VelocityCommandWatchdog(0.5)
     generation = watchdog.observe_nonzero(10.0)
-    watchdog.clear()
+    watchdog.request_stop()
     assert watchdog.completed_after_stop(generation)
+    assert watchdog.consume_expiration(10.5001)
 
 
-def test_stop_failure_retries_same_generation():
+def test_unconfirmed_stop_keeps_watchdog_armed():
     watchdog = VelocityCommandWatchdog(0.5)
     generation = watchdog.observe_nonzero(10.0)
-    watchdog.clear()
-    watchdog.retry_after_stop_failure(10.1)
-    assert not watchdog.consume_expiration(10.6)
-    assert watchdog.consume_expiration(10.6001)
+    watchdog.request_stop()
+    assert watchdog.consume_expiration(10.5001)
     assert watchdog.completed_after_stop(generation)
+
+
+def test_confirming_old_stop_does_not_disarm_new_generation():
+    watchdog = VelocityCommandWatchdog(0.5)
+    first_generation = watchdog.observe_nonzero(10.0)
+    stop_generation = watchdog.request_stop()
+    second_generation = watchdog.observe_nonzero(10.1)
+    assert second_generation > first_generation
+    watchdog.confirm_stop(stop_generation)
+    assert watchdog.consume_expiration(10.6001)
 
 
 def test_stop_uses_status_returning_g1_api():
@@ -112,11 +123,12 @@ if __name__ == '__main__':
         test_nonzero_expires_once,
         test_refresh_extends_deadline,
         test_nonzero_attempt_stays_armed_until_confirmed_stop,
-        test_clear_disarms_watchdog,
+        test_confirmed_stop_disarms_watchdog,
         test_late_completion_requires_compensating_stop,
         test_normal_completion_does_not_require_stop,
         test_explicit_stop_covers_inflight_generation,
-        test_stop_failure_retries_same_generation,
+        test_unconfirmed_stop_keeps_watchdog_armed,
+        test_confirming_old_stop_does_not_disarm_new_generation,
         test_stop_uses_status_returning_g1_api,
         test_stop_uses_sport_api_for_quadruped,
     ]

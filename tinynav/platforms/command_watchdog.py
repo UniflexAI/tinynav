@@ -26,9 +26,16 @@ class VelocityCommandWatchdog:
             self._armed = True
             return self._generation
 
-    def clear(self):
+    def request_stop(self) -> int:
         with self._lock:
             self._stopped_through = self._generation
+            return self._generation
+
+    def confirm_stop(self, generation: int):
+        with self._lock:
+            self._stopped_through = max(self._stopped_through, generation)
+            if self._generation > generation:
+                return
             self._last_nonzero_at = None
             self._armed = False
 

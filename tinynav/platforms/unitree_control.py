@@ -118,11 +118,12 @@ class Ros2UnitreeManagerNode(Node):
             if self.cmd_vel_watchdog.completed_after_stop(generation):
                 self._send_safety_stop("late Move completion")
         else:
-            self.cmd_vel_watchdog.clear()
+            stop_generation = self.cmd_vel_watchdog.request_stop()
             code = stop_unitree_motion(self.sport_client, self.robot_model)
-            if code != 0:
+            if code == 0:
+                self.cmd_vel_watchdog.confirm_stop(stop_generation)
+            else:
                 self.logger.error(f"StopMove failed: code={code}")
-                self.cmd_vel_watchdog.retry_after_stop_failure(time.monotonic())
         time.sleep(0.02)
 
     def _cmd_vel_watchdog_tick(self):
