@@ -777,7 +777,10 @@ class PlanningNode(Node):
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            # Building the cloud costs more than the raycasting that produced it,
+            # and its only consumer is a view that is usually closed.
+            if self.occupancy_cloud_pub.get_subscription_count() > 0:
+                self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             min_span_map = self._min_span_map(self.origin, self.resolution,
@@ -804,6 +807,11 @@ class PlanningNode(Node):
             v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
             # Publish the prior-driven open target so cmd_vel caps to the same ceiling.
             self.forward_speed_cap_pub.publish(Float32(data=float(v_open)))
+            # The library exists only to pick a trajectory toward a goal, so without
+            # one there is nothing to generate or score. The occupancy grid, the ESDF
+            # and the speed cap above are maintained either way.
+            if self.target_pose is None:
+                return
             trajectories, params = generate_trajectory_library_3d(
                 init_p=init_p, init_q=init_q,
                 max_linear_vel=v_allow,
@@ -823,9 +831,6 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             enter_threshold = 0.30
             should_reverse = front_clearance <= enter_threshold
-
-            if self.target_pose is None:
-                return
 
             target = self.target_pose
 
