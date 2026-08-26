@@ -3,7 +3,20 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from tinynav.platforms.command_watchdog import VelocityCommandWatchdog
+from tinynav.platforms.command_watchdog import VelocityCommandWatchdog, stop_unitree_motion
+
+
+class FakeMotionClient:
+    def __init__(self):
+        self.calls = []
+
+    def SetVelocity(self, vx, vy, vyaw):
+        self.calls.append(('SetVelocity', vx, vy, vyaw))
+        return 0
+
+    def StopMove(self):
+        self.calls.append(('StopMove',))
+        return 0
 
 
 def test_rejects_invalid_timeout():
@@ -49,6 +62,18 @@ def test_clear_disarms_watchdog():
     assert not watchdog.consume_expiration(20.0)
 
 
+def test_stop_uses_status_returning_g1_api():
+    client = FakeMotionClient()
+    assert stop_unitree_motion(client, 'g1') == 0
+    assert client.calls == [('SetVelocity', 0.0, 0.0, 0.0)]
+
+
+def test_stop_uses_sport_api_for_quadruped():
+    client = FakeMotionClient()
+    assert stop_unitree_motion(client, 'go2w') == 0
+    assert client.calls == [('StopMove',)]
+
+
 if __name__ == '__main__':
     tests = [
         test_rejects_invalid_timeout,
@@ -57,6 +82,8 @@ if __name__ == '__main__':
         test_refresh_extends_deadline,
         test_nonzero_attempt_stays_armed_until_confirmed_stop,
         test_clear_disarms_watchdog,
+        test_stop_uses_status_returning_g1_api,
+        test_stop_uses_sport_api_for_quadruped,
     ]
     for test in tests:
         test()

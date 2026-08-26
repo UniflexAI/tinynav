@@ -2,6 +2,12 @@ import math
 import threading
 
 
+def stop_unitree_motion(client, robot_model: str):
+    if robot_model == 'g1':
+        return client.SetVelocity(0.0, 0.0, 0.0)
+    return client.StopMove()
+
+
 class VelocityCommandWatchdog:
     def __init__(self, timeout_s: float):
         if not math.isfinite(timeout_s) or timeout_s <= 0:

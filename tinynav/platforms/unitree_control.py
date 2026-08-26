@@ -1,6 +1,5 @@
 import argparse
 import os
-import threading
 import time
 from enum import Enum
 
@@ -12,7 +11,10 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscri
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 
-from tinynav.platforms.command_watchdog import VelocityCommandWatchdog
+from tinynav.platforms.command_watchdog import (
+    VelocityCommandWatchdog,
+    stop_unitree_motion,
+)
 
 # go2/b2 are quadrupeds sharing the same SportClient gait API (Move/StandUp/
 # StandDown/BalanceStand/ClassicWalk). go2w/b2w are the wheeled variants of the
@@ -61,19 +63,22 @@ class Ros2UnitreeManagerNode(Node):
             raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
+        self.cmd_vel_watchdog = VelocityCommandWatchdog(cmd_vel_timeout_s)
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
+        # A blocked primary RPC must not prevent the watchdog from sending StopMove.
+        self.safety_client = _build_sport_client(robot_model)
+        self.safety_client.SetTimeout(min(0.1, cmd_vel_timeout_s / 4.0))
+        self.safety_client.Init()
         if self.is_quadruped:
             self.sport_client.ClassicWalk(True)
         self._robot_status = RobotStatus.SITTING
         self.battery = 0.0
         self.last_twist_time = None
         self.logger = self.get_logger()
-        self.cmd_vel_watchdog = VelocityCommandWatchdog(cmd_vel_timeout_s)
-        self._motion_lock = threading.Lock()
         self._watchdog_clock = Clock(clock_type=ClockType.STEADY_TIME)
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
@@ -102,31 +107,29 @@ class Ros2UnitreeManagerNode(Node):
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_twist_time = current_time
 
-        with self._motion_lock:
-            if (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
-                self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
-                self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
-                code = self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
-                if code != 0:
-                    self.logger.error(f"Move failed: code={code}")
+        if (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
+            self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
+            self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
+            code = self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
+            if code not in (0, None):
+                self.logger.error(f"Move failed: code={code}")
+        else:
+            code = stop_unitree_motion(self.sport_client, self.robot_model)
+            if code == 0:
+                self.cmd_vel_watchdog.clear()
             else:
-                code = self.sport_client.StopMove()
-                if code == 0:
-                    self.cmd_vel_watchdog.clear()
-                else:
-                    self.logger.error(f"StopMove failed: code={code}")
+                self.logger.error(f"StopMove failed: code={code}")
         time.sleep(0.02)
 
     def _cmd_vel_watchdog_tick(self):
-        with self._motion_lock:
-            if not self.cmd_vel_watchdog.consume_expiration(time.monotonic()):
-                return
-            code = self.sport_client.StopMove()
-            if code == 0:
-                self.logger.warning("cmd_vel stream stale; StopMove sent")
-            else:
-                self.logger.error(f"cmd_vel stream stale; StopMove failed: code={code}")
-                self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
+        if not self.cmd_vel_watchdog.consume_expiration(time.monotonic()):
+            return
+        code = stop_unitree_motion(self.safety_client, self.robot_model)
+        if code == 0:
+            self.logger.warning("cmd_vel stream stale; StopMove sent")
+        else:
+            self.logger.error(f"cmd_vel stream stale; StopMove failed: code={code}")
+            self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
