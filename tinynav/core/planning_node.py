@@ -177,34 +177,64 @@ def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
+    max_path_len_m=1e9, max_lat_acc=1e9,
 ):
-    """Regular sampled lattice (forward-only)."""
+    """Regular sampled lattice (forward-only).
+
+    Two caps shape the lattice beyond the velocity bounds, because `duration` alone
+    ties both the planning horizon and the turn rate to whatever speed is allowed:
+
+    `max_path_len_m` caps a trajectory's ARC LENGTH, not its speed. Without it the
+    lattice reaches vx*duration -- at 1.34 m/s over 3 s that is a 4 m arc, committing
+    the robot to a shape further out than the obstacle map is worth trusting. A
+    trajectory that hits the cap freezes in place for its remaining steps, so vx (the
+    commanded speed, and the feedforward) is untouched: it still travels fast, it is
+    just drawn less far. vx=0 rows never accumulate length, which is what leaves the
+    turn-in-place vocabulary at its full `duration` of rotation -- the cost function's
+    heading term depends on those rows swinging a real angle.
+
+    `max_lat_acc` caps vx*omega, so the same steering that is fine at a crawl is not
+    offered at speed. It binds only above max_lat_acc/max_angular_vel; below that the
+    omega range is unchanged, and at a standstill it does not bind at all.
+    """
     num_steps = int(duration / dt) + 1
 
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
+    n_omega = num_samples
     vx_samples = np.linspace(0.0, vx_max, n_vx)
-    omega_y_samples = np.linspace(-max_angular_vel, max_angular_vel, num_samples)
 
-    num_samples = len(vx_samples) * len(omega_y_samples)
+    num_samples = n_vx * n_omega
 
     trajectories = np.empty((num_samples, num_steps, 7))
     params = np.empty((num_samples, 2))
 
     k = -1
-    for i_vx in range(len(vx_samples)):
-        for i_omega in range(len(omega_y_samples)):
+    for i_vx in range(n_vx):
+        vx = vx_samples[i_vx]
+        # Per-speed omega range: the lattice stays rectangular (n_vx * n_omega rows),
+        # only the span of each row's omega shrinks as vx rises.
+        omega_lim = max_angular_vel
+        if vx > 1e-6 and max_lat_acc / vx < omega_lim:
+            omega_lim = max_lat_acc / vx
+        omega_y_samples = np.linspace(-omega_lim, omega_lim, n_omega)
+        # Nominal arc length per step; 0 for the stationary rows, which is why the
+        # length cap cannot touch them.
+        step_len = vx * dt
+        for i_omega in range(n_omega):
             k += 1
-            vx = vx_samples[i_vx]
             omega_y = omega_y_samples[i_omega]
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
+            path_len = 0.0
             for i in range(num_steps):
-                dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
-                q = q @ dq
-                v_world = q @ np.array([0.0, 0.0, vx])
-                p += v_world * dt
+                if path_len + step_len <= max_path_len_m:
+                    dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+                    q = q @ dq
+                    v_world = q @ np.array([0.0, 0.0, vx])
+                    p += v_world * dt
+                    path_len += step_len
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
             #hack
@@ -419,6 +449,12 @@ class PlanningNode(Node):
         self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
         self.declare_parameter('clear_scan_m', 2.0)  # forward clearance scan cap (m)
         self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
+        # Arc-length cap on a lattice trajectory (m). Bounds how far ahead a plan
+        # commits, independently of vx -- see generate_trajectory_library_3d.
+        self.declare_parameter('traj_max_len_m', 2.5)
+        # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
+        # max_lat_acc/max_angular_vel; below that the omega range is unchanged.
+        self.declare_parameter('traj_max_lat_acc', 0.5)
         self._vx_max = float(self.get_parameter('vx_max').value)
         self._vx_hard_max = float(self.get_parameter('vx_hard_max').value)
         self._vx_min = float(self.get_parameter('vx_min').value)
@@ -426,6 +462,8 @@ class PlanningNode(Node):
         self._clear_open_m = float(self.get_parameter('clear_open_m').value)
         self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
         self._t_react_s = float(self.get_parameter('t_react_s').value)
+        self._traj_max_len_m = float(self.get_parameter('traj_max_len_m').value)
+        self._traj_max_lat_acc = float(self.get_parameter('traj_max_lat_acc').value)
 
         # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
         # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
@@ -775,6 +813,8 @@ class PlanningNode(Node):
                 init_p=init_p, init_q=init_q,
                 max_linear_vel=v_allow,
                 max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+                max_path_len_m=self._traj_max_len_m,
+                max_lat_acc=self._traj_max_lat_acc,
             )
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
