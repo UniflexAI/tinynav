@@ -216,6 +216,9 @@ class BackendNode(Ros2NodeManager):
         # Sensor mode detection and image subscriptions
         self._sensor_mode: str = 'unknown'  # 'looper' | 'realsense' | 'unknown'
         self._image_subs: dict = {}
+        # Guards _image_subs alone. Separate from self._lock because destroying a
+        # subscription waits for in-flight callbacks, and those take self._lock.
+        self._subs_lock = threading.Lock()
         self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
         self._last_frame_time: dict[str, float] = {}
         self._looper_bridge_proc: subprocess.Popen | None = None
@@ -537,9 +540,7 @@ class BackendNode(Ros2NodeManager):
             return False
         with self._lock:
             self.preview_callbacks[topic].append((cb, max_edge_px, jpeg_quality))
-            first = len(self.preview_callbacks[topic]) == 1
-        if first:
-            self._create_image_sub(topic)
+        self._sync_image_sub(topic)
         return True
 
     def remove_preview_callback(self, topic: str, cb):
@@ -552,30 +553,40 @@ class BackendNode(Ros2NodeManager):
                 for registration in self.preview_callbacks[topic]
                 if registration[0] is not cb
             ]
-            empty = len(self.preview_callbacks[topic]) == 0
-        if empty:
-            self._destroy_image_sub(topic)
+        self._sync_image_sub(topic)
 
-    def _create_image_sub(self, topic: str):
-        if topic in self._image_subs:
-            return
+    def _sync_image_sub(self, topic: str):
+        """Make the subscription match whether anyone is still listening.
+
+        Re-reads the callback list here rather than trusting a first/empty flag
+        computed by the caller: add and remove decide outside this lock, so two
+        callers could each see themselves as the first and create a subscription
+        each -- the loser then leaks, invisible to _image_subs and still pulling
+        a full image stream off the Looper. The reverse order dropped a
+        subscription another caller was still using."""
+        with self._subs_lock:
+            with self._lock:
+                wanted = bool(self.preview_callbacks.get(topic))
+            have = topic in self._image_subs
+            if wanted and not have:
+                self._image_subs[topic] = self._make_image_sub(topic)
+            elif not wanted and have:
+                # self._lock is released here: destroy waits for in-flight
+                # callbacks, which take it.
+                self.destroy_subscription(self._image_subs.pop(topic))
+
+    def _make_image_sub(self, topic: str):
         if topic == _COLOR_TOPIC_LOOPER:
-            self._image_subs[topic] = self.create_subscription(
+            return self.create_subscription(
                 CompressedImage, topic,
                 lambda msg, t=topic: self._on_compressed_image(msg, t),
                 1,
             )
-        else:
-            self._image_subs[topic] = self.create_subscription(
-                Image, topic,
-                lambda msg, t=topic: self._on_image(msg, t),
-                1,
-            )
-
-    def _destroy_image_sub(self, topic: str):
-        sub = self._image_subs.pop(topic, None)
-        if sub is not None:
-            self.destroy_subscription(sub)
+        return self.create_subscription(
+            Image, topic,
+            lambda msg, t=topic: self._on_image(msg, t),
+            1,
+        )
 
     def _publish_preview_frame(self, topic: str, arr: np.ndarray):
         with self._lock:
