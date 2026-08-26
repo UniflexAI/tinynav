@@ -135,7 +135,6 @@ class PerceptionNode(Node):
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
         self.slam_camera_info_pub = self.create_publisher(CameraInfo, "/slam/camera_info", 10)
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
-        self.disparity_pub_vis = self.create_publisher(Image, '/slam/disparity_vis', 10)
         self.keyframe_pose_pub = self.create_publisher(Odometry, "/slam/keyframe_odom", 10)
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
@@ -574,13 +573,6 @@ class PerceptionNode(Node):
                 self.logger.debug(f"Keyframe {i} pose updated:\n{T_i}, at timestamp {keyframe.timestamp}")
                 self.logger.debug(f"Bias {i} updated:\n{result.atConstantBias(B(i))}")
                 #print("imu error: ", keyframe.preintegrated_imu.error(initial_estimate))
-
-        with Timer(text="[Depth as Color] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
-            disp_vis = disparity.copy().astype(np.uint8)
-            disp_color = cv2.applyColorMap(disp_vis * 4, cv2.COLORMAP_PLASMA)
-            disp_color_msg = self.bridge.cv2_to_imgmsg(disp_color, encoding='bgr8')
-            disp_color_msg.header = left_msg.header
-            self.disparity_pub_vis.publish(disp_color_msg)
 
         with Timer(name='[Depth as Cloud', text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.logger.debug):
             # publish depth image and camera info for depth topic (required by DepthCloud)

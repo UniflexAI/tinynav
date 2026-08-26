@@ -134,20 +134,6 @@ Visualization Manager:
       Value: true
     - Class: rviz_common/Group
       Displays:
-        - Class: rviz_default_plugins/Image
-          Enabled: true
-          Max Value: 1
-          Median window: 5
-          Min Value: 0
-          Name: Image
-          Normalize Range: true
-          Topic:
-            Depth: 5
-            Durability Policy: Volatile
-            History Policy: Keep Last
-            Reliability Policy: Reliable
-            Value: /slam/disparity_vis
-          Value: true
         - Alpha: 1
           Auto Size:
             Auto Size Factor: 1
