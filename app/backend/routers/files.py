@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
 
 from ..state import runner
 
@@ -63,6 +64,44 @@ async def list_bags():
 @router.get('/maps')
 async def list_maps():
     return {'files': _list_dir(_db_root() / 'maps')}
+
+
+def _serve_shot(subdir: str, file_name: str) -> FileResponse:
+    """Shared body for the poi-shots(-hik) single-file routes: both are flat,
+    read-only directories of JPEGs written by CapturePoiShot / CaptureHikShot
+    (core_runtime/mission/leaves.py) — same safety rules as everything else
+    served out of the db root, just no delete route (nothing deletes these
+    today, so there's nothing to wire up yet)."""
+    path = _safe_child(_db_root() / subdir, file_name)
+    if not path.is_file():
+        raise HTTPException(404, f'{file_name!r} not found')
+    return FileResponse(path, media_type='image/jpeg')
+
+
+@router.get('/poi-shots')
+async def list_poi_shots():
+    """Arrival photos from the robot's own onboard camera (CapturePoiShot).
+    Previously written to disk with no way to read them back over the network —
+    this is the first thing that exposes them."""
+    return {'files': _list_dir(_db_root() / 'poi_shots')}
+
+
+@router.get('/poi-shots/{file_name}')
+async def get_poi_shot(file_name: str):
+    return _serve_shot('poi_shots', file_name)
+
+
+@router.get('/poi-shots-hik')
+async def list_poi_shots_hik():
+    """Arrival photos from the external Hikvision gimbal camera
+    (CaptureHikShot) — separate directory from /poi-shots so the two cameras'
+    files never collide or interleave in one listing."""
+    return {'files': _list_dir(_db_root() / 'poi_shots_hik')}
+
+
+@router.get('/poi-shots-hik/{file_name}')
+async def get_poi_shot_hik(file_name: str):
+    return _serve_shot('poi_shots_hik', file_name)
 
 
 @router.delete('/bags/{bag_name}')
