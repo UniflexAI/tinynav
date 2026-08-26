@@ -275,6 +275,51 @@ Recommended first-look metrics:
 - ratio below `0.10m`, `0.20m`, `0.30m`, `0.50m`
 - trajectory plot shape consistency
 
+## Benchmark Pipeline 4: Relocalization Confidence Dataset Export
+
+`export_relocalization_confidence_dataset.py` exports keypoint-level training
+data for a learned relocalization confidence model. It takes two existing maps:
+
+1. `map_gt` is the retrieval/reference map.
+2. `map_eval` provides query keyframes.
+3. The tool fits `T_map_eval_to_gt` from Top1 retrieval self-consistency.
+4. Each sampled eval keyframe queries TopK candidates in `map_gt`.
+5. For each candidate, it runs SuperPoint + LightGlue + PnP and labels the
+   candidate by pose error against `T_map_eval_to_gt * eval_pose`.
+
+Usage:
+
+```bash
+uv run python tool/benchmark/export_relocalization_confidence_dataset.py \
+  --map-gt /tinynav/tinynav_db/maps/map_gt \
+  --map-eval /tinynav/tinynav_db/maps/map_eval \
+  --output-root /tinynav/output \
+  --num-samples 100 \
+  --top-k 3
+```
+
+Candidate labels:
+
+- `good`: PnP succeeds and pose error is below `--good-error-threshold-m`.
+- `bad`: PnP succeeds but pose error is above `--bad-error-threshold-m`.
+- `ignore`: PnP succeeds but falls between the good/bad thresholds.
+- `pnp_fail`: PnP does not satisfy the minimum inlier threshold.
+
+Keypoint labels:
+
+- `1`: reliable PnP inlier from a good candidate.
+- `0`: unreliable PnP inlier from a bad candidate.
+- `-1`: ignore / unused.
+
+Output:
+
+- `summary.json`: parameters, fitted transform, label counts, pose error stats.
+- `samples_index.jsonl`: one lightweight row per exported candidate.
+- `samples/*/sample.json`: candidate-level metadata.
+- `samples/*/keypoints.json`: matched keypoints, PnP inlier indices, keypoint labels.
+- `samples/*/query.png`, `reference.png`, `match_vis.jpg`: visual review data.
+- `index.html`: human-readable visual report.
+
 ## Future Benchmark Pipelines
 
 Additional benchmark pipelines will be added to evaluate:
