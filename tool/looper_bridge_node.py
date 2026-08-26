@@ -51,6 +51,7 @@ class LooperBridgeNode(Node):
         self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
         self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
+        self.pose_sub.registerCallback(self.publish_visual_odom)
         self.sync = message_filters.TimeSynchronizer(
             [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20
         )
@@ -161,6 +162,10 @@ class LooperBridgeNode(Node):
         depth_out.header.frame_id = "camera"
         return depth_out
 
+    def publish_visual_odom(self, pose_msg: PoseStamped):
+        odom_msg = self.build_odom(pose_msg2np(pose_msg), pose_msg.header.stamp)
+        self.odom_visual_pub.publish(odom_msg)
+
     def sync_callback(self, depth_msg: Image, pose_msg: PoseStamped, image_msg: Image):
         if self.cached_camera_info is None:
             self.log_missing_inputs()
@@ -170,7 +175,6 @@ class LooperBridgeNode(Node):
         stamp = pose_msg.header.stamp
 
         odom_msg = self.build_odom(T_world_camera, stamp)
-        self.odom_visual_pub.publish(odom_msg)
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
 

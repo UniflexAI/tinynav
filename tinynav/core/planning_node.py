@@ -15,6 +15,7 @@ import cv2
 import rclpy
 import message_filters
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32, Twist
@@ -369,8 +370,16 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+        latest_depth_only = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE
+        )
+        poses_covering_one_depth_frame = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE
+        )
+        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth',
+                                                    qos_profile=latest_depth_only)
+        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual',
+                                                   qos_profile=poses_covering_one_depth_frame)
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
