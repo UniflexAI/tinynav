@@ -17,6 +17,7 @@ class VelocityCommandWatchdog:
         self._armed = False
         self._generation = 0
         self._stopped_through = 0
+        self._confirmed_through = 0
         self._lock = threading.Lock()
 
     def observe_nonzero(self, now: float):
@@ -34,27 +35,31 @@ class VelocityCommandWatchdog:
     def confirm_stop(self, generation: int):
         with self._lock:
             self._stopped_through = max(self._stopped_through, generation)
+            self._confirmed_through = max(self._confirmed_through, generation)
             if self._generation > generation:
                 return
             self._last_nonzero_at = None
             self._armed = False
 
-    def retry_after_stop_failure(self, now: float):
+    def retry_after_stop_failure(self, generation: int, now: float) -> bool:
         with self._lock:
+            if generation != self._generation or generation <= self._confirmed_through:
+                return False
             self._last_nonzero_at = float(now)
             self._armed = True
+            return True
 
     def completed_after_stop(self, generation: int) -> bool:
         with self._lock:
             return generation <= self._stopped_through
 
-    def consume_expiration(self, now: float) -> bool:
+    def consume_expiration(self, now: float) -> int | None:
         with self._lock:
             if not self._armed or self._last_nonzero_at is None:
-                return False
+                return None
             if float(now) - self._last_nonzero_at <= self.timeout_s:
-                return False
+                return None
             self._stopped_through = self._generation
             self._last_nonzero_at = None
             self._armed = False
-            return True
+            return self._generation

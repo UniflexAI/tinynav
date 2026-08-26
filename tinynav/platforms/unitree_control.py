@@ -116,7 +116,7 @@ class Ros2UnitreeManagerNode(Node):
             if code not in (0, None):
                 self.logger.error(f"Move failed: code={code}")
             if self.cmd_vel_watchdog.completed_after_stop(generation):
-                self._send_safety_stop("late Move completion")
+                self._send_safety_stop("late Move completion", generation)
         else:
             stop_generation = self.cmd_vel_watchdog.request_stop()
             code = stop_unitree_motion(self.sport_client, self.robot_model)
@@ -127,18 +127,20 @@ class Ros2UnitreeManagerNode(Node):
         time.sleep(0.02)
 
     def _cmd_vel_watchdog_tick(self):
-        if not self.cmd_vel_watchdog.consume_expiration(time.monotonic()):
+        generation = self.cmd_vel_watchdog.consume_expiration(time.monotonic())
+        if generation is None:
             return
-        self._send_safety_stop("cmd_vel stream stale")
+        self._send_safety_stop("cmd_vel stream stale", generation)
 
-    def _send_safety_stop(self, reason: str):
+    def _send_safety_stop(self, reason: str, generation: int):
         with self._safety_stop_lock:
             code = stop_unitree_motion(self.safety_client, self.robot_model)
         if code == 0:
+            self.cmd_vel_watchdog.confirm_stop(generation)
             self.logger.warning(f"{reason}; StopMove sent")
         else:
             self.logger.error(f"{reason}; StopMove failed: code={code}")
-            self.cmd_vel_watchdog.retry_after_stop_failure(time.monotonic())
+            self.cmd_vel_watchdog.retry_after_stop_failure(generation, time.monotonic())
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")

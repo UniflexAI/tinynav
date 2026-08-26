@@ -104,6 +104,32 @@ def test_confirming_old_stop_does_not_disarm_new_generation():
     assert watchdog.consume_expiration(10.6001)
 
 
+def test_current_unconfirmed_stop_failure_retries():
+    watchdog = VelocityCommandWatchdog(0.5)
+    generation = watchdog.observe_nonzero(10.0)
+    assert watchdog.consume_expiration(10.5001) == generation
+    assert watchdog.retry_after_stop_failure(generation, 10.6)
+    assert watchdog.consume_expiration(11.1001) == generation
+
+
+def test_old_stop_failure_does_not_delay_new_generation():
+    watchdog = VelocityCommandWatchdog(0.5)
+    first_generation = watchdog.observe_nonzero(10.0)
+    assert watchdog.consume_expiration(10.5001) == first_generation
+    second_generation = watchdog.observe_nonzero(10.6)
+    assert not watchdog.retry_after_stop_failure(first_generation, 20.0)
+    assert watchdog.consume_expiration(11.1001) == second_generation
+
+
+def test_confirmed_stop_failure_does_not_rearm_idle_watchdog():
+    watchdog = VelocityCommandWatchdog(0.5)
+    generation = watchdog.observe_nonzero(10.0)
+    stop_generation = watchdog.request_stop()
+    watchdog.confirm_stop(stop_generation)
+    assert not watchdog.retry_after_stop_failure(generation, 20.0)
+    assert watchdog.consume_expiration(30.0) is None
+
+
 def test_stop_uses_status_returning_g1_api():
     client = FakeMotionClient()
     assert stop_unitree_motion(client, 'g1') == 0
@@ -129,6 +155,9 @@ if __name__ == '__main__':
         test_explicit_stop_covers_inflight_generation,
         test_unconfirmed_stop_keeps_watchdog_armed,
         test_confirming_old_stop_does_not_disarm_new_generation,
+        test_current_unconfirmed_stop_failure_retries,
+        test_old_stop_failure_does_not_delay_new_generation,
+        test_confirmed_stop_failure_does_not_rearm_idle_watchdog,
         test_stop_uses_status_returning_g1_api,
         test_stop_uses_sport_api_for_quadruped,
     ]
