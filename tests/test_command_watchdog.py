@@ -35,7 +35,8 @@ def test_idle_does_not_expire():
 
 def test_nonzero_expires_once():
     watchdog = VelocityCommandWatchdog(0.5)
-    watchdog.observe_nonzero(10.0)
+    generation = watchdog.observe_nonzero(10.0)
+    assert generation == 1
     assert not watchdog.consume_expiration(10.5)
     assert watchdog.consume_expiration(10.5001)
     assert not watchdog.consume_expiration(20.0)
@@ -43,8 +44,8 @@ def test_nonzero_expires_once():
 
 def test_refresh_extends_deadline():
     watchdog = VelocityCommandWatchdog(0.5)
-    watchdog.observe_nonzero(10.0)
-    watchdog.observe_nonzero(10.4)
+    assert watchdog.observe_nonzero(10.0) == 1
+    assert watchdog.observe_nonzero(10.4) == 2
     assert not watchdog.consume_expiration(10.8)
     assert watchdog.consume_expiration(10.9001)
 
@@ -60,6 +61,36 @@ def test_clear_disarms_watchdog():
     watchdog.observe_nonzero(10.0)
     watchdog.clear()
     assert not watchdog.consume_expiration(20.0)
+
+
+def test_late_completion_requires_compensating_stop():
+    watchdog = VelocityCommandWatchdog(0.5)
+    generation = watchdog.observe_nonzero(10.0)
+    assert watchdog.consume_expiration(10.5001)
+    assert watchdog.completed_after_stop(generation)
+
+
+def test_normal_completion_does_not_require_stop():
+    watchdog = VelocityCommandWatchdog(0.5)
+    generation = watchdog.observe_nonzero(10.0)
+    assert not watchdog.completed_after_stop(generation)
+
+
+def test_explicit_stop_covers_inflight_generation():
+    watchdog = VelocityCommandWatchdog(0.5)
+    generation = watchdog.observe_nonzero(10.0)
+    watchdog.clear()
+    assert watchdog.completed_after_stop(generation)
+
+
+def test_stop_failure_retries_same_generation():
+    watchdog = VelocityCommandWatchdog(0.5)
+    generation = watchdog.observe_nonzero(10.0)
+    watchdog.clear()
+    watchdog.retry_after_stop_failure(10.1)
+    assert not watchdog.consume_expiration(10.6)
+    assert watchdog.consume_expiration(10.6001)
+    assert watchdog.completed_after_stop(generation)
 
 
 def test_stop_uses_status_returning_g1_api():
@@ -82,6 +113,10 @@ if __name__ == '__main__':
         test_refresh_extends_deadline,
         test_nonzero_attempt_stays_armed_until_confirmed_stop,
         test_clear_disarms_watchdog,
+        test_late_completion_requires_compensating_stop,
+        test_normal_completion_does_not_require_stop,
+        test_explicit_stop_covers_inflight_generation,
+        test_stop_failure_retries_same_generation,
         test_stop_uses_status_returning_g1_api,
         test_stop_uses_sport_api_for_quadruped,
     ]

@@ -1,5 +1,6 @@
 import argparse
 import os
+import threading
 import time
 from enum import Enum
 
@@ -64,6 +65,7 @@ class Ros2UnitreeManagerNode(Node):
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
         self.cmd_vel_watchdog = VelocityCommandWatchdog(cmd_vel_timeout_s)
+        self._safety_stop_lock = threading.Lock()
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = _build_sport_client(robot_model)
@@ -109,27 +111,33 @@ class Ros2UnitreeManagerNode(Node):
 
         if (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
             self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
-            self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
+            generation = self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
             code = self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
             if code not in (0, None):
                 self.logger.error(f"Move failed: code={code}")
+            if self.cmd_vel_watchdog.completed_after_stop(generation):
+                self._send_safety_stop("late Move completion")
         else:
+            self.cmd_vel_watchdog.clear()
             code = stop_unitree_motion(self.sport_client, self.robot_model)
-            if code == 0:
-                self.cmd_vel_watchdog.clear()
-            else:
+            if code != 0:
                 self.logger.error(f"StopMove failed: code={code}")
+                self.cmd_vel_watchdog.retry_after_stop_failure(time.monotonic())
         time.sleep(0.02)
 
     def _cmd_vel_watchdog_tick(self):
         if not self.cmd_vel_watchdog.consume_expiration(time.monotonic()):
             return
-        code = stop_unitree_motion(self.safety_client, self.robot_model)
+        self._send_safety_stop("cmd_vel stream stale")
+
+    def _send_safety_stop(self, reason: str):
+        with self._safety_stop_lock:
+            code = stop_unitree_motion(self.safety_client, self.robot_model)
         if code == 0:
-            self.logger.warning("cmd_vel stream stale; StopMove sent")
+            self.logger.warning(f"{reason}; StopMove sent")
         else:
-            self.logger.error(f"cmd_vel stream stale; StopMove failed: code={code}")
-            self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
+            self.logger.error(f"{reason}; StopMove failed: code={code}")
+            self.cmd_vel_watchdog.retry_after_stop_failure(time.monotonic())
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
