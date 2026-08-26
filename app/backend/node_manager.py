@@ -24,6 +24,7 @@ import rclpy
 import rclpy.time
 import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos_event import SubscriptionEventCallbacks
 from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
@@ -167,7 +168,12 @@ class BackendNode(Ros2NodeManager):
         self._nav_target_pose: dict | None = None
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
-        self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
+        # message_lost is what tells a hole in these stamps apart from a hole this
+        # node punched in them by falling behind; nothing observable here does.
+        self.odom_lost_total = 0
+        self.create_subscription(
+            Odometry, '/slam/odometry_visual', self._on_slam_odom, 10,
+            event_callbacks=SubscriptionEventCallbacks(message_lost=self._on_odom_lost))
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
@@ -432,6 +438,9 @@ class BackendNode(Ros2NodeManager):
             corners = [{'x': p.x, 'y': p.y} for p in msg.points]
         with self._lock:
             self._footprint = corners
+
+    def _on_odom_lost(self, info):
+        self.odom_lost_total += info.total_count_change
 
     def _on_occupied_voxels(self, msg: PointCloud2):
         """Store a downsampled local 3D occupied voxel cloud for the web UI."""
