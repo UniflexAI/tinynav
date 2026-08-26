@@ -5,6 +5,7 @@ import time
 from enum import Enum
 
 import rclpy
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from std_msgs.msg import Float32, String
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -73,6 +74,7 @@ class Ros2UnitreeManagerNode(Node):
         self.logger = self.get_logger()
         self.cmd_vel_watchdog = VelocityCommandWatchdog(cmd_vel_timeout_s)
         self._motion_lock = threading.Lock()
+        self._watchdog_clock = Clock(clock_type=ClockType.STEADY_TIME)
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -89,7 +91,8 @@ class Ros2UnitreeManagerNode(Node):
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
         watchdog_period_s = min(0.05, cmd_vel_timeout_s / 2.0)
-        self._cmd_vel_watchdog_timer = self.create_timer(watchdog_period_s, self._cmd_vel_watchdog_tick)
+        self._cmd_vel_watchdog_timer = self.create_timer(
+            watchdog_period_s, self._cmd_vel_watchdog_tick, clock=self._watchdog_clock)
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
@@ -102,10 +105,9 @@ class Ros2UnitreeManagerNode(Node):
         with self._motion_lock:
             if (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
                 self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
+                self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
                 code = self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
-                if code == 0:
-                    self.cmd_vel_watchdog.observe_nonzero(time.monotonic())
-                else:
+                if code != 0:
                     self.logger.error(f"Move failed: code={code}")
             else:
                 code = self.sport_client.StopMove()

@@ -36,6 +36,12 @@ def test_refresh_extends_deadline():
     assert watchdog.consume_expiration(10.9001)
 
 
+def test_nonzero_attempt_stays_armed_until_confirmed_stop():
+    watchdog = VelocityCommandWatchdog(0.5)
+    watchdog.observe_nonzero(10.0)
+    assert watchdog.consume_expiration(10.5001)
+
+
 def test_clear_disarms_watchdog():
     watchdog = VelocityCommandWatchdog(0.5)
     watchdog.observe_nonzero(10.0)
@@ -49,6 +55,7 @@ if __name__ == '__main__':
         test_idle_does_not_expire,
         test_nonzero_expires_once,
         test_refresh_extends_deadline,
+        test_nonzero_attempt_stays_armed_until_confirmed_stop,
         test_clear_disarms_watchdog,
     ]
     for test in tests:
