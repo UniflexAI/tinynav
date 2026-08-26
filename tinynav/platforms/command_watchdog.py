@@ -1,10 +1,11 @@
+import math
 import threading
 
 
 class VelocityCommandWatchdog:
     def __init__(self, timeout_s: float):
-        if timeout_s <= 0:
-            raise ValueError('timeout_s must be positive')
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError('timeout_s must be finite and positive')
         self.timeout_s = float(timeout_s)
         self._last_nonzero_at = None
         self._armed = False

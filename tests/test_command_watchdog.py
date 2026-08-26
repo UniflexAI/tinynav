@@ -6,8 +6,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from tinynav.platforms.command_watchdog import VelocityCommandWatchdog
 
 
-def test_rejects_non_positive_timeout():
-    for timeout_s in (0.0, -0.1):
+def test_rejects_invalid_timeout():
+    for timeout_s in (0.0, -0.1, float('inf'), float('nan')):
         try:
             VelocityCommandWatchdog(timeout_s)
         except ValueError:
@@ -51,7 +51,7 @@ def test_clear_disarms_watchdog():
 
 if __name__ == '__main__':
     tests = [
-        test_rejects_non_positive_timeout,
+        test_rejects_invalid_timeout,
         test_idle_does_not_expire,
         test_nonzero_expires_once,
         test_refresh_extends_deadline,
