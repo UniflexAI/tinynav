@@ -66,11 +66,42 @@ class FeedforwardTest(unittest.TestCase):
             for z in self._run(omega):
                 self.assertAlmostEqual(z, omega, places=6, msg=f'omega={omega}')
 
-    def test_it_is_clipped_to_what_the_base_can_turn_and_no_further(self):
-        cap = self.node.max_angular_speed
-        for omega in (cap * 3, -cap * 3):
-            for z in self._run(omega):
-                self.assertAlmostEqual(z, cap if omega > 0 else -cap, places=6)
+    def test_it_is_clipped_to_what_the_base_can_turn(self):
+        # Driven through the real entry point, because that is where the clip lives and
+        # it also scales vx to preserve the turn radius. The omega has to sit between
+        # max_angular_speed and rotate_first_omega: above the latter, rotate-first owns
+        # the command instead (asserted below), so a larger value tests that path, not
+        # this one.
+        n = self.node
+        cap = n.max_angular_speed
+        omega = (cap + n.rotate_first_omega) / 2.0
+        self.assertGreater(omega, cap)
+        self.assertLess(omega, n.rotate_first_omega)
+        for sign in (+1.0, -1.0):
+            ff = Twist()
+            ff.linear.x, ff.angular.z = 0.8, sign * omega
+            n.velocity_ff_callback(ff)
+            self.assertAlmostEqual(n.path_vyaw_ff, sign * cap, places=6)
+            now = time.monotonic()
+            n.last_path_update_time = now
+            n.last_cmd_pub_time = now - _DT
+            n.cmd_timer_callback()
+            self.assertAlmostEqual(self.sent[-1].angular.z, sign * cap, places=6)
+
+    def test_a_turn_too_sharp_to_drive_through_becomes_a_turn_in_place(self):
+        # Not the clip: rotate-first replaces the command outright, and it is keyed off
+        # the UNCLAMPED omega so the clip above cannot hide it.
+        n = self.node
+        ff = Twist()
+        ff.linear.x, ff.angular.z = 0.8, n.rotate_first_omega * 1.5
+        n.velocity_ff_callback(ff)
+        now = time.monotonic()
+        n.last_path_update_time = now
+        n.last_cmd_pub_time = now - _DT
+        n.cmd_timer_callback()
+        self.assertAlmostEqual(self.sent[-1].angular.z, n.rotate_first_max_omega,
+                               places=6)
+        self.assertEqual(self.sent[-1].linear.x, 0.0)
 
     def test_a_constant_feedforward_produces_a_constant_command(self):
         # The failure mode a feedback term reintroduces is drift over time: same input,
