@@ -84,6 +84,10 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = self.robot.min_linear_vel
         self.min_effective_angular_speed = self.robot.min_angular_vel
+        # Sub-floor yaw requests are banked as an angle and spent at the floor (see
+        # cmd_timer_callback). The cap is roughly two ticks' worth at the floor.
+        self._yaw_bank = 0.0           # rad
+        self.yaw_bank_limit = 0.02     # rad
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
         # Rotate-first (upstream's gate, keyed off the planner's own feedforward): when
@@ -129,6 +133,7 @@ class CmdVelControlNode(Node):
         if not self._paused:
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
+            self._yaw_bank = 0.0
 
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
@@ -136,6 +141,7 @@ class CmdVelControlNode(Node):
         if was_active and not self._nav_active:
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
+            self._yaw_bank = 0.0
             self.last_path_update_time = None
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
@@ -286,12 +292,30 @@ class CmdVelControlNode(Node):
         elif abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
 
-        # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
-        if 0.0 < abs(out.angular.z) < self.min_effective_angular_speed:
-            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed:
-                out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
+        # Angular z: a request below the executable floor used to be published as 0
+        # while linear.x kept its accel-limited value, so the robot drove straight
+        # through the turn -- measured on go2w, 43% of turn commands went out as exactly
+        # 0.00 at a mean 0.53 m/s, and the drift they caused is not recoverable by a
+        # controller that only measures heading. Bank the requested yaw ANGLE instead and
+        # spend it as whole ticks at the floor: every tick is executable, and the mean
+        # yaw rate over a few ticks is the one that was asked for. No guess at the real
+        # floor is needed, which matters because min_angular_vel is still the shared
+        # placeholder on every chassis.
+        floor = self.min_effective_angular_speed
+        if 0.0 < abs(out.angular.z) < floor:
+            self._yaw_bank += out.angular.z * dt
+            quantum = floor * dt
+            if abs(self._yaw_bank) >= quantum:
+                out.angular.z = float(np.copysign(floor, self._yaw_bank))
+                self._yaw_bank -= np.copysign(quantum, self._yaw_bank)
             else:
                 out.angular.z = 0.0
+            # Bounded so a long sub-floor stretch cannot bank a turn it then spends
+            # after the plan has moved on.
+            self._yaw_bank = float(np.clip(self._yaw_bank, -self.yaw_bank_limit,
+                                           self.yaw_bank_limit))
+        else:
+            self._yaw_bank = 0.0
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out
