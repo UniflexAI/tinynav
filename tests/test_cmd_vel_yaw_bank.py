@@ -44,9 +44,8 @@ class YawBankTest(unittest.TestCase):
     def _run(self, omega, vx=0.8, ticks=_TICKS):
         """Drive the timer callback `ticks` times with a fixed dt and a fresh path.
 
-        pose/path are left None so _path_intended_yaw returns None and the drift PI
-        contributes nothing -- this isolates the floor logic from the feedback term.
-        """
+        Yaw is the planner's feedforward passed straight through (see
+        test_cmd_vel_feedforward.py), so setting path_vyaw_ff is the whole input."""
         n = self.node
         n.latest_cmd.linear.x = vx
         n.path_vyaw_ff = omega
