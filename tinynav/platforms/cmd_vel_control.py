@@ -66,6 +66,11 @@ class CmdVelControlNode(Node):
         self.yaw_kp = 0.35             # proportional (damping) gain (rad/s per rad)
         self.yaw_bias_ki = 0.15        # integral gain (see cmd_timer_callback)
         self.yaw_bias_limit = 0.5      # clamp on the learned bias (rad/m)
+        # Second clamp, on what the bias is allowed to contribute in rad/s. The rad/m
+        # clamp above was sized for a ~0.5 m/s robot, where it authorises 0.25 rad/s; at
+        # 1.5 m/s the same number authorises 0.75 rad/s, more than the planner's own turn
+        # rate, so a mislearned bias could cancel or invert a commanded turn.
+        self.yaw_bias_rate_limit = 0.25   # rad/s
         self.yaw_bias_min_vx = 0.15    # only learn/apply the bias above this forward speed (m/s)
         # Integrate only while the plan is roughly straight (feedforward near zero);
         # this also implies the path is fresh, since path_vyaw_ff comes from the latest path.
@@ -209,6 +214,7 @@ class CmdVelControlNode(Node):
         vx_now = float(self.latest_cmd.linear.x)
         # rad/m bias -> rad/s correction at the current speed; zero when stopped.
         bias_rate = self._yaw_bias_per_m * vx_now if vx_now > self.yaw_bias_min_vx else 0.0
+        bias_rate = float(np.clip(bias_rate, -self.yaw_bias_rate_limit, self.yaw_bias_rate_limit))
         if intended_yaw is not None and actual_yaw is not None:
             drift = float(np.arctan2(np.sin(actual_yaw - intended_yaw),
                                      np.cos(actual_yaw - intended_yaw)))

@@ -54,12 +54,15 @@ GO2_CONFIG = RobotConfig(
     safety_radius=0.1,
 )
 
+# Wheeled: faster than the legged go2, and it can hold a turn rate small enough that
+# the legged 0.1 rad/s floor would round a gentle heading correction down to zero.
 GO2W_CONFIG = RobotConfig(
     name='go2w', shape='square',
     length=0.6, width=0.3,
     camera_x=0.35, camera_y=0.0,
     control_x=0.05, control_y=0.0,
     safety_radius=0.1,
+    max_linear_vel=1.5, min_angular_vel=0.05,
 )
 
 B2_CONFIG = RobotConfig(
