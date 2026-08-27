@@ -8,6 +8,7 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from std_msgs.msg import Float32, String
 from enum import Enum
 import time
+from tinynav.core.robot_specs import ROBOT_CONFIG
 
 # go2/b2 are quadrupeds sharing the same SportClient gait API (Move/StandUp/
 # StandDown/BalanceStand/ClassicWalk). go2w/b2w are the wheeled variants of the
@@ -137,6 +138,9 @@ class Ros2UnitreeManagerNode(Node):
             elif self.arm_action_client is not None and action_key in self.arm_action_map:
                 code = self.arm_action_client.ExecuteAction(self.arm_action_map[action_key])
                 self.logger.info(f"Arm action {action_key!r}: code={code}")
+            elif self.is_quadruped and action_key in ROBOT_CONFIG.available_actions:
+                code = getattr(self.sport_client, action_key)()
+                self.logger.info(f"Sport action {action_key!r}: code={code}")
             else:
                 self.logger.warning(f"Unknown or unsupported action: {action_key!r}")
 

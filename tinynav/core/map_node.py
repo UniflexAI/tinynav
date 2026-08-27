@@ -268,6 +268,7 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
 
         self.pois = {}
+        self.poi_actions = {}
         self.poi_index = -1
         self._nav_completed = False
         self._leg_initial_length: float | None = None
@@ -299,13 +300,17 @@ class MapNode(Node):
             self.pois = json.loads(msg.data)
 
             pois_dict = {}
+            poi_actions = {}
             keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
                 pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                poi_actions[index] = self.pois[str(key)].get("action")
             self.pois = pois_dict
+            self.poi_actions = poi_actions
 
             if not self.pois:
                 self.poi_index = -1
+                self.poi_actions = {}
                 self.cached_nav_path_in_map = None
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
@@ -326,6 +331,7 @@ class MapNode(Node):
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
+            self.poi_actions = {}
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -649,16 +655,27 @@ class MapNode(Node):
         pos = pose_in_map[:3, 3]
 
         if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
-            if ROBOT_CONFIG.arrival_action and not self._poi_action_pending:
+            action = self.poi_actions.get(self.poi_index)
+            if action and action not in ROBOT_CONFIG.available_actions:
+                self.get_logger().warning(
+                    f"POI {self.poi_index} wants action {action!r}, not available for "
+                    f"robot {ROBOT_CONFIG.name!r} ({ROBOT_CONFIG.available_actions}); skipping"
+                )
+                action = None
+            if action and not self._poi_action_pending:
                 self._poi_action_pending = True
                 self._poi_action_until = time.time() + ROBOT_CONFIG.arrival_action_hold_s
-                self.action_pub.publish(String(data=f"play {ROBOT_CONFIG.arrival_action}"))
-                self.get_logger().info(f"Arrived at POI {self.poi_index}, playing {ROBOT_CONFIG.arrival_action!r}")
+                self.action_pub.publish(String(data=f"play {action}"))
+                self.get_logger().info(f"Arrived at POI {self.poi_index}, playing {action!r}")
                 return
             if self._poi_action_pending:
                 if time.time() < self._poi_action_until:
                     return
                 self._poi_action_pending = False
+                if ROBOT_CONFIG.name == 'g1':
+                    # g1 arm gestures don't self-release; some (e.g. "hug") leave the
+                    # arm extended until explicitly told to reset.
+                    self.action_pub.publish(String(data="play release arm"))
 
             if self._leg_initial_length is not None:
                 self.nav_progress_pub.publish(String(data=json.dumps({

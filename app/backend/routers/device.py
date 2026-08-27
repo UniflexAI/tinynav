@@ -4,6 +4,7 @@ import psutil
 from fastapi import APIRouter
 
 from ..state import runner
+from tinynav.core.robot_specs import ROBOT_CONFIG
 
 router = APIRouter(tags=['device'])
 
@@ -14,6 +15,8 @@ def device_info():
         'deviceId': socket.gethostname(),
         'firmwareVersion': '0.1.0',
         'capabilities': ['bag_record', 'map_build', 'navigation'],
+        'robotType': ROBOT_CONFIG.name,
+        'arrivalActions': ROBOT_CONFIG.available_actions,
     }
 
 
