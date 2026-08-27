@@ -132,13 +132,11 @@ class ArcLengthCapTest(unittest.TestCase):
 
 
 class LateralAccelCapTest(unittest.TestCase):
-    """The cap bounds vx*omega by lowering SPEED, not by narrowing steering.
-
-    The old shape capped omega per vx, which left the lattice with no tight arc at all
-    once vx passed max_lat_acc/max_angular_vel: at 1.34 m/s under a 0.5 cap the sharpest
-    arc on offer had a 3.6 m radius, so a corner tighter than that had no candidate and
-    the plan drove past it. Nothing else in the planner slows for curvature.
-    """
+    def test_uncapped_full_omega_is_offered_at_full_speed(self):
+        _, params = _lattice()
+        top = params[:, 0].max()
+        self.assertAlmostEqual(
+            np.abs(params[params[:, 0] > top - 1e-9, 1]).max(), _OMEGA_MAX, places=6)
 
     def test_vx_times_omega_stays_under_the_cap(self):
         for cap in (0.3, 0.5, 1.0):
@@ -146,47 +144,25 @@ class LateralAccelCapTest(unittest.TestCase):
             self.assertLessEqual(np.abs(params[:, 0] * params[:, 1]).max(),
                                  cap + 1e-9, f'cap={cap}')
 
-    def test_a_tight_arc_is_still_offered_while_moving(self):
-        # The regression this shape exists to prevent. Stationary rows are excluded:
-        # they satisfy the cap trivially and would make this assertion vacuous.
-        for cap in (0.3, 0.5, 1.0):
-            _, params = _lattice(max_lat_acc=cap)
-            moving = params[:, 0] > 1e-9
-            self.assertAlmostEqual(np.abs(params[moving, 1]).max(), _OMEGA_MAX,
-                                   places=6, msg=f'cap={cap}')
-            # ...and it moves at the speed the cap allows for that turn rate.
-            tightest = moving & (np.abs(params[:, 1]) > _OMEGA_MAX - 1e-9)
-            self.assertAlmostEqual(params[tightest, 0].max(), cap / _OMEGA_MAX,
-                                   places=6, msg=f'cap={cap}')
-
-    def test_it_bites_hardest_at_the_sharpest_steering(self):
+    def test_it_bites_hardest_at_the_top_speed(self):
         _, params = _lattice(max_lat_acc=0.5)
-        rates = np.unique(np.abs(params[:, 1]))
-        fastest = [params[np.abs(params[:, 1]) == w, 0].max() for w in rates]
-        # Monotonically non-increasing in |omega|, and strictly slower at the sharpest.
-        self.assertTrue(all(a >= b - 1e-9 for a, b in zip(fastest, fastest[1:])))
-        self.assertLess(fastest[-1], fastest[0])
+        speeds = np.unique(params[:, 0])
+        widest = [np.abs(params[params[:, 0] == v, 1]).max() for v in speeds]
+        # Monotonically non-increasing in vx, and strictly smaller at the top.
+        self.assertTrue(all(a >= b - 1e-9 for a, b in zip(widest, widest[1:])))
+        self.assertLess(widest[-1], widest[0])
 
-    def test_gentle_steering_keeps_the_full_speed_range(self):
-        # Below max_lat_acc/max_linear_vel the cap must not bind at all.
+    def test_slow_rows_are_untouched(self):
+        # Below max_lat_acc/max_angular_vel the cap must not bind at all.
         cap = 0.5
         _, free = _lattice()
         _, capped = _lattice(max_lat_acc=cap)
-        for w in np.unique(np.abs(capped[:, 1])):
-            if w > cap / _V_OPEN - 1e-9:
+        for v in np.unique(capped[:, 0]):
+            if v > cap / _OMEGA_MAX - 1e-9:
                 continue
-            self.assertAlmostEqual(np.abs(capped[np.abs(capped[:, 1]) == w, 0]).max(),
-                                   np.abs(free[np.abs(free[:, 1]) == w, 0]).max(),
-                                   places=6,
-                                   msg=f'omega={w:.3f} should be below the knee')
-
-    def test_driving_straight_keeps_the_full_speed_range(self):
-        # vx*omega is 0 with no steering, so no cap may slow the straight rows.
-        for cap in (0.1, 0.5):
-            _, params = _lattice(max_lat_acc=cap)
-            straight = np.abs(params[:, 1]) < 1e-9
-            self.assertAlmostEqual(params[straight, 0].max(), _V_OPEN, places=6,
-                                   msg=f'cap={cap}')
+            self.assertAlmostEqual(np.abs(capped[capped[:, 0] == v, 1]).max(),
+                                   np.abs(free[free[:, 0] == v, 1]).max(), places=6,
+                                   msg=f'vx={v:.3f} should be below the knee')
 
     def test_turn_in_place_keeps_full_angular_rate(self):
         # vx*omega is 0 at a standstill, so no lateral-accel cap may narrow it.

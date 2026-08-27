@@ -193,21 +193,16 @@ def generate_trajectory_library_3d(
     turn-in-place vocabulary at its full `duration` of rotation -- the cost function's
     heading term depends on those rows swinging a real angle.
 
-    `max_lat_acc` caps vx*omega. It binds by lowering the SPEED offered with a given
-    steering, not by narrowing the steering offered at a given speed: the full
-    +/-max_angular_vel range exists at every speed the cap allows, so a turn the robot
-    cannot take at 1.5 m/s is still on the menu at the speed where it can. Capping omega
-    instead left the lattice with no tight arc at all above max_lat_acc/max_angular_vel,
-    and nothing else in the planner slows for curvature -- the clearance schedule only
-    watches what is straight ahead -- so the plan drove into corners it could not turn.
-    omega=0 always keeps the full speed range, and vx=0 always keeps the full omega range.
+    `max_lat_acc` caps vx*omega, so the same steering that is fine at a crawl is not
+    offered at speed. It binds only above max_lat_acc/max_angular_vel; below that the
+    omega range is unchanged, and at a standstill it does not bind at all.
     """
     num_steps = int(duration / dt) + 1
 
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
     n_omega = num_samples
-    omega_y_samples = np.linspace(-max_angular_vel, max_angular_vel, n_omega)
+    vx_samples = np.linspace(0.0, vx_max, n_vx)
 
     num_samples = n_vx * n_omega
 
@@ -215,20 +210,20 @@ def generate_trajectory_library_3d(
     params = np.empty((num_samples, 2))
 
     k = -1
-    for i_omega in range(n_omega):
-        omega_y = omega_y_samples[i_omega]
-        # Per-steering speed range: the lattice stays rectangular (n_omega * n_vx rows),
-        # only the top of each row's vx shrinks as the turn tightens.
-        vx_lim = vx_max
-        if abs(omega_y) > 1e-6 and max_lat_acc / abs(omega_y) < vx_lim:
-            vx_lim = max_lat_acc / abs(omega_y)
-        vx_samples = np.linspace(0.0, vx_lim, n_vx)
-        for i_vx in range(n_vx):
+    for i_vx in range(n_vx):
+        vx = vx_samples[i_vx]
+        # Per-speed omega range: the lattice stays rectangular (n_vx * n_omega rows),
+        # only the span of each row's omega shrinks as vx rises.
+        omega_lim = max_angular_vel
+        if vx > 1e-6 and max_lat_acc / vx < omega_lim:
+            omega_lim = max_lat_acc / vx
+        omega_y_samples = np.linspace(-omega_lim, omega_lim, n_omega)
+        # Nominal arc length per step; 0 for the stationary rows, which is why the
+        # length cap cannot touch them.
+        step_len = vx * dt
+        for i_omega in range(n_omega):
             k += 1
-            vx = vx_samples[i_vx]
-            # Nominal arc length per step; 0 for the stationary rows, which is why the
-            # length cap cannot touch them.
-            step_len = vx * dt
+            omega_y = omega_y_samples[i_omega]
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
