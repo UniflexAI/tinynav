@@ -19,7 +19,7 @@ from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32, Twist
-from std_msgs.msg import Header, Float32
+from std_msgs.msg import Bool, Header, Float32
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
@@ -443,7 +443,13 @@ class PlanningNode(Node):
         # Depth latency (~100ms) + raycast makes the effective clearance smaller than
         # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
         self.declare_parameter('vx_max', 0.8)        # open-space target when NO capture prior (fallback)
-        self.declare_parameter('vx_hard_max', 2.0)   # absolute forward-speed ceiling (hardware)
+        # Operational ceiling, not the chassis's. Nothing downstream can exceed it: the
+        # capture-speed prior is clipped to it (_open_target_speed), the clearance
+        # schedule interpolates up to that clipped target, and cmd_vel_control clips its
+        # own output to the /planning/forward_speed_cap this publishes. core_runtime's
+        # vio_guard also sizes its odom-jump threshold at 2.5x this number, so raising it
+        # without revisiting that guard makes the guard blind.
+        self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (m/s)
         self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
         self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
         self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
@@ -518,6 +524,18 @@ class PlanningNode(Node):
         # capture is deliberately slow for mapping stability and replay can afford to
         # be quicker, but the operator's speed is already the best evidence of what
         # this stretch tolerates, so scaling it up just overdrives the tight parts.
+        # On stairs the whole speed target is scaled by this, so both the lattice's
+        # sampling bound and the /planning/forward_speed_cap cmd_vel_control clips to
+        # come down together. Gated on map_node's /planning/on_stairs, which is itself
+        # off whenever map_node's climb_prior is false -- the same kill switch, since the
+        # capture climb labels this is derived from are noisy enough to have needed one.
+        self.declare_parameter('stairs_speed_scale', 0.6)
+        self.declare_parameter('on_stairs_ttl_s', 2.0)
+        self._stairs_speed_scale = float(self.get_parameter('stairs_speed_scale').value)
+        self._on_stairs_ttl_ns = int(float(self.get_parameter('on_stairs_ttl_s').value) * 1e9)
+        self._on_stairs = False
+        self._on_stairs_stamp_ns = None
+        self.create_subscription(Bool, '/planning/on_stairs', self.on_stairs_callback, 10)
         self.declare_parameter('capture_speed_gain', 1.0)
         self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
         self.declare_parameter('speed_cap_ttl_s', 2.0)
@@ -563,6 +581,16 @@ class PlanningNode(Node):
         return np.where(region, self._climb_min_wall_span_m,
                         self.obstacle_config.min_wall_span_m)
 
+    def on_stairs_callback(self, msg):
+        self._on_stairs = bool(msg.data)
+        self._on_stairs_stamp_ns = self.get_clock().now().nanoseconds
+
+    def _on_stairs_now(self):
+        """True only while a FRESH /planning/on_stairs says so. A stale stream means
+        map_node stopped answering, which is not evidence of stairs."""
+        return bool(self._on_stairs
+                    and self._signal_fresh(self._on_stairs_stamp_ns, self._on_stairs_ttl_ns))
+
     def speed_cap_callback(self, msg):
         self._speed_cap = float(msg.data)
         self._speed_cap_stamp_ns = self.get_clock().now().nanoseconds
@@ -571,14 +599,24 @@ class PlanningNode(Node):
         """Open-space target forward speed: the capture-speed prior (scaled by
         capture_speed_gain) when a fresh, finite value is available, else vx_max
         (the no-capture fallback). Clamped to [vx_min, vx_hard_max] -- the prior may
-        raise the target above vx_max but never past the hardware ceiling."""
+        raise the target above vx_max but never past the ceiling.
+
+        Scaled by stairs_speed_scale while on stairs, and floored back at vx_min so a
+        low capture speed on a staircase does not scale down into a freeze. Applied here
+        rather than at the call site so the lattice bound and the published cap cannot
+        disagree about it."""
         # _signal_fresh short-circuits on a never-received (None) stamp, so a fresh
         # stamp implies _speed_cap was set -> the isfinite guard is safe.
         if (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
                 and np.isfinite(self._speed_cap)):
-            return float(np.clip(self._speed_cap * self._capture_speed_gain,
-                                 self._vx_min, self._vx_hard_max))
-        return self._vx_max
+            target = float(np.clip(self._speed_cap * self._capture_speed_gain,
+                                   self._vx_min, self._vx_hard_max))
+        else:
+            target = self._vx_max
+        if self._on_stairs_now():
+            target = float(np.clip(target * self._stairs_speed_scale,
+                                   self._vx_min, self._vx_hard_max))
+        return target
 
     def poi_change_callback(self, msg):
         self.target_pose = None
