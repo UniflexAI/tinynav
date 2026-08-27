@@ -110,15 +110,19 @@ class CeilingTest(unittest.TestCase):
         # vx_max is the no-prior target, so a ceiling below it would never be reached.
         self.assertLessEqual(VX_MAX, CEILING + 1e-9)
 
-    def test_the_ceiling_is_what_vio_guard_was_written_against(self):
-        # core_runtime's vio_guard sizes its odom-jump threshold at 2.5x this number and
-        # is not importable here, so pin the value that comment depends on.
-        self.assertAlmostEqual(CEILING, 1.0, places=6)
+    def test_the_ceiling_leaves_room_above_the_creep_speed(self):
+        # A ceiling at or under vx_min would collapse the whole schedule onto one speed.
+        self.assertLess(VX_MIN, CEILING)
+
+    # The other constraint on this number -- that core_runtime's vio_guard still has
+    # margin over it before calling real driving a pose jump -- is asserted where
+    # vio_guard lives: core_runtime/tests/test_vio_guard_odom.py. Pinning a value here
+    # would only restate the parameter back to itself.
 
 
 class StairsSpeedTest(unittest.TestCase):
     def test_stairs_scale_the_target_down(self):
-        for cap in (None, 0.8, 1.0):
+        for cap in (None, 0.8, CEILING):
             flat = _Node(speed_cap=cap)._open_target_speed()
             stairs = _Node(speed_cap=cap, on_stairs=True)._open_target_speed()
             self.assertAlmostEqual(stairs, flat * STAIRS_SCALE, places=6,
@@ -128,7 +132,7 @@ class StairsSpeedTest(unittest.TestCase):
     def test_the_reduction_reaches_the_schedule_too(self):
         # Applied inside _open_target_speed so the lattice bound and the published cap
         # cannot disagree: open ground on stairs must saturate at the reduced target.
-        node = _Node(speed_cap=1.0, on_stairs=True)
+        node = _Node(speed_cap=CEILING, on_stairs=True)
         self.assertAlmostEqual(node._speed_from_clearance(50.0, 0.0,
                                                           node._open_target_speed()),
                                CEILING * STAIRS_SCALE, places=6)
@@ -142,12 +146,12 @@ class StairsSpeedTest(unittest.TestCase):
 
     def test_a_stale_on_stairs_stream_does_not_slow_the_robot(self):
         # map_node going quiet is not evidence of stairs.
-        node = _Node(speed_cap=1.0, on_stairs=True).stale_stairs()
+        node = _Node(speed_cap=CEILING, on_stairs=True).stale_stairs()
         self.assertAlmostEqual(node._open_target_speed(),
-                               _Node(speed_cap=1.0)._open_target_speed(), places=6)
+                               _Node(speed_cap=CEILING)._open_target_speed(), places=6)
 
     def test_off_stairs_is_unchanged(self):
-        self.assertAlmostEqual(_Node(speed_cap=1.0)._open_target_speed(),
+        self.assertAlmostEqual(_Node(speed_cap=CEILING)._open_target_speed(),
                                CEILING, places=6)
 
     def test_the_scale_is_an_actual_reduction(self):

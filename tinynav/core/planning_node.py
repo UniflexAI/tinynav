@@ -443,13 +443,16 @@ class PlanningNode(Node):
         # Depth latency (~100ms) + raycast makes the effective clearance smaller than
         # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
         self.declare_parameter('vx_max', 0.8)        # open-space target when NO capture prior (fallback)
-        # Operational ceiling, not the chassis's. Nothing downstream can exceed it: the
-        # capture-speed prior is clipped to it (_open_target_speed), the clearance
-        # schedule interpolates up to that clipped target, and cmd_vel_control clips its
-        # own output to the /planning/forward_speed_cap this publishes. core_runtime's
-        # vio_guard also sizes its odom-jump threshold at 2.5x this number, so raising it
-        # without revisiting that guard makes the guard blind.
-        self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (m/s)
+        # Operational ceiling, not the chassis's (go2w runs to 1.5). Nothing downstream
+        # can exceed it: the capture-speed prior is clipped to it (_open_target_speed),
+        # the clearance schedule interpolates up to that clipped target, and
+        # cmd_vel_control clips its own output to the /planning/forward_speed_cap this
+        # publishes. core_runtime's vio_guard calls any apparent motion above 2.5 m/s a
+        # pose jump, so this number also sets that guard's margin -- 2.1x here; raising
+        # this much further needs TINYNAV_VIO_MAX_SPEED_MPS raised with it, or real
+        # driving starts tripping the guard (core_runtime/tests/test_vio_guard_odom.py
+        # asserts the margin).
+        self.declare_parameter('vx_hard_max', 1.2)   # absolute forward-speed ceiling (m/s)
         self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
         self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
         self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
