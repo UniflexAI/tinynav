@@ -574,6 +574,23 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
+        # map_node's global plan already avoids static obstacles by construction --
+        # DWA scoring below just needs it as two queryable maps (build_route_fields).
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self.global_route_sub = self.create_subscription(
+            Path, '/mapping/global_plan', self._on_global_route, 1
+        )
+        self._global_route_map_xy = None
+        # obstacle score dominates (1e5 multiplier); among survivors, progress drives
+        # speed and follow keeps the robot from cutting across to a closer route point
+        self.w_route_progress = 100.0
+        self.w_path_follow = 80.0
+        # pulls the last stretch onto the exact goal, since remaining_map alone
+        # saturates at 0 before reaching it
+        self.w_goal_terminal = 100.0
+        self.route_terminal_band = 0.5  # m of remaining route that arms w_goal_terminal
+
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
         # so a riser reads as a step, and only those cells do -- everything beside the
@@ -663,23 +680,6 @@ class PlanningNode(Node):
             return float(np.clip(self._speed_cap * self._capture_speed_gain,
                                  self._vx_min, self._vx_hard_max))
         return self._vx_max
-
-        # map_node's global plan already avoids static obstacles by construction --
-        # DWA scoring below just needs it as two queryable maps (build_route_fields).
-        self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self)
-        self.global_route_sub = self.create_subscription(
-            Path, '/mapping/global_plan', self._on_global_route, 1
-        )
-        self._global_route_map_xy = None
-        # obstacle score dominates (1e5 multiplier); among survivors, progress drives
-        # speed and follow keeps the robot from cutting across to a closer route point
-        self.w_route_progress = 100.0
-        self.w_path_follow = 80.0
-        # pulls the last stretch onto the exact goal, since remaining_map alone
-        # saturates at 0 before reaching it
-        self.w_goal_terminal = 100.0
-        self.route_terminal_band = 0.5  # m of remaining route that arms w_goal_terminal
 
     def poi_change_callback(self, msg):
         self.target_pose = None

@@ -1,4 +1,5 @@
 
+import ast
 import numpy as np
 import time
 import sys
@@ -323,3 +324,61 @@ def test_published_path_preserves_direction_of_travel():
     node._publish_path(_straight_traj(21, dx=-0.1), [0], Header())
     xs = [p.pose.position.x for p in sent[0].poses]
     assert xs[1] < xs[0]
+
+
+def _planning_source():
+    path = os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core',
+                        'planning_node.py')
+    with open(path) as fh:
+        return ast.parse(fh.read())
+
+
+def test_no_statement_sits_after_a_return():
+    """Nothing in this file may be unreachable.
+
+    Not style: a hand-merge once landed PlanningNode's route setup -- the TF buffer,
+    the /mapping/global_plan subscription and `_global_route_map_xy` -- after the
+    `return` in `_open_target_speed`. It parsed, it imported, the node started, and
+    then the first sync_callback died with AttributeError because the attribute had
+    never been created. The planner was gone and nothing published a trajectory.
+    """
+    offenders = []
+    for node in ast.walk(_planning_source()):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for i, stmt in enumerate(node.body[:-1]):
+            if isinstance(stmt, (ast.Return, ast.Raise)):
+                offenders.append(f'{node.name}: line {node.body[i + 1].lineno} is '
+                                 f'unreachable after {type(stmt).__name__} on line '
+                                 f'{stmt.lineno}')
+    assert not offenders, offenders
+
+
+def test_every_attribute_the_route_reads_is_built_in_init():
+    """`_route_in_world` runs from `sync_callback`, which fires as soon as images
+    arrive -- long before anything else has had a chance to create its state. So
+    what it reads has to exist from construction, not from whichever method
+    happened to be edited alongside it.
+    """
+    tree = _planning_source()
+    cls = next(n for n in ast.walk(tree)
+               if isinstance(n, ast.ClassDef) and n.name == 'PlanningNode')
+    fns = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+
+    def self_attrs_read(fn):
+        return {n.attr for n in ast.walk(fn)
+                if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load)
+                and isinstance(n.value, ast.Name) and n.value.id == 'self'}
+
+    def self_attrs_set(fn):
+        return {t.attr for n in ast.walk(fn)
+                if isinstance(n, ast.Assign)
+                for t in n.targets
+                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name)
+                and t.value.id == 'self'}
+
+    built = self_attrs_set(fns['__init__'])
+    methods = set(fns)
+    missing = sorted(a for a in self_attrs_read(fns['_route_in_world'])
+                     if a not in built and a not in methods)
+    assert not missing, f'_route_in_world reads what __init__ never builds: {missing}'
