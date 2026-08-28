@@ -673,8 +673,6 @@ class MapNode(Node):
                     return
                 self._poi_action_pending = False
                 if ROBOT_CONFIG.name == 'g1':
-                    # g1 arm gestures don't self-release; some (e.g. "hug") leave the
-                    # arm extended until explicitly told to reset.
                     self.action_pub.publish(String(data="play release arm"))
 
             if self._leg_initial_length is not None:

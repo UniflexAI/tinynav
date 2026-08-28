@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import rclpy
 from rclpy.node import Node
@@ -136,8 +137,18 @@ class Ros2UnitreeManagerNode(Node):
                     self.logger.info(f"Standing: Damp code={code1}, Squat2StandUp code={code2}")
                 self._robot_status = RobotStatus.STANDUP
             elif self.arm_action_client is not None and action_key in self.arm_action_map:
-                code = self.arm_action_client.ExecuteAction(self.arm_action_map[action_key])
-                self.logger.info(f"Arm action {action_key!r}: code={code}")
+                from unitree_sdk2py.g1.arm.g1_arm_action_api import ROBOT_API_ID_ARM_ACTION_EXECUTE_ACTION
+                parameter = json.dumps({"data": self.arm_action_map[action_key]})
+                for attempt in range(5):
+                    code, data = self.arm_action_client._Call(ROBOT_API_ID_ARM_ACTION_EXECUTE_ACTION, parameter)
+                    if code != 7404 or attempt == 4:
+                        break
+                    self.logger.info(
+                        f"Arm action {action_key!r} got FSM_UNAVAILABLE "
+                        f"(attempt {attempt + 1}/{5}), retrying"
+                    )
+                    time.sleep(0.15)
+                self.logger.info(f"Arm action {action_key!r}: code={code}, data={data!r}")
             elif self.is_quadruped and action_key in ROBOT_CONFIG.available_actions:
                 code = getattr(self.sport_client, action_key)()
                 self.logger.info(f"Sport action {action_key!r}: code={code}")

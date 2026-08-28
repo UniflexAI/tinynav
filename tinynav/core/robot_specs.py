@@ -119,10 +119,10 @@ _G1_ACTIONS = [
 
 G1_CONFIG = RobotConfig(
     name='g1', shape='square',
-    length=0.3, width=0.5,
+    length=0.3, width=0.4,
     camera_x=0.1, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.15,
+    safety_radius=0.1,
     min_linear_vel=0.2, min_angular_vel=0.3,
     obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
     available_actions=_G1_ACTIONS,
