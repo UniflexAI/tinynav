@@ -6,6 +6,7 @@ import os
 from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
+from std_msgs.msg import Header
 from planning_node import run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -279,3 +280,46 @@ def test_no_min_span_map_is_the_strict_default():
         build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config),
         build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
                            min_span_map=None))
+
+
+# --- published Path: the stride cmd_vel_control's dt assumption rests on -----
+
+def _publish_path_recorder():
+    """A PlanningNode with only what _publish_path touches, via __new__ so none of
+    __init__'s model/map loading runs."""
+    from planning_node import PlanningNode
+    node = PlanningNode.__new__(PlanningNode)
+    sent = []
+    node.path_pub = type('P', (), {'publish': lambda _s, m: sent.append(m)})()
+    return node, sent
+
+
+def _straight_traj(n, dx=0.1):
+    traj = np.zeros((n, 7))
+    traj[:, 0] = np.arange(n) * dx
+    traj[:, 6] = 1.0
+    return np.array([traj])
+
+
+def test_published_path_keeps_every_tenth_pose():
+    # cmd_vel_control derives speed and turn rate from this Path as
+    # planner_dt * path_pose_stride * step_idx; publishing at another stride scales
+    # both by that ratio, so the number is part of the interface, not a display choice.
+    from planning_node import PlanningNode
+    node, sent = _publish_path_recorder()
+    trajs = _straight_traj(31)
+    node._publish_path(trajs, [0], Header())
+    assert len(sent) == 1
+    assert PlanningNode.PATH_POSE_STRIDE == 10
+    assert len(sent[0].poses) == 4  # 0, 10, 20, 30
+    xs = [p.pose.position.x for p in sent[0].poses]
+    assert np.allclose(xs, [0.0, 1.0, 2.0, 3.0])
+
+
+def test_published_path_preserves_direction_of_travel():
+    # What the all-trajectories-collide fallback relies on: cmd_vel_control reads
+    # reverse off the path pointing backwards, so the sign has to survive publishing.
+    node, sent = _publish_path_recorder()
+    node._publish_path(_straight_traj(21, dx=-0.1), [0], Header())
+    xs = [p.pose.position.x for p in sent[0].poses]
+    assert xs[1] < xs[0]

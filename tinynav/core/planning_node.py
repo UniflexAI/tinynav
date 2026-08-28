@@ -24,7 +24,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
-from geometry_msgs.msg import PoseStamped, Point32, Twist
+from geometry_msgs.msg import PoseStamped, Point32
 from std_msgs.msg import Header, Float32
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
@@ -482,10 +482,8 @@ class PlanningNode(Node):
         # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
         # consumes this directly instead of reverse-engineering it from path poses.
         # angular.x is a backward-segment flag (fixed-speed reverse vocabulary).
-        self.velocity_ff_pub = self.create_publisher(Twist, '/planning/velocity_ff', 10)
         # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
         # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
-        self.forward_speed_cap_pub = self.create_publisher(Float32, '/planning/forward_speed_cap', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
@@ -565,8 +563,6 @@ class PlanningNode(Node):
 
         # Fixed-speed reverse fallback: driven when every trajectory is in collision
         # but the blockage is ahead (not already under the footprint).
-        self.declare_parameter('reverse_speed_fallback', 0.2)
-        self._reverse_speed_fallback = float(self.get_parameter('reverse_speed_fallback').value)
 
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
@@ -709,21 +705,35 @@ class PlanningNode(Node):
         return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
                                [self._vx_min, v_open]))
 
-    def _publish_velocity_ff(self, vx, omega):
-        """Publish a (vx, omega) feedforward on /planning/velocity_ff. angular.x
-        carries the fixed-speed reverse flag, derived from the sign of vx here so the
-        reverse-vocabulary convention cmd_vel_control consumes lives in one place."""
-        ff = Twist()
-        ff.linear.x = vx
-        ff.angular.z = omega
-        ff.angular.x = 1.0 if vx < 0.0 else 0.0
-        self.velocity_ff_pub.publish(ff)
-
     def _on_global_route(self, msg: Path):
         self._global_route_map_xy = (
             np.array([[p.pose.position.x, p.pose.position.y] for p in msg.poses])
             if len(msg.poses) >= 2 else None
         )
+
+    # Decimation is load-bearing: cmd_vel_control reads speed and turn rate off this
+    # Path, and its dt is planner_dt * path_pose_stride * step_idx -- publishing at a
+    # different stride would scale both by that ratio.
+    PATH_POSE_STRIDE = 10
+
+    def _publish_path(self, trajectories, indices, header):
+        path = Path()
+        path.header = header
+        path.header.frame_id = "world"
+        for i in indices:
+            for j in range(0, len(trajectories[i]), self.PATH_POSE_STRIDE):
+                x, y, z, qx, qy, qz, qw = trajectories[i][j]
+                pose = PoseStamped()
+                pose.header = header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = z
+                pose.pose.orientation.x = qx
+                pose.pose.orientation.y = qy
+                pose.pose.orientation.z = qz
+                pose.pose.orientation.w = qw
+                path.poses.append(pose)
+        self.path_pub.publish(path)
 
     def _route_in_world(self):
         """The cached global route (map frame) transformed into this node's world/odom
@@ -935,8 +945,6 @@ class PlanningNode(Node):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
             v_open = self._open_target_speed()
             v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
-            # Publish the prior-driven open target so cmd_vel caps to the same ceiling.
-            self.forward_speed_cap_pub.publish(Float32(data=float(v_open)))
             # The library exists only to pick a trajectory toward a goal, so without
             # one there is nothing to generate or score. The occupancy grid, the ESDF
             # and the speed cap above are maintained either way.
@@ -1005,7 +1013,14 @@ class PlanningNode(Node):
                 # When the footprint cell is itself an obstacle (phantom ground/self)
                 # we stay put rather than reversing blindly into noise.
                 if should_reverse and not center_obst:
-                    self._publish_velocity_ff(-self._reverse_speed_fallback, 0.0)
+                    # The predefined vocabulary's straight-back row. Published as the
+                    # Path rather than as a separate command, because that Path is the
+                    # only thing cmd_vel_control reads -- and it drives reverse at its
+                    # own fixed speed once the path points backwards, so the row's
+                    # magnitude only has to have the right sign.
+                    rev = [i for i in range(len(params)) if params[i][0] < 0.0]
+                    if rev:
+                        self._publish_path(trajectories, rev[:1], depth_msg.header)
                 return
 
             # Single cost: clearance + route adherence/progress + smoothness, with the
@@ -1095,27 +1110,7 @@ class PlanningNode(Node):
             dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
             sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
-            self._publish_velocity_ff(sel_vx, sel_omega)
-
-            # path
-            path = Path()
-            path.header = depth_msg.header
-            path.header.frame_id = "world"
-
-            for i in top_indices:
-                for j in range(0, len(trajectories[i]), 10):
-                    x,y,z,qx,qy,qz,qw = trajectories[i][j]
-                    pose = PoseStamped()
-                    pose.header = depth_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = qx
-                    pose.pose.orientation.y = qy
-                    pose.pose.orientation.z = qz
-                    pose.pose.orientation.w = qw
-                    path.poses.append(pose)
-            self.path_pub.publish(path)
+            self._publish_path(trajectories, top_indices, depth_msg.header)
 
 
 def main(args=None):
