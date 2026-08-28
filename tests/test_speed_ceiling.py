@@ -61,13 +61,14 @@ STAIRS_SCALE = _declared_default('stairs_speed_scale')
 class _Node:
     """Stand-in `self`: just the attributes the extracted methods read."""
 
-    def __init__(self, speed_cap=None, on_stairs=False, fresh=True, gain=1.0):
+    def __init__(self, speed_cap=None, on_stairs=False, fresh=True, gain=1.0,
+                 stairs_scale=STAIRS_SCALE):
         self._vx_min, self._vx_max, self._vx_hard_max = VX_MIN, VX_MAX, CEILING
         self._capture_speed_gain = gain
         self._speed_cap = speed_cap
         self._speed_cap_stamp_ns = 0 if (speed_cap is not None and fresh) else None
         self._speed_cap_ttl_ns = int(2e9)
-        self._stairs_speed_scale = STAIRS_SCALE
+        self._stairs_speed_scale = stairs_scale
         self._on_stairs = on_stairs
         self._on_stairs_stamp_ns = 0 if on_stairs else None
         self._on_stairs_ttl_ns = int(2e9)
@@ -121,27 +122,30 @@ class CeilingTest(unittest.TestCase):
 
 
 class StairsSpeedTest(unittest.TestCase):
-    def test_stairs_scale_the_target_down(self):
+    def test_stairs_scale_the_target_by_the_parameter(self):
+        # Injects a scale rather than reading the default: the default is 1.0 today, and
+        # a test written against it would pass with the multiplication deleted.
         for cap in (None, 0.8, CEILING):
             flat = _Node(speed_cap=cap)._open_target_speed()
-            stairs = _Node(speed_cap=cap, on_stairs=True)._open_target_speed()
-            self.assertAlmostEqual(stairs, flat * STAIRS_SCALE, places=6,
+            stairs = _Node(speed_cap=cap, on_stairs=True,
+                           stairs_scale=0.5)._open_target_speed()
+            self.assertAlmostEqual(stairs, max(flat * 0.5, VX_MIN), places=6,
                                    msg=f'speed_cap={cap}')
-            self.assertLess(stairs, flat, f'speed_cap={cap}')
 
     def test_the_reduction_reaches_the_schedule_too(self):
         # Applied inside _open_target_speed so the lattice bound and the published cap
         # cannot disagree: open ground on stairs must saturate at the reduced target.
-        node = _Node(speed_cap=CEILING, on_stairs=True)
+        node = _Node(speed_cap=CEILING, on_stairs=True, stairs_scale=0.5)
         self.assertAlmostEqual(node._speed_from_clearance(50.0, 0.0,
                                                           node._open_target_speed()),
-                               CEILING * STAIRS_SCALE, places=6)
+                               CEILING * 0.5, places=6)
 
     def test_stairs_never_scale_below_the_creep_speed(self):
         # A slow capture speed on a staircase must not scale down into a freeze.
         v = _Node(speed_cap=VX_MIN)._open_target_speed()
         self.assertGreaterEqual(
-            _Node(speed_cap=VX_MIN, on_stairs=True)._open_target_speed(), VX_MIN)
+            _Node(speed_cap=VX_MIN, on_stairs=True,
+                  stairs_scale=0.1)._open_target_speed(), VX_MIN)
         self.assertGreaterEqual(v, VX_MIN)
 
     def test_a_stale_on_stairs_stream_does_not_slow_the_robot(self):
@@ -154,11 +158,11 @@ class StairsSpeedTest(unittest.TestCase):
         self.assertAlmostEqual(_Node(speed_cap=CEILING)._open_target_speed(),
                                CEILING, places=6)
 
-    def test_the_scale_is_an_actual_reduction(self):
-        # Guards the default against being set to 1.0, which would make the tests above
-        # pass while doing nothing.
+    def test_the_scale_stays_within_its_meaning(self):
+        # A scale is a reduction factor: never zero (a freeze) and never an amplifier.
+        # 1.0 -- the current default -- is the neutral end of that range, not a bug.
         self.assertGreater(STAIRS_SCALE, 0.0)
-        self.assertLess(STAIRS_SCALE, 1.0)
+        self.assertLessEqual(STAIRS_SCALE, 1.0)
 
 
 if __name__ == '__main__':

@@ -532,7 +532,9 @@ class PlanningNode(Node):
         # come down together. Gated on map_node's /planning/on_stairs, which is itself
         # off whenever map_node's climb_prior is false -- the same kill switch, since the
         # capture climb labels this is derived from are noisy enough to have needed one.
-        self.declare_parameter('stairs_speed_scale', 0.6)
+        # 1.0 = no reduction: 0.6 crawled on the real staircases, so the seam stays wired
+        # but neutral until a scale is measured rather than guessed.
+        self.declare_parameter('stairs_speed_scale', 1.0)
         self.declare_parameter('on_stairs_ttl_s', 2.0)
         self._stairs_speed_scale = float(self.get_parameter('stairs_speed_scale').value)
         self._on_stairs_ttl_ns = int(float(self.get_parameter('on_stairs_ttl_s').value) * 1e9)
