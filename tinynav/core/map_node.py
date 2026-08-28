@@ -176,13 +176,22 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
     return []
 
 class MapNode(Node):
-    def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
+    def __init__(
+        self,
+        tinynav_db_path: str,
+        tinynav_map_path: str,
+        verbose_timer: bool = True,
+        initial_map_to_odom_transform_path: str | None = None,
+    ):
         """Initialization
 
         Args:
             tinynav_db_path (str): Directory to store output data.
             tinynav_map_path (str): Directory to load the pre-built map.
             verbose_timer (bool): Whether to use verbose timer output.
+            initial_map_to_odom_transform_path (str | None): Path to a .npy 4x4
+                T_from_map_to_odom to seed this session with (map handoff), instead of
+                waiting for a fresh cold relocalization/RTK fix.
         """
         super().__init__('map_node')
         self.logger = logging.getLogger(__name__)
@@ -265,8 +274,20 @@ class MapNode(Node):
         self.failed_relocalizations = []
 
         self.T_from_map_to_odom = None
+        # Map-handoff seeding: publish one /map/relocalization the moment we have an odom
+        # pose to pair it with (see continuous_odom_callback), instead of waiting for a real
+        # relocalization -- node_manager's _on_relocalization sets its own _localized=True
+        # off that same topic, so this needs no other changes to how "localized" is tracked.
+        self._seed_map_to_odom_pending = False
+        if initial_map_to_odom_transform_path is not None:
+            self.T_from_map_to_odom = np.load(initial_map_to_odom_transform_path)
+            self._seed_map_to_odom_pending = True
+            self.get_logger().info(
+                f"Seeded T_from_map_to_odom from {initial_map_to_odom_transform_path} for map handoff"
+            )
 
         self.pois = {}
+        self.poi_meta = {}
         self.poi_index = -1
         self._nav_completed = False
         self._leg_initial_length: float | None = None
@@ -292,13 +313,20 @@ class MapNode(Node):
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
         try:
-            self.pois = json.loads(msg.data)
+            raw_pois = json.loads(msg.data)
 
             pois_dict = {}
-            keys = sorted([int (key) for key in self.pois.keys()])
+            poi_meta = {}
+            keys = sorted([int(key) for key in raw_pois.keys()])
             for index, key in enumerate(keys):
-                pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                raw_poi = raw_pois[str(key)]
+                pois_dict[index] = np.array(raw_poi["position"])
+                poi_meta[index] = {
+                    "id": raw_poi.get("id", key),
+                    "name": raw_poi.get("name"),
+                }
             self.pois = pois_dict
+            self.poi_meta = poi_meta
 
             if not self.pois:
                 self.poi_index = -1
@@ -306,6 +334,7 @@ class MapNode(Node):
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
+                self.poi_meta = {}
                 self.get_logger().info("POIs cleared, navigation cancelled")
                 return
 
@@ -320,6 +349,20 @@ class MapNode(Node):
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
+            self.poi_meta = {}
+
+    def _nav_progress_payload(self, *, percent: float, path_remaining_m: float,
+                              path_total_m: float, estimated_remaining_s: float) -> dict:
+        meta = self.poi_meta.get(self.poi_index, {})
+        return {
+            "poi_index": self.poi_index,  # route index in the current command queue
+            "poi_id": meta.get("id"),
+            "poi_name": meta.get("name"),
+            "percent": percent,
+            "path_remaining_m": path_remaining_m,
+            "path_total_m": path_total_m,
+            "estimated_remaining_s": estimated_remaining_s,
+        }
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -333,6 +376,11 @@ class MapNode(Node):
     def continuous_odom_callback(self, odom_msg: Odometry):
         self.continuous_odom_recorder.record_odometry_msg(odom_msg)
         self.latest_odom_pose, _ = msg2np(odom_msg)
+        if self._seed_map_to_odom_pending:
+            self._seed_map_to_odom_pending = False
+            pose_in_world = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
+            self.relocation_pub.publish(np2msg(pose_in_world, odom_msg.header.stamp, "world", "camera"))
+            self.get_logger().info(f"Published seeded map-handoff pose: xyz={pose_in_world[:3, 3]}")
 
     def localization_stop_callback(self, msg: Bool):
         if msg.data:
@@ -644,13 +692,12 @@ class MapNode(Node):
 
         if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
             if self._leg_initial_length is not None:
-                self.nav_progress_pub.publish(String(data=json.dumps({
-                    "poi_index": self.poi_index,
-                    "percent": 100.0,
-                    "path_remaining_m": 0.0,
-                    "path_total_m": round(self._leg_initial_length, 2),
-                    "estimated_remaining_s": 0.0,
-                })))
+                self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
+                    percent=100.0,
+                    path_remaining_m=0.0,
+                    path_total_m=round(self._leg_initial_length or 0.0, 2),
+                    estimated_remaining_s=0.0,
+                ))))
             self.poi_index += 1
             self._leg_initial_length = None
             self._leg_start_time = None
@@ -707,13 +754,12 @@ class MapNode(Node):
         percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
 
-        self.nav_progress_pub.publish(String(data=json.dumps({
-            "poi_index": self.poi_index,
-            "percent": round(percent, 1),
-            "path_remaining_m": round(remaining_length, 2),
-            "path_total_m": round(initial, 2),
-            "estimated_remaining_s": round(estimated_remaining_s, 1),
-        })))
+        self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
+            percent=round(percent, 1),
+            path_remaining_m=round(remaining_length, 2),
+            path_total_m=round(initial, 2),
+            estimated_remaining_s=round(estimated_remaining_s, 1),
+        ))))
 
         max_speed = 0.5
         accumulated_distance = 0.0
@@ -793,10 +839,22 @@ def main(args=None):
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
+    parser.add_argument(
+        "--initial_map_to_odom_transform",
+        type=str,
+        default=None,
+        help=(
+            "Path to a .npy 4x4 T_from_map_to_odom to seed this session with (map handoff "
+            "between two calibrated-adjacent maps), instead of waiting for a fresh cold "
+            "relocalization/RTK fix. See app/backend/node_manager.py's "
+            "_maybe_seed_map_handoff."
+        ),
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
-                   verbose_timer=parsed_args.verbose_timer)
+                   verbose_timer=parsed_args.verbose_timer,
+                   initial_map_to_odom_transform_path=parsed_args.initial_map_to_odom_transform)
 
     rclpy.spin(node)
     node.destroy_node()

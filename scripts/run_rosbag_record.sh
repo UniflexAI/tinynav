@@ -39,4 +39,7 @@ ros2 bag record \
     /camera/camera/color/camera_info \
     /camera/camera/color/image_rect_raw/compressed \
     /camera/camera/vio_image \
-    /tf_static
+    /tf_static \
+    /planning/occupancy_grid \
+    /planning/trajectory_path \
+    /mapping/global_plan

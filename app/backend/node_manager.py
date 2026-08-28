@@ -60,6 +60,13 @@ _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
 _PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
 _PREVIEW_HIGH_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_HIGH_JPEG_QUALITY', '80'))
+# Map handoff waits indefinitely for the target map to localize by default --
+# relocalization can legitimately take over a minute in field tests, and dropping the
+# pending poi_list at that point makes nav_flow silently stop after the map switch. Set
+# this to a positive value to opt into an explicit failure timeout instead.
+_MAP_HANDOFF_LOCALIZATION_TIMEOUT_S = float(
+    os.environ.get('TINYNAV_MAP_HANDOFF_LOCALIZATION_TIMEOUT_S', '0')
+)
 _PREVIEW_PROFILES = {
     'default': (_PREVIEW_MAX_EDGE_PX, _PREVIEW_JPEG_QUALITY),
     'high': (_PREVIEW_HIGH_MAX_EDGE_PX, _PREVIEW_HIGH_JPEG_QUALITY),
@@ -224,6 +231,8 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
+        self._map_handoff_active: bool = False
+        self._handled_map_handoffs: set[tuple[str, int | str]] = set()
 
         self._nav_active_pub.publish(Bool(data=False))
 
@@ -247,7 +256,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub.publish(Bool(data=bool(active)))
 
     def _on_nav_done(self, msg: Bool):
-        if msg.data and self.state == 'navigation':
+        if msg.data and self.state == 'navigation' and not self._map_handoff_active:
             self._set_nav_active(False)
             self.state = 'idle'
             self._pub_state()
@@ -259,8 +268,252 @@ class BackendNode(Ros2NodeManager):
                 self._nav_progress = data
             for cb in self.nav_progress_callbacks:
                 cb(data)
+            self._maybe_start_map_handoff(data)
         except json.JSONDecodeError:
             pass
+
+    def _maybe_start_map_handoff(self, progress: dict):
+        """Demo map-collaboration hook.
+
+        If the active map folder contains map_handoff.json (or a "handoffs" key in
+        nav_flow.json) and the current route index has a rule, reaching that route index
+        switches to the target map, waits for relocalization, then sends the next poi_list.
+
+        Schema, in the currently active map folder:
+          {
+            "0": {"target_map": "map_...", "poi_list": [1, 2]},
+            "2": {"target_map": "map_other", "poi_list": [0]}
+          }
+
+        Keys are matched against POI name first, then POI id, with the old
+        current-route index behavior kept only as a legacy fallback. poi_list
+        values may be POI IDs or POI names in the target map's pois.json.
+        """
+        try:
+            poi_index = int(progress.get('poi_index'))
+            percent = float(progress.get('percent', 0.0))
+        except (TypeError, ValueError):
+            return
+        poi_id = progress.get('poi_id')
+        try:
+            poi_id = int(poi_id) if poi_id is not None else None
+        except (TypeError, ValueError):
+            poi_id = None
+        poi_name = progress.get('poi_name') if isinstance(progress.get('poi_name'), str) else None
+        if percent < 100.0:
+            return
+
+        active_map = self._active_map_name()
+        if not active_map:
+            return
+        key = (active_map, poi_name or poi_id or poi_index)
+        with self._lock:
+            if self._map_handoff_active or key in self._handled_map_handoffs:
+                return
+
+        rule = self._load_map_handoff_rule(poi_index, poi_id=poi_id, poi_name=poi_name)
+        if rule is None:
+            return
+
+        with self._lock:
+            self._map_handoff_active = True
+            self._handled_map_handoffs.add(key)
+        threading.Thread(
+            target=self._run_map_handoff,
+            args=(active_map, poi_index, rule),
+            daemon=True,
+        ).start()
+
+    def _active_map_name(self) -> str | None:
+        try:
+            if os.path.islink(self.map_path):
+                return os.path.basename(os.path.realpath(self.map_path))
+            if os.path.isdir(self.map_path):
+                return os.path.basename(self.map_path)
+        except OSError:
+            return None
+        return None
+
+    def _load_map_handoff_rule(
+        self,
+        poi_index: int,
+        *,
+        poi_id: int | None = None,
+        poi_name: str | None = None,
+    ) -> dict | None:
+        config_path = None
+        for filename in ('nav_flow.json', 'map_handoff.json'):
+            candidate = os.path.join(self.map_path, filename)
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+        if config_path is None:
+            return None
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read {os.path.basename(config_path)}: {e}')
+            return None
+
+        rule = None
+        if poi_name:
+            if isinstance(config.get('by_name'), dict):
+                rule = config['by_name'].get(poi_name)
+            if rule is None:
+                rule = config.get(poi_name)
+        if rule is None and poi_id is not None:
+            if isinstance(config.get('by_id'), dict):
+                rule = config['by_id'].get(str(poi_id))
+            if rule is None:
+                rule = config.get(str(poi_id))
+        if rule is None and isinstance(config.get('by_index'), dict):
+            rule = config['by_index'].get(str(poi_index))
+        if rule is None and isinstance(config.get('handoffs'), dict):
+            rule = config['handoffs'].get(str(poi_index))
+        if rule is None:
+            rule = config.get(str(poi_index))
+        if not isinstance(rule, dict):
+            return None
+        target_map = rule.get('target_map') or rule.get('map')
+        poi_list = rule.get('poi_list', [])
+        if not isinstance(target_map, str) or not re.match(r'^[a-zA-Z0-9_\-]+$', target_map):
+            self.get_logger().error(f'Invalid map handoff target_map: {target_map!r}')
+            return None
+        if not isinstance(poi_list, list) or not all(isinstance(p, (int, str)) for p in poi_list):
+            self.get_logger().error(f'Invalid map handoff poi_list: {poi_list!r}')
+            return None
+        return {'target_map': target_map, 'poi_list': poi_list}
+
+    def _set_active_map_link(self, map_name: str):
+        import shutil
+        root = self.tinynav_db_path
+        src = os.path.join(root, 'maps', map_name)
+        if not os.path.isdir(src):
+            raise FileNotFoundError(f'Map {map_name!r} not found')
+        link = self.map_path
+        if os.path.islink(link) or os.path.isfile(link):
+            os.remove(link)
+        elif os.path.isdir(link):
+            shutil.rmtree(link)
+        os.symlink(src, link)
+
+    def _wait_for_map_handoff_localization(self, target_map: str) -> bool:
+        """Wait until the target map is localized before continuing nav_flow.
+
+        By default we do not time out. Relocalization can legitimately take more
+        than a minute in field tests, and dropping the pending poi_list at that
+        point makes the nav_flow silently stop after the map switch.
+        Set TINYNAV_MAP_HANDOFF_LOCALIZATION_TIMEOUT_S to a positive value if a
+        deployment wants an explicit failure timeout.
+        """
+        timeout_s = _MAP_HANDOFF_LOCALIZATION_TIMEOUT_S
+        deadline = time.time() + timeout_s if timeout_s > 0 else None
+        next_log_time = time.time() + 10.0
+
+        while True:
+            with self._lock:
+                localized = self._localized
+                nav_nodes_running = self._nav_nodes_running
+            if localized:
+                return True
+            if not nav_nodes_running:
+                self.get_logger().warn(
+                    f'Map handoff cancelled while waiting for localization on {target_map}'
+                )
+                return False
+            if deadline is not None and time.time() >= deadline:
+                self.get_logger().error(
+                    f'Map handoff timed out waiting for localization on {target_map}'
+                )
+                return False
+            if time.time() >= next_log_time:
+                self.get_logger().info(
+                    f'Map handoff waiting for localization on {target_map}; nav_flow POIs remain pending'
+                )
+                next_log_time = time.time() + 30.0
+            time.sleep(0.2)
+
+    def _maybe_seed_map_handoff(
+        self, source_map: str, target_map: str, T_source_to_odom_live: np.ndarray | None,
+    ) -> str | None:
+        """If a calibrated map_handoff_from_<source_map>.json edge exists inside the target
+        map's own directory (see tool/calibrate_map_transform.py), compute a seed
+        T_from_map_to_odom for the target map and write it to a temp file map_node.py can be
+        launched with, so nav on the target map doesn't wait on a fresh cold relocalization.
+        Returns None (map_node falls back to its normal cold-start behavior) if there's no
+        edge for this map pair, or if we don't have a live source-map pose to seed from.
+        """
+        if T_source_to_odom_live is None:
+            self.get_logger().warning(
+                f'Map handoff {source_map}->{target_map}: no live source-map pose available, '
+                'target map will cold-start relocalization as usual'
+            )
+            return None
+        edge_path = os.path.join(self.tinynav_db_path, 'maps', target_map, f'map_handoff_from_{source_map}.json')
+        if not os.path.exists(edge_path):
+            return None
+        try:
+            with open(edge_path) as f:
+                edge = json.load(f)
+            source_to_target = np.array(edge['mapA_to_mapB'])
+            T_target_to_odom_seed = T_source_to_odom_live @ np.linalg.inv(source_to_target)
+        except Exception as exc:
+            self.get_logger().error(f'Map handoff {source_map}->{target_map}: failed to apply edge {edge_path}: {exc}')
+            return None
+        seed_path = f'/tmp/map_handoff_seed_{source_map}_to_{target_map}.npy'
+        np.save(seed_path, T_target_to_odom_seed)
+        self.get_logger().info(
+            f'Map handoff {source_map}->{target_map}: seeded T_from_map_to_odom from {edge_path} -> {seed_path}'
+        )
+        return seed_path
+
+    def _run_map_handoff(self, source_map: str, poi_index: int, rule: dict):
+        target_map = rule['target_map']
+        poi_list = rule['poi_list']
+        self.get_logger().info(
+            f'Map handoff triggered: {source_map}[{poi_index}] -> {target_map}, poi_list={poi_list}'
+        )
+        # Snapshot the live source-map localization NOW, before cmd_stop_nav_nodes/
+        # _set_active_map_link tear down this session's state below -- this is the one
+        # (map_pose, odom_pose) pair we have to seed the target map's T_from_map_to_odom
+        # with, if a calibrated edge exists for this map pair (see _maybe_seed_map_handoff).
+        T_source_to_odom_live = self._compute_live_map_to_odom()
+        try:
+            # Stop current map_node/control hard before changing the active map.
+            self.cmd_stop_nav_nodes()
+            self.state = 'idle'
+            self._pub_state()
+
+            self._set_active_map_link(target_map)
+
+            with self._lock:
+                self._localized = False
+                self._map_pose = None
+                self._global_path = []
+                self._nav_target_pose = None
+                self._nav_progress = None
+
+            seed_transform_path = self._maybe_seed_map_handoff(source_map, target_map, T_source_to_odom_live)
+            self.cmd_start_nav_nodes(initial_map_to_odom_transform_path=seed_transform_path)
+
+            if not self._wait_for_map_handoff_localization(target_map):
+                self.state = 'idle'
+                self._pub_state()
+                return
+
+            if poi_list:
+                self.cmd_send_pois(poi_list)
+            else:
+                self.state = 'idle'
+                self._pub_state()
+        except Exception as e:
+            self.get_logger().error(f'Map handoff failed: {e}')
+            self.state = 'error:map_handoff'
+            self._pub_state()
+        finally:
+            with self._lock:
+                self._map_handoff_active = False
 
     def _on_mapping_percent(self, msg: Float32):
         with self._lock:
@@ -435,6 +688,29 @@ class BackendNode(Ros2NodeManager):
             [    2*(qx*qy + qw*qz), 1 - 2*(qx*qx + qz*qz),     2*(qy*qz - qw*qx)],
             [    2*(qx*qz - qw*qy),     2*(qy*qz + qw*qx), 1 - 2*(qx*qx + qy*qy)],
         ])
+
+    @classmethod
+    def _pose_dict_to_matrix(cls, pose: dict) -> np.ndarray:
+        T = np.eye(4)
+        T[:3, :3] = cls._quat_to_rot(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
+        T[:3, 3] = [pose['x'], pose['y'], pose['z']]
+        return T
+
+    def _compute_live_map_to_odom(self) -> np.ndarray | None:
+        """T_from_map_to_odom for the CURRENTLY active map, from whatever pose_in_map and
+        pose_in_odom this session has already observed -- used to seed the next map at a
+        handoff (see _run_map_handoff) instead of that map waiting on a fresh cold
+        relocalization. _odom_pose_at_kf is odom frozen at the same keyframe _map_pose came
+        from (see _on_pose_in_map), so the pair is already time-synchronized.
+        """
+        with self._lock:
+            map_pose = self._map_pose
+            odom_pose = self._odom_pose_at_kf or self._odom_pose
+        if map_pose is None or odom_pose is None:
+            return None
+        pose_in_map = self._pose_dict_to_matrix(map_pose)
+        pose_in_odom = self._pose_dict_to_matrix(odom_pose)
+        return pose_in_odom @ np.linalg.inv(pose_in_map)
 
     def _transform_path_via_tf(self, path: list) -> list:
         """Transform map-frame path points to odom (world) frame via TF lookup."""
@@ -777,16 +1053,19 @@ class BackendNode(Ros2NodeManager):
     # Nav nodes toggle                                                     #
     # ------------------------------------------------------------------ #
 
-    def cmd_start_nav_nodes(self):
+    def cmd_start_nav_nodes(self, initial_map_to_odom_transform_path: str | None = None):
         self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
+        _map_node_args = [
+            'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+            '--tinynav_map_path', self.map_path,
+        ]
+        if initial_map_to_odom_transform_path is not None:
+            _map_node_args += ['--initial_map_to_odom_transform', initial_map_to_odom_transform_path]
         self._map_node_proc = self._launch_proc(
             'map_node',
-            [
-                'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
-                '--tinynav_map_path', self.map_path,
-            ],
+            _map_node_args,
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
@@ -1062,8 +1341,12 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
 
-    def cmd_send_pois(self, poi_ids: list[int]):
-        """Publish selected POIs to map_node and transition to navigation state."""
+    def cmd_send_pois(self, poi_ids: list[int | str]):
+        """Publish selected POIs to map_node and transition to navigation state.
+
+        Items may be integer POI IDs or POI names. The payload is re-indexed as
+        a dense queue while preserving each POI's original id/name metadata.
+        """
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)
@@ -1074,14 +1357,27 @@ class BackendNode(Ros2NodeManager):
                 return
             with open(pois_file) as f:
                 all_pois = json.load(f)
+            pois_by_name = {
+                poi.get('name'): poi
+                for poi in all_pois.values()
+                if isinstance(poi, dict) and isinstance(poi.get('name'), str)
+            }
             # Re-index as a dense queue ("0", "1", ...) so downstream
-            # consumers navigate in the same order the UI sent the checked POIs,
+            # consumers navigate in the same order the UI/nav_flow sent POIs,
             # instead of falling back to the original ids / pois.json order.
             payload = {}
-            for pid in poi_ids:
-                key = str(pid)
-                if key in all_pois:
-                    payload[str(len(payload))] = all_pois[key]
+            for poi_ref in poi_ids:
+                poi = None
+                if isinstance(poi_ref, int):
+                    poi = all_pois.get(str(poi_ref))
+                elif isinstance(poi_ref, str):
+                    poi = pois_by_name.get(poi_ref)
+                    if poi is None and poi_ref.isdigit():
+                        poi = all_pois.get(poi_ref)
+                if poi is not None:
+                    payload[str(len(payload))] = poi
+                else:
+                    self.get_logger().warn(f'POI {poi_ref!r} not found in active map')
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
             self._set_nav_active(bool(payload))
         with self._lock:
