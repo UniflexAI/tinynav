@@ -267,6 +267,7 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
 
         self.pois = {}
+        self.poi_meta = {}
         self.poi_index = -1
         self._nav_completed = False
         self._leg_initial_length: float | None = None
@@ -292,13 +293,20 @@ class MapNode(Node):
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
         try:
-            self.pois = json.loads(msg.data)
+            raw_pois = json.loads(msg.data)
 
             pois_dict = {}
-            keys = sorted([int (key) for key in self.pois.keys()])
+            poi_meta = {}
+            keys = sorted([int(key) for key in raw_pois.keys()])
             for index, key in enumerate(keys):
-                pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                raw_poi = raw_pois[str(key)]
+                pois_dict[index] = np.array(raw_poi["position"])
+                poi_meta[index] = {
+                    "id": raw_poi.get("id", key),
+                    "name": raw_poi.get("name"),
+                }
             self.pois = pois_dict
+            self.poi_meta = poi_meta
 
             if not self.pois:
                 self.poi_index = -1
@@ -306,6 +314,7 @@ class MapNode(Node):
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
+                self.poi_meta = {}
                 self.get_logger().info("POIs cleared, navigation cancelled")
                 return
 
@@ -320,6 +329,20 @@ class MapNode(Node):
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
+            self.poi_meta = {}
+
+    def _nav_progress_payload(self, *, percent: float, path_remaining_m: float,
+                              path_total_m: float, estimated_remaining_s: float) -> dict:
+        meta = self.poi_meta.get(self.poi_index, {})
+        return {
+            "poi_index": self.poi_index,  # route index in the current command queue
+            "poi_id": meta.get("id"),
+            "poi_name": meta.get("name"),
+            "percent": percent,
+            "path_remaining_m": path_remaining_m,
+            "path_total_m": path_total_m,
+            "estimated_remaining_s": estimated_remaining_s,
+        }
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -639,31 +662,38 @@ class MapNode(Node):
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
 
-        poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
 
-        if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
-            if self._leg_initial_length is not None:
-                self.nav_progress_pub.publish(String(data=json.dumps({
-                    "poi_index": self.poi_index,
-                    "percent": 100.0,
-                    "path_remaining_m": 0.0,
-                    "path_total_m": round(self._leg_initial_length, 2),
-                    "estimated_remaining_s": 0.0,
-                })))
-            self.poi_index += 1
-            self._leg_initial_length = None
-            self._leg_start_time = None
-            self._speed_estimate = None
-            self.cached_nav_path_in_map = None
-            self.cached_nav_path_poi_index = -1
-            self.poi_change_pub.publish(np2msg(np.eye(4), self.get_clock().now().to_msg(), "world", "map"))
-            if self.poi_index >= len(self.pois) and not self._nav_completed:
+        while self.poi_index < len(self.pois):
+            poi = self.pois[self.poi_index]
+            diff_position_norm_xy = np.linalg.norm(poi[:2] - pos[:2])
+            diff_position_norm_z = abs(poi[2] - pos[2])
+            if diff_position_norm_xy < 0.5 and diff_position_norm_z < 2.0:
+                self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
+                    percent=100.0,
+                    path_remaining_m=0.0,
+                    path_total_m=round(self._leg_initial_length or 0.0, 2),
+                    estimated_remaining_s=0.0,
+                ))))
+                self.poi_index += 1
+                self._leg_initial_length = None
+                self._leg_start_time = None
+                self._speed_estimate = None
+                self.cached_nav_path_in_map = None
+                self.cached_nav_path_poi_index = -1
+                self.poi_change_pub.publish(np2msg(np.eye(4), self.get_clock().now().to_msg(), "world", "map"))
+                continue
+            else:
+                break
+
+        if self.poi_index >= len(self.pois):
+            if not self._nav_completed:
                 self._nav_completed = True
                 self.get_logger().info("All POIs have been visited, nav done")
                 self.nav_done_pub.publish(Bool(data=True))
             return
 
+        poi = self.pois[self.poi_index]
         needs_replan = (
             self.cached_nav_path_in_map is None
             or self.cached_nav_path_poi_index != self.poi_index
@@ -707,13 +737,12 @@ class MapNode(Node):
         percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
 
-        self.nav_progress_pub.publish(String(data=json.dumps({
-            "poi_index": self.poi_index,
-            "percent": round(percent, 1),
-            "path_remaining_m": round(remaining_length, 2),
-            "path_total_m": round(initial, 2),
-            "estimated_remaining_s": round(estimated_remaining_s, 1),
-        })))
+        self.nav_progress_pub.publish(String(data=json.dumps(self._nav_progress_payload(
+            percent=round(percent, 1),
+            path_remaining_m=round(remaining_length, 2),
+            path_total_m=round(initial, 2),
+            estimated_remaining_s=round(estimated_remaining_s, 1),
+        ))))
 
         max_speed = 0.5
         accumulated_distance = 0.0
