@@ -842,6 +842,13 @@ class MapNode(Node):
             # whole leg timeout on a leg that is already done.
             self.nav_progress_pub.publish(String(data=json.dumps({
                 "poi_index": self.poi_index,
+                # The arrival edge, said in a word. `percent` is path progress and
+                # reaches 100 whenever the robot is at the END OF THE PATH -- a
+                # replan, a path that doubles back near the robot, or a pose
+                # correction that snaps the projection forward all get there
+                # without the robot being anywhere near the POI. A consumer that
+                # keyed on percent ended legs mid-route (pilot did).
+                "arrived": True,
                 "percent": 100.0,
                 "path_remaining_m": 0.0,
                 "path_total_m": round(self._leg_initial_length or 0.0, 2),
@@ -904,7 +911,10 @@ class MapNode(Node):
         percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
 
+        # False, not absent: a consumer can then tell "this build says when it
+        # arrives" from "this build never says", and only fall back for the latter.
         self.nav_progress_pub.publish(String(data=json.dumps({
+            "arrived": False,
             "poi_index": self.poi_index,
             "percent": round(percent, 1),
             "path_remaining_m": round(remaining_length, 2),
