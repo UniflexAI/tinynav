@@ -221,6 +221,7 @@ def _run_router_tests():
             self._stopped = False
             self._nav_target = None
             self.pose_callbacks: list = []
+            self._localized = False
 
         def get_status(self):
             grid = os.path.join(self.map_path, 'occupancy_grid.npy')
@@ -279,6 +280,7 @@ def _run_router_suite(client, node, map_path, bag_path):
         node._started.clear()
         node._stopped = False
         node._nav_target = None
+        node._localized = False
         # clear pois
         pois_file = os.path.join(map_path, 'pois.json')
         if os.path.exists(pois_file):
@@ -348,10 +350,22 @@ def _run_router_suite(client, node, map_path, bag_path):
         r = client.get('/map/current')
         assert r.status_code == 200
         assert r.json()['imageUrl'] == '/map/image'
+        assert r.json()['name'] == 'map'
         r2 = client.get('/map/image')
         assert r2.status_code == 200
         assert r2.headers['content-type'] == 'image/png'
         assert r2.content[:4] == b'\x89PNG'
+
+    def test_map_active():
+        reset()
+        node._localized = True
+        r = client.get('/map/active')
+        assert r.status_code == 200
+        assert r.json() == {
+            'active_map': 'map',
+            'map_path': map_path,
+            'localized': True,
+        }
 
     # -- POI --
     def test_poi_list_empty():
@@ -424,7 +438,7 @@ def _run_router_suite(client, node, map_path, bag_path):
         test_bag_start_from_idle, test_bag_start_already_recording,
         test_bag_stop, test_bag_stop_when_idle, test_bag_status_recording,
         test_map_build_no_bag, test_map_build_with_bag,
-        test_map_current_no_map, test_map_current_and_image,
+        test_map_current_no_map, test_map_current_and_image, test_map_active,
         test_poi_list_empty, test_poi_create_and_list, test_poi_delete,
         test_poi_delete_nonexistent, test_poi_invalid_position, test_poi_unique_ids,
         test_nav_go_to_poi, test_nav_go_already_navigating,

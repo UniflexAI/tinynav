@@ -56,6 +56,7 @@ The interactive API docs are available at `http://<host>:8000/docs`.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/map/build` | Trigger map build from the recorded bag |
+| `GET` | `/map/active` | Current active map name, resolved path, and localization state |
 | `GET` | `/map/current` | Map metadata (image URL, resolution, origin, size) |
 | `GET` | `/map/image` | Occupancy grid rendered as a PNG image |
 
