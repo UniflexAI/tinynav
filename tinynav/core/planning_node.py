@@ -284,7 +284,7 @@ def generate_predefined_trajectory_vocabularies(
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
-                                origin, resolution, safety_radius=0.1,
+                                route_heading_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
     """
     Score trajectories by ESDF clearance over the footprint (center + 4 corners), plus
@@ -292,12 +292,13 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
     build_route_fields), which share ESDF_map's shape, origin and resolution.
     :return: per trajectory, the obstacle score (inf on collision), the step index of the
              minimum clearance, the worst (max) distance from the trajectory center to the
-             route over the whole trajectory, and the route arc length still ahead of its
-             end cell.
+             route over the whole trajectory, the route arc length still ahead of its end
+             cell, and how far its end heading is from the route's own direction there.
     """
     scores = []
     occ_points = []
     path_costs = []
+    end_heading_errs = []
     end_remainings = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
 
@@ -371,6 +372,22 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
         else:
             end_remaining = 1e3
 
+        # How far the trajectory ends up pointing from the way the route runs there.
+        # Measured at the end cell, on the same body-+z-forward convention the rest of
+        # this file uses. 0 when the end left the grid: an off-grid end is already
+        # punished through path_cost/remaining, and a heading against a route we cannot
+        # look up would be a number invented from nothing.
+        end_heading_err = 0.0
+        if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
+            qx = traj[-1, 3]
+            qy = traj[-1, 4]
+            qz = traj[-1, 5]
+            qw = traj[-1, 6]
+            end_yaw = np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
+            d = end_yaw - route_heading_map[end_x_img, end_y_img]
+            end_heading_err = abs(np.arctan2(np.sin(d), np.cos(d)))
+        end_heading_errs.append(end_heading_err)
+
         start_x_img = int((traj[0, 0] - origin[0]) / resolution)
         start_y_img = int((traj[0, 1] - origin[1]) / resolution)
         if 0 <= start_x_img < ESDF_rows and 0 <= start_y_img < ESDF_cols:
@@ -392,7 +409,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
-    return scores, occ_points, path_costs, end_remainings
+    return scores, occ_points, path_costs, end_remainings, end_heading_errs
 
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
@@ -418,6 +435,20 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def route_heading_penalty(weight, heading_err_rad, end_remaining_m, terminal_band_m):
+    """What a moving candidate pays for not pointing the way the route runs.
+
+    A separate function because it is the whole fix and it has to be assertable: the
+    cost it feeds is a closure inside a 200-line callback, so a test that only checked
+    the heading FIELD would go green with this term deleted from the cost.
+
+    Faded out inside the terminal band, where the route has run out and the arrival
+    heading -- not the route's -- is what matters.
+    """
+    fade = min(1.0, end_remaining_m / max(terminal_band_m, 1e-6))
+    return weight * heading_err_rad * fade
+
+
 def build_route_fields(route_xy, shape, origin, resolution):
     """
     Rasterize a route into the lookup maps read by the DWA scoring, so scoring costs
@@ -425,22 +456,24 @@ def build_route_fields(route_xy, shape, origin, resolution):
     :param route_xy: (N, 2) route in world xy, e.g. map_node's global plan transformed
                      into this node's world/odom frame -- the path is already clean of
                      static obstacles by construction, this just makes it queryable.
-    :return: (path_dist_map, remaining_map, has_route). path_dist_map is the distance in m
-             from each cell to the nearest route cell, remaining_map is the route arc length
-             still ahead, with off-route cells inheriting the arc length of their nearest
-             route cell.
+    :return: (path_dist_map, remaining_map, route_heading_map, has_route). path_dist_map
+             is the distance in m from each cell to the nearest route cell, remaining_map
+             is the route arc length still ahead, and route_heading_map is the direction
+             the route runs there -- all three with off-route cells inheriting the value
+             of their nearest route cell, from one EDT.
     """
     path_dist_map = np.full(shape, 1e3, dtype=np.float32)
     remaining_map = np.full(shape, 1e3, dtype=np.float32)
+    route_heading_map = np.zeros(shape, dtype=np.float32)
     if len(route_xy) < 2:
-        return path_dist_map, remaining_map, False
+        return path_dist_map, remaining_map, route_heading_map, False
 
     rows, cols = shape
     route = np.asarray(route_xy, dtype=float)
     node_arc = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))))
     arc = float(node_arc[-1])
     if arc < 1e-9:
-        return path_dist_map, remaining_map, False
+        return path_dist_map, remaining_map, route_heading_map, False
 
     # resample at half-cell steps so the rasterized line has no gaps for the EDT
     sample_arc = np.linspace(0.0, arc, int(np.ceil(arc / (0.5 * resolution))) + 1)
@@ -448,17 +481,32 @@ def build_route_fields(route_xy, shape, origin, resolution):
     c = ((np.interp(sample_arc, node_arc, route[:, 1]) - origin[1]) / resolution).astype(np.int64)
     inside = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
     if not np.any(inside):
-        return path_dist_map, remaining_map, False
+        return path_dist_map, remaining_map, route_heading_map, False
 
     route_mask = np.zeros(shape, dtype=bool)
     arc_map = np.zeros(shape, dtype=np.float32)
     route_mask[r[inside], c[inside]] = True
     arc_map[r[inside], c[inside]] = sample_arc[inside]  # a cell crossed twice keeps the later arc
 
+    # Which way the route RUNS at each sample, carried as cos/sin so the nearest-cell
+    # propagation below can average them without an angle wrapping at +/-pi. This is
+    # what lets the scoring ask "is this trajectory pointing along the route" -- the
+    # bearing to the goal cannot answer that at a corner, where pointing at the goal
+    # IS cutting the corner.
+    sx = np.interp(sample_arc, node_arc, route[:, 0])
+    sy = np.interp(sample_arc, node_arc, route[:, 1])
+    tang = np.arctan2(np.gradient(sy), np.gradient(sx))
+    cos_map = np.zeros(shape, dtype=np.float32)
+    sin_map = np.zeros(shape, dtype=np.float32)
+    cos_map[r[inside], c[inside]] = np.cos(tang[inside])
+    sin_map[r[inside], c[inside]] = np.sin(tang[inside])
+
     dist_cells, (near_r, near_c) = distance_transform_edt(~route_mask, return_indices=True)
     path_dist_map = (dist_cells * resolution).astype(np.float32)
     remaining_map = (arc - arc_map[near_r, near_c]).astype(np.float32)
-    return path_dist_map, remaining_map, True
+    route_heading_map = np.arctan2(sin_map[near_r, near_c],
+                                   cos_map[near_r, near_c]).astype(np.float32)
+    return path_dist_map, remaining_map, route_heading_map, True
 
 
 # === PlanningNode class ===
@@ -590,6 +638,12 @@ class PlanningNode(Node):
         # saturates at 0 before reaching it
         self.w_goal_terminal = 100.0
         self.route_terminal_band = 0.5  # m of remaining route that arms w_goal_terminal
+        # Per radian the trajectory's end heading is off the route's own direction.
+        # Comparable to w_path_follow on purpose: half a radian off the route weighs
+        # about as much as being 0.37 m beside it, so a turn is chosen for the reason a
+        # human would give -- it points the right way -- and not by a few centimetres of
+        # end position that the smoothness term can outvote.
+        self.w_route_heading = 60.0
 
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
@@ -963,14 +1017,14 @@ class PlanningNode(Node):
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
-            path_dist_map, remaining_map, has_route = build_route_fields(
+            path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
                 route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
             )
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-            scores, occ_points, path_costs, end_remainings = score_trajectories_by_ESDF(
-                trajectories, ESDF_map, path_dist_map, remaining_map,
+            scores, occ_points, path_costs, end_remainings, end_heading_errs = score_trajectories_by_ESDF(
+                trajectories, ESDF_map, path_dist_map, remaining_map, route_heading_map,
                 self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
                 front_len, rear_len, half_w,
             )
@@ -1055,6 +1109,21 @@ class PlanningNode(Node):
                     heading_penalty = 60 * _end_heading_error(traj[-1], target_end)
                 else:
                     heading_penalty = 0.0
+                # A MOVING candidate is asked to point the way the route runs, not at
+                # the goal: at a corner those are different, and pointing at the goal is
+                # what cutting the corner looks like. Without any heading term while
+                # moving -- which is what this cost had -- nothing distinguishes "turn
+                # into the corner" from "carry straight on past it": both end within
+                # centimetres of the route over a one-second horizon, so the choice fell
+                # to the smoothness term and dithered. Measured on 118 (2026-08-31):
+                # goal_err sat at 61-65 degrees for tens of frames while the selected
+                # omega alternated -0.21 / +0.43 frame to frame, and the robot drove
+                # straight through a right turn.
+                #
+                if has_route and abs(param[0]) > 1e-3:
+                    heading_penalty += route_heading_penalty(
+                        self.w_route_heading, end_heading_errs[i],
+                        end_remainings[i], self.route_terminal_band)
                 if not has_route:
                     # No route this cycle: both route maps are flat, so rank on the raw
                     # target the way this planner did before the route existed.
@@ -1089,6 +1158,7 @@ class PlanningNode(Node):
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
+                f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
                 f'should_reverse={should_reverse} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'

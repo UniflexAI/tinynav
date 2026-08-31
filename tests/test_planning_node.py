@@ -8,7 +8,8 @@ from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
 from std_msgs.msg import Header
-from planning_node import run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF
+from planning_node import (run_raycasting_loopy, build_route_fields,
+                           route_heading_penalty, score_trajectories_by_ESDF)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -146,7 +147,7 @@ def test_run_raycasting_comparison():
         assert False, "Implementations do not match."
 
 def test_build_route_fields_no_route():
-    path_dist_map, remaining_map, has_route = build_route_fields(
+    path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
         [], (20, 20), np.array([0.0, 0.0]), 0.1,
     )
     assert not has_route
@@ -158,7 +159,7 @@ def test_build_route_fields_straight_line():
     resolution = 0.1
     # a straight 4m route along x, at y=2.5
     route_xy = [(0.5, 2.5), (4.5, 2.5)]
-    path_dist_map, remaining_map, has_route = build_route_fields(
+    path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
         route_xy, (50, 50), origin, resolution,
     )
     assert has_route
@@ -183,7 +184,7 @@ def test_score_trajectories_by_esdf_route_terms():
     origin = np.array([0.0, 0.0])
     resolution = 0.1
     route_xy = [(0.5, 2.5), (4.5, 2.5)]
-    path_dist_map, remaining_map, has_route = build_route_fields(
+    path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
         route_xy, (50, 50), origin, resolution,
     )
     assert has_route
@@ -194,8 +195,9 @@ def test_score_trajectories_by_esdf_route_terms():
     on_route_traj = np.array([[
         [x, 2.5, 0.0, 0.0, 0.0, 0.0, 1.0] for x in np.linspace(0.6, 4.4, 5)
     ]])
-    scores, occ_points, path_costs, end_remainings = score_trajectories_by_ESDF(
-        on_route_traj, ESDF_map, path_dist_map, remaining_map, origin, resolution,
+    scores, occ_points, path_costs, end_remainings, end_heading_errs = score_trajectories_by_ESDF(
+        on_route_traj, ESDF_map, path_dist_map, remaining_map, route_heading_map,
+        origin, resolution,
     )
     assert scores[0] == 0.0  # nothing anywhere near safety_radius
     assert path_costs[0] < resolution  # trajectory center never leaves the route
@@ -205,14 +207,104 @@ def test_score_trajectories_by_esdf_route_terms():
     off_route_traj = np.array([[
         [x, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0] for x in np.linspace(0.6, 4.4, 5)
     ]])
-    _, _, off_path_costs, _ = score_trajectories_by_ESDF(
-        off_route_traj, ESDF_map, path_dist_map, remaining_map, origin, resolution,
+    _, _, off_path_costs, _, _ = score_trajectories_by_ESDF(
+        off_route_traj, ESDF_map, path_dist_map, remaining_map, route_heading_map,
+        origin, resolution,
     )
     assert abs(off_path_costs[0] - 2.0) < 0.2
+
+
+def _pose_facing(x, y, heading):
+    """A pose7 [x, y, z, qx, qy, qz, qw] whose BODY +Z (this planner's forward) points
+    along `heading` in world XY -- the camera convention every heading in
+    planning_node uses. Built from the rotation whose columns are (right, down,
+    forward), so the scoring's own arctan2(R[1,2], R[0,2]) reads `heading` back."""
+    c, s = np.cos(heading), np.sin(heading)
+    R = np.array([[s, 0.0, c],
+                  [-c, 0.0, s],
+                  [0.0, -1.0, 0.0]])
+    t = R.trace()
+    if t > 0:
+        w = np.sqrt(1.0 + t) / 2.0
+        q = np.array([(R[2, 1] - R[1, 2]), (R[0, 2] - R[2, 0]), (R[1, 0] - R[0, 1])]) / (4 * w)
+    else:  # the branchy case is not needed for these rotations, but be honest about it
+        i = int(np.argmax(np.diag(R)))
+        j, k = (i + 1) % 3, (i + 2) % 3
+        r = np.sqrt(max(1.0 + R[i, i] - R[j, j] - R[k, k], 1e-12))
+        q = np.zeros(3)
+        q[i] = r / 2.0
+        q[j] = (R[j, i] + R[i, j]) / (2 * r)
+        q[k] = (R[k, i] + R[i, k]) / (2 * r)
+        w = (R[k, j] - R[j, k]) / (2 * r)
+    return [x, y, 0.0, q[0], q[1], q[2], w]
+
+
+def test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal():
+    """At a corner, the route's own direction -- not the bearing to the goal -- is
+    what a candidate is measured against, and carrying straight on reads as wrong.
+
+    Both candidates end within centimetres of the route, so `path_dist` and
+    `remaining` cannot tell them apart; the heading is the only thing that can, which
+    is why the robot drove straight through a right turn on 118 (2026-08-31) while
+    nothing measured it.
+    """
+    origin = np.array([0.0, 0.0])
+    resolution = 0.1
+    # the route runs +x for 2 m, then turns and runs +y for 2 m
+    route_xy = [(0.5, 0.5), (2.5, 0.5), (2.5, 2.5)]
+    path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
+        route_xy, (50, 50), origin, resolution,
+    )
+    assert has_route
+
+    def heading_at(x, y):
+        return route_heading_map[int(x / resolution), int(y / resolution)]
+
+    assert abs(heading_at(1.5, 0.5) - 0.0) < 0.2                 # along +x before it
+    assert abs(heading_at(2.5, 1.5) - np.pi / 2) < 0.2           # along +y after it
+
+    ESDF_map = np.full((50, 50), 5.0, dtype=np.float32)
+    # from just before the corner: one candidate carries straight on, one turns into it
+    straight = np.array([[_pose_facing(x, 0.5, 0.0) for x in np.linspace(2.0, 3.0, 5)]])
+    turning = np.array([[_pose_facing(2.5, y, np.pi / 2) for y in np.linspace(0.5, 1.5, 5)]])
+
+    _, _, _, _, straight_err = score_trajectories_by_ESDF(
+        straight, ESDF_map, path_dist_map, remaining_map, route_heading_map,
+        origin, resolution,
+    )
+    _, _, _, _, turning_err = score_trajectories_by_ESDF(
+        turning, ESDF_map, path_dist_map, remaining_map, route_heading_map,
+        origin, resolution,
+    )
+    assert turning_err[0] < np.deg2rad(20), turning_err[0]
+    assert straight_err[0] > np.deg2rad(60), straight_err[0]
+
+def test_carrying_straight_on_at_a_corner_costs_more_than_turning():
+    """The penalty the cost actually adds, not just the field it reads.
+
+    Deleting the term from cost_function leaves the heading test above green -- this
+    is the one that goes red, because it asserts the number that changes the choice.
+    """
+    w, band = 60.0, 0.5
+    turning = route_heading_penalty(w, np.deg2rad(5), 3.0, band)
+    straight = route_heading_penalty(w, np.deg2rad(85), 3.0, band)
+    assert straight > turning
+    # ... by enough to outweigh the smoothness term (10 * |d omega|, at most ~13 over
+    # the full omega range) that was winning these ties.
+    assert straight - turning > 13.0
+
+    # Inside the terminal band the route has run out: the arrival heading takes over,
+    # so this term must fade rather than fight it.
+    assert route_heading_penalty(w, np.deg2rad(85), 0.0, band) == 0.0
+    assert (route_heading_penalty(w, np.deg2rad(85), 0.25, band)
+            < 0.6 * route_heading_penalty(w, np.deg2rad(85), 3.0, band))
+
 
 if __name__ == "__main__":
     test_run_raycasting_comparison()
     test_build_route_fields_no_route()
+    test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal()
+    test_carrying_straight_on_at_a_corner_costs_more_than_turning()
     test_build_route_fields_straight_line()
     test_score_trajectories_by_esdf_route_terms()
     print("Route field tests passed.")
