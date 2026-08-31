@@ -756,34 +756,18 @@ class MapNode(Node):
             pass
 
 
-    #: How many constraints the solve may use, newest first. Upstream's 100; kept as a
-    #: knob rather than a constant because it is the number the travel bound below
-    #: falls back to when the robot is standing still.
-    FUSE_WINDOW = int(os.environ.get("TINYNAV_FUSE_WINDOW", "100"))
-    #: How far the robot may have driven since an observation before that observation's
-    #: implied map->odom is treated as stale. The units are metres of odom travel and
-    #: not seconds, because what invalidates a constraint is drift, and drift comes
-    #: with travel: a robot standing still holds its constraints for ever, which is
-    #: what a stationary robot needs.
-    FUSE_MAX_M = float(os.environ.get("TINYNAV_FUSE_MAX_M", "3.0"))
+    def select_fusion_constraints(self, constraints, odom_poses):
+        """Which of the accumulated relocalization constraints this solve should use.
 
-    def _fresh_constraints(self, constraints):
-        """The constraints the solve should see: recent in travel, capped in count.
+        A hook, like `select_relocalization_candidates`: upstream keeps the newest 100
+        and weights them equally, and a subclass that knows how fast this rig's odom
+        drifts can say something better. `odom_poses[i]` is the odom pose constraint
+        `i` was observed at -- what "how stale is this one" has to be measured against,
+        and the only thing the solver itself has no way to ask about.
 
-        Each entry carries the odom pose it was taken at (the last element), which is
-        what the distance is measured against -- the newest constraint's odom is
-        "here", so this asks how far back each one sits along the ride.
+        Return the constraints to solve over, newest last.
         """
-        if not constraints:
-            return []
-        here = constraints[-1][-1][:3, 3]
-        fresh = [c for c in constraints
-                 if float(np.linalg.norm(c[-1][:3, 3] - here)) <= self.FUSE_MAX_M]
-        # Never fewer than a handful: a solve with one constraint is that observation
-        # alone, which is the aliasing case with no averaging left to damp it.
-        if len(fresh) < 5:
-            fresh = constraints[-5:]
-        return [c[:5] for c in fresh[-self.FUSE_WINDOW:]]
+        return constraints[-100:]
 
     def compute_transform_from_map_to_odom(self):
         """
@@ -791,21 +775,15 @@ class MapNode(Node):
 
         Each constraint is one observation's implied map->odom, `camera_in_odom @
         inv(camera_in_map)` -- true at the moment that observation was taken, and only
-        still true while odom has not drifted since. Upstream keeps the last 100
-        regardless of when they were taken and weights them equally, which measured on
-        118 (2026-08-31) is why a wrong estimate cannot be corrected: standing still,
-        20 consecutive PnP answers all agreed on (42.44, -4.47) while the fused
-        estimate sat 0.75m away at (43.06, -4.90) and its yaw wandered from 89 to 95
-        degrees. At ~0.8 relocalizations a second, 100 constraints reach back over two
-        minutes, so every good new observation was one vote against ninety-nine older
-        ones -- including the wrong ones from a stretch the robot has already left.
-
-        So the window is bounded by **travel** as well as by count: a constraint whose
-        odom is more than FUSE_MAX_M of driving old describes a transform that has
-        since drifted, and is dropped. Standing still expires nothing, which is what
-        keeps a stationary robot from ending up with no constraints at all.
+        still true while odom has not drifted since. Which of them are still worth
+        solving over is `select_fusion_constraints`, so that a rig whose drift has been
+        measured can answer it (pilot/nav/fusion.py) without this method changing.
         """
         relative_pose_constraint = []
+        # The odom pose each constraint was taken at, kept beside them rather than
+        # inside them: the solver's tuple shape is upstream's contract, and widening it
+        # for one consumer means every reader has two shapes to know about.
+        constraint_odom = []
         optimized_parameters = {
             0 : np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
             1 : np.eye(4),
@@ -818,8 +796,10 @@ class MapNode(Node):
                 observation_T_from_map_to_odom =  camera_in_odom_world @ np.linalg.inv(camera_in_map_world)
                 weight = self.relocalization_pose_weights[timestamp]
 
-                relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0]), camera_in_odom_world))
-        relative_pose_constraint = self._fresh_constraints(relative_pose_constraint)
+                relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
+                constraint_odom.append(camera_in_odom_world)
+        relative_pose_constraint = self.select_fusion_constraints(
+            relative_pose_constraint, constraint_odom)
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 

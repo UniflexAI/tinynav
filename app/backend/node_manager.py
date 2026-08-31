@@ -145,9 +145,10 @@ class BackendNode(Ros2NodeManager):
         self._map_pose: dict | None = None
         self._localized: bool = False
         self._reloc_seq: int = 0   # monotonic count of accepted relocalization fixes
-        # Last /map/reloc_status word. 'open_loop N' is the one that matters: the fix
-        # topic goes quiet there, so without this the UI cannot tell a stretch running
-        # uncorrected from one that simply has not expired yet.
+        # Last /map/reloc_status word: 'fused' on every relocalization the solve took,
+        # 'seeded' / 'unseeded' / 'switch_refused' across a map switch. 'unseeded' is
+        # the one the UI needs -- no fix is published until the camera finds one there,
+        # so `localized` alone would still show the map being left.
         self._reloc_status: str = ''
         # The capture-speed prior at the robot (path_speed.npy, via map_node). None
         # where the map has no answer -- off-path, or a map baked before the prior
@@ -333,10 +334,10 @@ class BackendNode(Ros2NodeManager):
         status = str(msg.data)
         with self._lock:
             self._reloc_status = status
-        if status.startswith('open_loop'):
+        if status == 'unseeded':
             self.get_logger().warning(
-                f'[reloc] running open-loop: {status.split(" ", 1)[-1]} relocalizations '
-                'in a row disagreed with the carried fix, so nothing was fused')
+                '[reloc] the new map was loaded with no seed: nav has no pose on it '
+                'until a relocalization lands')
 
     def _on_path_speed(self, msg: Float32):
         v = float(msg.data)

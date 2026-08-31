@@ -283,6 +283,26 @@ def generate_predefined_trajectory_vocabularies(
 
 
 @njit(cache=True)
+def heading_of_pose7(pose7):
+    """World heading (rad) of a trajectory pose: its body +Z axis -- this stack's
+    forward -- projected onto world XY.
+
+    `math_utils.heading_of` is the same convention off a rotation matrix and says why
+    it may only live in one place; this is its njit-able form for the pose7 rows the
+    lattice carries, and the callback below calls it too so there is one copy.
+    """
+    qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
+    return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
+
+
+@njit(cache=True)
+def angle_between(a, b):
+    """|a - b| folded into [0, pi]. `math_utils.wrap_angle` in njit form."""
+    d = a - b
+    return abs(np.arctan2(np.sin(d), np.cos(d)))
+
+
+@njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
                                 route_heading_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
@@ -379,13 +399,8 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
         # look up would be a number invented from nothing.
         end_heading_err = 0.0
         if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
-            qx = traj[-1, 3]
-            qy = traj[-1, 4]
-            qz = traj[-1, 5]
-            qw = traj[-1, 6]
-            end_yaw = np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
-            d = end_yaw - route_heading_map[end_x_img, end_y_img]
-            end_heading_err = abs(np.arctan2(np.sin(d), np.cos(d)))
+            end_heading_err = angle_between(heading_of_pose7(traj[-1]),
+                                            route_heading_map[end_x_img, end_y_img])
         end_heading_errs.append(end_heading_err)
 
         start_x_img = int((traj[0, 0] - origin[0]) / resolution)
@@ -435,18 +450,26 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def route_band_fade(end_remaining_m, terminal_band_m):
+    """How much of the route is still ahead, as 0..1 over the last `terminal_band_m`.
+
+    One encoding of the band, because two terms hand over across it: outside it the
+    route says which way to point and how much progress is left, inside it the route
+    has run out (remaining_map saturates at 0 and can rank nothing) and the goal --
+    its position and its bearing -- takes over. Written twice, the two would drift and
+    the robot would be pulled toward two different headings on arrival.
+    """
+    return min(1.0, end_remaining_m / max(terminal_band_m, 1e-6))
+
+
 def route_heading_penalty(weight, heading_err_rad, end_remaining_m, terminal_band_m):
-    """What a moving candidate pays for not pointing the way the route runs.
+    """What a candidate pays for not pointing the way the route runs.
 
     A separate function because it is the whole fix and it has to be assertable: the
     cost it feeds is a closure inside a 200-line callback, so a test that only checked
     the heading FIELD would go green with this term deleted from the cost.
-
-    Faded out inside the terminal band, where the route has run out and the arrival
-    heading -- not the route's -- is what matters.
     """
-    fade = min(1.0, end_remaining_m / max(terminal_band_m, 1e-6))
-    return weight * heading_err_rad * fade
+    return weight * heading_err_rad * route_band_fade(end_remaining_m, terminal_band_m)
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -460,7 +483,10 @@ def build_route_fields(route_xy, shape, origin, resolution):
              is the distance in m from each cell to the nearest route cell, remaining_map
              is the route arc length still ahead, and route_heading_map is the direction
              the route runs there -- all three with off-route cells inheriting the value
-             of their nearest route cell, from one EDT.
+             of their nearest route cell, from one EDT. The heading is what lets the
+             scoring ask "is this trajectory pointing along the route": the bearing to
+             the goal cannot answer that at a corner, where pointing at the goal IS
+             cutting the corner.
     """
     path_dist_map = np.full(shape, 1e3, dtype=np.float32)
     remaining_map = np.full(shape, 1e3, dtype=np.float32)
@@ -477,35 +503,38 @@ def build_route_fields(route_xy, shape, origin, resolution):
 
     # resample at half-cell steps so the rasterized line has no gaps for the EDT
     sample_arc = np.linspace(0.0, arc, int(np.ceil(arc / (0.5 * resolution))) + 1)
-    r = ((np.interp(sample_arc, node_arc, route[:, 0]) - origin[0]) / resolution).astype(np.int64)
-    c = ((np.interp(sample_arc, node_arc, route[:, 1]) - origin[1]) / resolution).astype(np.int64)
+    sx = np.interp(sample_arc, node_arc, route[:, 0])
+    sy = np.interp(sample_arc, node_arc, route[:, 1])
+    r = ((sx - origin[0]) / resolution).astype(np.int64)
+    c = ((sy - origin[1]) / resolution).astype(np.int64)
     inside = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
     if not np.any(inside):
         return path_dist_map, remaining_map, route_heading_map, False
 
+    # Which way the route RUNS at each sample. Taken as the direction of the SEGMENT
+    # the sample sits on, not as a gradient of the resampled points: the route is
+    # piecewise linear, so the segment is the exact answer, and a gradient would smear
+    # the two directions together across the corner cell -- the one place this field
+    # exists to be sharp.
+    seg = np.diff(route, axis=0)
+    seg_of = np.clip(np.searchsorted(node_arc, sample_arc, side='right') - 1,
+                     0, len(seg) - 1)
+    tang = np.arctan2(seg[seg_of, 1], seg[seg_of, 0])
+
     route_mask = np.zeros(shape, dtype=bool)
     arc_map = np.zeros(shape, dtype=np.float32)
+    heading_map = np.zeros(shape, dtype=np.float32)
     route_mask[r[inside], c[inside]] = True
     arc_map[r[inside], c[inside]] = sample_arc[inside]  # a cell crossed twice keeps the later arc
+    heading_map[r[inside], c[inside]] = tang[inside]
 
-    # Which way the route RUNS at each sample, carried as cos/sin so the nearest-cell
-    # propagation below can average them without an angle wrapping at +/-pi. This is
-    # what lets the scoring ask "is this trajectory pointing along the route" -- the
-    # bearing to the goal cannot answer that at a corner, where pointing at the goal
-    # IS cutting the corner.
-    sx = np.interp(sample_arc, node_arc, route[:, 0])
-    sy = np.interp(sample_arc, node_arc, route[:, 1])
-    tang = np.arctan2(np.gradient(sy), np.gradient(sx))
-    cos_map = np.zeros(shape, dtype=np.float32)
-    sin_map = np.zeros(shape, dtype=np.float32)
-    cos_map[r[inside], c[inside]] = np.cos(tang[inside])
-    sin_map[r[inside], c[inside]] = np.sin(tang[inside])
-
+    # One EDT, three fields: each off-route cell takes the arc and the direction of its
+    # nearest route cell. A gather, not an average -- so the headings need no cos/sin
+    # decomposition to survive the wrap at +/-pi.
     dist_cells, (near_r, near_c) = distance_transform_edt(~route_mask, return_indices=True)
     path_dist_map = (dist_cells * resolution).astype(np.float32)
     remaining_map = (arc - arc_map[near_r, near_c]).astype(np.float32)
-    route_heading_map = np.arctan2(sin_map[near_r, near_c],
-                                   cos_map[near_r, near_c]).astype(np.float32)
+    route_heading_map = heading_map[near_r, near_c]
     return path_dist_map, remaining_map, route_heading_map, True
 
 
@@ -637,7 +666,10 @@ class PlanningNode(Node):
         # pulls the last stretch onto the exact goal, since remaining_map alone
         # saturates at 0 before reaching it
         self.w_goal_terminal = 100.0
-        self.route_terminal_band = 0.5  # m of remaining route that arms w_goal_terminal
+        # The last metres of route, over which the goal takes over from the route: the
+        # goal's position arms w_goal_terminal and its bearing replaces the route's
+        # direction in the heading term (route_band_fade).
+        self.route_terminal_band = 0.5
         # Per radian the trajectory's end heading is off the route's own direction.
         # Comparable to w_path_follow on purpose: half a radian off the route weighs
         # about as much as being 0.37 m beside it, so a turn is chosen for the reason a
@@ -1035,18 +1067,14 @@ class PlanningNode(Node):
 
             target = self.target_pose
 
-            # World heading (rad) of a trajectory pose, body +Z-forward convention
-            # (same as score_trajectories_by_ESDF and the published Path). Used by the
-            # velocity feedforward to derive omega from the trajectory's own poses.
-            def _world_heading(pose7):
-                qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
-                return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
+            _world_heading = heading_of_pose7
 
             def _end_heading_error(pose7, goal):
                 """|wrapped angle| between the pose's heading and the bearing from that
                 pose to the goal."""
-                err = np.arctan2(goal[1] - pose7[1], goal[0] - pose7[0]) - _world_heading(pose7)
-                return abs(np.arctan2(np.sin(err), np.cos(err)))
+                return angle_between(
+                    np.arctan2(goal[1] - pose7[1], goal[0] - pose7[0]),
+                    heading_of_pose7(pose7))
 
             if all(s == float('inf') for s in scores):
                 # Diagnose WHERE it collides: is the robot's own footprint cell already
@@ -1085,17 +1113,25 @@ class PlanningNode(Node):
             # filter had to spell out, in one term. Clearance stays soft on purpose:
             # safety_radius is a margin, not a collision boundary, and a corridor
             # narrower than the band forces every forward trajectory to intrude into it.
-            # The heading term exists because the lattice's vx=0 rows all END where they
-            # started, so no positional term can tell them apart: smoothness then picked
-            # whichever rotation matched last cycle -- omega=0 from a standstill -- and
-            # with a goal further behind than a 3 s arc can swing around, standing still
-            # was the cost minimum and stayed it: a permanent freeze. Scoring the
-            # stationary rows by their end heading vs the goal bearing ranks the rotations
-            # and prices standing-still-while-misaligned above turning to face the goal.
-            # It survives the route terms unchanged -- those rows share one remaining_map
-            # cell and one path_cost exactly as they shared one dist -- and only the
-            # stationary rows get it, since a moving arc's endpoint already says where it
-            # went and penalising its heading would fight the positional term.
+            # The heading term exists because no positional term can rank a heading.
+            # Two cases share that:
+            #
+            #   the vx=0 rows all END where they started, so smoothness picked whichever
+            #   rotation matched last cycle -- omega=0 from a standstill -- and with a
+            #   goal further behind than one arc can swing around, standing still was
+            #   the cost minimum and stayed it: a permanent freeze;
+            #
+            #   a MOVING arc through a corner ends within centimetres of where turning
+            #   into the corner ends, so remaining_map and path_dist cannot separate
+            #   them either, and the choice fell to smoothness and dithered. Measured on
+            #   118 (2026-08-31): goal_err sat at 61-65 degrees for tens of frames while
+            #   the selected omega alternated -0.21 / +0.43 frame to frame, and the
+            #   robot drove straight through a right turn it should have taken.
+            #
+            # What differs is WHICH heading is right, and that is the route's own
+            # direction wherever there is a route: pointing at the goal, at a corner, is
+            # what cutting the corner is. Without a route there is only the goal bearing,
+            # which is what this planner had before the route existed.
             def cost_function(i):
                 traj, param = trajectories[i], params[i]
                 reverse_gate_penalty = 0.0 if (param[0] < 0.0) == should_reverse else 1e9
@@ -1103,27 +1139,23 @@ class PlanningNode(Node):
                 target_end = target if target is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
                 smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
-                # Stationary candidates only: skipped once within 0.3 m of the goal, where
-                # the bearing is noise and rotating achieves nothing.
-                if abs(param[0]) <= 1e-3 and dist > 0.3:
-                    heading_penalty = 60 * _end_heading_error(traj[-1], target_end)
-                else:
-                    heading_penalty = 0.0
-                # A MOVING candidate is asked to point the way the route runs, not at
-                # the goal: at a corner those are different, and pointing at the goal is
-                # what cutting the corner looks like. Without any heading term while
-                # moving -- which is what this cost had -- nothing distinguishes "turn
-                # into the corner" from "carry straight on past it": both end within
-                # centimetres of the route over a one-second horizon, so the choice fell
-                # to the smoothness term and dithered. Measured on 118 (2026-08-31):
-                # goal_err sat at 61-65 degrees for tens of frames while the selected
-                # omega alternated -0.21 / +0.43 frame to frame, and the robot drove
-                # straight through a right turn.
-                #
-                if has_route and abs(param[0]) > 1e-3:
-                    heading_penalty += route_heading_penalty(
-                        self.w_route_heading, end_heading_errs[i],
-                        end_remainings[i], self.route_terminal_band)
+                # Skipped within 0.3 m of the goal, where the bearing is noise and
+                # turning achieves nothing.
+                heading_penalty = 0.0
+                if dist > 0.3:
+                    # The two references hand over across the terminal band: the route's
+                    # direction while there is route left, the goal's bearing once there
+                    # is not. A hard switch would leave the vx=0 rows unranked in the
+                    # band -- which is the freeze this term was written to prevent.
+                    to_goal = self.w_route_heading * _end_heading_error(traj[-1], target_end)
+                    if has_route:
+                        fade = route_band_fade(end_remainings[i], self.route_terminal_band)
+                        heading_penalty = (
+                            route_heading_penalty(self.w_route_heading, end_heading_errs[i],
+                                                  end_remainings[i], self.route_terminal_band)
+                            + (1.0 - fade) * to_goal)
+                    else:
+                        heading_penalty = to_goal
                 if not has_route:
                     # No route this cycle: both route maps are flat, so rank on the raw
                     # target the way this planner did before the route existed.
@@ -1134,9 +1166,11 @@ class PlanningNode(Node):
                     # anything -- without it smoothness picks the slowest of the tied
                     # trajectories and the robot crawls the last stretch.
                     terminal = 0.0
-                    if end_remainings[i] < self.route_terminal_band and target is not None:
-                        terminal = self.w_goal_terminal * float(
-                            np.linalg.norm(traj[-1, :2] - target[:2]))
+                    if target is not None:
+                        terminal = (self.w_goal_terminal
+                                    * (1.0 - route_band_fade(end_remainings[i],
+                                                             self.route_terminal_band))
+                                    * float(np.linalg.norm(traj[-1, :2] - target[:2])))
                     positional = (self.w_route_progress * end_remainings[i]
                                   + self.w_path_follow * path_costs[i]
                                   + terminal)

@@ -8,7 +8,8 @@ from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
 from std_msgs.msg import Header
-from planning_node import (run_raycasting_loopy, build_route_fields,
+from math_utils import matrix_to_quat
+from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
                            route_heading_penalty, score_trajectories_by_ESDF)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -147,7 +148,7 @@ def test_run_raycasting_comparison():
         assert False, "Implementations do not match."
 
 def test_build_route_fields_no_route():
-    path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
+    path_dist_map, remaining_map, _, has_route = build_route_fields(
         [], (20, 20), np.array([0.0, 0.0]), 0.1,
     )
     assert not has_route
@@ -217,26 +218,13 @@ def test_score_trajectories_by_esdf_route_terms():
 def _pose_facing(x, y, heading):
     """A pose7 [x, y, z, qx, qy, qz, qw] whose BODY +Z (this planner's forward) points
     along `heading` in world XY -- the camera convention every heading in
-    planning_node uses. Built from the rotation whose columns are (right, down,
-    forward), so the scoring's own arctan2(R[1,2], R[0,2]) reads `heading` back."""
+    planning_node uses. The rotation's columns are (right, down, forward), so the
+    scoring's own heading_of_pose7 reads `heading` back."""
     c, s = np.cos(heading), np.sin(heading)
     R = np.array([[s, 0.0, c],
                   [-c, 0.0, s],
                   [0.0, -1.0, 0.0]])
-    t = R.trace()
-    if t > 0:
-        w = np.sqrt(1.0 + t) / 2.0
-        q = np.array([(R[2, 1] - R[1, 2]), (R[0, 2] - R[2, 0]), (R[1, 0] - R[0, 1])]) / (4 * w)
-    else:  # the branchy case is not needed for these rotations, but be honest about it
-        i = int(np.argmax(np.diag(R)))
-        j, k = (i + 1) % 3, (i + 2) % 3
-        r = np.sqrt(max(1.0 + R[i, i] - R[j, j] - R[k, k], 1e-12))
-        q = np.zeros(3)
-        q[i] = r / 2.0
-        q[j] = (R[j, i] + R[i, j]) / (2 * r)
-        q[k] = (R[k, i] + R[i, k]) / (2 * r)
-        w = (R[k, j] - R[j, k]) / (2 * r)
-    return [x, y, 0.0, q[0], q[1], q[2], w]
+    return [x, y, 0.0, *matrix_to_quat(R)]
 
 
 def test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal():
@@ -279,6 +267,16 @@ def test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal():
     assert turning_err[0] < np.deg2rad(20), turning_err[0]
     assert straight_err[0] > np.deg2rad(60), straight_err[0]
 
+def test_the_goal_takes_over_from_the_route_across_the_terminal_band():
+    """One encoding of the band. The heading term fades out over it and the terminal
+    position term fades in; written twice they would drift, and on arrival the robot
+    would be pulled toward two different headings."""
+    band = 0.5
+    assert route_band_fade(3.0, band) == 1.0        # far out: the route decides
+    assert route_band_fade(0.0, band) == 0.0        # arrived: the goal decides
+    assert 0.0 < route_band_fade(0.25, band) < 1.0  # and it hands over, not switches
+
+
 def test_carrying_straight_on_at_a_corner_costs_more_than_turning():
     """The penalty the cost actually adds, not just the field it reads.
 
@@ -305,6 +303,7 @@ if __name__ == "__main__":
     test_build_route_fields_no_route()
     test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal()
     test_carrying_straight_on_at_a_corner_costs_more_than_turning()
+    test_the_goal_takes_over_from_the_route_across_the_terminal_band()
     test_build_route_fields_straight_line()
     test_score_trajectories_by_esdf_route_terms()
     print("Route field tests passed.")
