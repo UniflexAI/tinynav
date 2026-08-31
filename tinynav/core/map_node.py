@@ -179,6 +179,13 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
 
 # Arrival radius, measured from the CAMERA (see nav_target_timer_callback).
 _ARRIVE_M = 0.5
+# How many consecutive ticks must agree that the robot is inside that radius.
+# A relocalization can move the pose metres in one step -- that is what an
+# accepted correction IS -- and a single tick taken right after one has ended
+# legs at places the robot was nowhere near. Two ticks is 1s at the nav timer's
+# 2Hz: long enough that a jump has to be confirmed by the pose that follows it,
+# short enough to cost nothing on a real arrival.
+_ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '2'))
 # ...and for a POI that carries an arrival heading, where being 0.5m out matters.
 _ARRIVE_HEADING_M = 0.2
 
@@ -339,6 +346,8 @@ class MapNode(Node):
 
         self.pois = {}
         self.poi_index = -1
+        # Consecutive nav ticks that have seen the robot inside the arrival radius.
+        self._arrive_ticks = 0
         # Queue indices whose POI carries an arrival heading (tighter arrival radius).
         self.poi_has_heading = set()
         self._nav_completed = False
@@ -820,7 +829,11 @@ class MapNode(Node):
         # place. Everything else keeps the loose radius and the margin it buys (above).
         arrive_m = (_ARRIVE_HEADING_M if self.poi_index in self.poi_has_heading
                     else _ARRIVE_M)
-        if np.linalg.norm(poi[:2] - pos[:2]) < arrive_m and abs(poi[2] - pos[2]) < 2.0:
+        inside = (np.linalg.norm(poi[:2] - pos[:2]) < arrive_m
+                  and abs(poi[2] - pos[2]) < 2.0)
+        # Confirmed, not sampled: see _ARRIVE_TICKS.
+        self._arrive_ticks = (self._arrive_ticks + 1) if inside else 0
+        if inside and self._arrive_ticks >= _ARRIVE_TICKS:
             # Unconditional: this message is the only arrival edge consumers get, so
             # gating it on _leg_initial_length (i.e. "this leg published progress at
             # least once") silently loses the arrival for a POI the robot is ALREADY
@@ -835,6 +848,7 @@ class MapNode(Node):
                 "estimated_remaining_s": 0.0,
             })))
             self.poi_index += 1
+            self._arrive_ticks = 0
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None

@@ -410,8 +410,14 @@ class BackendNode(Ros2NodeManager):
             self._trajectory = pts
 
     def _on_global_plan(self, msg: Path):
+        # z is kept. It used to be dropped here and the odom-frame copy was then
+        # rotated with z=0 -- harmless on a map built around z~0, and a whole-path
+        # skew on one built 157m off it (map_2026_08_07: every POI sits at
+        # z=-157), because a degree of tilt across 157m is metres of sideways
+        # error, identically on every point.
         pts = [
-            {'x': p.pose.position.x, 'y': p.pose.position.y}
+            {'x': p.pose.position.x, 'y': p.pose.position.y,
+             'z': p.pose.position.z}
             for p in msg.poses
         ]
         with self._lock:
@@ -491,22 +497,41 @@ class BackendNode(Ros2NodeManager):
         ])
 
     def _transform_path_via_tf(self, path: list) -> list:
-        """Transform map-frame path points to odom (world) frame via TF lookup."""
+        """Transform map-frame path points to odom (world) frame via TF lookup.
+
+        The point's own z goes through the rotation. Substituting 0 for it is only
+        harmless when the map is built around z=0; on a map whose frame sits 157m
+        away it tilts the whole path sideways by metres.
+
+        A missing TF returns **nothing**, not the map-frame points: handing those
+        back unchanged labels map coordinates as odom ones, and the consumer draws
+        a path tens of metres from the robot with no way to tell.
+        """
         if not path:
             return path
         try:
             t = self._tf_buffer.lookup_transform('world', 'map', rclpy.time.Time())
-            tr = t.transform.translation
-            rot = t.transform.rotation
-            R = self._quat_to_rot(rot.x, rot.y, rot.z, rot.w)
-            trans = np.array([tr.x, tr.y, tr.z])
-            result = []
-            for pt in path:
-                p = R @ np.array([pt['x'], pt['y'], 0.0]) + trans
-                result.append({'x': float(p[0]), 'y': float(p[1])})
-            return result
-        except Exception:
-            return path  # TF not yet available — fall back to map-frame coords
+        except Exception as exc:  # noqa: BLE001 - any TF failure means "no answer"
+            self._note_no_tf(exc)
+            return []
+        tr = t.transform.translation
+        rot = t.transform.rotation
+        R = self._quat_to_rot(rot.x, rot.y, rot.z, rot.w)
+        trans = np.array([tr.x, tr.y, tr.z])
+        return [
+            {'x': float(p[0]), 'y': float(p[1])}
+            for p in (R @ np.array([pt['x'], pt['y'], pt.get('z', 0.0)]) + trans
+                      for pt in path)
+        ]
+
+    def _note_no_tf(self, exc) -> None:
+        """Say it once a second at most: the snapshot is built at the UI's rate."""
+        now = time.time()
+        if now - getattr(self, '_no_tf_said', 0.0) < 1.0:
+            return
+        self._no_tf_said = now
+        self.get_logger().warning(
+            f'no world<-map transform, so the global path has no odom-frame form: {exc}')
 
     # ------------------------------------------------------------------ #
     # Sensor / camera                                                      #
