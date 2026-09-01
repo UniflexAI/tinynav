@@ -326,7 +326,7 @@ class PlanningNode(Node):
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.grid_shape = (100, 100, 10)
-        self.resolution = 0.1
+        self.resolution = 0.05
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
