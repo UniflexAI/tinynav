@@ -147,7 +147,7 @@ class Ros2UnitreeManagerNode(Node):
                         f"Arm action {action_key!r} got FSM_UNAVAILABLE "
                         f"(attempt {attempt + 1}/{5}), retrying"
                     )
-                    time.sleep(0.15)
+                    time.sleep(0.2)
                 self.logger.info(f"Arm action {action_key!r}: code={code}, data={data!r}")
             elif self.is_quadruped and action_key in ROBOT_CONFIG.available_actions:
                 code = getattr(self.sport_client, action_key)()
