@@ -28,6 +28,7 @@ from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
+from tinynav.core.robot_specs import ROBOT_CONFIG
 logger = logging.getLogger(__name__)
 
 
@@ -267,6 +268,7 @@ class MapNode(Node):
         self.T_from_map_to_odom = None
 
         self.pois = {}
+        self.poi_actions = {}
         self.poi_index = -1
         self._nav_completed = False
         self._leg_initial_length: float | None = None
@@ -274,11 +276,14 @@ class MapNode(Node):
         self._speed_estimate: float | None = None
         self.cached_nav_path_in_map = None
         self.cached_nav_path_poi_index = -1
+        self._poi_action_pending = False
+        self._poi_action_until: float | None = None
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
         self.nav_done_pub = self.create_publisher(Bool, '/mapping/nav_done', 10)
         self.nav_progress_pub = self.create_publisher(String, '/mapping/nav_progress', 10)
+        self.action_pub = self.create_publisher(String, '/service/command', 10)
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
@@ -295,13 +300,17 @@ class MapNode(Node):
             self.pois = json.loads(msg.data)
 
             pois_dict = {}
+            poi_actions = {}
             keys = sorted([int (key) for key in self.pois.keys()])
             for index, key in enumerate(keys):
                 pois_dict[index] = np.array(self.pois[str(key)]["position"])
+                poi_actions[index] = self.pois[str(key)].get("action")
             self.pois = pois_dict
+            self.poi_actions = poi_actions
 
             if not self.pois:
                 self.poi_index = -1
+                self.poi_actions = {}
                 self.cached_nav_path_in_map = None
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
@@ -314,12 +323,15 @@ class MapNode(Node):
             self._leg_initial_length = None
             self._leg_start_time = None
             self._speed_estimate = None
+            self._poi_action_pending = False
+            self._poi_action_until = None
             self.cached_nav_path_in_map = None
             self.cached_nav_path_poi_index = -1
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
             self.pois = {}
+            self.poi_actions = {}
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
@@ -643,6 +655,26 @@ class MapNode(Node):
         pos = pose_in_map[:3, 3]
 
         if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
+            action = self.poi_actions.get(self.poi_index)
+            if action and action not in ROBOT_CONFIG.available_actions:
+                self.get_logger().warning(
+                    f"POI {self.poi_index} wants action {action!r}, not available for "
+                    f"robot {ROBOT_CONFIG.name!r} ({ROBOT_CONFIG.available_actions}); skipping"
+                )
+                action = None
+            if action and not self._poi_action_pending:
+                self._poi_action_pending = True
+                self._poi_action_until = time.time() + ROBOT_CONFIG.arrival_action_hold_s
+                self.action_pub.publish(String(data=f"play {action}"))
+                self.get_logger().info(f"Arrived at POI {self.poi_index}, playing {action!r}")
+                return
+            if self._poi_action_pending:
+                if time.time() < self._poi_action_until:
+                    return
+                self._poi_action_pending = False
+                if ROBOT_CONFIG.name == 'g1':
+                    self.action_pub.publish(String(data="play release arm"))
+
             if self._leg_initial_length is not None:
                 self.nav_progress_pub.publish(String(data=json.dumps({
                     "poi_index": self.poi_index,
