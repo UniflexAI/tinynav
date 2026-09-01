@@ -1,5 +1,7 @@
 import argparse
+import math
 import os
+import threading
 import rclpy
 from rclpy.node import Node
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -49,10 +51,13 @@ class RobotStatus(Enum):
 
 
 class Ros2UnitreeManagerNode(Node):
-    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
+    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE,
+                 cmd_vel_timeout_s: float = 0.5):
         super().__init__('ros2_unitree_manager')
         if robot_model not in _SUPPORTED_ROBOT_MODELS:
             raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
+        if not math.isfinite(cmd_vel_timeout_s) or cmd_vel_timeout_s <= 0:
+            raise ValueError(f"cmd_vel_timeout_s must be finite and positive, got {cmd_vel_timeout_s!r}")
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
 
@@ -60,12 +65,22 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
+        
+        self.safety_client = _build_sport_client(robot_model)
+        self.safety_client.SetTimeout(min(0.1, cmd_vel_timeout_s / 4.0))
+        self.safety_client.Init()
+        self._safety_stop_lock = threading.Lock()
         if self.is_quadruped:
             self.sport_client.ClassicWalk(True)
         self._robot_status = RobotStatus.SITTING
         self.battery = 0.0
         self.last_twist_time = None
         self.logger = self.get_logger()
+
+        self._cmd_vel_timeout_s = cmd_vel_timeout_s
+        self._cmd_vel_lock = threading.Lock()
+        self._cmd_vel_last_nonzero_at: float | None = None
+        self._cmd_vel_armed = False
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -81,6 +96,8 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+        watchdog_period_s = min(0.05, cmd_vel_timeout_s / 2.0)
+        self._cmd_vel_watchdog_timer = self.create_timer(watchdog_period_s, self._cmd_vel_watchdog_tick)
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
@@ -92,10 +109,44 @@ class Ros2UnitreeManagerNode(Node):
 
         if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
             self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
+            dispatch_time = time.monotonic()
+            with self._cmd_vel_lock:
+                self._cmd_vel_last_nonzero_at = dispatch_time
+                self._cmd_vel_armed = True
             self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
+            
+            if time.monotonic() - dispatch_time > self._cmd_vel_timeout_s:
+                self._send_safety_stop("Move() completed after its own deadline", dispatch_time)
         else:
+            with self._cmd_vel_lock:
+                self._cmd_vel_armed = False
             self.sport_client.StopMove()
         time.sleep(0.02)
+
+    def _cmd_vel_watchdog_tick(self):
+        with self._cmd_vel_lock:
+            last_nonzero_at = self._cmd_vel_last_nonzero_at
+            stale = (
+                self._cmd_vel_armed
+                and last_nonzero_at is not None
+                and time.monotonic() - last_nonzero_at > self._cmd_vel_timeout_s
+            )
+        if stale:
+            self._send_safety_stop("cmd_vel stream stale", last_nonzero_at)
+
+    def _send_safety_stop(self, reason: str, observed_at: float):
+        with self._safety_stop_lock:
+            code = self.safety_client.StopMove()
+        with self._cmd_vel_lock:
+            if self._cmd_vel_last_nonzero_at != observed_at:
+                return
+            if code == 0:
+                self._cmd_vel_armed = False
+        if code == 0:
+            self.logger.warning(f"{reason}; StopMove sent")
+        else:
+            # _cmd_vel_armed stays True, so the next watchdog tick retries.
+            self.logger.error(f"{reason}; StopMove failed: code={code}")
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
