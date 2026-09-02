@@ -15,9 +15,8 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, tf2np
+from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tf2_ros import Buffer, TransformListener
 
 # === Helper functions ===
 @njit(cache=True)
@@ -200,92 +199,6 @@ def generate_predefined_trajectory_vocabularies(
 
     return np.asarray(trajectories), np.asarray(params)
 
-def _camera_quat_from_xy_tangent(tx, ty, fallback_q):
-    tangent = np.array([tx, ty, 0.0], dtype=np.float64)
-    n = np.linalg.norm(tangent)
-    if n < 1e-6:
-        return fallback_q
-    cam_z = tangent / n
-    cam_y = np.array([0.0, 0.0, -1.0])
-    cam_x = np.cross(cam_y, cam_z)
-    xn = np.linalg.norm(cam_x)
-    if xn < 1e-6:
-        return fallback_q
-    cam_x = cam_x / xn
-    cam_y = np.cross(cam_z, cam_x)
-    return matrix_to_quat(np.column_stack((cam_x, cam_y, cam_z)))
-
-def _heading_change_along_path(path_xy: np.ndarray, start_idx: int, distance: float) -> float:
-    pts = path_xy[start_idx:]
-    if len(pts) < 2 or distance < 1e-3:
-        return 0.0
-    seg_len = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-    cum = np.concatenate(([0.0], np.cumsum(seg_len)))
-    d = min(float(distance), float(cum[-1]))
-    if d < 1e-3:
-        return 0.0
-    k = int(np.searchsorted(cum, d, side='right') - 1)
-    k = min(max(k, 0), len(seg_len) - 1)
-    d0 = pts[1] - pts[0]
-    d1 = pts[min(k + 1, len(pts) - 1)] - pts[k]
-    n0 = np.linalg.norm(d0)
-    n1 = np.linalg.norm(d1)
-    if n0 < 1e-6 or n1 < 1e-6:
-        return 0.0
-    dot = float(np.clip((d0 / n0) @ (d1 / n1), -1.0, 1.0))
-    return float(np.arccos(dot))
-
-def generate_path_follow_trajectory(
-    path_xy, init_p, init_q, speed, duration=3.0, dt=0.1,
-):
-    """Timed trajectory that walks the global plan. Captures L/U turns the lattice cannot."""
-    if path_xy is None or len(path_xy) < 2:
-        return None, None, 0.0
-    robot_xy = np.asarray(init_p[:2], dtype=np.float64)
-    closest = int(np.argmin(np.linalg.norm(path_xy - robot_xy[None, :], axis=1)))
-    pts = np.vstack((robot_xy, path_xy[closest:]))
-    keep = [0]
-    for i in range(1, len(pts)):
-        if np.linalg.norm(pts[i] - pts[keep[-1]]) > 1e-4:
-            keep.append(i)
-    pts = pts[np.asarray(keep)]
-    if len(pts) < 2:
-        return None, None, 0.0
-
-    num_steps = int(duration / dt) + 1
-    seg_len = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-    cum = np.concatenate(([0.0], np.cumsum(seg_len)))
-    total = float(cum[-1])
-    if total < 1e-3:
-        return None, None, 0.0
-
-    traj = np.empty((num_steps, 7), dtype=np.float64)
-    z = float(init_p[2])
-    fallback_q = np.asarray(init_q, dtype=np.float64)
-    for i in range(num_steps):
-        s = min(speed * i * dt, total)
-        k = int(np.searchsorted(cum, s, side='right') - 1)
-        k = min(max(k, 0), len(seg_len) - 1)
-        t = (s - cum[k]) / max(seg_len[k], 1e-12)
-        xy = pts[k] + t * (pts[k + 1] - pts[k])
-        traj[i, 0] = xy[0]
-        traj[i, 1] = xy[1]
-        traj[i, 2] = z
-        traj[i, 3:] = _camera_quat_from_xy_tangent(
-            pts[k + 1, 0] - pts[k, 0],
-            pts[k + 1, 1] - pts[k, 1],
-            fallback_q,
-        )
-
-    i_omega = min(5, num_steps - 1)
-    z0 = quat_to_matrix(traj[0, 3:]) @ np.array([0.0, 0.0, 1.0])
-    z1 = quat_to_matrix(traj[i_omega, 3:]) @ np.array([0.0, 0.0, 1.0])
-    yaw0 = np.arctan2(z0[1], z0[0])
-    yaw1 = np.arctan2(z1[1], z1[0])
-    omega = float(np.arctan2(np.sin(yaw1 - yaw0), np.cos(yaw1 - yaw0)) / max(i_omega * dt, 1e-6))
-    param = np.array([speed, omega], dtype=np.float64)
-    return traj, param, _heading_change_along_path(path_xy, closest, speed * duration)
-
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
@@ -431,34 +344,9 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
-        self.create_subscription(Path, '/mapping/global_plan', self.global_plan_callback, 10)
-        self._map_plan_xyz = None
-        self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
-        self._map_plan_xyz = None
-
-    def global_plan_callback(self, msg: Path):
-        if not msg.poses:
-            self._map_plan_xyz = None
-            return
-        self._map_plan_xyz = np.array(
-            [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses],
-            dtype=np.float64,
-        )
-
-    def _global_plan_xy_in_world(self):
-        if self._map_plan_xyz is None or len(self._map_plan_xyz) < 2:
-            return None
-        try:
-            tf_msg = self._tf_buffer.lookup_transform('world', 'map', Time())
-        except Exception:
-            return None
-        _, _, T = tf2np(tf_msg)
-        pts = (T[:3, :3] @ self._map_plan_xyz.T).T + T[:3, 3]
-        return pts[:, :2]
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
@@ -665,28 +553,6 @@ class PlanningNode(Node):
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
-            path_follow_turn = np.zeros(len(trajectories), dtype=bool)
-            world_plan_xy = self._global_plan_xy_in_world()
-            if world_plan_xy is not None:
-                pf_trajs = []
-                pf_params = []
-                pf_turns = []
-                for speed in (0.4, 0.7):
-                    traj, param, turn = generate_path_follow_trajectory(
-                        world_plan_xy, init_p, init_q, speed,
-                    )
-                    if traj is None:
-                        continue
-                    pf_trajs.append(traj)
-                    pf_params.append(param)
-                    pf_turns.append(turn)
-                if pf_trajs:
-                    trajectories = np.concatenate([trajectories, np.stack(pf_trajs)], axis=0)
-                    params = np.concatenate([params, np.stack(pf_params)], axis=0)
-                    path_follow_turn = np.concatenate([
-                        path_follow_turn,
-                        np.array(pf_turns, dtype=np.float64) > np.deg2rad(60.0),
-                    ])
             self.last_T = T
             self.last_stamp = stamp
 
@@ -700,7 +566,7 @@ class PlanningNode(Node):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
 
-            def cost_function(traj, param, score, target_pose, follow_turn=False):
+            def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
                 should_reverse = front_clearance <= enter_threshold
@@ -717,8 +583,6 @@ class PlanningNode(Node):
                 # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
                 # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
                 heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
-                # Prefer walking the global plan around a sharp corner instead of cutting it.
-                follow_bonus = -400.0 if follow_turn and np.isfinite(score) else 0.0
 
                 return (
                     score * 100000
@@ -727,17 +591,10 @@ class PlanningNode(Node):
                     + 10 * abs(self.last_param[0] - param[0])
                     + 10 * abs(self.last_param[1] - param[1])
                     + reverse_gate_penalty
-                    + follow_bonus
                 )
 
             top_k = 1
-            top_indices = np.argsort(np.array([
-                cost_function(
-                    trajectories[i], params[i], scores[i], self.target_pose,
-                    follow_turn=bool(path_follow_turn[i]),
-                )
-                for i in range(len(trajectories))
-            ]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path
