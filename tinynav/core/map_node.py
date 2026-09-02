@@ -31,7 +31,7 @@ import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
 
-_GLOBAL_PLAN_SMOOTH_ITERATIONS = 2
+_GLOBAL_PLAN_SMOOTH_ITERATIONS = 3
 _GLOBAL_PLAN_SMOOTH_MIN_SDF_M = 0.18
 
 
@@ -798,11 +798,36 @@ class MapNode(Node):
     ) -> np.ndarray:
         if path is None or len(path) < 3:
             return path
-        smoothed = chaikin_smooth_path(path, _GLOBAL_PLAN_SMOOTH_ITERATIONS)
+        shortcut = self._shortcut_nav_path(path, occupancy_map_origin, resolution)
+        smoothed = chaikin_smooth_path(shortcut, _GLOBAL_PLAN_SMOOTH_ITERATIONS)
         if self._is_nav_path_safe(smoothed, occupancy_map_origin, resolution):
             return smoothed
-        self.get_logger().warning("smoothed global plan failed SDF safety check; using raw path")
+        if len(shortcut) < len(path) and self._is_nav_path_safe(shortcut, occupancy_map_origin, resolution):
+            self.get_logger().warning("smoothed global plan failed SDF safety check; using shortcut path")
+            return shortcut
+        self.get_logger().warning("global plan smoothing failed SDF safety check; using raw path")
         return path
+
+    def _shortcut_nav_path(
+        self,
+        path: np.ndarray,
+        occupancy_map_origin: np.ndarray,
+        resolution: float,
+    ) -> np.ndarray:
+        if path is None or len(path) < 3:
+            return path
+
+        shortcut = [path[0]]
+        i = 0
+        while i < len(path) - 1:
+            next_i = i + 1
+            for j in range(len(path) - 1, i, -1):
+                if self._is_nav_segment_safe(path[i], path[j], occupancy_map_origin, resolution):
+                    next_i = j
+                    break
+            shortcut.append(path[next_i])
+            i = next_i
+        return np.array(shortcut, dtype=np.float64)
 
     def _is_nav_path_safe(
         self,
@@ -813,20 +838,29 @@ class MapNode(Node):
         if path is None or len(path) == 0:
             return False
         for i in range(len(path) - 1):
-            p0 = path[i]
-            p1 = path[i + 1]
-            distance = float(np.linalg.norm(p1 - p0))
-            steps = max(1, int(np.ceil(distance / max(resolution * 0.5, 1e-6))))
-            for t in np.linspace(0.0, 1.0, steps + 1):
-                p = p0 * (1.0 - t) + p1 * t
-                idx = np.floor((p - occupancy_map_origin) / resolution).astype(np.int32)
-                if np.any(idx < 0) or np.any(idx >= np.array(self.occupancy_map.shape)):
-                    return False
-                idx_tuple = tuple(idx.tolist())
-                if self.occupancy_map[idx_tuple] == 2:
-                    return False
-                if float(self.sdf_map[idx_tuple]) < _GLOBAL_PLAN_SMOOTH_MIN_SDF_M:
-                    return False
+            if not self._is_nav_segment_safe(path[i], path[i + 1], occupancy_map_origin, resolution):
+                return False
+        return True
+
+    def _is_nav_segment_safe(
+        self,
+        p0: np.ndarray,
+        p1: np.ndarray,
+        occupancy_map_origin: np.ndarray,
+        resolution: float,
+    ) -> bool:
+        distance = float(np.linalg.norm(p1 - p0))
+        steps = max(1, int(np.ceil(distance / max(resolution * 0.5, 1e-6))))
+        for t in np.linspace(0.0, 1.0, steps + 1):
+            p = p0 * (1.0 - t) + p1 * t
+            idx = np.floor((p - occupancy_map_origin) / resolution).astype(np.int32)
+            if np.any(idx < 0) or np.any(idx >= np.array(self.occupancy_map.shape)):
+                return False
+            idx_tuple = tuple(idx.tolist())
+            if self.occupancy_map[idx_tuple] == 2:
+                return False
+            if float(self.sdf_map[idx_tuple]) < _GLOBAL_PLAN_SMOOTH_MIN_SDF_M:
+                return False
         return True
 
 def main(args=None):

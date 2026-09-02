@@ -102,6 +102,27 @@ def test_chaikin_smooth_path_preserves_endpoints():
     assert len(smoothed) > len(path)
     assert not any(np.allclose(p, path[1]) for p in smoothed[1:-1])
 
+def test_nav_path_shortcut_removes_safe_zigzags():
+    from tinynav.core.map_node import MapNode
+
+    node = object.__new__(MapNode)
+    node.occupancy_map = np.zeros((20, 20, 3), dtype=np.int8)
+    node.sdf_map = np.ones((20, 20, 3), dtype=np.float32)
+    path = np.array([
+        [1.0, 1.0, 1.0],
+        [2.0, 1.0, 1.0],
+        [2.0, 2.0, 1.0],
+        [3.0, 2.0, 1.0],
+        [3.0, 3.0, 1.0],
+        [4.0, 3.0, 1.0],
+    ])
+
+    shortcut = node._shortcut_nav_path(path, np.zeros(3), 1.0)
+
+    np.testing.assert_allclose(shortcut[0], path[0])
+    np.testing.assert_allclose(shortcut[-1], path[-1])
+    assert len(shortcut) == 2
+
 if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
@@ -110,3 +131,5 @@ if __name__ == "__main__":
     print("A* test passed.")
     test_chaikin_smooth_path_preserves_endpoints()
     print("Chaikin smoothing test passed.")
+    test_nav_path_shortcut_removes_safe_zigzags()
+    print("Nav path shortcut test passed.")
