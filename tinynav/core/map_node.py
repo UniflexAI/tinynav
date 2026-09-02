@@ -166,6 +166,38 @@ def resample_polyline(points: np.ndarray, spacing: float) -> np.ndarray:
     samples = np.linspace(0.0, total, n)
     return np.column_stack([np.interp(samples, dist, points[:, i]) for i in range(points.shape[1])])
 
+def pick_path_lookahead(
+    paths: np.ndarray,
+    closest_idx: int,
+    lookahead_m: float,
+    min_turn_dot: float = 0.5,
+) -> np.ndarray:
+    """Carrot along the path, stopped at the first turn beyond ~60 deg.
+
+    Local planning scores Euclidean distance to this target, so looking past an
+    L-corner pulls the robot through the inner obstacle.
+    """
+    if closest_idx >= len(paths) - 1:
+        return paths[-1]
+    acc = 0.0
+    ref_dir = None
+    target_idx = closest_idx
+    for i in range(closest_idx, len(paths) - 1):
+        delta = paths[i + 1, :2] - paths[i, :2]
+        seg_len = float(np.linalg.norm(delta))
+        if seg_len < 1e-6:
+            continue
+        direction = delta / seg_len
+        if ref_dir is None:
+            ref_dir = direction
+        elif float(ref_dir @ direction) < min_turn_dot:
+            break
+        acc += seg_len
+        target_idx = i + 1
+        if acc >= lookahead_m:
+            break
+    return paths[target_idx]
+
 def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, stop_distance:np.ndarray):
     start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else start_index
     open_heap = [(sdf_map[start_index], start_index)]
@@ -793,16 +825,7 @@ class MapNode(Node):
             "estimated_remaining_s": round(estimated_remaining_s, 1),
         })))
 
-        max_speed = 0.5
-        accumulated_distance = 0.0
-        start_point = pos[:3]
-        target_position = paths[-1]
-        for i in range(closest_idx, len(paths) - 1):
-            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-            if accumulated_distance > max_speed * 5:
-                target_position = paths[i]
-                break
-            start_point = paths[i]
+        target_position = pick_path_lookahead(paths, closest_idx, lookahead_m=2.5)
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
