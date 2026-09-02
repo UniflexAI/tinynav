@@ -25,10 +25,14 @@ import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop, solve_pose_graph
+from tinynav.core.path_utils import chaikin_smooth_path
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 logger = logging.getLogger(__name__)
+
+_GLOBAL_PLAN_SMOOTH_ITERATIONS = 2
+_GLOBAL_PLAN_SMOOTH_MIN_SDF_M = 0.18
 
 
 
@@ -767,6 +771,11 @@ class MapNode(Node):
             return None 
         sdf_start_path = search_close_to_sdf_map(start_idx, self.sdf_map, self.occupancy_map, 0.2)
         sdf_goal_path = search_close_to_sdf_map(poi_goal_idx, self.sdf_map, self.occupancy_map, 0.2)
+        if len(sdf_start_path) == 0 or len(sdf_goal_path) == 0:
+            self.get_logger().warning(
+                f"failed to find safe SDF endpoints: start_idx={tuple(start_idx)}, goal_idx={tuple(poi_goal_idx)}"
+            )
+            return None
 
         sdf_start_sdf = sdf_start_path[-1]
         sdf_goal_sdf = sdf_goal_path[-1]
@@ -778,8 +787,47 @@ class MapNode(Node):
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
         if len(path) > 0:
             converted_path = np.array(path) * resolution + occupancy_map_origin
-            return converted_path
+            return self._smooth_nav_path(converted_path, occupancy_map_origin, resolution)
         return None
+
+    def _smooth_nav_path(
+        self,
+        path: np.ndarray,
+        occupancy_map_origin: np.ndarray,
+        resolution: float,
+    ) -> np.ndarray:
+        if path is None or len(path) < 3:
+            return path
+        smoothed = chaikin_smooth_path(path, _GLOBAL_PLAN_SMOOTH_ITERATIONS)
+        if self._is_nav_path_safe(smoothed, occupancy_map_origin, resolution):
+            return smoothed
+        self.get_logger().warning("smoothed global plan failed SDF safety check; using raw path")
+        return path
+
+    def _is_nav_path_safe(
+        self,
+        path: np.ndarray,
+        occupancy_map_origin: np.ndarray,
+        resolution: float,
+    ) -> bool:
+        if path is None or len(path) == 0:
+            return False
+        for i in range(len(path) - 1):
+            p0 = path[i]
+            p1 = path[i + 1]
+            distance = float(np.linalg.norm(p1 - p0))
+            steps = max(1, int(np.ceil(distance / max(resolution * 0.5, 1e-6))))
+            for t in np.linspace(0.0, 1.0, steps + 1):
+                p = p0 * (1.0 - t) + p1 * t
+                idx = np.floor((p - occupancy_map_origin) / resolution).astype(np.int32)
+                if np.any(idx < 0) or np.any(idx >= np.array(self.occupancy_map.shape)):
+                    return False
+                idx_tuple = tuple(idx.tolist())
+                if self.occupancy_map[idx_tuple] == 2:
+                    return False
+                if float(self.sdf_map[idx_tuple]) < _GLOBAL_PLAN_SMOOTH_MIN_SDF_M:
+                    return False
+        return True
 
 def main(args=None):
     logging.basicConfig(
