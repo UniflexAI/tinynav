@@ -1934,7 +1934,7 @@ class _CameraPathOverlayPainter extends CustomPainter {
     final perspectiveY = rect.top +
         rect.height *
             (_nearFraction - (_nearFraction - _horizonFraction) * sqrt(depthT));
-    final x = rect.left + rect.width * (0.5 + xNorm * 0.5);
+    final x = rect.left + rect.width * (0.5 - xNorm * 0.5);
     return Offset(x, perspectiveY);
   }
 
