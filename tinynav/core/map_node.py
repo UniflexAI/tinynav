@@ -166,33 +166,93 @@ def resample_polyline(points: np.ndarray, spacing: float) -> np.ndarray:
     samples = np.linspace(0.0, total, n)
     return np.column_stack([np.interp(samples, dist, points[:, i]) for i in range(points.shape[1])])
 
+def _segment_dir_xy(paths: np.ndarray, i: int):
+    delta = paths[i + 1, :2] - paths[i, :2]
+    n = float(np.linalg.norm(delta))
+    if n < 1e-6:
+        return None
+    return delta / n
+
+def project_on_path(
+    paths: np.ndarray,
+    pos_xy: np.ndarray,
+    fwd_xy=None,
+    min_turn_dot: float = 0.5,
+):
+    """Closest point on the polyline. If that lands on a side corridor the robot
+    is not facing yet, snap back to the incoming corner so lookahead cannot jump
+    around an L."""
+    if len(paths) < 2:
+        return 0, 0.0
+    pos_xy = np.asarray(pos_xy, dtype=np.float64)
+    best_d = np.inf
+    best_i = 0
+    best_t = 0.0
+    for i in range(len(paths) - 1):
+        a = paths[i, :2]
+        ab = paths[i + 1, :2] - a
+        l2 = float(ab @ ab)
+        t = 0.0 if l2 < 1e-12 else float(np.clip((pos_xy - a) @ ab / l2, 0.0, 1.0))
+        d = float(np.linalg.norm(pos_xy - (a + t * ab)))
+        if d < best_d:
+            best_d, best_i, best_t = d, i, t
+
+    if fwd_xy is None:
+        return best_i, best_t
+    fwd = np.asarray(fwd_xy, dtype=np.float64)
+    fn = float(np.linalg.norm(fwd))
+    if fn < 1e-6:
+        return best_i, best_t
+    fwd = fwd / fn
+    seg_dir = _segment_dir_xy(paths, best_i)
+    if seg_dir is None or float(fwd @ seg_dir) >= min_turn_dot:
+        return best_i, best_t
+    for j in range(best_i - 1, -1, -1):
+        incoming = _segment_dir_xy(paths, j)
+        if incoming is not None and float(fwd @ incoming) >= min_turn_dot:
+            return j, 1.0
+    return best_i, best_t
+
 def pick_path_lookahead(
     paths: np.ndarray,
-    closest_idx: int,
-    lookahead_m: float,
+    pos_xy: np.ndarray,
+    fwd_xy=None,
+    lookahead_m: float = 2.5,
     min_turn_dot: float = 0.5,
+    corner_lead_m: float = 0.4,
 ) -> np.ndarray:
-    """Carrot along the path, stopped at the first turn beyond ~60 deg.
+    """Carrot along the path, stopped at the first turn the robot is not facing yet.
 
-    Local planning scores Euclidean distance to this target, so looking past an
-    L-corner pulls the robot through the inner obstacle.
+    A short lead past the vertex is only for starting yaw; the 2.5 m lookahead
+    continues down a new corridor after heading has committed to it.
     """
-    if closest_idx >= len(paths) - 1:
+    if len(paths) < 2:
         return paths[-1]
-    acc = 0.0
-    ref_dir = None
-    target_idx = closest_idx
-    for i in range(closest_idx, len(paths) - 1):
-        delta = paths[i + 1, :2] - paths[i, :2]
-        seg_len = float(np.linalg.norm(delta))
-        if seg_len < 1e-6:
+    seg_i, t = project_on_path(paths, pos_xy, fwd_xy, min_turn_dot)
+    ref_dir = _segment_dir_xy(paths, seg_i)
+    if ref_dir is None:
+        return paths[min(seg_i + 1, len(paths) - 1)]
+
+    acc = (1.0 - t) * float(np.linalg.norm(paths[seg_i + 1, :2] - paths[seg_i, :2]))
+    target_idx = seg_i + 1
+    if acc >= lookahead_m:
+        return paths[target_idx]
+
+    for i in range(seg_i + 1, len(paths) - 1):
+        direction = _segment_dir_xy(paths, i)
+        if direction is None:
             continue
-        direction = delta / seg_len
-        if ref_dir is None:
-            ref_dir = direction
-        elif float(ref_dir @ direction) < min_turn_dot:
-            break
-        acc += seg_len
+        if float(ref_dir @ direction) < min_turn_dot:
+            lead = 0.0
+            for k in range(i, len(paths) - 1):
+                ds = float(np.linalg.norm(paths[k + 1, :2] - paths[k, :2]))
+                if lead + ds >= corner_lead_m:
+                    alpha = (corner_lead_m - lead) / max(ds, 1e-12)
+                    return paths[k] + alpha * (paths[k + 1] - paths[k])
+                lead += ds
+                target_idx = k + 1
+            return paths[target_idx]
+        acc += float(np.linalg.norm(paths[i + 1, :2] - paths[i, :2]))
         target_idx = i + 1
         if acc >= lookahead_m:
             break
@@ -780,8 +840,10 @@ class MapNode(Node):
         )
         if not needs_replan:
             paths = self.cached_nav_path_in_map
-            closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
-            if np.linalg.norm(paths[closest_idx, :2] - pos[:2]) > 0.5:
+            fwd_xy = pose_in_map[:2, 2]
+            seg_i, t = project_on_path(paths, pos[:2], fwd_xy)
+            proj = paths[seg_i, :2] + t * (paths[seg_i + 1, :2] - paths[seg_i, :2])
+            if np.linalg.norm(proj - pos[:2]) > 0.5:
                 needs_replan = True
 
         if needs_replan:
@@ -796,7 +858,9 @@ class MapNode(Node):
 
         paths = self.cached_nav_path_in_map
         self._publish_global_plan(paths)
-        closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
+        fwd_xy = pose_in_map[:2, 2]
+        seg_i, t = project_on_path(paths, pos[:2], fwd_xy)
+        closest_idx = seg_i + 1 if t > 0.5 else seg_i
 
         remaining_length = sum(
             np.linalg.norm(paths[i + 1] - paths[i])
@@ -825,7 +889,7 @@ class MapNode(Node):
             "estimated_remaining_s": round(estimated_remaining_s, 1),
         })))
 
-        target_position = pick_path_lookahead(paths, closest_idx, lookahead_m=2.5)
+        target_position = pick_path_lookahead(paths, pos[:2], fwd_xy)
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
