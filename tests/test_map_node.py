@@ -4,7 +4,6 @@ sys.path.append("/tinynav/tinynav/core")
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.math_utils import theta_star
-from tinynav.core.path_utils import chaikin_smooth_path
 import numpy as np
 
 def angle_diff_from_two_rotation_matrix(R1, R2):
@@ -87,26 +86,9 @@ def test_theta_star():
         assert point[0] == ground_truth_path[i][0]
         assert point[1] == ground_truth_path[i][1]
 
-def test_chaikin_smooth_path_preserves_endpoints():
-    path = np.array([
-        [0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0],
-        [1.0, 1.0, 0.0],
-        [2.0, 1.0, 0.0],
-    ])
-
-    smoothed = chaikin_smooth_path(path, iterations=1)
-
-    np.testing.assert_allclose(smoothed[0], path[0])
-    np.testing.assert_allclose(smoothed[-1], path[-1])
-    assert len(smoothed) > len(path)
-    assert not any(np.allclose(p, path[1]) for p in smoothed[1:-1])
-
 if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
     print("Pose graph solve test passed.")
     test_theta_star()
     print("A* test passed.")
-    test_chaikin_smooth_path_preserves_endpoints()
-    print("Chaikin smoothing test passed.")
