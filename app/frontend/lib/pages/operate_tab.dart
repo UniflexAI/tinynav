@@ -1479,8 +1479,12 @@ class _CameraPanel extends ConsumerStatefulWidget {
 class _CameraPanelState extends ConsumerState<_CameraPanel> {
   Uint8List? _latestFrame;
   bool _previewCover = false;
+  bool _showCameraPathOverlay = true;
 
   BoxFit get _previewFit => _previewCover ? BoxFit.cover : BoxFit.contain;
+
+  bool _supportsCameraPathOverlay(String? topic) =>
+      topic != null && topic.contains('/infra1/');
 
   void _showFullscreen(BuildContext context) {
     final topic = ref.read(selectedPreviewTopicProvider);
@@ -1492,6 +1496,7 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
         topic: topic,
         quality: quality,
         fit: _previewFit,
+        showPathOverlay: _showCameraPathOverlay && _supportsCameraPathOverlay(topic),
       ),
     );
   }
@@ -1505,6 +1510,9 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
     final baseUrl = ref.watch(baseUrlProvider);
     final mapInfo = ref.watch(mapInfoProvider).valueOrNull;
     final planning = ref.watch(planningStreamProvider).valueOrNull;
+    final showPathOverlay = _showCameraPathOverlay &&
+        _supportsCameraPathOverlay(selectedTopic) &&
+        planning != null;
 
     // Auto-select color topic on first load
     ref.listen<AsyncValue<List<String>>>(imageTopicsProvider, (_, next) {
@@ -1539,7 +1547,21 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
           if (selectedTopic != null && _latestFrame != null)
             GestureDetector(
               onTap: () => _showFullscreen(context),
-              child: Image.memory(_latestFrame!, fit: _previewFit, gaplessPlayback: true),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.memory(_latestFrame!, fit: _previewFit, gaplessPlayback: true),
+                  if (showPathOverlay)
+                    IgnorePointer(
+                      child: CustomPaint(
+                        painter: _CameraPathOverlayPainter(
+                          planning: planning!,
+                          fit: _previewFit,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             )
           else
             Center(
@@ -1597,6 +1619,32 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                         ref.read(previewQualityProvider.notifier).state = quality;
                       }
                     },
+                  ),
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: _supportsCameraPathOverlay(selectedTopic)
+                        ? 'Path overlay'
+                        : 'Path overlay needs infra1',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: _supportsCameraPathOverlay(selectedTopic)
+                          ? () => setState(() {
+                                _showCameraPathOverlay = !_showCameraPathOverlay;
+                              })
+                          : null,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 3),
+                        child: Icon(
+                          Icons.route_outlined,
+                          color: _supportsCameraPathOverlay(selectedTopic)
+                              ? (_showCameraPathOverlay
+                                  ? const Color(0xFF69F0AE)
+                                  : Colors.white38)
+                              : Colors.white24,
+                          size: 15,
+                        ),
+                      ),
+                    ),
                   ),
                   const SizedBox(width: 6),
                   Tooltip(
@@ -1675,10 +1723,12 @@ class _FullscreenPreview extends ConsumerStatefulWidget {
   final String topic;
   final PreviewQuality quality;
   final BoxFit fit;
+  final bool showPathOverlay;
   const _FullscreenPreview({
     required this.topic,
     required this.quality,
     required this.fit,
+    required this.showPathOverlay,
   });
 
   @override
@@ -1690,6 +1740,8 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
 
   @override
   Widget build(BuildContext context) {
+    final planning = ref.watch(planningStreamProvider).valueOrNull;
+
     ref.listen<AsyncValue<Uint8List>>(
       previewStreamProvider((topic: widget.topic, quality: widget.quality)),
       (_, next) {
@@ -1704,10 +1756,26 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
       insetPadding: const EdgeInsets.all(12),
       child: Stack(
         children: [
-          Center(
+          Positioned.fill(
             child: _frame != null
-                ? Image.memory(_frame!, fit: widget.fit, gaplessPlayback: true)
-                : const CircularProgressIndicator(color: Colors.white54),
+                ? Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Image.memory(_frame!, fit: widget.fit, gaplessPlayback: true),
+                      if (widget.showPathOverlay && planning != null)
+                        IgnorePointer(
+                          child: CustomPaint(
+                            painter: _CameraPathOverlayPainter(
+                              planning: planning,
+                              fit: widget.fit,
+                            ),
+                          ),
+                        ),
+                    ],
+                  )
+                : const Center(
+                    child: CircularProgressIndicator(color: Colors.white54),
+                  ),
           ),
           Positioned(
             top: 8, right: 8,
@@ -1720,6 +1788,159 @@ class _FullscreenPreviewState extends ConsumerState<_FullscreenPreview> {
       ),
     );
   }
+}
+
+class _CameraPathOverlayPainter extends CustomPainter {
+  static const Size _nominalPreviewSize = Size(4, 3);
+  static const double _horizonFraction = 0.52;
+  static const double _nearFraction = 0.9;
+  static const double _maxForwardM = 10.0;
+  static const double _horizontalFovRad = 1.2;
+
+  final PlanningState planning;
+  final BoxFit fit;
+
+  const _CameraPathOverlayPainter({
+    required this.planning,
+    required this.fit,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final pose = planning.odomPose;
+    if (pose == null || size.width <= 0 || size.height <= 0) return;
+
+    final fitted = applyBoxFit(fit, _nominalPreviewSize, size);
+    final imageRect = Alignment.center.inscribe(fitted.destination, Offset.zero & size);
+
+    canvas.save();
+    canvas.clipRect(imageRect);
+
+    _drawGroundTint(canvas, imageRect);
+    _drawProjectedPath(
+      canvas,
+      imageRect,
+      pose,
+      planning.globalPath,
+      const Color(0xFF69F0AE),
+      3.5,
+      drawGoal: true,
+    );
+    _drawProjectedPath(
+      canvas,
+      imageRect,
+      pose,
+      planning.trajectory,
+      Colors.cyanAccent,
+      3.0,
+      drawGoal: false,
+    );
+
+    canvas.restore();
+  }
+
+  void _drawGroundTint(Canvas canvas, Rect rect) {
+    final horizonY = rect.top + rect.height * _horizonFraction;
+    final tint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          Colors.transparent,
+          Colors.black.withOpacity(0.04),
+          Colors.black.withOpacity(0.22),
+        ],
+        stops: const [0.0, 0.35, 1.0],
+      ).createShader(Rect.fromLTRB(rect.left, horizonY, rect.right, rect.bottom));
+    canvas.drawRect(Rect.fromLTRB(rect.left, horizonY, rect.right, rect.bottom), tint);
+  }
+
+  void _drawProjectedPath(
+    Canvas canvas,
+    Rect rect,
+    Pose pose,
+    List<TrajPoint> points,
+    Color color,
+    double strokeWidth, {
+    required bool drawGoal,
+  }) {
+    if (points.length < 2) return;
+
+    final segments = <List<Offset>>[];
+    var currentSegment = <Offset>[];
+    for (final pt in points) {
+      final p = _projectPoint(rect, pose, pt);
+      if (p == null) {
+        if (currentSegment.length >= 2) segments.add(currentSegment);
+        currentSegment = <Offset>[];
+      } else {
+        currentSegment.add(p);
+      }
+    }
+    if (currentSegment.length >= 2) segments.add(currentSegment);
+    if (segments.isEmpty) return;
+
+    final glowPaint = Paint()
+      ..color = Colors.black.withOpacity(0.7)
+      ..strokeWidth = strokeWidth + 4
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final linePaint = Paint()
+      ..color = color.withOpacity(0.92)
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    for (final segment in segments) {
+      final path = Path()..moveTo(segment.first.dx, segment.first.dy);
+      for (final p in segment.skip(1)) {
+        path.lineTo(p.dx, p.dy);
+      }
+      canvas.drawPath(path, glowPaint);
+      canvas.drawPath(path, linePaint);
+    }
+
+    if (drawGoal) {
+      final goal = segments.last.last;
+      canvas.drawCircle(goal, 7, Paint()..color = Colors.black.withOpacity(0.65));
+      canvas.drawCircle(goal, 5, Paint()..color = color);
+      canvas.drawCircle(
+        goal,
+        5,
+        Paint()
+          ..color = Colors.white.withOpacity(0.9)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.5,
+      );
+    }
+  }
+
+  Offset? _projectPoint(Rect rect, Pose pose, TrajPoint pt) {
+    final dx = pt.x - pose.x;
+    final dy = pt.y - pose.y;
+    final cosYaw = cos(pose.yaw);
+    final sinYaw = sin(pose.yaw);
+    final forward = dx * cosYaw + dy * sinYaw;
+    final lateral = -dx * sinYaw + dy * cosYaw;
+    if (forward < 0.15 || forward > _maxForwardM) return null;
+
+    final halfFov = tan(_horizontalFovRad / 2);
+    final xNorm = lateral / (forward * halfFov);
+    if (xNorm < -1.25 || xNorm > 1.25) return null;
+
+    final depthT = (forward / _maxForwardM).clamp(0.0, 1.0);
+    final perspectiveY = rect.top +
+        rect.height *
+            (_nearFraction - (_nearFraction - _horizonFraction) * sqrt(depthT));
+    final x = rect.left + rect.width * (0.5 + xNorm * 0.5);
+    return Offset(x, perspectiveY);
+  }
+
+  @override
+  bool shouldRepaint(_CameraPathOverlayPainter old) =>
+      planning != old.planning || fit != old.fit;
 }
 
 class _MapPip extends StatelessWidget {
