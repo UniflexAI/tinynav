@@ -226,8 +226,12 @@ def pick_path_lookahead(
     t: float,
     lookahead_m: float = 2.5,
     min_turn_dot: float = 0.5,
+    arrive_m: float = 0.15,
 ) -> np.ndarray:
-    """Carrot along the path, stopped exactly at the first turn beyond ~60 deg."""
+    """Carrot along the path, stopped at the first turn that is still ahead.
+
+    If the robot is already on that vertex, continue down the new corridor.
+    """
     if len(paths) < 2:
         return paths[-1]
     ref_dir = _segment_dir_xy(paths, seg_i)
@@ -244,7 +248,9 @@ def pick_path_lookahead(
         if direction is None:
             continue
         if float(ref_dir @ direction) < min_turn_dot:
-            return paths[i]
+            if acc > arrive_m:
+                return paths[i]
+            ref_dir = direction
         acc += float(np.linalg.norm(paths[i + 1, :2] - paths[i, :2]))
         target_idx = i + 1
         if acc >= lookahead_m:
@@ -863,8 +869,12 @@ class MapNode(Node):
                 self._path_s = near
             else:
                 self._path_s = s_meas
-        elif s_meas <= self._path_s + 0.8:
-            self._path_s = max(self._path_s - 0.3, s_meas)
+        else:
+            seg_i_prev, t_prev = s_to_segment(paths, self._path_s)
+            tracked_xy = paths[seg_i_prev, :2] + t_prev * (paths[seg_i_prev + 1, :2] - paths[seg_i_prev, :2])
+            arrived = np.linalg.norm(pos[:2] - tracked_xy) <= 0.45
+            if arrived or s_meas <= self._path_s + 0.8:
+                self._path_s = max(self._path_s - 0.3, s_meas)
         seg_i, t = s_to_segment(paths, self._path_s)
         closest_idx = seg_i + 1 if t > 0.5 else seg_i
 
