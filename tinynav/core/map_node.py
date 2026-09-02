@@ -88,6 +88,84 @@ def reconstruct_path_sdf(parent:dict, current:tuple):
         current = parent[current]
     return path[::-1]
 
+def _grid_index_in_bounds(idx: tuple, shape) -> bool:
+    return (
+        0 <= idx[0] < shape[0]
+        and 0 <= idx[1] < shape[1]
+        and 0 <= idx[2] < shape[2]
+    )
+
+def segment_is_shortcut_safe(
+    start: tuple,
+    goal: tuple,
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    sdf_margin_m: float = 0.2,
+) -> bool:
+    start_np = np.asarray(start, dtype=np.float32)
+    goal_np = np.asarray(goal, dtype=np.float32)
+    delta = goal_np - start_np
+    distance_m = float(np.linalg.norm(delta) * resolution)
+    if distance_m <= 1e-6:
+        return True
+    if distance_m > max_segment_m:
+        return False
+
+    steps = max(1, int(np.ceil(float(np.max(np.abs(delta))))))
+    max_allowed_sdf = max(float(sdf_map[start]), float(sdf_map[goal]), 0.5) + sdf_margin_m
+    for t in np.linspace(0.0, 1.0, steps + 1):
+        idx = tuple(np.rint(start_np + delta * t).astype(np.int32).tolist())
+        if not _grid_index_in_bounds(idx, occupancy_map.shape):
+            return False
+        if occupancy_map[idx] == 2:
+            return False
+        sdf = float(sdf_map[idx])
+        if not np.isfinite(sdf) or sdf > max_allowed_sdf:
+            return False
+    return True
+
+def shortcut_prune_path(
+    path: list,
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+    max_segment_m: float = 1.0,
+    max_skip_nodes: int = 30,
+) -> list:
+    """Greedy line-of-sight shortcut. Keeps the path inside the SDF corridor."""
+    if len(path) <= 2:
+        return path
+    pruned = [path[0]]
+    i = 0
+    while i < len(path) - 1:
+        farthest = i + 1
+        upper = min(len(path) - 1, i + max_skip_nodes)
+        for j in range(upper, i, -1):
+            if segment_is_shortcut_safe(
+                path[i], path[j], sdf_map, occupancy_map, resolution, max_segment_m
+            ):
+                farthest = j
+                break
+        pruned.append(path[farthest])
+        i = farthest
+    return pruned
+
+def resample_polyline(points: np.ndarray, spacing: float) -> np.ndarray:
+    """Uniform arc-length resample so lookahead / closest-waypoint stay dense."""
+    points = np.asarray(points, dtype=np.float64)
+    if len(points) < 2:
+        return points
+    seg = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    dist = np.concatenate(([0.0], np.cumsum(seg)))
+    total = float(dist[-1])
+    if total < 1e-6:
+        return points[:1]
+    n = max(2, int(np.round(total / spacing)) + 1)
+    samples = np.linspace(0.0, total, n)
+    return np.column_stack([np.interp(samples, dist, points[:, i]) for i in range(points.shape[1])])
+
 def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, stop_distance:np.ndarray):
     start_index = tuple(start_index.flatten()) if isinstance(start_index, np.ndarray) else start_index
     open_heap = [(sdf_map[start_index], start_index)]
@@ -776,10 +854,11 @@ class MapNode(Node):
                 f"search_within_sdf_map returned empty path: start_idx={tuple(sdf_start_sdf)}, goal_idx={tuple(sdf_goal_sdf)}"
             )
         path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
-        if len(path) > 0:
-            converted_path = np.array(path) * resolution + occupancy_map_origin
-            return converted_path
-        return None
+        if len(path) == 0:
+            return None
+        path = shortcut_prune_path(path, self.sdf_map, self.occupancy_map, resolution)
+        converted_path = np.asarray(path, dtype=np.float64) * resolution + occupancy_map_origin
+        return resample_polyline(converted_path, spacing=resolution)
 
 def main(args=None):
     logging.basicConfig(

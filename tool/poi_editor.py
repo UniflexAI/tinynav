@@ -21,7 +21,12 @@ from rclpy.node import Node
 import rclpy
 import os
 from math_utils import msg2np, matrix_to_quat
-from map_node import search_close_to_sdf_map, search_within_sdf_map
+from map_node import (
+    search_close_to_sdf_map,
+    search_within_sdf_map,
+    shortcut_prune_path,
+    resample_polyline,
+)
 from tool.video_db import VideoDB
 
 class SplatFile(TypedDict):
@@ -195,76 +200,6 @@ def _grid_indices_to_world(path: list[tuple[int, int, int]], origin: np.ndarray,
     return np.asarray(path, dtype=np.float32) * float(resolution) + origin[None, :]
 
 
-def _segment_is_shortcut_safe(
-    start: tuple[int, int, int],
-    goal: tuple[int, int, int],
-    sdf_map: np.ndarray,
-    occupancy_map: np.ndarray,
-    resolution: float,
-    max_segment_m: float = 1.0,
-    sdf_margin_m: float = 0.2,
-) -> bool:
-    start_np = np.asarray(start, dtype=np.float32)
-    goal_np = np.asarray(goal, dtype=np.float32)
-    delta = goal_np - start_np
-    distance_m = float(np.linalg.norm(delta) * resolution)
-    if distance_m <= 1e-6:
-        return True
-    if distance_m > max_segment_m:
-        return False
-
-    steps = max(1, int(np.ceil(float(np.max(np.abs(delta))))))
-    max_allowed_sdf = max(float(sdf_map[start]), float(sdf_map[goal]), 0.5) + sdf_margin_m
-    for t in np.linspace(0.0, 1.0, steps + 1):
-        idx = tuple(np.rint(start_np + delta * t).astype(np.int32).tolist())
-        if not _grid_index_in_bounds(idx, occupancy_map.shape):
-            return False
-        if occupancy_map[idx] == 2:
-            return False
-        if not np.isfinite(sdf_map[idx]) or float(sdf_map[idx]) > max_allowed_sdf:
-            return False
-    return True
-
-
-def _shortcut_prune_path(
-    path: list[tuple[int, int, int]],
-    sdf_map: np.ndarray,
-    occupancy_map: np.ndarray,
-    resolution: float,
-    max_segment_m: float = 1.0,
-    max_skip_nodes: int = 30,
-    max_prune_nodes: int = 100,
-) -> list[tuple[int, int, int]]:
-    # Same bounded local shortcut pruning as map_node.shortcut_prune_path.
-    if len(path) <= 2:
-        return path
-
-    prune_end = min(len(path), max_prune_nodes)
-    prune_path = path[:prune_end]
-    tail = path[prune_end:]
-
-    pruned = [prune_path[0]]
-    i = 0
-    while i < len(prune_path) - 1:
-        farthest = i + 1
-        upper = min(len(prune_path) - 1, i + max_skip_nodes)
-        for j in range(upper, i, -1):
-            if _segment_is_shortcut_safe(
-                prune_path[i],
-                prune_path[j],
-                sdf_map,
-                occupancy_map,
-                resolution,
-                max_segment_m=max_segment_m,
-            ):
-                farthest = j
-                break
-        pruned.append(prune_path[farthest])
-        i = farthest
-
-    return pruned + tail
-
-
 def _plan_sdf_path_between_points(
     start_position: np.ndarray,
     goal_position: np.ndarray,
@@ -301,8 +236,11 @@ def _plan_sdf_path_between_points(
         return None, f"No SDF path between corridor voxels: {sdf_start} -> {sdf_goal}"
 
     raw_path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
-    pruned_path = _shortcut_prune_path(raw_path, sdf_map, occupancy_map, resolution)
-    world_path = _grid_indices_to_world(pruned_path, origin, resolution)
+    pruned_path = shortcut_prune_path(raw_path, sdf_map, occupancy_map, resolution)
+    world_path = resample_polyline(
+        _grid_indices_to_world(pruned_path, origin, resolution),
+        spacing=resolution,
+    )
     return world_path, f"SDF path OK: raw={len(raw_path)}, pruned={len(pruned_path)}, start_idx={start_idx}, goal_idx={goal_idx}"
 
 
