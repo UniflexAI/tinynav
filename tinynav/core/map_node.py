@@ -18,6 +18,8 @@ import cv2
 from codetiming import Timer
 import argparse
 
+from tinynav.core.fusion_window import (
+    FUSE_MAX, FUSE_MAX_M, FUSE_MIN, select_fusion_constraints)
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
@@ -325,6 +327,12 @@ class MapNode(Node):
             f"vocab={self.vlad_centres.shape}, "
             f"descriptors={self.map_vlad_descriptors.shape}, "
             f"keyframes={len(self.vlad_timestamps)}"
+        )
+        # Said out loud because it is the one behaviour that changes silently with the
+        # tinynav pin: on upstream the solve keeps the newest 100 constraints instead.
+        self.get_logger().info(
+            f"[fusion] solving over constraints from the last {FUSE_MAX_M}m of travel "
+            f"(min {FUSE_MIN}, max {FUSE_MAX})"
         )
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
@@ -756,19 +764,6 @@ class MapNode(Node):
             pass
 
 
-    def select_fusion_constraints(self, constraints, odom_poses):
-        """Which of the accumulated relocalization constraints this solve should use.
-
-        A hook, like `select_relocalization_candidates`: upstream keeps the newest 100
-        and weights them equally, and a subclass that knows how fast this rig's odom
-        drifts can say something better. `odom_poses[i]` is the odom pose constraint
-        `i` was observed at -- what "how stale is this one" has to be measured against,
-        and the only thing the solver itself has no way to ask about.
-
-        Return the constraints to solve over, newest last.
-        """
-        return constraints[-100:]
-
     def compute_transform_from_map_to_odom(self):
         """
         Solve the optmization problem.
@@ -776,8 +771,8 @@ class MapNode(Node):
         Each constraint is one observation's implied map->odom, `camera_in_odom @
         inv(camera_in_map)` -- true at the moment that observation was taken, and only
         still true while odom has not drifted since. Which of them are still worth
-        solving over is `select_fusion_constraints`, so that a rig whose drift has been
-        measured can answer it (pilot/nav/fusion.py) without this method changing.
+        solving over is `fusion_window.select_fusion_constraints`, which bounds them by
+        odom travel where upstream bounds them by count.
         """
         relative_pose_constraint = []
         # The odom pose each constraint was taken at, kept beside them rather than
@@ -798,7 +793,7 @@ class MapNode(Node):
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
                 constraint_odom.append(camera_in_odom_world)
-        relative_pose_constraint = self.select_fusion_constraints(
+        relative_pose_constraint = select_fusion_constraints(
             relative_pose_constraint, constraint_odom)
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
