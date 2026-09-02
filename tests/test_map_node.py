@@ -3,6 +3,7 @@ sys.path.append(".")
 sys.path.append("/tinynav/tinynav/core")
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
+from tinynav.core.map_node import shortcut_prune_path
 from tinynav.core.math_utils import theta_star
 import numpy as np
 
@@ -86,9 +87,28 @@ def test_theta_star():
         assert point[0] == ground_truth_path[i][0]
         assert point[1] == ground_truth_path[i][1]
 
+def test_shortcut_prune_path_removes_local_zigzags():
+    occupancy_map = np.zeros((10, 10, 3), dtype=np.int8)
+    sdf_map = 0.5 * np.ones((10, 10, 3), dtype=np.float32)
+    path = [
+        (1, 1, 1),
+        (2, 1, 1),
+        (2, 2, 1),
+        (3, 2, 1),
+        (3, 3, 1),
+    ]
+
+    pruned = shortcut_prune_path(path, sdf_map, occupancy_map, resolution=0.1)
+
+    assert pruned[0] == path[0]
+    assert pruned[-1] == path[-1]
+    assert len(pruned) < len(path)
+
 if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
     print("Pose graph solve test passed.")
     test_theta_star()
     print("A* test passed.")
+    test_shortcut_prune_path_removes_local_zigzags()
+    print("Shortcut pruning test passed.")
