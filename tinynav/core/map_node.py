@@ -173,21 +173,15 @@ def _segment_dir_xy(paths: np.ndarray, i: int):
         return None
     return delta / n
 
-def project_on_path(
-    paths: np.ndarray,
-    pos_xy: np.ndarray,
-    fwd_xy=None,
-    min_turn_dot: float = 0.5,
-):
-    """Closest point on the polyline. If that lands on a side corridor the robot
-    is not facing yet, snap back to the incoming corner so lookahead cannot jump
-    around an L."""
+def project_on_path(paths: np.ndarray, pos_xy: np.ndarray):
+    """Closest point on the polyline as (segment index, t in [0, 1], arclength s)."""
     if len(paths) < 2:
-        return 0, 0.0
+        return 0, 0.0, 0.0
     pos_xy = np.asarray(pos_xy, dtype=np.float64)
     best_d = np.inf
     best_i = 0
     best_t = 0.0
+    seg_len = np.linalg.norm(np.diff(paths[:, :2], axis=0), axis=1)
     for i in range(len(paths) - 1):
         a = paths[i, :2]
         ab = paths[i + 1, :2] - a
@@ -196,39 +190,46 @@ def project_on_path(
         d = float(np.linalg.norm(pos_xy - (a + t * ab)))
         if d < best_d:
             best_d, best_i, best_t = d, i, t
+    s = float(np.sum(seg_len[:best_i]) + best_t * seg_len[best_i])
+    return best_i, best_t, s
 
-    if fwd_xy is None:
-        return best_i, best_t
-    fwd = np.asarray(fwd_xy, dtype=np.float64)
-    fn = float(np.linalg.norm(fwd))
-    if fn < 1e-6:
-        return best_i, best_t
-    fwd = fwd / fn
-    seg_dir = _segment_dir_xy(paths, best_i)
-    if seg_dir is None or float(fwd @ seg_dir) >= min_turn_dot:
-        return best_i, best_t
-    for j in range(best_i - 1, -1, -1):
-        incoming = _segment_dir_xy(paths, j)
-        if incoming is not None and float(fwd @ incoming) >= min_turn_dot:
-            return j, 1.0
-    return best_i, best_t
+def s_to_segment(paths: np.ndarray, s: float):
+    seg_len = np.linalg.norm(np.diff(paths[:, :2], axis=0), axis=1)
+    cum = np.concatenate(([0.0], np.cumsum(seg_len)))
+    s = float(np.clip(s, 0.0, cum[-1]))
+    i = int(np.searchsorted(cum, s, side='right') - 1)
+    i = min(max(i, 0), len(seg_len) - 1)
+    t = (s - cum[i]) / max(seg_len[i], 1e-12)
+    if t <= 1e-9 and i > 0:
+        return i - 1, 1.0
+    return i, float(np.clip(t, 0.0, 1.0))
+
+def first_near_s(paths: np.ndarray, pos_xy: np.ndarray, max_dist: float = 0.5):
+    """Earliest arclength at which the path comes within max_dist of pos."""
+    pos_xy = np.asarray(pos_xy, dtype=np.float64)
+    s = 0.0
+    for i in range(len(paths) - 1):
+        a = paths[i, :2]
+        b = paths[i + 1, :2]
+        sl = float(np.linalg.norm(b - a))
+        n = max(1, int(np.ceil(sl / 0.1)))
+        for k in range(n + 1):
+            t = k / n
+            if float(np.linalg.norm(a + t * (b - a) - pos_xy)) <= max_dist:
+                return s + t * sl
+        s += sl
+    return None
 
 def pick_path_lookahead(
     paths: np.ndarray,
-    pos_xy: np.ndarray,
-    fwd_xy=None,
+    seg_i: int,
+    t: float,
     lookahead_m: float = 2.5,
     min_turn_dot: float = 0.5,
-    corner_lead_m: float = 0.4,
 ) -> np.ndarray:
-    """Carrot along the path, stopped at the first turn the robot is not facing yet.
-
-    A short lead past the vertex is only for starting yaw; the 2.5 m lookahead
-    continues down a new corridor after heading has committed to it.
-    """
+    """Carrot along the path, stopped exactly at the first turn beyond ~60 deg."""
     if len(paths) < 2:
         return paths[-1]
-    seg_i, t = project_on_path(paths, pos_xy, fwd_xy, min_turn_dot)
     ref_dir = _segment_dir_xy(paths, seg_i)
     if ref_dir is None:
         return paths[min(seg_i + 1, len(paths) - 1)]
@@ -243,15 +244,7 @@ def pick_path_lookahead(
         if direction is None:
             continue
         if float(ref_dir @ direction) < min_turn_dot:
-            lead = 0.0
-            for k in range(i, len(paths) - 1):
-                ds = float(np.linalg.norm(paths[k + 1, :2] - paths[k, :2]))
-                if lead + ds >= corner_lead_m:
-                    alpha = (corner_lead_m - lead) / max(ds, 1e-12)
-                    return paths[k] + alpha * (paths[k + 1] - paths[k])
-                lead += ds
-                target_idx = k + 1
-            return paths[target_idx]
+            return paths[i]
         acc += float(np.linalg.norm(paths[i + 1, :2] - paths[i, :2]))
         target_idx = i + 1
         if acc >= lookahead_m:
@@ -444,6 +437,7 @@ class MapNode(Node):
         self._speed_estimate: float | None = None
         self.cached_nav_path_in_map = None
         self.cached_nav_path_poi_index = -1
+        self._path_s: float | None = None
 
         self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
         self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
@@ -473,6 +467,7 @@ class MapNode(Node):
             if not self.pois:
                 self.poi_index = -1
                 self.cached_nav_path_in_map = None
+                self._path_s = None
                 # Signal planning_node to clear target_pose so it stops publishing paths
                 dummy_pose = np.eye(4)
                 self.poi_change_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "map"))
@@ -486,6 +481,7 @@ class MapNode(Node):
             self._speed_estimate = None
             self.cached_nav_path_in_map = None
             self.cached_nav_path_poi_index = -1
+            self._path_s = None
             self.get_logger().info(f"Parsed POIs: {self.pois}")
         except json.JSONDecodeError as e:
             self.get_logger().error(f"Failed to parse POIs JSON: {e}")
@@ -827,6 +823,7 @@ class MapNode(Node):
             self._speed_estimate = None
             self.cached_nav_path_in_map = None
             self.cached_nav_path_poi_index = -1
+            self._path_s = None
             self.poi_change_pub.publish(np2msg(np.eye(4), self.get_clock().now().to_msg(), "world", "map"))
             if self.poi_index >= len(self.pois) and not self._nav_completed:
                 self._nav_completed = True
@@ -840,8 +837,7 @@ class MapNode(Node):
         )
         if not needs_replan:
             paths = self.cached_nav_path_in_map
-            fwd_xy = pose_in_map[:2, 2]
-            seg_i, t = project_on_path(paths, pos[:2], fwd_xy)
+            seg_i, t, _ = project_on_path(paths, pos[:2])
             proj = paths[seg_i, :2] + t * (paths[seg_i + 1, :2] - paths[seg_i, :2])
             if np.linalg.norm(proj - pos[:2]) > 0.5:
                 needs_replan = True
@@ -851,15 +847,25 @@ class MapNode(Node):
             if paths is not None:
                 self.cached_nav_path_in_map = paths
                 self.cached_nav_path_poi_index = self.poi_index
+                self._path_s = None
             else:
                 self.cached_nav_path_in_map = None
                 self.cached_nav_path_poi_index = -1
+                self._path_s = None
                 return
 
         paths = self.cached_nav_path_in_map
         self._publish_global_plan(paths)
-        fwd_xy = pose_in_map[:2, 2]
-        seg_i, t = project_on_path(paths, pos[:2], fwd_xy)
+        _, _, s_meas = project_on_path(paths, pos[:2])
+        if self._path_s is None:
+            near = first_near_s(paths, pos[:2])
+            if near is not None and s_meas > near + 0.6:
+                self._path_s = near
+            else:
+                self._path_s = s_meas
+        elif s_meas <= self._path_s + 0.8:
+            self._path_s = max(self._path_s - 0.3, s_meas)
+        seg_i, t = s_to_segment(paths, self._path_s)
         closest_idx = seg_i + 1 if t > 0.5 else seg_i
 
         remaining_length = sum(
@@ -889,7 +895,7 @@ class MapNode(Node):
             "estimated_remaining_s": round(estimated_remaining_s, 1),
         })))
 
-        target_position = pick_path_lookahead(paths, pos[:2], fwd_xy)
+        target_position = pick_path_lookahead(paths, seg_i, t)
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
