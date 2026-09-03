@@ -22,6 +22,16 @@ def _require_node():
     return runner.node
 
 
+def _active_map_payload(node):
+    """Return the active map identity without changing any runtime state."""
+    map_path = os.path.realpath(node.map_path)
+    return {
+        'active_map': os.path.basename(map_path.rstrip(os.sep)),
+        'map_path': map_path,
+        'localized': bool(getattr(node, '_localized', False)),
+    }
+
+
 class MapBuildRequest(BaseModel):
     bag_name: Optional[str] = None
 
@@ -55,8 +65,15 @@ def map_current():
         raise HTTPException(500, str(e))
     return {
         'imageUrl': '/map/image',
+        'name': _active_map_payload(node)['active_map'],
         **meta,
     }
+
+
+@router.get('/active')
+def map_active():
+    """Returns the map currently selected by tinynav_db/map."""
+    return _active_map_payload(_require_node())
 
 
 @router.get('/image', response_class=Response)
