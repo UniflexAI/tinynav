@@ -202,10 +202,23 @@ def generate_predefined_trajectory_vocabularies(
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
+    """Score trajectories by min ESDF on the footprint outline (plus center).
+
+    Long bodies (e.g. B2) can clip obstacles at the waist if only 4 corners are
+    checked, so the rectangle perimeter is sampled every ~0.15 m.
+    """
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
+    sample_step = 0.15
+    length = front_len + rear_len
+    width = 2.0 * half_w
+    n_long = int(length / sample_step) + 1
+    n_lat = int(width / sample_step) + 1
+    if n_long < 2:
+        n_long = 2
+    if n_lat < 2:
+        n_lat = 2
 
     for t in range(len(trajectories)):
         traj = trajectories[t]
@@ -228,30 +241,40 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
             left_x = -fwd_y
             left_y = fwd_x
 
-            # center + 4 corners, unrolled for numba
-            check_xs = (
-                x_world,
-                x_world + fwd_x * front_len + left_x * half_w,
-                x_world + fwd_x * front_len - left_x * half_w,
-                x_world - fwd_x * rear_len  + left_x * half_w,
-                x_world - fwd_x * rear_len  - left_x * half_w,
-            )
-            check_ys = (
-                y_world,
-                y_world + fwd_y * front_len + left_y * half_w,
-                y_world + fwd_y * front_len - left_y * half_w,
-                y_world - fwd_y * rear_len  + left_y * half_w,
-                y_world - fwd_y * rear_len  - left_y * half_w,
-            )
-
-            for k in range(5):
-                x_img = int((check_xs[k] - origin[0]) / resolution)
-                y_img = int((check_ys[k] - origin[1]) / resolution)
-                if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
-                    dist = ESDF_map[x_img, y_img]
-                    if dist < min_dist_for_traj:
-                        min_dist_for_traj = dist
-                        closest_step_for_traj = i
+            for li in range(n_long):
+                lon = -rear_len + (front_len + rear_len) * li / (n_long - 1)
+                for side in range(2):
+                    lat = half_w if side == 0 else -half_w
+                    px = x_world + fwd_x * lon + left_x * lat
+                    py = y_world + fwd_y * lon + left_y * lat
+                    x_img = int((px - origin[0]) / resolution)
+                    y_img = int((py - origin[1]) / resolution)
+                    if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
+                        dist = ESDF_map[x_img, y_img]
+                        if dist < min_dist_for_traj:
+                            min_dist_for_traj = dist
+                            closest_step_for_traj = i
+            for wi in range(n_lat):
+                lat = -half_w + (2.0 * half_w) * wi / (n_lat - 1)
+                for ei in range(2):
+                    lon = front_len if ei == 0 else -rear_len
+                    px = x_world + fwd_x * lon + left_x * lat
+                    py = y_world + fwd_y * lon + left_y * lat
+                    x_img = int((px - origin[0]) / resolution)
+                    y_img = int((py - origin[1]) / resolution)
+                    if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
+                        dist = ESDF_map[x_img, y_img]
+                        if dist < min_dist_for_traj:
+                            min_dist_for_traj = dist
+                            closest_step_for_traj = i
+            # center catches obstacles fully inside the rectangle
+            x_img = int((x_world - origin[0]) / resolution)
+            y_img = int((y_world - origin[1]) / resolution)
+            if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
+                dist = ESDF_map[x_img, y_img]
+                if dist < min_dist_for_traj:
+                    min_dist_for_traj = dist
+                    closest_step_for_traj = i
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
@@ -522,7 +545,7 @@ class PlanningNode(Node):
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.99
+            self.occupancy_grid *= 0.995
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
@@ -580,16 +603,24 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
+                current_dist = np.linalg.norm(init_p - target_end)
                 # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
                 # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
                 heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
+                # Standing still is otherwise cheap (good ESDF, dist unchanged), so a
+                # longer walkable detour loses. Penalize near-zero vx while the goal
+                # is still away so those detours get picked.
+                idle_penalty = 0.0
+                if current_dist > 0.4 and abs(param[0]) < ROBOT_CONFIG.min_linear_vel:
+                    idle_penalty = 4000.0
 
                 return (
-                    score * 100000
-                    + 100 * dist
-                    + 100 * heading
+                    score * 1000
+                    + 500 * dist
+                    + 50 * heading
                     + 10 * abs(self.last_param[0] - param[0])
                     + 10 * abs(self.last_param[1] - param[1])
+                    + idle_penalty
                     + reverse_gate_penalty
                 )
 

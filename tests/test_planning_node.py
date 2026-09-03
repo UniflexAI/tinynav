@@ -154,16 +154,17 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
                       [0.0, -1.0, 0.0]])
 
 # mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
-# the weights (100000/100/100/10/10) and heading fade distance (2.0) in sync by hand
-_HEADING_WEIGHT = 100.0
+# the weights (1000/500/50/10/10) and heading fade distance (2.0) in sync by hand
+_HEADING_WEIGHT = 50.0
 _HEADING_FADE_DIST = 2.0
+_DIST_WEIGHT = 500.0
 
 def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
     dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
     heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / _HEADING_FADE_DIST)
     return (
-        score * 100000
-        + 100 * dist
+        score * 1000
+        + _DIST_WEIGHT * dist
         + heading_weight * heading
         + 10 * abs(last_param[0] - param[0])
         + 10 * abs(last_param[1] - param[1])
@@ -233,7 +234,7 @@ def test_heading_fade_is_monotonic_in_distance():
 
     def heading_term(range_m):
         target = np.array([0.0, range_m, 0.0])  # 90 deg off the nose at every range
-        return _trajectory_cost(traj, param, 0.0, target, last_param) - 100 * range_m
+        return _trajectory_cost(traj, param, 0.0, target, last_param) - _DIST_WEIGHT * range_m
 
     terms = [heading_term(r) for r in (0.5, 1.0, 2.0, 4.0)]
     assert terms[0] < terms[1] < terms[2], f"heading penalty not growing with range: {terms}"
