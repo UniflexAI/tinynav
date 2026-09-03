@@ -19,6 +19,19 @@
             <button id="realtimeButton" class="primary">Realtime</button>
           </div>
         </div>
+        <div class="scenario-bar">
+          <label class="scenario-label">Scenario
+            <select id="scenarioSelect">
+              <option value="l_turn">L turn</option>
+              <option value="straight">Straight</option>
+              <option value="s_bend">S bend</option>
+              <option value="narrow_gate">Narrow gate</option>
+              <option value="open_target">Open target</option>
+              <option value="back_target">Back target</option>
+            </select>
+          </label>
+          <button id="loadScenario" class="primary" type="button">Load</button>
+        </div>
         <canvas id="sceneCanvas" width="720" height="720" aria-label="Scene editor"></canvas>
         <div class="toolbar">
           <button id="addBox">Add Box</button>
@@ -125,6 +138,6 @@
         </details>
       </section>
     </main>
-    <script src="/static/app.js?v=20260821"></script>
+    <script src="/static/app.js?v=20260902"></script>
   </body>
 </html>

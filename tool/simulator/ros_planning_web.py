@@ -68,7 +68,7 @@ CAMERA_DEFAULTS = {
     "image_height": 100,
     "fx": 80.0,
     "fy": 50.0,
-    "max_range": 15.0,
+    "max_range": 8.0,
     "mount_height": 0.45,
 }
 ROBOT_PRESETS = {
@@ -76,6 +76,20 @@ ROBOT_PRESETS = {
     for name in dir(robot_specs_mod)
     if name.endswith("_CONFIG") and name != "ROBOT_CONFIG"
 }
+
+
+def l_corridor_objects() -> list[dict[str, Any]]:
+    """L-shaped corridor used as the default web-sim planning scene."""
+    return [
+        {"name": "lower_horizontal_wall", "kind": "box", "center": [1.8, -0.85, 0.65], "size": [5.6, 0.3, 1.3]},
+        {"name": "upper_horizontal_wall_before_turn", "kind": "box", "center": [1.15, 0.85, 0.65], "size": [4.3, 0.3, 1.3]},
+        {"name": "inside_corner_block", "kind": "box", "center": [3.45, 0.85, 0.65], "size": [0.3, 0.3, 1.3]},
+        {"name": "left_vertical_wall_after_turn", "kind": "box", "center": [3.15, 2.8, 0.65], "size": [0.3, 3.6, 1.3]},
+        {"name": "right_vertical_wall", "kind": "box", "center": [4.85, 2.55, 0.65], "size": [0.3, 5.1, 1.3]},
+        {"name": "entry_left_stub", "kind": "box", "center": [-1.05, 0.85, 0.65], "size": [0.8, 0.3, 1.3]},
+        {"name": "entry_right_stub", "kind": "box", "center": [-1.05, -0.85, 0.65], "size": [0.8, 0.3, 1.3]},
+        {"name": "far_end_cap", "kind": "box", "center": [4.0, 5.25, 0.65], "size": [2.0, 0.3, 1.3]},
+    ]
 
 
 def _robot_dict(name: str | None = None) -> dict[str, Any]:
@@ -91,10 +105,10 @@ def default_config(robot_name: str | None = None) -> dict[str, Any]:
         "obstacle": copy.deepcopy(robot.get("obstacle") or {}),
         "camera": copy.deepcopy(CAMERA_DEFAULTS),
         "start": {"xy": [0.0, 0.0], "yaw_deg": 0.0},
-        "target": [4.0, 0.0, 0.0],
+        "target": [3.9, 4.4, 0.0],
         "map_path": None,
         "map_name": None,
-        "objects": [],
+        "objects": l_corridor_objects(),
     }
 
 

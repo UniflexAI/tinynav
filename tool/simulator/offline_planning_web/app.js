@@ -27,6 +27,96 @@ let robotPresets = {};
 let mapBackgroundImage = null;
 let mapBackgroundSrc = null;
 
+function simBox(name, center, size) {
+  return { name, kind: "box", center, size };
+}
+
+const SCENARIOS = {
+  l_turn: {
+    label: "L turn",
+    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
+    target: [3.9, 4.4, 0.0],
+    cameraMaxRange: 8.0,
+    bounds: { xMin: -1.4, xMax: 5.6, yMin: -1.6, yMax: 5.7 },
+    objects: [
+      simBox("lower_horizontal_wall", [1.8, -0.85, 0.65], [5.6, 0.3, 1.3]),
+      simBox("upper_horizontal_wall_before_turn", [1.15, 0.85, 0.65], [4.3, 0.3, 1.3]),
+      simBox("inside_corner_block", [3.45, 0.85, 0.65], [0.3, 0.3, 1.3]),
+      simBox("left_vertical_wall_after_turn", [3.15, 2.8, 0.65], [0.3, 3.6, 1.3]),
+      simBox("right_vertical_wall", [4.85, 2.55, 0.65], [0.3, 5.1, 1.3]),
+      simBox("entry_left_stub", [-1.05, 0.85, 0.65], [0.8, 0.3, 1.3]),
+      simBox("entry_right_stub", [-1.05, -0.85, 0.65], [0.8, 0.3, 1.3]),
+      simBox("far_end_cap", [4.0, 5.25, 0.65], [2.0, 0.3, 1.3]),
+    ],
+  },
+  straight: {
+    label: "Straight",
+    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
+    target: [5.2, 0.0, 0.0],
+    cameraMaxRange: 8.0,
+    bounds: { xMin: -0.8, xMax: 6.0, yMin: -1.8, yMax: 1.8 },
+    objects: [
+      simBox("left_wall", [2.55, 0.9, 0.65], [6.1, 0.25, 1.3]),
+      simBox("right_wall", [2.55, -0.9, 0.65], [6.1, 0.25, 1.3]),
+      simBox("far_cap", [5.8, 0.0, 0.65], [0.25, 2.0, 1.3]),
+    ],
+  },
+  s_bend: {
+    label: "S bend",
+    start: { xy: [0.0, -0.7], yaw_deg: 0.0 },
+    target: [5.2, 0.7, 0.0],
+    cameraMaxRange: 8.0,
+    bounds: { xMin: -0.8, xMax: 6.0, yMin: -2.2, yMax: 2.2 },
+    objects: [
+      simBox("lower_wall_entry", [1.25, -1.45, 0.65], [3.1, 0.22, 1.3]),
+      simBox("upper_wall_entry", [1.15, 0.55, 0.65], [2.9, 0.22, 1.3]),
+      simBox("lower_wall_exit", [4.05, -0.35, 0.65], [3.1, 0.22, 1.3]),
+      simBox("upper_wall_exit", [4.05, 1.45, 0.65], [3.1, 0.22, 1.3]),
+      simBox("left_deflector", [2.55, -0.95, 0.65], [0.22, 0.9, 1.3]),
+      simBox("right_deflector", [3.25, 0.95, 0.65], [0.22, 0.9, 1.3]),
+    ],
+  },
+  narrow_gate: {
+    label: "Narrow gate",
+    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
+    target: [4.8, 0.0, 0.0],
+    cameraMaxRange: 8.0,
+    bounds: { xMin: -0.8, xMax: 5.6, yMin: -2.1, yMax: 2.1 },
+    objects: [
+      simBox("left_wall", [2.2, 1.05, 0.65], [5.6, 0.25, 1.3]),
+      simBox("right_wall", [2.2, -1.05, 0.65], [5.6, 0.25, 1.3]),
+      simBox("gate_left_block", [2.65, 0.75, 0.65], [0.45, 0.45, 1.3]),
+      simBox("gate_right_block", [2.65, -0.75, 0.65], [0.45, 0.45, 1.3]),
+      simBox("far_cap", [5.15, 0.0, 0.65], [0.25, 2.3, 1.3]),
+    ],
+  },
+  open_target: {
+    label: "Open target",
+    start: { xy: [0.0, 0.0], yaw_deg: -45.0 },
+    target: [4.2, 2.4, 0.0],
+    cameraMaxRange: 8.0,
+    bounds: { xMin: -1.0, xMax: 5.4, yMin: -2.4, yMax: 3.4 },
+    objects: [
+      simBox("near_column", [1.45, 0.65, 0.65], [0.45, 0.45, 1.3]),
+      simBox("middle_column", [2.65, -0.65, 0.65], [0.5, 0.5, 1.3]),
+      simBox("far_column", [3.35, 1.45, 0.65], [0.45, 0.45, 1.3]),
+      simBox("side_shelf", [3.9, -1.55, 0.65], [1.2, 0.35, 1.3]),
+    ],
+  },
+  back_target: {
+    label: "Back target",
+    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
+    target: [-1.35, 0.0, 0.0],
+    cameraMaxRange: 5.0,
+    bounds: { xMin: -2.2, xMax: 1.6, yMin: -1.6, yMax: 1.6 },
+    objects: [
+      simBox("front_block", [0.95, 0.0, 0.65], [0.25, 2.0, 1.3]),
+      simBox("left_boundary", [-0.35, 1.05, 0.65], [2.6, 0.22, 1.3]),
+      simBox("right_boundary", [-0.35, -1.05, 0.65], [2.6, 0.22, 1.3]),
+    ],
+  },
+};
+
 const canvas = document.getElementById("sceneCanvas");
 const ctx = canvas.getContext("2d");
 const mapCanvas = document.getElementById("mapCanvas");
@@ -55,6 +145,7 @@ const fields = {
   objectSZ: $("objectSZ"),
   configText: $("configText"),
   robotPreset: $("robotPreset"),
+  scenarioSelect: $("scenarioSelect"),
   robotSummary: $("robotSummary"),
   cameraSummary: $("cameraSummary"),
 };
@@ -940,6 +1031,48 @@ async function loadDefault() {
   statusEl.textContent = "Ready";
 }
 
+async function loadScenarioFromSelection() {
+  const key = fields.scenarioSelect.value;
+  const scenario = SCENARIOS[key];
+  if (!scenario) {
+    statusEl.textContent = "Select a scenario first";
+    return;
+  }
+  stopRealtime();
+  if (!config) config = await (await fetch("/api/default-config")).json();
+  const robot = structuredClone(config.robot || robotPresets.go2 || {});
+  const camera = structuredClone(config.camera || {});
+  camera.max_range = scenario.cameraMaxRange;
+  config = {
+    ...structuredClone(config),
+    name: scenario.label,
+    robot,
+    obstacle: structuredClone(robot.obstacle || config.obstacle || {}),
+    camera,
+    start: structuredClone(scenario.start),
+    target: structuredClone(scenario.target),
+    map_path: null,
+    map_name: null,
+    map_info: null,
+    map_background: null,
+    objects: structuredClone(scenario.objects),
+  };
+  setMapBackground(null);
+  sceneBounds = { ...scenario.bounds };
+  selectedIndex = config.objects.length ? 0 : -1;
+  currentFrame = null;
+  realtimePath = [];
+  fields.mapSelect.value = "";
+  refreshFields();
+  statusEl.textContent = `Loading ${scenario.label}...`;
+  try {
+    await pushConfigToServer(true);
+    statusEl.textContent = `Loaded ${scenario.label}`;
+  } catch (error) {
+    statusEl.textContent = `Scenario error: ${error.message}`;
+  }
+}
+
 async function loadMapFromSelection() {
   const mapName = fields.mapSelect.value.trim();
   if (!mapName) {
@@ -1002,6 +1135,7 @@ realtimeButton.addEventListener("click", toggleRealtime);
 controlsToggle.addEventListener("click", () => setControlsVisible(controlsPanel.classList.contains("is-hidden")));
 $("resetScene").addEventListener("click", loadDefault);
 $("loadMap").addEventListener("click", loadMapFromSelection);
+$("loadScenario").addEventListener("click", loadScenarioFromSelection);
 $("applyJson").addEventListener("click", () => {
   const next = JSON.parse(fields.configText.value);
   if (!next.obstacle) next.obstacle = config.obstacle;

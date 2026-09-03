@@ -98,6 +98,19 @@ button.primary {
   gap: 8px;
 }
 
+.scenario-bar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.scenario-label {
+  grid-template-columns: 1fr;
+  margin: 0;
+}
+
 button.secondary {
   background: #f3f6f9;
 }
