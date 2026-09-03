@@ -830,34 +830,23 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.global_plan_pub.publish(path_msg)
 
-    def _log_nav_skip(self, why: str) -> None:
-        self.get_logger().info(
-            f"[nav_timer] skip: {why}: poi_index={self.poi_index}, "
-            f"n_pois={len(self.pois)}, "
-            f"T={'set' if self.T_from_map_to_odom is not None else 'None'}, "
-            f"odom={'set' if self.latest_odom_pose is not None else 'None'}"
-        )
-
     def nav_target_timer_callback(self):
-        if self.T_from_map_to_odom is None or self.latest_odom_pose is None:
-            self._log_nav_skip("no pose")
+        if (
+            self.poi_index < 0
+            or self.poi_index >= len(self.pois)
+            or self.T_from_map_to_odom is None
+            or self.latest_odom_pose is None
+        ):
+            self.get_logger().info(
+                f"[nav_timer] skip: poi_index={self.poi_index}, "
+                f"n_pois={len(self.pois)}, "
+                f"T={'set' if self.T_from_map_to_odom is not None else 'None'}, "
+                f"odom={'set' if self.latest_odom_pose is not None else 'None'}"
+            )
             return
 
-        # Where the robot is, on the map. **Published whether or not a goal is in
-        # flight**: it is state, not a product of having somewhere to drive. The
-        # arrival turn runs AFTER the last POI is consumed and steers by this
-        # topic, so publishing it under the goal guard deadlocked it -- measured on
-        # 122 on 2026-09-03, a leg that arrived left `poi_index == len(pois)`, this
-        # callback returned before the publish on every tick after, and
-        # `pilot/nav/face.py:_await_map_yaw` then waited out its whole 90s timeout
-        # for a map yaw nothing was going to send while it held /cmd_vel.
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
-
-        if self.poi_index < 0 or self.poi_index >= len(self.pois):
-            self._log_nav_skip("no goal")
-            return
-
         # Capture speed (m/s) near the robot; +inf when off-path/unknown (speed_cap's
         # own "no cap" sentinel) -> planning's isfinite guard treats it as no data and
         # falls back to vx_max, so publish it straight through.
