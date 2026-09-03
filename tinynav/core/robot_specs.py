@@ -14,10 +14,10 @@ class ObstacleConfig:
     (which are -0.4/0.4, 0.1, 0.2, 2). They arrived as one global config inside
     planning_node -- `94e9871` tuned min_wall_span_m to 0.05 and `95ec80a` the
     occupancy threshold -- and moved here when upstream made the config per-robot.
-    The move is upstream's structure with the fork's numbers. No robot below overrides
-    the band: upstream gives the taller ones -0.6/0.6, and adopting that would widen
-    what b2 treats as an obstacle -- a measured change, not a merge. The field is here
-    per-robot when someone measures it.
+    The move is upstream's structure with the fork's numbers. The band below is the
+    default for every robot except b2, which the operator widened to -0.6/0.6 on
+    2026-09-03 -- that is what this field is per-robot for, and it is a judgement about
+    a rig rather than something a merge should have done on its own.
     """
     robot_z_bottom: float = -0.45
     robot_z_top: float = 0.2
@@ -96,6 +96,10 @@ B2_CONFIG = RobotConfig(
     camera_x=0.5, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
+    # Taller than the default band covers: the operator's call, 2026-09-03. This is
+    # the same band upstream ships for b2, adopted now that someone has judged it
+    # rather than as a side effect of a merge.
+    obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
 B2W_CONFIG = RobotConfig(

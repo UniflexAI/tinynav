@@ -640,8 +640,19 @@ class MapNode(Node):
     def rank_relocalization_candidates(self, pnp_candidates: list, candidate_timestamps: list[int]) -> tuple[bool, np.ndarray, float]:
         """Pick the pose among the surviving candidates. `candidate_timestamps` is
         parallel to `pnp_candidates` so an override can see where each one sits in the
-        map (the batch call below only ever reports the winner)."""
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        map (the batch call below only ever reports the winner).
+
+        **`self.K` and not `self.map_K`.** PnP projects the map's 3D points into the
+        image the 2D points came from, which is the live one -- `map_K` belongs to the
+        camera that BUILT the map and is right only where the map's own depth is
+        un-projected (`keypoint_with_depth_to_3d` above). The two were equal until the
+        camera on this rig was REPLACED, so both calibrations are correct and describe
+        different hardware: measured on 122 on 2026-09-03, live fx 301.61 / cx 268.37
+        against the maps' 312.30 / 275.90. A 3.4% focal error reprojects a point 270px
+        off-centre by ~9px, past solvePnPRansac's 8px default, so correct
+        correspondences were being counted as outliers: 222 relocalizations failed for
+        too few inliers on one drive."""
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.K)
         return success, best_pose_in_camera, pose_cov_weight
 
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
