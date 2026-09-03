@@ -1,4 +1,10 @@
-"""How many relocalization observations the pose-graph solve averages over.
+"""How many relocalization observations the solve averages over.
+
+`pose_graph_solve` is not a graph on this path: node 1 is held constant at identity
+and every constraint is `(0, 1, observation_T)`, so there is one free variable and N
+direct measurements of it. The solve is a weighted mean on SE(3), which makes this
+module the whole of the fusion -- there is no structure here for a wider window to
+exploit.
 
 Each constraint is one observation's implied map->odom. Upstream solves over the
 newest 100, which at ~0.8 relocalizations a second reaches back two minutes. That
@@ -10,26 +16,41 @@ the window** -- measured on 118 standing still, 20 consecutive PnP answers agree
 on (42.44, -4.47) while the fused estimate sat 0.75m away, because a good
 observation was one vote against ninety-nine older ones.
 
-So the window is small: the newest `FUSE_WINDOW` observations, and no more. Small
-enough that the lag is nothing, still more than one so a single PnP is damped.
+So the window is 1: the newest observation IS the transform, and nothing is averaged.
 
-**Nothing here judges an observation.** Two attempts to were measured failing in
-opposite directions on 2026-09-03: refusing what disagreed with the current estimate
-defended a wrong pose through 157 consecutive refusals over 20m, 104 of them the
-truth; letting the rejected ones overrule it when enough agreed believed ten aliased
-matches that agreed with each other to centimetres and moved the pose 49.65m. A
-trend-consensus filter over a 3m travel window was tried in their place and is what
-this replaced -- it starved the solve exactly where the fix rate collapses, and the
-corridor aliasing it was aimed at is answered upstream of here, by the candidate
-radius in `pilot/nav/candidates.py`. The odometry veto in `pilot/nav/jump.py` is the
-only thing that refuses a result, and it refuses the fused pose, not an observation.
+**Averaging cannot help here anyway**, because the error is not noise. Measured on
+122 (2026-09-03) on `home-to-n2-1`, one straight 35m corridor: PnP returns two nearly
+equally good answers 4-9m apart -- 72 inliers against 72 for a place 4.6m away -- and
+which one wins flips. Averaging a bimodal distribution gives the point between the two
+modes, which is nowhere; a LARGE window also drags the estimate behind the robot,
+since the old mode keeps most of the votes. At window 3 the pose moved p50 1.21m over
+19 consecutive solves, following the flip. Neither size is right, and no size is.
+
+What separates the two modes is odometry, not the observations: `pilot/nav/jump.py`
+refuses a transform that moved further than the robot rode. **That is the only
+discriminator in the path**, which is why this module no longer tries to be one.
+
+**Nothing here judges an observation**, and three attempts to were measured failing on
+2026-09-03. Refusing what disagreed with the current estimate defended a wrong pose
+through 157 consecutive refusals over 20m, 104 of them the truth. Letting the rejected
+ones overrule it when enough agreed believed ten aliased matches that agreed with each
+other to centimetres and moved the pose 49.65m. Requiring a new observation to lie on
+the window's own robust regression line failed for the same reason: **a run of aliased
+matches is itself a smooth line** -- the robot drives straight down the corridor and so
+does the wrong hypothesis -- so the test rejects lone outliers and admits exactly the
+correlated runs that do the damage.
 """
 import os
 
-#: How many of the newest observations the solve averages over. A count and not a
-#: distance: what has to stay small is the number of votes an old observation gets,
-#: and the lag that number buys is half the window whether the robot is moving or not.
-FUSE_WINDOW = int(os.environ.get("TINYNAV_FUSE_WINDOW", "3"))
+#: How many of the newest observations the solve averages over. 1 means the newest
+#: observation IS the transform, and averaging is off.
+#:
+#: `pose_graph_solve` is not a graph here: node 1 is held constant at identity and
+#: every constraint is `(0, 1, observation_T)`, so there is one free variable and N
+#: direct measurements of it. The solve is a weighted mean on SE(3) and nothing else,
+#: which makes this parameter the whole of it -- and the average is what lags, because
+#: the observations are not a constant plus noise. See the module docstring.
+FUSE_WINDOW = int(os.environ.get("TINYNAV_FUSE_WINDOW", "1"))
 
 
 def select_fusion_constraints(constraints, odom_poses):
