@@ -15,7 +15,7 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
-from dataclasses import dataclass
+from dataclasses import replace
 from numba import njit
 import cv2
 import rclpy
@@ -30,7 +30,7 @@ from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
-from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 
 # === Helper functions ===
 @njit(cache=True)
@@ -114,16 +114,6 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
                     occupancy_grid[i, j, k] = 0.1
 
     return occupancy_grid
-
-
-@dataclass
-class ObstacleConfig:
-    robot_z_bottom: float = -0.45
-    robot_z_top: float = 0.2
-    occ_threshold: float = 0.05
-    min_wall_span_m: float = 0.05
-    ground_band_m: float = 0.3
-    dilation_cells: int = 0
 
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
@@ -552,7 +542,8 @@ class PlanningNode(Node):
             f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
             f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
             f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
-            f"safety_r={ROBOT_CONFIG.safety_radius}m)"
+            f"safety_r={ROBOT_CONFIG.safety_radius}m, "
+            f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
@@ -589,14 +580,20 @@ class PlanningNode(Node):
         # floating-obstacle check, to avoid filtering out real low/thin obstacles.
         # A ROS parameter, like the climb knobs below, so a site can retune from the
         # launch without a code edit.
-        self.declare_parameter('min_wall_span_m', ObstacleConfig.min_wall_span_m)
-        self.obstacle_config = ObstacleConfig(
+        # Per robot, from robot_specs, with the site's override on top: upstream made
+        # the config per-robot and this keeps that plumbing rather than building a
+        # fresh one from class defaults.
+        self.declare_parameter('min_wall_span_m',
+                               ROBOT_CONFIG.obstacle.min_wall_span_m)
+        self.obstacle_config = replace(
+            ROBOT_CONFIG.obstacle,
             min_wall_span_m=float(self.get_parameter('min_wall_span_m').value))
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
         self.grid_shape = (100, 100, z_layers)
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
+
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 4
         self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt

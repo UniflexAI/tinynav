@@ -299,6 +299,10 @@ def test_carrying_straight_on_at_a_corner_costs_more_than_turning():
 
 
 if __name__ == "__main__":
+    # Upstream's goal-heading tests are deliberately absent: they exercise
+    # `goal_heading_error` and a Python `cost_function` closure, and this fork scores
+    # the end heading inside `score_trajectories_by_ESDF` off the route heading field
+    # instead. What replaces them are the route-heading tests below.
     test_run_raycasting_comparison()
     test_build_route_fields_no_route()
     test_route_heading_is_the_route_direction_not_the_bearing_to_the_goal()
@@ -326,7 +330,8 @@ def _span_map(config, relaxed_cell, relaxed=0.3):
 
 
 def test_min_span_map_relaxes_only_the_cells_it_covers():
-    from planning_node import ObstacleConfig, build_obstacle_map
+    from planning_node import build_obstacle_map
+    from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
     grid, origin = _riser_grid(0.15, config)
     args = (grid, origin, 0.05)
@@ -340,7 +345,8 @@ def test_min_span_map_relaxes_only_the_cells_it_covers():
 
 
 def test_min_span_map_still_blocks_taller_verticals():
-    from planning_node import ObstacleConfig, build_obstacle_map
+    from planning_node import build_obstacle_map
+    from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
     grid, origin = _riser_grid(0.35, config)   # above the relaxed threshold
     assert build_obstacle_map(grid, origin, 0.05, robot_z=0.0, config=config,
@@ -350,7 +356,8 @@ def test_min_span_map_still_blocks_taller_verticals():
 def test_min_span_map_relaxes_steps_above_the_ground_band():
     """Mid-climb the next riser starts above robot_z_bottom + ground_band_m; a relaxed
     cell must still read it as a step, not as a floating obstacle."""
-    from planning_node import ObstacleConfig, build_obstacle_map
+    from planning_node import build_obstacle_map
+    from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
     resolution = 0.05
     grid, origin = _riser_grid(0.0, config, resolution)
@@ -365,7 +372,8 @@ def test_min_span_map_relaxes_steps_above_the_ground_band():
 
 
 def test_no_min_span_map_is_the_strict_default():
-    from planning_node import ObstacleConfig, build_obstacle_map
+    from planning_node import build_obstacle_map
+    from tinynav.core.robot_specs import ObstacleConfig
     config = ObstacleConfig()
     grid, origin = _riser_grid(0.15, config)
     assert np.array_equal(

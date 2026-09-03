@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+export TINYNAV_DB_PATH="${TINYNAV_DB_PATH:-$ROOT/tinynav_db}"
 set +u
 source /opt/ros/humble/setup.bash
 set -u

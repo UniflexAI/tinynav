@@ -1,6 +1,33 @@
 import os
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ObstacleConfig:
+    """Height band + occupancy filters used by planning_node.build_obstacle_map.
+
+    z-band is relative to camera height (T[2, 3]). Taller robots need a wider
+    band so hanging obstacles and low walls still count as collisions.
+
+    The values here are this fork's, measured on its rigs, and they are NOT upstream's
+    (which are -0.4/0.4, 0.1, 0.2, 2). They arrived as one global config inside
+    planning_node -- `94e9871` tuned min_wall_span_m to 0.05 and `95ec80a` the
+    occupancy threshold -- and moved here when upstream made the config per-robot.
+    The move is upstream's structure with the fork's numbers. No robot below overrides
+    the band: upstream gives the taller ones -0.6/0.6, and adopting that would widen
+    what b2 treats as an obstacle -- a measured change, not a merge. The field is here
+    per-robot when someone measures it.
+    """
+    robot_z_bottom: float = -0.45
+    robot_z_top: float = 0.2
+    occ_threshold: float = 0.05
+    min_wall_span_m: float = 0.05
+    #: Only cells whose lowest occupied voxel sits within this of robot_z_bottom are
+    #: span-filtered: walls span, stair risers and ground bumps do not. Cells starting
+    #: above the band are floating obstacles and keep a single-voxel noise floor.
+    ground_band_m: float = 0.3
+    dilation_cells: int = 0
 
 
 @dataclass
@@ -28,6 +55,7 @@ class RobotConfig:
     max_linear_vel: float = 1.0
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
+    obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
 
     @property
     def cam_offset_3d(self):
@@ -84,7 +112,7 @@ G1_CONFIG = RobotConfig(
     camera_x=0.1, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.15,
-    min_linear_vel=0.2,min_angular_vel=0.3
+    min_linear_vel=0.2, min_angular_vel=0.3,
 )
 
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()

@@ -19,6 +19,19 @@
             <button id="realtimeButton" class="primary">Realtime</button>
           </div>
         </div>
+        <div class="scenario-bar">
+          <label class="scenario-label">Scenario
+            <select id="scenarioSelect">
+              <option value="l_turn">L turn</option>
+              <option value="straight">Straight</option>
+              <option value="s_bend">S bend</option>
+              <option value="narrow_gate">Narrow gate</option>
+              <option value="open_target">Open target</option>
+              <option value="back_target">Back target</option>
+            </select>
+          </label>
+          <button id="loadScenario" class="primary" type="button">Load</button>
+        </div>
         <canvas id="sceneCanvas" width="720" height="720" aria-label="Scene editor"></canvas>
         <div class="toolbar">
           <button id="addBox">Add Box</button>
@@ -30,22 +43,60 @@
 
       <section class="panel controls" id="controlsPanel">
         <h2>Robot</h2>
-        <p class="robot-note">Robot geometry and planner safety settings are read from <code>planning_node.py</code>.</p>
+        <p class="robot-note">Presets from <code>robot_specs.py</code>. Switching type restarts planning.</p>
+        <label class="map-select-label">Preset
+          <select id="robotPreset"></select>
+        </label>
+        <label>Shape
+          <select data-bind="robot.shape">
+            <option value="square">square</option>
+            <option value="circle">circle</option>
+          </select>
+        </label>
+        <label>Length (m) <input data-bind="robot.length" type="number" step="0.05" min="0.05" /></label>
+        <label>Width (m) <input data-bind="robot.width" type="number" step="0.05" min="0.05" /></label>
+        <label>Radius (m) <input data-bind="robot.radius" type="number" step="0.05" min="0.05" /></label>
+        <label>Camera X (m) <input data-bind="robot.camera_x" type="number" step="0.01" /></label>
+        <label>Camera Y (m) <input data-bind="robot.camera_y" type="number" step="0.01" /></label>
+        <label>Control X (m) <input data-bind="robot.control_x" type="number" step="0.01" /></label>
+        <label>Control Y (m) <input data-bind="robot.control_y" type="number" step="0.01" /></label>
+        <label>Safety radius (m) <input data-bind="robot.safety_radius" type="number" step="0.01" min="0" /></label>
+        <label>Max linear (m/s) <input data-bind="robot.max_linear_vel" type="number" step="0.05" min="0.05" /></label>
+        <label>Max angular (rad/s) <input data-bind="robot.max_angular_vel" type="number" step="0.05" min="0.05" /></label>
+        <label>Z-band bottom (m) <input data-bind="robot.obstacle.robot_z_bottom" type="number" step="0.05" /></label>
+        <label>Z-band top (m) <input data-bind="robot.obstacle.robot_z_top" type="number" step="0.05" /></label>
+        <label>Dilation (cells) <input data-bind="robot.obstacle.dilation_cells" type="number" step="1" min="0" /></label>
         <div class="robot-summary" id="robotSummary"></div>
 
         <h2>Camera</h2>
-        <p class="robot-note">Pinhole intrinsics used for synthetic depth and <code>CameraInfo</code>. FOV is derived from width/height and fx/fy.</p>
-        <label>Width <input id="camWidth" type="number" step="1" min="16" /></label>
-        <label>Height <input id="camHeight" type="number" step="1" min="16" /></label>
-        <label>fx <input id="camFx" type="number" step="1" min="1" /></label>
-        <label>fy <input id="camFy" type="number" step="1" min="1" /></label>
-        <label>Max range (m) <input id="camMaxRange" type="number" step="0.1" min="0.5" /></label>
-        <label>Mount height (m) <input id="camMountHeight" type="number" step="0.01" min="0.05" /></label>
+        <p class="robot-note">Pinhole intrinsics for synthetic depth. FOV is derived from width/height and fx/fy.</p>
+        <label>Width <input data-bind="camera.width" type="number" step="1" min="16" /></label>
+        <label>Height <input data-bind="camera.image_height" type="number" step="1" min="16" /></label>
+        <label>fx <input data-bind="camera.fx" type="number" step="1" min="1" /></label>
+        <label>fy <input data-bind="camera.fy" type="number" step="1" min="1" /></label>
+        <label>Max range (m) <input data-bind="camera.max_range" type="number" step="0.1" min="0.5" /></label>
+        <label>Mount height (m) <input data-bind="camera.mount_height" type="number" step="0.01" min="0.05" /></label>
         <div class="robot-summary" id="cameraSummary"></div>
 
+        <h2>Map</h2>
+        <p class="robot-note">Choose a map from <code>/tinynav/tinynav_db/maps</code>. Coordinates use the map world frame.</p>
+        <label class="map-select-label">Map
+          <select id="mapSelect">
+            <option value="">— select a map —</option>
+          </select>
+        </label>
+        <button id="loadMap" class="primary">Load Map</button>
+        <div class="robot-summary" id="mapSummary"></div>
+
+        <h2>Start Pose</h2>
+        <p class="robot-note">Fixed initial pose in map world frame (replaces relocalization). Drag the green control marker on the scene.</p>
+        <label>Start X <input id="startX" data-bind="start.xy.0" type="number" step="0.1" /></label>
+        <label>Start Y <input id="startY" data-bind="start.xy.1" type="number" step="0.1" /></label>
+        <label>Start yaw (deg) <input id="startYaw" data-bind="start.yaw_deg" type="number" step="1" /></label>
+
         <h2>Target</h2>
-        <label>Target X <input id="targetX" type="number" step="0.1" /></label>
-        <label>Target Y <input id="targetY" type="number" step="0.1" /></label>
+        <label>Target X <input id="targetX" data-bind="target.0" type="number" step="0.1" /></label>
+        <label>Target Y <input id="targetY" data-bind="target.1" type="number" step="0.1" /></label>
 
         <h2>Selected Object</h2>
         <label>Name <input id="objectName" type="text" /></label>
@@ -71,6 +122,10 @@
           <summary>Perception / Planning Diagnostics</summary>
           <div class="image-grid">
             <div>
+              <h3>Map Overview</h3>
+              <canvas id="mapCanvas" width="320" height="240" aria-label="Map overview"></canvas>
+            </div>
+            <div>
               <h3>Depth</h3>
               <canvas id="depthCanvas" width="320" height="200" aria-label="Depth image"></canvas>
               <div class="depth-legend" aria-hidden="true">
@@ -83,6 +138,6 @@
         </details>
       </section>
     </main>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260902"></script>
   </body>
 </html>
