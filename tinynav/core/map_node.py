@@ -18,8 +18,7 @@ import cv2
 from codetiming import Timer
 import argparse
 
-from tinynav.core.fusion_window import (
-    FUSE_MAX, FUSE_MAX_M, FUSE_MIN, select_fusion_constraints)
+from tinynav.core.fusion_window import FUSE_WINDOW, select_fusion_constraints
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
@@ -331,8 +330,7 @@ class MapNode(Node):
         # Said out loud because it is the one behaviour that changes silently with the
         # tinynav pin: on upstream the solve keeps the newest 100 constraints instead.
         self.get_logger().info(
-            f"[fusion] solving over constraints from the last {FUSE_MAX_M}m of travel "
-            f"(min {FUSE_MIN}, max {FUSE_MAX})"
+            f"[fusion] solving over the newest {FUSE_WINDOW} relocalizations"
         )
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
@@ -782,8 +780,8 @@ class MapNode(Node):
         Each constraint is one observation's implied map->odom, `camera_in_odom @
         inv(camera_in_map)` -- true at the moment that observation was taken, and only
         still true while odom has not drifted since. Which of them are still worth
-        solving over is `fusion_window.select_fusion_constraints`, which bounds them by
-        odom travel where upstream bounds them by count.
+        solving over is `fusion_window.select_fusion_constraints`, which keeps the
+        newest few where upstream keeps the newest 100.
         """
         relative_pose_constraint = []
         # The odom pose each constraint was taken at, kept beside them rather than
@@ -807,7 +805,7 @@ class MapNode(Node):
         relative_pose_constraint = select_fusion_constraints(
             relative_pose_constraint, constraint_odom)
         if not relative_pose_constraint:
-            # No constraints agreed, so there is nothing to solve and the pose must not
+            # Nothing observed yet, so there is nothing to solve and the pose must not
             # move. Returning here rather than solving over an empty set, because the
             # seed above is `np.eye(4)` when no transform is held yet -- an empty solve
             # would hand that straight back and "we do not know where we are" would
