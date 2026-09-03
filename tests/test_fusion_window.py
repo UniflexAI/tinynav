@@ -41,13 +41,13 @@ class RecencyTest(unittest.TestCase):
             kept = _pick([0.0] * 99 + [9.0, 9.0, 9.0])
             self.assertEqual(kept, [9.0, 9.0, 9.0])
 
-    def test_the_newest_observation_is_the_transform(self):
-        """The default is 1: averaging is off, because the error this path sees is a
-        flip between two PnP hypotheses and not noise. Averaging a bimodal
-        distribution lands between the modes, and averaging it over a large window
-        lands there AND behind the robot."""
-        self.assertEqual(fusion_window.FUSE_WINDOW, 1)
-        self.assertEqual(_pick([1.0, 2.0, 3.0]), [3.0])
+    def test_the_window_is_sized_for_the_noise_and_not_the_aliasing(self):
+        """Single-observation scatter is p50 0.3m standing still, which averaging
+        removes; the 4.3m aliasing it cannot touch, and a large window only dilutes
+        one flip to 4.3/N metres -- small enough to pass a veto and still wrong. So
+        the size belongs in single digits: more than one, and nowhere near 100."""
+        self.assertGreater(fusion_window.FUSE_WINDOW, 1)
+        self.assertLess(fusion_window.FUSE_WINDOW, 10)
 
     def test_a_short_history_is_used_as_is(self):
         """Fewer observations than the window is not a reason to refuse to move --
