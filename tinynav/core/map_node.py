@@ -795,6 +795,15 @@ class MapNode(Node):
                 constraint_odom.append(camera_in_odom_world)
         relative_pose_constraint = select_fusion_constraints(
             relative_pose_constraint, constraint_odom)
+        if not relative_pose_constraint:
+            # No constraints agreed, so there is nothing to solve and the pose must not
+            # move. Returning here rather than solving over an empty set, because the
+            # seed above is `np.eye(4)` when no transform is held yet -- an empty solve
+            # would hand that straight back and "we do not know where we are" would
+            # become "we are at the map origin". Measured on 122 on 2026-09-03: the
+            # fused pose came back exactly equal to the odom pose while the camera was
+            # saying 19m away, and the admission rule then defended it.
+            return
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
