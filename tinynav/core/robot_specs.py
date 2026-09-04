@@ -96,9 +96,11 @@ B2_CONFIG = RobotConfig(
     camera_x=0.5, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
-    # The operator's call, 2026-09-04. The default 0.1 is the placeholder every
-    # platform inherits, not a measurement of this one.
-    min_linear_vel=0.2,
+    # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
+    # robot could barely move: cmd_vel_control DROPS a target below this rather than
+    # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
+    # sample that drive was 0.000 or exactly 0.200. Raising it needs the planner's own
+    # speed floor raised with it.
     # Taller than the default band covers: the operator's call, 2026-09-03. This is
     # the same band upstream ships for b2, adopted now that someone has judged it
     # rather than as a side effect of a merge.
