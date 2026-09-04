@@ -137,22 +137,34 @@ class Ros2UnitreeManagerNode(Node):
                     self.logger.info(f"Sitting: StandUp2Squat code={code}")
                 self._robot_status = RobotStatus.SITTING
             elif action_key == "stand":
+                # **Every code is kept.** The quadruped path used to discard all four
+                # and then log a success line and set STANDUP regardless, so a robot
+                # whose sport service was refusing reported itself standing and the
+                # only evidence anywhere was `sit`, which happened to keep its code.
+                # Measured on 122 on 2026-09-04: 'play stand' dispatched over twenty
+                # times against a service returning -1, with nothing in the log to say
+                # so, while /robot_status answered "standup".
                 if self.is_quadruped:
-                    self.sport_client.StandUp()
-                    self.sport_client.BalanceStand()
-                    self.sport_client.ClassicWalk(True)
+                    codes = {'StandUp': self.sport_client.StandUp(),
+                             'BalanceStand': self.sport_client.BalanceStand(),
+                             'ClassicWalk': self.sport_client.ClassicWalk(True)}
                     if self.has_switch_gait:
-                        self.sport_client.SwitchGait(1)
-                    self.logger.info(
-                        "Standing: StandUp, BalanceStand, ClassicWalk"
-                        + (", SwitchGait(1)" if self.has_switch_gait else "")
-                    )
+                        codes['SwitchGait'] = self.sport_client.SwitchGait(1)
                 else:
-                    code1 = self.sport_client.Damp()
+                    codes = {'Damp': self.sport_client.Damp()}
                     time.sleep(0.5)
-                    code2 = self.sport_client.Squat2StandUp()
-                    self.logger.info(f"Standing: Damp code={code1}, Squat2StandUp code={code2}")
-                self._robot_status = RobotStatus.STANDUP
+                    codes['Squat2StandUp'] = self.sport_client.Squat2StandUp()
+                said = ', '.join(f'{k} code={v}' for k, v in codes.items())
+                # The status is what the robot did, not what it was asked to do: the
+                # frontend reads it, and a false "standing" is worse than no answer.
+                if all(c == 0 for c in codes.values()):
+                    self.logger.info(f"Standing: {said}")
+                    self._robot_status = RobotStatus.STANDUP
+                else:
+                    self.logger.error(
+                        f"Stand REFUSED by the robot: {said}. The commands reached the "
+                        "sport service and it declined them -- check the remote's mode, "
+                        "whether another client holds control, and the battery.")
 
     def _publish_robot_status(self):
         msg = String()
