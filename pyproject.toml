@@ -61,3 +61,10 @@ unitree = [
     "pymeshlab==2022.2.post4",
     "newrawpy<=1.0.0b0",
 ]
+# Only needed to run scripts/export_yolo_onnx.py (pretrained checkpoint -> ONNX,
+# one-time per checkpoint). Not a runtime dependency of
+# tinynav.core.models_trt.YoloDetectorTRT, which only needs the compiled
+# TensorRT engine committed under tinynav/models/, same as dinov2/superpoint/etc.
+yolo_export = [
+    "ultralytics",
+]
