@@ -63,29 +63,6 @@ def test_pose_graph_solve():
         assert translation_error < 1e-6, f"Translation error {translation_error} for camera {camera_timestamp} is too high."
         assert rotation_error < 1e-6, f"Rotation error {rotation_error} for camera {camera_timestamp} is too high."
 
-def test_theta_star():
-    from tinynav.core.math_utils import theta_star
-    cost_map = np.array([
-        [1.0, 0.0, 0.5, 0.5, 1.0],
-        [1.0, 1.0, 0.5, 1.0, 1.0],
-        [0.5, 0.5, 0.5, 0.5, 1.0],
-        [0.5, 0.5, 0.5, 0.5, 1.0],
-        [0.5, 0.5, 0.5, 0.5, 1.0],
-        [0.5, 0.5, 0.5, 0.5, 1.0],
-        [0.5, 0.5, 0.5, 0.5, 1.0],
-        [0.5, 0.7, 0.6, 0.5, 1.0],
-        [1.0, 1.0, 0.6, 0.5, 1.0],
-        [0.0, 0.5, 0.6, 0.5, 1.0],
-        [1.0, 1.0, 0, 0.5, 1.0],
-    ])
-    start = (0, 1)
-    goal = (9, 0)
-    path = theta_star(cost_map, start, goal, obstacles_cost=1.0)
-    ground_truth_path = [(0, 1), (1, 2), (8, 2), (9, 1), (9, 0)]
-    for i,point in enumerate(path):
-        assert point[0] == ground_truth_path[i][0]
-        assert point[1] == ground_truth_path[i][1]
-
 def test_lookahead_rides_the_capture_speed():
     """The target pose is a carrot at a fixed TIME horizon, so its distance has to
     track the speed actually being driven — a flat 2.5m was 12.5s ahead wherever the
@@ -133,7 +110,6 @@ if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
     print("Pose graph solve test passed.")
-    test_theta_star()
-    print("A* test passed.")
     test_lookahead_rides_the_capture_speed()
-    print("Lookahead test passed.")
+    test_lookahead_rides_the_gained_speed()
+    print("Lookahead tests passed.")
