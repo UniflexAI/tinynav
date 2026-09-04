@@ -96,6 +96,9 @@ B2_CONFIG = RobotConfig(
     camera_x=0.5, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
+    # The operator's call, 2026-09-04. The default 0.1 is the placeholder every
+    # platform inherits, not a measurement of this one.
+    min_linear_vel=0.2,
     # Taller than the default band covers: the operator's call, 2026-09-03. This is
     # the same band upstream ships for b2, adopted now that someone has judged it
     # rather than as a side effect of a merge.
