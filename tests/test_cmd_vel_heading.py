@@ -48,7 +48,9 @@ def _path(*pts):
     return m
 
 
-class HeadingControlTest(unittest.TestCase):
+class _NodeCase(unittest.TestCase):
+    """A live CmdVelControlNode with its publisher captured and nav running."""
+
     @classmethod
     def setUpClass(cls):
         rclpy.init()
@@ -70,18 +72,26 @@ class HeadingControlTest(unittest.TestCase):
     def tearDown(self):
         self.node.destroy_node()
 
-    def _drive(self, path, ticks=1):
-        """Feed one path, then tick the timer. Returns the published Twists."""
+    def _tick(self, ticks=1, before=None):
+        """Tick the timer `ticks` times, never stale. Returns the published Twists."""
         n = self.node
         self.sent.clear()
-        n.path_callback(path)
         for _ in range(ticks):
+            if before is not None:
+                before(n)
             now = time.monotonic()
-            n.last_path_update_time = now       # never stale
+            n.last_path_update_time = now
             n.last_cmd_pub_time = now - _DT
             n.cmd_timer_callback()
         return list(self.sent)
 
+    def _drive(self, path, ticks=1):
+        """Feed one path, then tick. Returns the published Twists."""
+        self.node.path_callback(path)
+        return self._tick(ticks)
+
+
+class HeadingControlTest(_NodeCase):
     def test_a_lateral_lookahead_moves_the_output(self):
         """The property the old nearest-pose reference did not have: an offset ahead of
         the robot produces a turn. Straight ahead produces none."""
@@ -123,54 +133,23 @@ class HeadingControlTest(unittest.TestCase):
             self.assertFalse(hasattr(self.node, attr), f'{attr} is back')
 
 
-class LinearDeadbandTest(unittest.TestCase):
-    """A speed inside the deadband is either a ramp engaging or a stop decaying, and
-    the planner's own REQUEST is what says which.
-
-    Those are two quantities -- the slowest speed the chassis can execute, and how
-    small a request means "stopping" -- and the deadband used the first for both, so
-    every request inside it read as a stop. Measured on 122 on 2026-09-04 with
-    `min_linear_vel` at 0.2: slow turns and approaches were commanded yaw with
-    linear.x exactly 0.000, and the only linear values published all drive were 0.000
-    and 0.200. `linear_engage_threshold` already existed for the second role and was
-    dead code.
+class DeadbandTest(_NodeCase):
+    """Inside the deadband the output is either a ramp engaging or a stop decaying, and
+    the planner's own REQUEST says which -- judged against the engage threshold, not
+    against the minimum the chassis can execute. Using the minimum for both made every
+    request inside the band read as a stop.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        rclpy.init()
-
-    @classmethod
-    def tearDownClass(cls):
-        rclpy.shutdown()
-
     def setUp(self):
-        self.node = CmdVelControlNode()
-        self.sent: list[Twist] = []
-        self.node.cmd_pub.publish = self.sent.append
-        self.node._nav_active = True
-        self.node._paused = False
-        odom = Odometry()
-        odom.pose.pose.orientation.w = 1.0
-        self.node.pose = odom
-        # A straight path ahead, so heading control asks for no turn and the linear
-        # deadband is the only thing under test.
+        super().setUp()
+        # Straight ahead, so heading control asks for no turn of its own.
         self.node.path_callback(_path((0, 0, 0), (0, 0, 2.0)))
-
-    def tearDown(self):
-        self.node.destroy_node()
 
     def _request(self, vx, ticks=40):
         """Ask for `vx` and let the ramp settle. Returns the last published linear.x."""
-        n = self.node
-        self.sent.clear()
-        for _ in range(ticks):
+        def set_cmd(n):
             n.latest_cmd.linear.x = float(vx)
-            now = time.monotonic()
-            n.last_path_update_time = now
-            n.last_cmd_pub_time = now - _DT
-            n.cmd_timer_callback()
-        return self.sent[-1].linear.x
+        return self._tick(ticks, before=set_cmd)[-1].linear.x
 
     def test_a_request_the_chassis_cannot_execute_still_drives(self):
         """Between the engage threshold and the minimum: the planner means to move, so
@@ -194,13 +173,27 @@ class LinearDeadbandTest(unittest.TestCase):
         self.assertAlmostEqual(self._request(want), want, places=6)
 
     def test_raising_the_minimum_does_not_create_a_dead_band(self):
-        """The regression itself: with the minimum raised, everything the planner asks
-        for below it used to become exactly 0."""
+        """Raising the minimum must widen the snap, not the silence: what stops is still
+        only what the planner asked to be below the engage threshold."""
         n = self.node
         n.min_effective_linear_speed = 0.2
         self.assertAlmostEqual(self._request(0.15), 0.2, places=6)
         self.assertAlmostEqual(self._request(0.05), 0.2, places=6)
         self.assertEqual(self._request(0.02), 0.0)
+
+    def test_both_axes_go_through_the_same_rule(self):
+        """The two halves are one mechanism with different thresholds. Re-inlining either
+        one (or giving the turn axis back the minimum-as-discriminator) trips here."""
+        snap = self.node._snap
+        for min_exec, engage in ((0.2, 0.04), (0.3, 0.3)):
+            # Above the minimum: untouched, either sign.
+            self.assertEqual(snap(0.5, 0.5, min_exec, engage), 0.5)
+            self.assertEqual(snap(-0.5, -0.5, min_exec, engage), -0.5)
+            # Inside the band, request still engaging: snap out to the minimum, signed.
+            self.assertAlmostEqual(snap(0.01, engage, min_exec, engage), min_exec)
+            self.assertAlmostEqual(snap(-0.01, -engage, min_exec, engage), -min_exec)
+            # Inside the band, request below the engage threshold: this is a stop.
+            self.assertEqual(snap(0.01, engage * 0.9, min_exec, engage), 0.0)
 
 
 if __name__ == '__main__':
