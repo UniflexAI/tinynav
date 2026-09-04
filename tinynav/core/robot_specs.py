@@ -18,6 +18,22 @@ class ObstacleConfig:
 
 
 @dataclass
+class ObjectDetectionConfig:
+    """Closed-set object detector settings for planning_node's object-voxel grid.
+
+    kept_class_names empty means keep every COCO class the detector emits;
+    otherwise only these names are kept (see models_trt.COCO_CLASS_NAMES for
+    the full list of names the detector can emit).
+    """
+    enabled: bool = True
+    confidence_threshold: float = 0.4
+    iou_threshold: float = 0.45
+    ttl_frames: int = 20
+    detect_every_n_frames: int = 1
+    kept_class_names: tuple[str, ...] = ("person", "car")
+
+
+@dataclass
 class RobotConfig:
     """Robot geometry + velocity limits. Body frame: +x forward, +y left.
 
@@ -43,6 +59,7 @@ class RobotConfig:
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
+    object_detection: ObjectDetectionConfig = field(default_factory=ObjectDetectionConfig)
 
     @property
     def cam_offset_3d(self):

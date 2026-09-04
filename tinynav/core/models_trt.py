@@ -277,6 +277,134 @@ class Dinov2TRT(TRTBase):
         return tokens.astype(np.float32)
 
 
+# The 80 COCO class names yolo11n (and the rest of the YOLOv8/11 family) is
+# trained on, index-matched to the class_id emitted by decode_yolo_output.
+COCO_CLASS_NAMES = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic_light",
+    "fire_hydrant", "stop_sign", "parking_meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports_ball", "kite", "baseball_bat", "baseball_glove", "skateboard", "surfboard",
+    "tennis_racket", "bottle", "wine_glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot_dog", "pizza", "donut", "cake", "chair", "couch",
+    "potted_plant", "bed", "dining_table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell_phone",
+    "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy_bear",
+    "hair_drier", "toothbrush",
+)
+_COCO_NAME_TO_ID = {name: i for i, name in enumerate(COCO_CLASS_NAMES)}
+
+
+def coco_class_ids(names):
+    """Resolve COCO class names (see COCO_CLASS_NAMES) to their class_id ints.
+
+    Raises ValueError naming the offending entry on an unknown class name, so
+    a typo in a config file fails loudly instead of silently keeping nothing.
+    """
+    try:
+        return tuple(_COCO_NAME_TO_ID[name] for name in names)
+    except KeyError as exc:
+        raise ValueError(f"Unknown COCO class name: {exc.args[0]!r}") from exc
+
+
+def letterbox_resize(image: np.ndarray, net_h: int, net_w: int, pad_value: int = 114):
+    """Resize+pad `image` to (net_h, net_w) preserving aspect ratio.
+
+    Returns (canvas, scale, (pad_left, pad_top)); orig = (net - pad) / scale
+    maps a coordinate back from network space to the original image.
+    """
+    h, w = image.shape[:2]
+    scale = min(net_w / w, net_h / h)
+    new_w, new_h = int(round(w * scale)), int(round(h * scale))
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    pad_left = (net_w - new_w) // 2
+    pad_top = (net_h - new_h) // 2
+    canvas = np.full((net_h, net_w, image.shape[2]), pad_value, dtype=image.dtype)
+    canvas[pad_top:pad_top + new_h, pad_left:pad_left + new_w] = resized
+    return canvas, scale, (pad_left, pad_top)
+
+
+def decode_yolo_output(raw, conf_threshold, iou_threshold, scale, pad):
+    """Decode a raw (1, 4+num_classes, N) Ultralytics-style YOLO export tensor.
+
+    `scale`/`pad` come from the matching `letterbox_resize` call and map
+    network-space pixel coords back to the original image via
+    orig = (net - pad) / scale. Kept free of TRT/ROS imports so it can be
+    unit-tested with synthetic tensors.
+
+    Returns a list of (class_id, score, x1, y1, x2, y2) in original-image
+    pixel coordinates.
+    """
+    preds = np.asarray(raw, dtype=np.float32)
+    if preds.ndim == 3:
+        preds = preds[0]
+    preds = preds.T  # (N, 4+num_classes)
+
+    boxes_xywh = preds[:, :4]
+    class_scores = preds[:, 4:]
+    class_ids = np.argmax(class_scores, axis=1)
+    scores = class_scores[np.arange(len(class_ids)), class_ids]
+
+    keep = scores >= conf_threshold
+    if not np.any(keep):
+        return []
+    boxes_xywh = boxes_xywh[keep]
+    class_ids = class_ids[keep]
+    scores = scores[keep]
+
+    pad_x, pad_y = pad
+    cx = (boxes_xywh[:, 0] - pad_x) / scale
+    cy = (boxes_xywh[:, 1] - pad_y) / scale
+    w = boxes_xywh[:, 2] / scale
+    h = boxes_xywh[:, 3] / scale
+    x1 = cx - w / 2.0
+    y1 = cy - h / 2.0
+
+    nms_boxes = np.stack([x1, y1, w, h], axis=1).tolist()
+    indices = cv2.dnn.NMSBoxes(nms_boxes, scores.tolist(), float(conf_threshold), float(iou_threshold))
+    if len(indices) == 0:
+        return []
+    indices = np.asarray(indices).reshape(-1)
+
+    detections = []
+    for i in indices:
+        bx1, by1, bw, bh = nms_boxes[i]
+        detections.append((int(class_ids[i]), float(scores[i]), float(bx1), float(by1), float(bx1 + bw), float(by1 + bh)))
+    return detections
+
+
+class YoloDetectorTRT(TRTBase):
+    """Closed-set COCO detector (Ultralytics YOLO export) used to flag
+    "potential objects" for planning_node's object-voxel grid."""
+
+    def __init__(
+        self,
+        engine_path=f"/tinynav/tinynav/models/yolo11n_640x640_{platform.machine()}.plan",
+        confidence_threshold=0.4,
+        iou_threshold=0.45,
+    ):
+        super().__init__(engine_path)
+        if len(self.inputs) != 1:
+            raise RuntimeError(f"YOLO engine must have 1 input, got {len(self.inputs)}")
+        self.output_name = self.outputs[0]["name"]
+        self.net_h = int(self.inputs[0]["shape"][2])
+        self.net_w = int(self.inputs[0]["shape"][3])
+        self.confidence_threshold = confidence_threshold
+        self.iou_threshold = iou_threshold
+
+    def preprocess(self, image: np.ndarray):
+        if image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 1):
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+        canvas, scale, pad = letterbox_resize(image, self.net_h, self.net_w)
+        tensor = einops.rearrange(canvas, "h w c -> 1 c h w").astype(np.float32) / 255.0
+        return tensor, scale, pad
+
+    async def infer(self, image: np.ndarray):
+        tensor, scale, pad = self.preprocess(image)
+        np.copyto(self.inputs[0]["host"], tensor.astype(self.inputs[0]["host"].dtype, copy=False))
+        results = await self.run_graph()
+        raw = np.asarray(results[self.output_name], dtype=np.float32)
+        return decode_yolo_output(raw, self.confidence_threshold, self.iou_threshold, scale, pad)
+
+
 class SigLIPImageTRT(TRTBase):
     def __init__(self, engine_path=f"/tinynav/tinynav/models/siglip_vit_b_16_webli_image_fp16_{platform.machine()}.plan"):
         super().__init__(engine_path)

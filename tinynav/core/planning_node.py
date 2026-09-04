@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo, PointField
+from sensor_msgs.msg import Image, CameraInfo, PointField, CompressedImage
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
@@ -9,14 +9,28 @@ from scipy.spatial.transform import Rotation as R
 from numba import njit
 import message_filters
 from rclpy.time import Time
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
+from tf2_msgs.msg import TFMessage
 from codetiming import Timer
+from collections import deque
 import cv2
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+import asyncio
+
+from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, tf2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+# YoloDetectorTRT (tinynav.core.models_trt) is imported lazily inside
+# PlanningNode._get_detector, not here: models_trt imports tensorrt/cuda,
+# which aren't available on every machine that needs to import this module
+# (e.g. offline unit tests for the pure functions below).
+
+# Fixed BGR palette so a given COCO class id always renders the same color in RViz.
+_OBJECT_CLASS_PALETTE = np.array([
+    [(37 * i) % 256, (17 + 91 * i) % 256, (53 + 149 * i) % 256] for i in range(80)
+], dtype=np.uint8)
 
 # === Helper functions ===
 @njit(cache=True)
@@ -299,6 +313,173 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def roll_object_grids(class_grid, ttl_grid, old_origin, new_origin, resolution):
+    """Roll the object-class/TTL grids in lockstep with the occupancy grid.
+
+    Same shift math as roll_occupancy_grid, but the newly-exposed slab is
+    filled with "no object" (-1 for class, 0 for TTL) instead of 0/0.
+    """
+    shift_m = new_origin - old_origin
+    shift_voxels = np.round(shift_m / resolution).astype(int)
+    if np.all(shift_voxels == 0):
+        return class_grid, ttl_grid, old_origin
+
+    rolled_class = np.roll(class_grid, shift=tuple(-shift_voxels), axis=(0, 1, 2))
+    rolled_ttl = np.roll(ttl_grid, shift=tuple(-shift_voxels), axis=(0, 1, 2))
+    for axis, shift in enumerate(shift_voxels):
+        if shift == 0:
+            continue
+        idx = [slice(None)] * 3
+        idx[axis] = slice(-shift, None) if shift > 0 else slice(None, -shift)
+        rolled_class[tuple(idx)] = -1
+        rolled_ttl[tuple(idx)] = 0
+
+    updated_origin = old_origin + shift_voxels * resolution
+    return rolled_class, rolled_ttl, updated_origin
+
+
+def label_occupied_column(occupancy_grid, class_id, x, y, origin, resolution, occ_threshold):
+    """Tag whichever voxels are ALREADY marked occupied in occupancy_grid's
+    (x, y) column with class_id, instead of inventing new geometry.
+
+    Returns an (N, 4) int array of (vx, vy, vz, class_id) hits; empty if the
+    (x, y) column falls outside the grid or has no occupied cells.
+    """
+    grid_shape = occupancy_grid.shape
+    vx = int(np.floor((x - origin[0]) / resolution))
+    vy = int(np.floor((y - origin[1]) / resolution))
+    if not (0 <= vx < grid_shape[0] and 0 <= vy < grid_shape[1]):
+        return np.empty((0, 4), dtype=np.int32)
+
+    z_indices = np.nonzero(occupancy_grid[vx, vy, :] > occ_threshold)[0]
+    if z_indices.size == 0:
+        return np.empty((0, 4), dtype=np.int32)
+
+    hits = np.zeros((z_indices.size, 4), dtype=np.int32)
+    hits[:, 0] = vx
+    hits[:, 1] = vy
+    hits[:, 2] = z_indices
+    hits[:, 3] = int(class_id)
+    return hits
+
+
+def store_transform(tf_edges, parent_frame, child_frame, T):
+    """Record a TF edge (and its inverse) in an adjacency dict of world-fixed transforms."""
+    tf_edges.setdefault(parent_frame, {})[child_frame] = T.astype(np.float32, copy=False)
+    tf_edges.setdefault(child_frame, {})[parent_frame] = np.linalg.inv(T).astype(np.float32, copy=False)
+
+
+def lookup_transform(tf_edges, source_frame, target_frame):
+    """BFS a chain of stored TF edges from source_frame to target_frame. None if unresolved."""
+    if source_frame == target_frame:
+        return np.eye(4, dtype=np.float32)
+    if source_frame not in tf_edges or target_frame not in tf_edges:
+        return None
+
+    queue = deque([(source_frame, np.eye(4, dtype=np.float32))])
+    visited = {source_frame}
+    while queue:
+        frame, T_source_frame = queue.popleft()
+        for next_frame, T_frame_next in tf_edges.get(frame, {}).items():
+            if next_frame in visited:
+                continue
+            T_source_next = T_source_frame @ T_frame_next
+            if next_frame == target_frame:
+                return T_source_next.astype(np.float32, copy=False)
+            visited.add(next_frame)
+            queue.append((next_frame, T_source_next))
+    return None
+
+
+def project_color_detections_to_voxels(
+    detections, depth, T_cam_to_world, depth_K, color_K, T_depth_color, color_shape,
+    occupancy_grid, origin, resolution, step=10, occ_threshold=0.1,
+):
+    """Project detections made on the COLOR image into world-frame voxels.
+
+    detections are 2D boxes in COLOR-image pixel coordinates. Every depth
+    pixel is backprojected and reprojected into the color image via
+    T_depth_color (the mirror of global_pointcloud_publisher.depth_to_color_cloud's
+    depth->color coloring step) to find which detection box, if any, it falls
+    inside. Each detection's matched depth pixels then anchor a lookup into
+    occupancy_grid's real occupied column (label_occupied_column), exactly as
+    for the non-color path.
+
+    Returns an (N, 4) int array of (vx, vy, vz, class_id) hits.
+    """
+    if not detections:
+        return np.empty((0, 4), dtype=np.int32)
+
+    depth_h, depth_w = depth.shape
+    fx, fy = depth_K[0, 0], depth_K[1, 1]
+    cx, cy = depth_K[0, 2], depth_K[1, 2]
+    color_h, color_w = color_shape[:2]
+
+    v_grid, u_grid = np.mgrid[0:depth_h:step, 0:depth_w:step]
+    d = depth[v_grid, u_grid]
+    valid = np.isfinite(d) & (d > 0)
+    if not np.any(valid):
+        return np.empty((0, 4), dtype=np.int32)
+    u = u_grid[valid]
+    v = v_grid[valid]
+    d = d[valid]
+
+    px = (u - cx) * d / fx
+    py = (v - cy) * d / fy
+    points_depth = np.stack([px, py, d], axis=1)
+
+    color_points = points_depth @ T_depth_color[:3, :3].T + T_depth_color[:3, 3]
+    in_front = color_points[:, 2] > 1e-6
+    if not np.any(in_front):
+        return np.empty((0, 4), dtype=np.int32)
+    points_depth = points_depth[in_front]
+    color_points = color_points[in_front]
+
+    color_u = color_K[0, 0] * color_points[:, 0] / color_points[:, 2] + color_K[0, 2]
+    color_v = color_K[1, 1] * color_points[:, 1] / color_points[:, 2] + color_K[1, 2]
+    in_bounds = (color_u >= 0) & (color_u < color_w) & (color_v >= 0) & (color_v < color_h)
+    if not np.any(in_bounds):
+        return np.empty((0, 4), dtype=np.int32)
+    points_depth = points_depth[in_bounds]
+    color_u = color_u[in_bounds]
+    color_v = color_v[in_bounds]
+
+    points_cam = np.concatenate([points_depth, np.ones((points_depth.shape[0], 1))], axis=1)
+    points_world = points_cam @ T_cam_to_world.T
+
+    hits = []
+    for class_id, _score, x1, y1, x2, y2 in detections:
+        in_box = (color_u >= x1) & (color_u < x2) & (color_v >= y1) & (color_v < y2)
+        if not np.any(in_box):
+            continue
+        anchor_xy = np.median(points_world[in_box, :2], axis=0)
+        column_hits = label_occupied_column(occupancy_grid, class_id, anchor_xy[0], anchor_xy[1], origin, resolution, occ_threshold)
+        if column_hits.shape[0] == 0:
+            continue
+        hits.append(column_hits)
+
+    if not hits:
+        return np.empty((0, 4), dtype=np.int32)
+    return np.concatenate(hits, axis=0)
+
+
+def apply_object_hits(class_grid, ttl_grid, hits, ttl_frames):
+    """Write class_id + refresh TTL at each hit voxel. Mutates grids in place."""
+    if hits.shape[0] == 0:
+        return
+    vx, vy, vz, class_id = hits[:, 0], hits[:, 1], hits[:, 2], hits[:, 3]
+    class_grid[vx, vy, vz] = class_id
+    ttl_grid[vx, vy, vz] = ttl_frames
+
+
+def decay_object_grids(class_grid, ttl_grid):
+    """Count TTL down by one frame; clear the class label where TTL expires. Mutates in place."""
+    ttl_grid -= 1
+    expired = ttl_grid <= 0
+    class_grid[expired] = -1
+    ttl_grid[expired] = 0
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -318,6 +499,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
+        self.object_voxel_pub = self.create_publisher(PointCloud2, '/planning/object_voxels', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
 
@@ -325,11 +507,54 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
+        # Object detection runs on the color image (RGB, matches what the COCO
+        # detector was trained on) instead of infra1 grayscale/IR, which was
+        # found to misclassify real objects (e.g. a person as "oven"). Detected
+        # boxes are then reprojected from color-image space into the depth
+        # (infra1) frame via the TF-derived depth->color extrinsic — the mirror
+        # of tool/global_pointcloud_publisher.py's depth_to_color_cloud, which
+        # goes the other way (depth pixel -> color pixel) to sample color.
+        self.color_K = None
+        self.color_frame_id = None
+        self.depth_frame_id = None
+        self.T_depth_color = None
+        self.tf_edges = {}
+        self.latest_color_image = None
+        self._logged_color_tf_wait = False
+        self.depth_frame_info_sub = self.create_subscription(
+            CameraInfo, '/camera/camera/infra1/camera_info', self.depth_frame_info_callback, 10,
+        )
+        self.color_camera_info_sub = self.create_subscription(
+            CameraInfo, '/camera/camera/color/camera_info', self.color_camera_info_callback, 10,
+        )
+        tf_static_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.tf_static_sub = self.create_subscription(TFMessage, '/tf_static', self.tf_static_callback, tf_static_qos)
+        # Subscribe to both known color topic conventions (RealSense raw vs.
+        # Looper compressed, see app/backend/node_manager.py's _COLOR_TOPIC_*)
+        # and just use whichever one is actually publishing.
+        self.color_image_sub = self.create_subscription(
+            Image, '/camera/camera/color/image_raw', self.color_image_callback, 10,
+        )
+        self.color_image_compressed_sub = self.create_subscription(
+            CompressedImage, '/camera/camera/color/image_rect_raw/compressed', self.color_image_compressed_callback, 10,
+        )
+
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.05
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
+        self.object_class_grid = np.full(self.grid_shape, -1, dtype=np.int16)
+        self.object_ttl_grid = np.zeros(self.grid_shape, dtype=np.int16)
+        self.object_detection_config = ROBOT_CONFIG.object_detection
+        self.detector = None
+        self.kept_class_ids = None  # resolved lazily in _get_detector, () means "keep all"
+        self.frame_index = 0
         self.K = None
         self.baseline = None
         self.last_T = None
@@ -360,6 +585,39 @@ class PlanningNode(Node):
             self.baseline = -Tx / fx
             self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camerainfo_sub)
+
+    def depth_frame_info_callback(self, msg):
+        if self.depth_frame_id is None:
+            self.depth_frame_id = msg.header.frame_id
+            self.get_logger().info(f"Depth frame id resolved to '{self.depth_frame_id}' (from infra1 camera_info).")
+            self._try_resolve_depth_color_extrinsic()
+
+    def color_camera_info_callback(self, msg):
+        if self.color_K is None:
+            self.color_K = np.array(msg.k).reshape(3, 3)
+            self.color_frame_id = msg.header.frame_id
+            self.get_logger().info(f"Color camera intrinsics received, frame '{self.color_frame_id}'.")
+            self._try_resolve_depth_color_extrinsic()
+
+    def tf_static_callback(self, msg):
+        for transform in msg.transforms:
+            frame_id, child_frame_id, T = tf2np(transform)
+            store_transform(self.tf_edges, frame_id, child_frame_id, T)
+        self._try_resolve_depth_color_extrinsic()
+
+    def _try_resolve_depth_color_extrinsic(self):
+        if self.T_depth_color is not None or self.depth_frame_id is None or self.color_frame_id is None:
+            return
+        T = lookup_transform(self.tf_edges, self.depth_frame_id, self.color_frame_id)
+        if T is not None:
+            self.T_depth_color = T
+            self.get_logger().info(f"Resolved {self.depth_frame_id} -> {self.color_frame_id} extrinsic for color-based detection.")
+
+    def color_image_callback(self, msg):
+        self.latest_color_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
+
+    def color_image_compressed_callback(self, msg):
+        self.latest_color_image = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='rgb8')
 
     def camera_to_robot_center(self, T):
         """World control-center position derived from camera pose T_cam->world."""
@@ -495,6 +753,48 @@ class PlanningNode(Node):
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
+    def publish_object_voxel_cloud(self, class_grid, resolution, origin):
+        occupied = np.argwhere(class_grid >= 0)
+        header = Header(stamp=self.get_clock().now().to_msg(), frame_id="world")
+        if len(occupied) == 0:
+            self.object_voxel_pub.publish(pc2.create_cloud(header, [
+                PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+                PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+                PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+                PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
+            ], np.zeros(0, dtype=[('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.uint32)])))
+            return
+
+        coords = np.asarray(origin) + occupied * resolution
+        class_ids = class_grid[occupied[:, 0], occupied[:, 1], occupied[:, 2]]
+        colors = _OBJECT_CLASS_PALETTE[class_ids % len(_OBJECT_CLASS_PALETTE)]
+        rgb = (colors[:, 2].astype(np.uint32) << 16) | (colors[:, 1].astype(np.uint32) << 8) | colors[:, 0].astype(np.uint32)
+
+        dtype = np.dtype([('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.uint32)])
+        points = np.zeros(coords.shape[0], dtype=dtype)
+        points['x'], points['y'], points['z'] = coords[:, 0], coords[:, 1], coords[:, 2]
+        points['rgb'] = rgb
+        fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
+        ]
+        self.object_voxel_pub.publish(pc2.create_cloud(header, fields, points))
+
+    def _get_detector(self):
+        """Lazily construct the TensorRT detector (and resolve the class-name
+        allowlist) so nodes/tests that never exercise object detection don't
+        need tensorrt/cuda importable."""
+        if self.detector is None:
+            from tinynav.core.models_trt import YoloDetectorTRT, coco_class_ids
+            self.detector = YoloDetectorTRT(
+                confidence_threshold=self.object_detection_config.confidence_threshold,
+                iou_threshold=self.object_detection_config.iou_threshold,
+            )
+            self.kept_class_ids = coco_class_ids(self.object_detection_config.kept_class_names)
+        return self.detector
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
@@ -520,6 +820,9 @@ class PlanningNode(Node):
             if np.linalg.norm(delta) > .1:
                 new_center = robot_pos
                 new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
+                self.object_class_grid, self.object_ttl_grid, _ = roll_object_grids(
+                    self.object_class_grid, self.object_ttl_grid, self.origin, new_origin, self.resolution,
+                )
                 self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
             new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
             self.occupancy_grid *= 0.99
@@ -527,6 +830,34 @@ class PlanningNode(Node):
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+
+        with Timer(name='object detection', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            det_config = self.object_detection_config
+            self.frame_index += 1
+            color_ready = (
+                self.latest_color_image is not None
+                and self.color_K is not None
+                and self.T_depth_color is not None
+            )
+            if not color_ready and not self._logged_color_tf_wait:
+                self._logged_color_tf_wait = True
+                self.get_logger().info(
+                    "Waiting for color image + color camera_info + depth->color TF before object detection can start."
+                )
+            if det_config.enabled and color_ready and self.frame_index % max(1, det_config.detect_every_n_frames) == 0:
+                detector = self._get_detector()
+                detections = asyncio.run(detector.infer(self.latest_color_image))
+                if self.kept_class_ids:
+                    kept = set(self.kept_class_ids)
+                    detections = [d for d in detections if d[0] in kept]
+                hits = project_color_detections_to_voxels(
+                    detections, depth, T, self.K, self.color_K, self.T_depth_color, self.latest_color_image.shape,
+                    self.occupancy_grid, self.origin, self.resolution,
+                    step=self.step, occ_threshold=self.obstacle_config.occ_threshold,
+                )
+                apply_object_hits(self.object_class_grid, self.object_ttl_grid, hits, det_config.ttl_frames)
+            decay_object_grids(self.object_class_grid, self.object_ttl_grid)
+            self.publish_object_voxel_cloud(self.object_class_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(

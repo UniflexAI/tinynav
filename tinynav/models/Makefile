@@ -18,6 +18,7 @@ RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
 FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
 SIGLIP_IMAGE_ONNX := siglip_vit_b_16_webli_image_fp16.onnx
 SIGLIP_TEXT_ONNX  := siglip_vit_b_16_webli_text_fp16.onnx
+YOLO_ONNX         := yolo11n_640x640.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -31,10 +32,11 @@ RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
 FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
 SIGLIP_IMAGE_ENGINE := $(basename $(SIGLIP_IMAGE_ONNX))_$(ARCH).plan
 SIGLIP_TEXT_ENGINE  := $(basename $(SIGLIP_TEXT_ONNX))_$(ARCH).plan
+YOLO_ENGINE       := $(basename $(YOLO_ONNX))_$(ARCH).plan
 
-ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE)
+ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) $(YOLO_ENGINE)
 
-.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip clean
+.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip yolo clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,6 +50,7 @@ lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
 retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
 siglip: $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) ## Build SigLIP image/text engines
+yolo: $(YOLO_ENGINE) ## Build YOLO object-detector engine
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -91,6 +94,13 @@ $(SIGLIP_IMAGE_ENGINE): $(SIGLIP_IMAGE_ONNX)
 $(SIGLIP_TEXT_ENGINE): $(SIGLIP_TEXT_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
         $(if $(SIGLIP_TEXT_SHAPES),--shapes=$(SIGLIP_TEXT_SHAPES),) --fp16
+
+# YOLO object detector: the ONNX export already bakes in a static 1x3x640x640
+# input shape (no --dynamic passed to ultralytics' .export()), matching the
+# letterbox preprocessing in tinynav.core.models_trt.YoloDetectorTRT, so no
+# --shapes profile is needed (or accepted) here.
+$(YOLO_ENGINE): $(YOLO_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
 
 
 clean: ## Remove generated TensorRT plans for this architecture
