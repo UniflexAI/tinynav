@@ -7,7 +7,6 @@ that minimizes a cost of clearance + route adherence/progress (+ smoothness,
 and a reverse gate. With no route available it falls back to distance-to-goal.
 """
 
-import os
 
 import rclpy
 from rclpy.node import Node
@@ -33,6 +32,7 @@ import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
 
 # === Helper functions ===
 @njit(cache=True)
@@ -704,18 +704,8 @@ class PlanningNode(Node):
         # by capture_speed_gain), clamped to [vx_min, vx_hard_max] -- so it may raise
         # the target above vx_max where the operator went fast, never past the hardware
         # ceiling. NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
-        # Gain 1.0: replay the capture speed as driven. It was >1 on the theory that
-        # capture is deliberately slow for mapping stability and replay can afford to
-        # be quicker, but the operator's speed is already the best evidence of what
-        # this stretch tolerates, so scaling it up just overdrives the tight parts.
-        #
-        # On an env var because that is the only knob this node has from the outside:
-        # pilot spawns it with no `--ros-args`, so the declared default was the only
-        # value it could ever take. Raising it above 1.0 re-opens the overdrive above;
-        # the clamp to vx_hard_max is what keeps that from reaching the hardware.
-        self.declare_parameter(
-            'capture_speed_gain',
-            float(os.environ.get('TINYNAV_CAPTURE_SPEED_GAIN', '1.0')))
+        # The gain is shared with map_node's carrot horizon -- see path_speed.
+        self.declare_parameter('capture_speed_gain', CAPTURE_SPEED_GAIN)
         self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
         self.declare_parameter('speed_cap_ttl_s', 2.0)
         self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)

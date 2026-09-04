@@ -29,7 +29,8 @@ from tinynav.core.build_map_node import find_loop, solve_pose_graph
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
-from tinynav.core.path_speed import PathSpeedIndex, bake as bake_path_speed
+from tinynav.core.path_speed import (
+    CAPTURE_SPEED_GAIN, PathSpeedIndex, bake as bake_path_speed)
 from tinynav.core.path_climb import PathClimbIndex, bake as bake_path_climb, n_climbing
 logger = logging.getLogger(__name__)
 
@@ -190,11 +191,9 @@ _ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '2'))
 # ...and for a POI that carries an arrival heading, where being 0.5m out matters.
 _ARRIVE_HEADING_M = 0.2
 
-# The target pose is a carrot at a TIME horizon, so how far along the path it sits has
-# to ride the speed actually being driven -- which is the capture-speed prior this node
-# already publishes on /planning/speed_cap. It used to be a flat 2.5m (0.5 m/s x 5s), so
-# where the operator crept at 0.2 m/s the carrot sat 12.5s ahead, aiming past the tight
-# stretch the slow capture speed was warning about.
+# The target pose is a carrot at a TIME horizon, so how far along the path it sits rides
+# the speed actually driven: the capture-speed prior this node publishes, times the same
+# gain planning applies to it.
 _LOOKAHEAD_S = 5.0
 # No prior (off-path, or a map with no path_speed.npy): planning falls back to vx_max for
 # the speed, so the carrot falls back to the same number.
@@ -206,12 +205,18 @@ _LOOKAHEAD_MIN_M = 1.0
 _LOOKAHEAD_MAX_M = 5.0
 
 
-def lookahead_distance_m(speed_cap_mps: float) -> float:
+def lookahead_distance_m(speed_cap_mps: float, gain: float = CAPTURE_SPEED_GAIN) -> float:
     """How far along the path the target pose sits, given the capture-speed prior.
 
     `speed_cap_mps` is what /planning/speed_cap carries: +inf (or NaN) means off-path or
-    no prior, the same sentinel planning treats as "no data"."""
-    speed = (speed_cap_mps if np.isfinite(speed_cap_mps) else _NO_CAP_SPEED_MPS)
+    no prior, the same sentinel planning treats as "no data". `gain` mirrors planning's
+    capture_speed_gain: the horizon is a TIME, so it has to ride the speed actually
+    driven, not the raw prior. It is applied on the prior branch only -- the no-prior
+    fallback is planning's ungained vx_max."""
+    if np.isfinite(speed_cap_mps):
+        speed = speed_cap_mps * gain
+    else:
+        speed = _NO_CAP_SPEED_MPS
     return float(np.clip(speed * _LOOKAHEAD_S, _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
 
 

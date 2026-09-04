@@ -95,19 +95,38 @@ def test_lookahead_rides_the_capture_speed():
 
     # Constant horizon across the speeds planning can command ([vx_min, vx_hard_max]).
     for cap in (0.2, 0.5, 0.6, 1.0):
-        assert abs(lookahead_distance_m(cap) / cap - _LOOKAHEAD_S) < 1e-6
+        assert abs(lookahead_distance_m(cap, gain=1.0) / cap - _LOOKAHEAD_S) < 1e-6
 
     # The old hardcoded 0.5 m/s is preserved exactly where it was right.
-    assert abs(lookahead_distance_m(0.5) - 2.5) < 1e-6
+    assert abs(lookahead_distance_m(0.5, gain=1.0) - 2.5) < 1e-6
 
     # Faster than the hardware ceiling clamps rather than flinging the carrot away.
-    assert lookahead_distance_m(3.0) == 5.0
-    assert lookahead_distance_m(0.01) == 1.0
+    assert lookahead_distance_m(3.0, gain=1.0) == 5.0
+    assert lookahead_distance_m(0.01, gain=1.0) == 1.0
 
     # Off-path / no path_speed.npy: +inf is speed_cap's "no data" sentinel, and the
     # fallback matches planning's own (vx_max = 0.6).
-    assert abs(lookahead_distance_m(float("inf")) - 3.0) < 1e-6
-    assert abs(lookahead_distance_m(float("nan")) - 3.0) < 1e-6
+    assert abs(lookahead_distance_m(float("inf"), gain=1.0) - 3.0) < 1e-6
+    assert abs(lookahead_distance_m(float("nan"), gain=1.0) - 3.0) < 1e-6
+
+
+def test_lookahead_rides_the_gained_speed():
+    """The horizon is a TIME, and planning drives cap*gain -- so the carrot has to sit
+    _LOOKAHEAD_S ahead at THAT speed. Reading the raw prior instead shortens the horizon
+    by exactly 1/gain (at gain 1.5 the 5s carrot became 3.33s)."""
+    from tinynav.core.map_node import lookahead_distance_m, _LOOKAHEAD_S, _NO_CAP_SPEED_MPS
+
+    for gain in (1.0, 1.2, 1.5):
+        for cap in (0.2, 0.4, 0.512, 0.6):
+            driven = cap * gain
+            horizon_s = lookahead_distance_m(cap, gain=gain) / driven
+            assert abs(horizon_s - _LOOKAHEAD_S) < 1e-6, (cap, gain, horizon_s)
+
+    # The no-prior fallback is planning's vx_max, which the gain does not touch, so it
+    # must stay put as the gain moves.
+    for gain in (1.0, 1.5, 3.0):
+        assert abs(lookahead_distance_m(float("inf"), gain=gain)
+                   - _NO_CAP_SPEED_MPS * _LOOKAHEAD_S) < 1e-6
 
 
 if __name__ == "__main__":

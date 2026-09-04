@@ -21,6 +21,12 @@ import numpy as np
 from tinynav.core.path_prior import (
     poses_to_positions, horizontal_arclength, is_stale, PathSampleIndex)
 
+# How much faster than the operator to replay. Multiplies the prior for BOTH of its
+# consumers -- planning's open-space target and map_node's carrot horizon -- so they
+# stay one speed. Set from the environment because pilot spawns both nodes with no
+# `--ros-args`.
+CAPTURE_SPEED_GAIN = float(os.environ.get('TINYNAV_CAPTURE_SPEED_GAIN', '1.0'))
+
 # Defaults (tunable).
 WIN_M = 1.0            # half-window horizontal arclength (m) for local speed aggregation
 SPEED_PCT = 75.0       # percentile of in-window segment speeds -> the representative
