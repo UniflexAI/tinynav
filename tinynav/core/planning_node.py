@@ -15,6 +15,7 @@ from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from tf2_msgs.msg import TFMessage
+from visualization_msgs.msg import Marker, MarkerArray
 from codetiming import Timer
 from collections import deque
 import cv2
@@ -31,6 +32,29 @@ from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 _OBJECT_CLASS_PALETTE = np.array([
     [(37 * i) % 256, (17 + 91 * i) % 256, (53 + 149 * i) % 256] for i in range(80)
 ], dtype=np.uint8)
+
+# Gazebo model meshes (docs/meshes/) rendered as a Marker at each detection's
+# ground anchor, keyed by COCO class_id. `scale` and `yaw` come straight from
+# each model's original model.sdf (person_standing: mesh already in meters, no
+# extra rotation; hatchback: authored in inches -- scale 0.0254 -- with a
+# +90deg yaw baked into its model.sdf pose). Classes with no entry here still
+# get the plain colored voxel cloud, just no mesh.
+_OBJECT_MESH_ASSETS = {
+    0: {  # person
+        "uri": "file:///tinynav/docs/meshes/person_standing/meshes/standing.dae",
+        "scale": (1.0, 1.0, 1.0),
+        "yaw": 0.0,
+    },
+    2: {  # car
+        "uri": "file:///tinynav/docs/meshes/hatchback/meshes/hatchback.obj",
+        "scale": (0.0254, 0.0254, 0.0254),
+        "yaw": 1.57079632679,
+    },
+}
+
+
+def _yaw_to_quat(yaw):
+    return (0.0, 0.0, np.sin(yaw / 2.0), np.cos(yaw / 2.0))
 
 # === Helper functions ===
 @njit(cache=True)
@@ -405,10 +429,14 @@ def project_color_detections_to_voxels(
     occupancy_grid's real occupied column (label_occupied_column), exactly as
     for the non-color path.
 
-    Returns an (N, 4) int array of (vx, vy, vz, class_id) hits.
+    Returns (hits, marker_anchors):
+      - hits: an (N, 4) int array of (vx, vy, vz, class_id).
+      - marker_anchors: list of (class_id, x, y, z_ground) world-frame anchors,
+        one per matched detection, for mesh Markers (z_ground = the lowest
+        occupied voxel in that detection's column, approximating ground contact).
     """
     if not detections:
-        return np.empty((0, 4), dtype=np.int32)
+        return np.empty((0, 4), dtype=np.int32), []
 
     depth_h, depth_w = depth.shape
     fx, fy = depth_K[0, 0], depth_K[1, 1]
@@ -419,7 +447,7 @@ def project_color_detections_to_voxels(
     d = depth[v_grid, u_grid]
     valid = np.isfinite(d) & (d > 0)
     if not np.any(valid):
-        return np.empty((0, 4), dtype=np.int32)
+        return np.empty((0, 4), dtype=np.int32), []
     u = u_grid[valid]
     v = v_grid[valid]
     d = d[valid]
@@ -431,7 +459,7 @@ def project_color_detections_to_voxels(
     color_points = points_depth @ T_depth_color[:3, :3].T + T_depth_color[:3, 3]
     in_front = color_points[:, 2] > 1e-6
     if not np.any(in_front):
-        return np.empty((0, 4), dtype=np.int32)
+        return np.empty((0, 4), dtype=np.int32), []
     points_depth = points_depth[in_front]
     color_points = color_points[in_front]
 
@@ -439,7 +467,7 @@ def project_color_detections_to_voxels(
     color_v = color_K[1, 1] * color_points[:, 1] / color_points[:, 2] + color_K[1, 2]
     in_bounds = (color_u >= 0) & (color_u < color_w) & (color_v >= 0) & (color_v < color_h)
     if not np.any(in_bounds):
-        return np.empty((0, 4), dtype=np.int32)
+        return np.empty((0, 4), dtype=np.int32), []
     points_depth = points_depth[in_bounds]
     color_u = color_u[in_bounds]
     color_v = color_v[in_bounds]
@@ -448,6 +476,7 @@ def project_color_detections_to_voxels(
     points_world = points_cam @ T_cam_to_world.T
 
     hits = []
+    marker_anchors = []
     for class_id, _score, x1, y1, x2, y2 in detections:
         in_box = (color_u >= x1) & (color_u < x2) & (color_v >= y1) & (color_v < y2)
         if not np.any(in_box):
@@ -457,10 +486,12 @@ def project_color_detections_to_voxels(
         if column_hits.shape[0] == 0:
             continue
         hits.append(column_hits)
+        z_ground = origin[2] + column_hits[:, 2].min() * resolution
+        marker_anchors.append((class_id, anchor_xy[0], anchor_xy[1], z_ground))
 
     if not hits:
-        return np.empty((0, 4), dtype=np.int32)
-    return np.concatenate(hits, axis=0)
+        return np.empty((0, 4), dtype=np.int32), []
+    return np.concatenate(hits, axis=0), marker_anchors
 
 
 def apply_object_hits(class_grid, ttl_grid, hits, ttl_frames):
@@ -500,6 +531,7 @@ class PlanningNode(Node):
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.object_voxel_pub = self.create_publisher(PointCloud2, '/planning/object_voxels', 10)
+        self.object_marker_pub = self.create_publisher(MarkerArray, '/planning/object_markers', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
 
@@ -782,6 +814,44 @@ class PlanningNode(Node):
         ]
         self.object_voxel_pub.publish(pc2.create_cloud(header, fields, points))
 
+    def publish_object_markers(self, marker_anchors, stamp):
+        """Publish one mesh Marker per detection with a registered asset
+        (_OBJECT_MESH_ASSETS), positioned at its world-frame ground anchor.
+        Auto-expires after a couple of frames so a Marker disappears promptly
+        once its detection stops recurring, instead of freezing in place.
+        """
+        marker_array = MarkerArray()
+        per_class_index = {}
+        for class_id, x, y, z_ground in marker_anchors:
+            asset = _OBJECT_MESH_ASSETS.get(class_id)
+            if asset is None:
+                continue
+            index = per_class_index.get(class_id, 0)
+            per_class_index[class_id] = index + 1
+
+            marker = Marker()
+            marker.header = Header(stamp=stamp, frame_id="world")
+            marker.ns = f"object_{class_id}"
+            marker.id = index
+            marker.type = Marker.MESH_RESOURCE
+            marker.action = Marker.ADD
+            marker.mesh_resource = asset["uri"]
+            marker.mesh_use_embedded_materials = True
+            marker.pose.position.x = float(x)
+            marker.pose.position.y = float(y)
+            marker.pose.position.z = float(z_ground)
+            qx, qy, qz, qw = _yaw_to_quat(asset["yaw"])
+            marker.pose.orientation.x = qx
+            marker.pose.orientation.y = qy
+            marker.pose.orientation.z = qz
+            marker.pose.orientation.w = qw
+            marker.scale.x, marker.scale.y, marker.scale.z = asset["scale"]
+            marker.color.a = 1.0
+            marker.lifetime.sec = 1
+            marker_array.markers.append(marker)
+
+        self.object_marker_pub.publish(marker_array)
+
     def _get_detector(self):
         """Lazily construct the TensorRT detector (and resolve the class-name
         allowlist) so nodes/tests that never exercise object detection don't
@@ -850,12 +920,13 @@ class PlanningNode(Node):
                 if self.kept_class_ids:
                     kept = set(self.kept_class_ids)
                     detections = [d for d in detections if d[0] in kept]
-                hits = project_color_detections_to_voxels(
+                hits, marker_anchors = project_color_detections_to_voxels(
                     detections, depth, T, self.K, self.color_K, self.T_depth_color, self.latest_color_image.shape,
                     self.occupancy_grid, self.origin, self.resolution,
                     step=self.step, occ_threshold=self.obstacle_config.occ_threshold,
                 )
                 apply_object_hits(self.object_class_grid, self.object_ttl_grid, hits, det_config.ttl_frames)
+                self.publish_object_markers(marker_anchors, depth_msg.header.stamp)
             decay_object_grids(self.object_class_grid, self.object_ttl_grid)
             self.publish_object_voxel_cloud(self.object_class_grid, self.resolution, self.origin)
 
