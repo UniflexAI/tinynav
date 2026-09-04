@@ -42,9 +42,11 @@ from tool.simulator.map_volume import MapVolume
 from tool.simulator.planning_scene import (
     SimObject,
     cam_size,
+    footprint_polygon_xy,
     image_u8_payload,
     make_camera_pose_from_config,
     render_depth,
+    robot_hits_objects,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -231,6 +233,8 @@ class RosPlanningSimNode(Node):
         self.last_footprint: list[list[float]] = []
         self.last_obstacle_mask: dict[str, Any] | None = None
         self.last_esdf_grid: dict[str, Any] | None = None
+        self.collision = False
+        self.geom_footprint: list[list[float]] = []
         self.running = True
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
@@ -290,6 +294,8 @@ class RosPlanningSimNode(Node):
                 self.last_footprint = []
                 self.last_obstacle_mask = None
                 self.last_esdf_grid = None
+                self.collision = False
+                self.geom_footprint = []
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -343,6 +349,9 @@ class RosPlanningSimNode(Node):
         self.target_pub.publish(msg)
 
     def integrate_cmd(self, dt: float) -> None:
+        if self.collision:
+            self.last_cmd = Twist()
+            return
         yaw = math.radians(self.yaw_deg)
         self.control_xy[0] += math.cos(yaw) * self.last_cmd.linear.x * dt
         self.control_xy[1] += math.sin(yaw) * self.last_cmd.linear.x * dt
@@ -355,14 +364,24 @@ class RosPlanningSimNode(Node):
             now = time.monotonic()
             dt = max(1e-3, min(0.2, now - self.last_update))
             self.last_update = now
+            prev_xy = [float(self.control_xy[0]), float(self.control_xy[1])]
+            prev_yaw = float(self.yaw_deg)
             self.integrate_cmd(dt)
             config = copy.deepcopy(self.config)
+            robot = config.get("robot") or _robot_dict()
+            objects = [SimObject(**obj) for obj in config.get("objects", [])]
+            if robot_hits_objects(self.control_xy, self.yaw_deg, robot, objects):
+                self.collision = True
+                self.control_xy = prev_xy
+                self.yaw_deg = prev_yaw
+                self.last_cmd = Twist()
             config.setdefault("start", {})["xy"] = [float(self.control_xy[0]), float(self.control_xy[1])]
             config["start"]["yaw_deg"] = float(self.yaw_deg)
             yaw_deg = float(self.yaw_deg)
             map_volume = self.map_volume
+            geom = footprint_polygon_xy(self.control_xy, math.radians(yaw_deg), robot)
+            self.geom_footprint = geom.tolist() + [geom[0].tolist()]
 
-        objects = [SimObject(**obj) for obj in config.get("objects", [])]
         T_cam = make_camera_pose_from_config(config["start"]["xy"], yaw_deg, config["robot"], config["camera"])
         depth = render_depth(objects, T_cam, config["camera"], map_volume=map_volume)
         with self.lock:
@@ -384,12 +403,14 @@ class RosPlanningSimNode(Node):
     def frame(self) -> dict[str, Any]:
         with self.lock:
             xy = [float(self.control_xy[0]), float(self.control_xy[1])]
+            footprint = copy.deepcopy(self.geom_footprint) or copy.deepcopy(self.last_footprint)
             return {
                 "robot_xy": xy,
                 "robot_yaw_deg": float(self.yaw_deg),
-                "robot_footprint_xy": copy.deepcopy(self.last_footprint),
+                "robot_footprint_xy": footprint,
                 "selected_trajectory_xy": copy.deepcopy(self.last_path),
                 "selected_param": [float(self.last_cmd.linear.x), float(self.last_cmd.angular.z)],
+                "collision": bool(self.collision),
                 "depth_u8": image_u8_payload(self.last_depth, 0.0, float(self.config["camera"]["max_range"])),
                 "obstacle_u8": self.last_obstacle_mask,
                 "esdf_u8": self.last_esdf_grid,

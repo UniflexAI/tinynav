@@ -554,10 +554,10 @@ function drawPath(points, color, width, alpha = 1, targetCtx = ctx, targetCanvas
   targetCtx.restore();
 }
 
-function drawFootprint(footprint) {
+function drawFootprint(footprint, colorFill = "rgba(0, 169, 201, 0.24)", colorStroke = "#00a9c9") {
   if (!footprint?.length) return;
-  ctx.fillStyle = "rgba(0, 169, 201, 0.24)";
-  ctx.strokeStyle = "#007d95";
+  ctx.fillStyle = colorFill;
+  ctx.strokeStyle = colorStroke;
   ctx.lineWidth = 3;
   ctx.beginPath();
   footprint.forEach(([x, y], i) => {
@@ -603,14 +603,21 @@ function drawRealtimeOverlay() {
   }
   drawPath(realtimePath, "#0f766e", 4);
   drawPath(currentFrame.selected_trajectory_xy, "#00a9c9", 3, 0.95);
-  drawFootprint(currentFrame.robot_footprint_xy || []);
+  const hit = Boolean(currentFrame.collision);
+  drawFootprint(
+    currentFrame.robot_footprint_xy || [],
+    hit ? "rgba(218, 30, 40, 0.35)" : "rgba(0, 169, 201, 0.24)",
+    hit ? "#da1e28" : "#00a9c9",
+  );
   drawHeadingArrow(currentFrame.robot_xy, currentFrame.robot_yaw_deg, "#003f4a");
   if (currentFrame.robot_xy) drawMarker(currentFrame.robot_xy, "", "#003f4a", 5);
 
-  drawHudPanel([
+  const hud = [
     `realtime tick ${Math.max(0, realtimePath.length - 1)}`,
     `cmd [${(currentFrame.selected_param || []).map((v) => Number(v).toFixed(2)).join(", ")}]`,
-  ]);
+  ];
+  if (currentFrame.collision) hud.unshift("COLLISION (geometry) — reset to continue");
+  drawHudPanel(hud);
 }
 
 function drawScene() {

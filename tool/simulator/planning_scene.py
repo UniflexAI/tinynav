@@ -120,6 +120,58 @@ def render_depth(
     return depth.reshape((height, width))
 
 
+def footprint_polygon_xy(control_xy, yaw_rad, robot: dict[str, Any]) -> np.ndarray:
+    """Control-frame rectangle in world XY, matching planning_node footprint_from_control."""
+    xy = np.asarray(control_xy, dtype=np.float64)[:2]
+    yaw = float(yaw_rad)
+    fwd = np.array([np.cos(yaw), np.sin(yaw)], dtype=np.float64)
+    left = np.array([-np.sin(yaw), np.cos(yaw)], dtype=np.float64)
+    length = float(robot.get("length", 0.4))
+    width = float(robot.get("width", 0.3))
+    cx = float(robot.get("control_x", 0.0))
+    hl, hw = 0.5 * length, 0.5 * width
+    front, rear = hl - cx, hl + cx
+    return np.stack([
+        xy + fwd * front + left * hw,
+        xy + fwd * front - left * hw,
+        xy - fwd * rear - left * hw,
+        xy - fwd * rear + left * hw,
+    ])
+
+
+def _project_xy(points: np.ndarray, axis: np.ndarray) -> tuple[float, float]:
+    dots = points @ axis
+    return float(dots.min()), float(dots.max())
+
+
+def _obb_hits_aabb(poly: np.ndarray, aabb_min: np.ndarray, aabb_max: np.ndarray) -> bool:
+    half = 0.5 * (aabb_max - aabb_min)
+    mid = 0.5 * (aabb_max + aabb_min)
+    e0 = poly[1] - poly[0]
+    e1 = poly[3] - poly[0]
+    axes = (np.array([1.0, 0.0]), np.array([0.0, 1.0]),
+            e0 / (np.linalg.norm(e0) + 1e-12), e1 / (np.linalg.norm(e1) + 1e-12))
+    for axis in axes:
+        a0, a1 = _project_xy(poly, axis)
+        c = float(mid @ axis)
+        r = abs(axis[0]) * half[0] + abs(axis[1]) * half[1]
+        if a1 < c - r or c + r < a0:
+            return False
+    return True
+
+
+def robot_hits_objects(control_xy, yaw_deg, robot: dict[str, Any], objects: list[SimObject]) -> bool:
+    """XY footprint vs scene boxes. Ignores map voxels and occupancy/ESDF."""
+    poly = footprint_polygon_xy(control_xy, np.deg2rad(float(yaw_deg)), robot)
+    for obj in objects:
+        if obj.kind != "box":
+            continue
+        lo, hi = obj.bounds
+        if _obb_hits_aabb(poly, lo[:2], hi[:2]):
+            return True
+    return False
+
+
 def image_u8_payload(image: np.ndarray, vmin: float, vmax: float) -> dict[str, Any]:
     u8 = np.clip((image.astype(np.float32) - vmin) / max(vmax - vmin, 1e-6), 0.0, 1.0)
     u8 = np.round(u8 * 255.0).astype(np.uint8)
