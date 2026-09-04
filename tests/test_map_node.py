@@ -3,7 +3,6 @@ sys.path.append(".")
 sys.path.append("/tinynav/tinynav/core")
 
 from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.math_utils import theta_star
 import numpy as np
 
 def angle_diff_from_two_rotation_matrix(R1, R2):
@@ -65,6 +64,7 @@ def test_pose_graph_solve():
         assert rotation_error < 1e-6, f"Rotation error {rotation_error} for camera {camera_timestamp} is too high."
 
 def test_theta_star():
+    from tinynav.core.math_utils import theta_star
     cost_map = np.array([
         [1.0, 0.0, 0.5, 0.5, 1.0],
         [1.0, 1.0, 0.5, 1.0, 1.0],
