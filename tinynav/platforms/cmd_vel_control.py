@@ -53,6 +53,9 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = self.robot.min_linear_vel
         self.min_effective_angular_speed = self.robot.min_angular_vel
+        #: How small a REQUEST means the planner is stopping rather than driving. Not
+        #: the same thing as the speed the chassis can execute -- see the deadband in
+        #: `cmd_timer_callback`. The angular half below still conflates the two.
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = 0.2
         # Hack: if path first segment points far away from robot heading,
@@ -141,10 +144,23 @@ class CmdVelControlNode(Node):
         # and forced rotate-in-place should take effect immediately.
         out.angular.z = float(np.clip(target_cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
 
-        # Linear x: robot cannot execute tiny non-zero speeds reliably.
-        # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
+        # Linear x: robot cannot execute tiny non-zero speeds reliably, so a value
+        # inside the deadband is either a ramp that has not got there yet (engaging ->
+        # snap to +min) or the tail of a stop (decaying -> snap to 0). `out` is the
+        # acceleration-limited value and `target_cmd` is what the planner asked, so the
+        # planner's own request is what says which.
+        #
+        # **The discriminator is `linear_engage_threshold`, not the minimum itself.**
+        # Those are two different quantities -- the slowest speed the chassis can
+        # execute, and how small a request means "stopping" -- and using the minimum
+        # for both makes every request inside the deadband read as a stop. Measured on
+        # 122 on 2026-09-04 with min_linear_vel raised to 0.2: slow turns and
+        # approaches were commanded yaw with linear.x exactly 0.000, and the only
+        # linear values that drive published all round were 0.000 and 0.200.
         if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
+            out.linear.x = (self.min_effective_linear_speed
+                            if target_cmd.linear.x >= self.linear_engage_threshold
+                            else 0.0)
         elif abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
 
