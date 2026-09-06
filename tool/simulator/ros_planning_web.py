@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import heapq
 import math
 import os
 import subprocess
@@ -76,6 +77,186 @@ ROBOT_PRESETS = {
     for name in dir(robot_specs_mod)
     if name.endswith("_CONFIG") and name != "ROBOT_CONFIG"
 }
+
+
+def _map_heuristic(start: tuple[int, int, int], goal: tuple[int, int, int], resolution: float) -> float:
+    vec_start = np.array(start)
+    vec_goal = np.array(goal)
+    return float(np.linalg.norm((vec_start - vec_goal) * resolution) + 20 * abs(vec_start[2] - vec_goal[2]) * resolution)
+
+
+def _reconstruct_path(parent: dict[tuple[int, int, int], tuple[int, int, int]], current: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+    path = []
+    while current in parent:
+        path.append(current)
+        if current == parent[current]:
+            break
+        current = parent[current]
+    return path[::-1]
+
+
+def _grid_in_bounds(idx: tuple[int, int, int], shape: tuple[int, int, int]) -> bool:
+    return 0 <= idx[0] < shape[0] and 0 <= idx[1] < shape[1] and 0 <= idx[2] < shape[2]
+
+
+def _world_to_grid(point: np.ndarray, volume: MapVolume) -> tuple[int, int, int]:
+    idx = ((point - volume.origin) / volume.resolution).astype(np.int32)
+    return int(idx[0]), int(idx[1]), int(idx[2])
+
+
+def _snap_grid_z_to_sdf(
+    idx: tuple[int, int, int],
+    volume: MapVolume,
+) -> tuple[int, int, int]:
+    """Keep XY fixed and snap Z to the closest SDF/navigation layer."""
+    if volume.sdf is None:
+        return idx
+    x, y, z = idx
+    if x < 0 or x >= volume.grid.shape[0] or y < 0 or y >= volume.grid.shape[1]:
+        return idx
+    best = None
+    best_key = (float("inf"), float("inf"))
+    for zi in range(volume.grid.shape[2]):
+        candidate = (x, y, zi)
+        if volume.grid[candidate] == 2:
+            continue
+        sdf = float(volume.sdf[candidate])
+        if not math.isfinite(sdf):
+            continue
+        key = (sdf, abs(zi - z))
+        if key < best_key:
+            best = candidate
+            best_key = key
+    return best if best is not None else idx
+
+
+def _grid_to_world(path: list[tuple[int, int, int]], volume: MapVolume) -> np.ndarray:
+    if not path:
+        return np.empty((0, 3), dtype=np.float32)
+    return np.asarray(path, dtype=np.float32) * float(volume.resolution) + volume.origin.astype(np.float32)
+
+
+def _search_close_to_sdf_map(
+    start_index: tuple[int, int, int],
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    stop_distance: float,
+) -> list[tuple[int, int, int]]:
+    open_heap = [(float(sdf_map[start_index]), start_index)]
+    open_heap_set = {start_index}
+    parent = {start_index: start_index}
+    visited = set()
+    while open_heap:
+        current_sdf, current = heapq.heappop(open_heap)
+        open_heap_set.remove(current)
+        visited.add(current)
+        if current_sdf < stop_distance:
+            return _reconstruct_path(parent, current)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if _grid_in_bounds(neighbor, sdf_map.shape):
+                        if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
+                            open_heap_set.add(neighbor)
+                            heapq.heappush(open_heap, (float(sdf_map[neighbor]), neighbor))
+                            parent[neighbor] = current
+    return []
+
+
+def _search_within_sdf_map(
+    start: tuple[int, int, int],
+    goal: tuple[int, int, int],
+    sdf_map: np.ndarray,
+    occupancy_map: np.ndarray,
+    resolution: float,
+) -> list[tuple[int, int, int]]:
+    sdf_bins = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+
+    def queue_index(sdf_value: float) -> int:
+        for idx, threshold in enumerate(sdf_bins):
+            if sdf_value < threshold:
+                return idx
+        return len(sdf_bins)
+
+    open_heaps = [[] for _ in range(len(sdf_bins) + 1)]
+    open_sets = [set() for _ in range(len(sdf_bins) + 1)]
+    start_queue_idx = queue_index(float(sdf_map[start]))
+    heapq.heappush(open_heaps[start_queue_idx], (_map_heuristic(start, goal, resolution), start))
+    open_sets[start_queue_idx].add(start)
+    parent = {start: start}
+    visited = set()
+
+    while True:
+        queue_idx = -1
+        for i, q in enumerate(open_heaps):
+            if q:
+                queue_idx = i
+                break
+        if queue_idx == -1:
+            break
+        _, current = heapq.heappop(open_heaps[queue_idx])
+        open_sets[queue_idx].remove(current)
+        if current in visited:
+            continue
+        visited.add(current)
+        if current == goal:
+            return _reconstruct_path(parent, current)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
+                    if not _grid_in_bounds(neighbor, sdf_map.shape):
+                        continue
+                    if neighbor in visited or occupancy_map[neighbor] == 2:
+                        continue
+                    neighbor_queue_idx = queue_index(float(sdf_map[neighbor]))
+                    if neighbor in open_sets[neighbor_queue_idx]:
+                        continue
+                    open_sets[neighbor_queue_idx].add(neighbor)
+                    heapq.heappush(open_heaps[neighbor_queue_idx], (_map_heuristic(neighbor, goal, resolution), neighbor))
+                    parent.setdefault(neighbor, current)
+    return []
+
+
+def _sdf_global_path(volume: MapVolume, robot_xy: list[float], target: list[float]) -> np.ndarray:
+    if volume.sdf is None:
+        return np.empty((0, 3), dtype=np.float32)
+    target_z = float(target[2] if len(target) > 2 else volume.origin[2])
+    start_idx = _world_to_grid(np.array([robot_xy[0], robot_xy[1], target_z], dtype=np.float64), volume)
+    goal_idx = _world_to_grid(np.array([target[0], target[1], target_z], dtype=np.float64), volume)
+    start_idx = _snap_grid_z_to_sdf(start_idx, volume)
+    goal_idx = _snap_grid_z_to_sdf(goal_idx, volume)
+    if not _grid_in_bounds(start_idx, volume.grid.shape) or not _grid_in_bounds(goal_idx, volume.grid.shape):
+        return np.empty((0, 3), dtype=np.float32)
+    sdf_start_path = _search_close_to_sdf_map(start_idx, volume.sdf, volume.grid, 0.2)
+    sdf_goal_path = _search_close_to_sdf_map(goal_idx, volume.sdf, volume.grid, 0.2)
+    if not sdf_start_path or not sdf_goal_path:
+        return np.empty((0, 3), dtype=np.float32)
+    path_sdf = _search_within_sdf_map(sdf_start_path[-1], sdf_goal_path[-1], volume.sdf, volume.grid, volume.resolution)
+    path = sdf_start_path + path_sdf + sdf_goal_path[::-1]
+    return _grid_to_world(path, volume)
+
+
+def _local_target_from_path(path: np.ndarray, robot_xy: list[float], horizon_m: float = 2.5) -> list[float] | None:
+    if len(path) == 0:
+        return None
+    robot = np.array(robot_xy, dtype=np.float32)
+    closest_idx = int(np.argmin(np.linalg.norm(path[:, :2] - robot[:2], axis=1)))
+    accumulated = 0.0
+    start = np.array([robot_xy[0], robot_xy[1]], dtype=np.float32)
+    target = path[-1]
+    for i in range(closest_idx, len(path) - 1):
+        accumulated += float(np.linalg.norm(path[i, :2] - start))
+        if accumulated > horizon_m:
+            target = path[i]
+            break
+        start = path[i, :2]
+    return [float(target[0]), float(target[1]), float(target[2])]
 
 
 def _robot_dict(name: str | None = None) -> dict[str, Any]:
@@ -217,6 +398,8 @@ class RosPlanningSimNode(Node):
         self.last_footprint: list[list[float]] = []
         self.last_obstacle_mask: dict[str, Any] | None = None
         self.last_esdf_grid: dict[str, Any] | None = None
+        self.global_path_xy: list[list[float]] = []
+        self.global_local_target: list[float] | None = None
         self.running = True
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
@@ -276,6 +459,8 @@ class RosPlanningSimNode(Node):
                 self.last_footprint = []
                 self.last_obstacle_mask = None
                 self.last_esdf_grid = None
+                self.global_path_xy = []
+                self.global_local_target = None
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -316,8 +501,8 @@ class RosPlanningSimNode(Node):
         msg.p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, -0.06 * fx, 0.0, 0.0, 1.0, 0.0]
         self.camera_info_pub.publish(msg)
 
-    def publish_target(self, stamp, config: dict[str, Any]) -> None:
-        target = config.get("target", [4.0, 0.0, 0.0])
+    def publish_target(self, stamp, config: dict[str, Any], target_override: list[float] | None = None) -> None:
+        target = target_override if target_override is not None else config.get("target", [4.0, 0.0, 0.0])
         msg = Odometry()
         msg.header.stamp = stamp
         msg.header.frame_id = "world"
@@ -348,6 +533,17 @@ class RosPlanningSimNode(Node):
             yaw_deg = float(self.yaw_deg)
             map_volume = self.map_volume
 
+        target_override = None
+        global_path_xy: list[list[float]] = []
+        if map_volume is not None and map_volume.sdf is not None:
+            global_path = _sdf_global_path(map_volume, config["start"]["xy"], config.get("target", [4.0, 0.0, 0.0]))
+            if len(global_path) > 0:
+                target_override = _local_target_from_path(global_path, config["start"]["xy"])
+                global_path_xy = [[float(p[0]), float(p[1])] for p in global_path]
+        with self.lock:
+            self.global_path_xy = global_path_xy
+            self.global_local_target = target_override
+
         objects = [SimObject(**obj) for obj in config.get("objects", [])]
         T_cam = make_camera_pose_from_config(config["start"]["xy"], yaw_deg, config["robot"], config["camera"])
         depth = render_depth(objects, T_cam, config["camera"], map_volume=map_volume)
@@ -363,7 +559,7 @@ class RosPlanningSimNode(Node):
         self.odom_visual_pub.publish(odom_msg)
         self.odom_pub.publish(odom_msg)
         self.publish_camera_info(stamp, config)
-        self.publish_target(stamp, config)
+        self.publish_target(stamp, config, target_override=target_override)
         self.nav_active_pub.publish(Bool(data=True))
         self.nav_paused_pub.publish(Bool(data=False))
 
@@ -375,6 +571,8 @@ class RosPlanningSimNode(Node):
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": copy.deepcopy(self.last_footprint),
                 "selected_trajectory_xy": copy.deepcopy(self.last_path),
+                "global_path_xy": copy.deepcopy(self.global_path_xy),
+                "global_local_target": copy.deepcopy(self.global_local_target),
                 "selected_param": [float(self.last_cmd.linear.x), float(self.last_cmd.angular.z)],
                 "depth_u8": image_u8_payload(self.last_depth, 0.0, float(self.config["camera"]["max_range"])),
                 "obstacle_u8": self.last_obstacle_mask,

@@ -511,6 +511,8 @@ function drawRealtimeOverlay() {
     return;
   }
   drawPath(realtimePath, "#0f766e", 4);
+  drawPath(currentFrame.global_path_xy, "#7c3aed", 2, 0.8);
+  if (currentFrame.global_local_target) drawMarker(currentFrame.global_local_target, "", "#7c3aed", 5);
   drawPath(currentFrame.selected_trajectory_xy, "#00a9c9", 3, 0.95);
   drawFootprint(currentFrame.robot_footprint_xy || []);
   drawHeadingArrow(currentFrame.robot_xy, currentFrame.robot_yaw_deg, "#003f4a");
@@ -586,6 +588,8 @@ function drawPerceptionMap() {
   mapCtx.save();
   mapCtx.textAlign = "center";
   mapCtx.textBaseline = "alphabetic";
+  drawPath(currentFrame?.global_path_xy, "#7c3aed", 2, 0.85, mapCtx, mapCanvas, bounds);
+  if (currentFrame?.global_local_target) drawMarker(currentFrame.global_local_target, "", "#7c3aed", 5, mapCtx, mapCanvas, bounds);
   drawPath(realtimePath, "#0f766e", 3, 1, mapCtx, mapCanvas, bounds);
   const robotXY = robotDragXY();
   const showStart = !realtimeRunning

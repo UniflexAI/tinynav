@@ -59,6 +59,7 @@ class MapInfo:
 @dataclass
 class MapVolume:
     grid: np.ndarray
+    sdf: np.ndarray | None
     origin: np.ndarray
     resolution: float
     map_path: str
@@ -68,18 +69,23 @@ class MapVolume:
         root = Path(map_path).expanduser().resolve()
         grid_file = root / "occupancy_grid.npy"
         meta_file = root / "occupancy_meta.npy"
+        sdf_file = root / "sdf_map.npy"
         if not grid_file.is_file() or not meta_file.is_file():
             raise FileNotFoundError(
                 f"Map needs occupancy_grid.npy and occupancy_meta.npy under {root}"
             )
         grid = np.load(grid_file)
+        sdf = np.load(sdf_file) if sdf_file.is_file() else None
         meta = np.load(meta_file).astype(np.float64)
         if grid.ndim != 3:
             raise ValueError(f"occupancy_grid must be 3D, got shape {grid.shape}")
+        if sdf is not None and sdf.shape != grid.shape:
+            raise ValueError(f"sdf_map shape {sdf.shape} does not match occupancy_grid {grid.shape}")
         if meta.shape[0] < 4:
             raise ValueError(f"occupancy_meta must have 4 values, got {meta.shape}")
         return cls(
             grid=np.ascontiguousarray(grid, dtype=np.uint8),
+            sdf=np.ascontiguousarray(sdf, dtype=np.float32) if sdf is not None else None,
             origin=np.array(meta[:3], dtype=np.float64),
             resolution=float(meta[3]),
             map_path=str(root),
