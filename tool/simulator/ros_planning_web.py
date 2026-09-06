@@ -3,7 +3,7 @@
 
 Web UI edits the scene. This process publishes synthetic /slam/depth,
 /slam/odometry(_visual), /control/target_pose, then mirrors outputs from the
-real planning_node + cmd_vel_control loop.
+real planning_node + simulator_control loop.
 """
 
 from __future__ import annotations
@@ -437,7 +437,7 @@ EXECUTOR: MultiThreadedExecutor | None = None
 PROCS: list[subprocess.Popen] = []
 CHILD_SCRIPTS = (
     "tinynav/core/planning_node.py",
-    "tinynav/platforms/cmd_vel_control.py",
+    "tinynav/platforms/simulator_control.py",
 )
 _LAST_PLANNING_RESET = 0.0
 _PLANNING_RESET_COOLDOWN_S = 1.0
@@ -614,7 +614,7 @@ def update_config(request: RunRequest) -> dict[str, Any]:
     node.set_config(copy.deepcopy(request.config), reset=reset)
     robot_changed = prev_robot != node.config.get("robot", {}).get("name")
     if robot_changed:
-        _stop_script("tinynav/platforms/cmd_vel_control.py")
+        _stop_script("tinynav/platforms/simulator_control.py")
     if reset or robot_changed:
         ensure_ros_loop(reset_planning=True, force=robot_changed)
     return {"ok": True, "robot_changed": robot_changed}
