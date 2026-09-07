@@ -28,6 +28,7 @@ IDLE_HEADING_THRESHOLD = np.pi / 2
 IDLE_VX_THRESHOLD = 0.1
 FOOTPRINT_SAMPLE_STEP_M = 0.3
 REVERSE_GATE_ENTER_CLEARANCE_M = 0.2
+REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M = 0.1
 
 # === Helper functions ===
 @njit(cache=True)
@@ -308,6 +309,9 @@ def goal_heading_error(traj_end, target):
     yaw2 = np.arctan2(dy, dx)
     return abs(np.arctan2(np.sin(yaw2 - yaw1), np.cos(yaw2 - yaw1)))
 
+def reverse_gate_exit_clearance(config=ROBOT_CONFIG):
+    return max(config.length, config.width) / 2.0 + REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -367,6 +371,7 @@ class PlanningNode(Node):
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ROBOT_CONFIG.obstacle
+        self.reverse_gate_active = False
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
@@ -423,9 +428,11 @@ class PlanningNode(Node):
         msg.points = points
         self.footprint_pub.publish(msg)
 
-    def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
+    def _front_obstacle_dist(self, T, obstacle_mask, max_dist=None):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
         Scans start at the front face so the returned value matches physical clearance."""
+        if max_dist is None:
+            max_dist = reverse_gate_exit_clearance() + self.resolution
         center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
@@ -596,11 +603,16 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
+            reverse_exit_clearance = reverse_gate_exit_clearance()
+            if self.reverse_gate_active:
+                self.reverse_gate_active = front_clearance < reverse_exit_clearance
+            elif front_clearance <= REVERSE_GATE_ENTER_CLEARANCE_M:
+                self.reverse_gate_active = True
+            should_reverse = self.reverse_gate_active
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= REVERSE_GATE_ENTER_CLEARANCE_M
                 reverse_gate_penalty = 0.0
                 if should_reverse and param[0] > 0.0:
                     reverse_gate_penalty = 1e9

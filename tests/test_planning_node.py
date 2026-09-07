@@ -16,12 +16,15 @@ from planning_node import (
     IDLE_TRAJECTORY_PENALTY,
     IDLE_VX_THRESHOLD,
     REVERSE_GATE_ENTER_CLEARANCE_M,
+    REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M,
     run_raycasting_loopy,
     generate_trajectory_library_3d,
     generate_predefined_trajectory_vocabularies,
     goal_heading_error,
+    reverse_gate_exit_clearance,
 )
 from tinynav.core.math_utils import matrix_to_quat
+from tinynav.core.robot_specs import B2_CONFIG, GO2_CONFIG
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -281,6 +284,12 @@ def test_reverse_gate_uses_explicit_close_clearance():
     # Dilation stays disabled; reverse starts only when the front clearance is tight.
     assert abs(REVERSE_GATE_ENTER_CLEARANCE_M - 0.2) < 1e-9
 
+def test_reverse_gate_exit_clearance_scales_with_robot_size():
+    assert abs(REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M - 0.1) < 1e-9
+    assert abs(reverse_gate_exit_clearance(GO2_CONFIG) - 0.3) < 1e-9
+    assert abs(reverse_gate_exit_clearance(B2_CONFIG) - 0.65) < 1e-9
+    assert reverse_gate_exit_clearance(B2_CONFIG) > REVERSE_GATE_ENTER_CLEARANCE_M
+
 def test_front_blocked_allows_turning_in_place_for_abeam_target():
     for side in (5.0, -5.0):
         vx, omega = _pick(np.array([0.0, side, 0.0]), front_blocked=True)
@@ -294,5 +303,6 @@ if __name__ == "__main__":
     test_heading_fades_within_arrival_radius()
     test_heading_fade_is_monotonic_in_distance()
     test_reverse_gate_uses_explicit_close_clearance()
+    test_reverse_gate_exit_clearance_scales_with_robot_size()
     test_front_blocked_allows_turning_in_place_for_abeam_target()
     test_run_raycasting_comparison()
