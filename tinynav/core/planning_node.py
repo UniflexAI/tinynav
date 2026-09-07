@@ -601,6 +601,8 @@ class PlanningNode(Node):
                 reverse_gate_penalty = 0.0
                 if should_reverse and param[0] > 0.0:
                     reverse_gate_penalty = 1e9
+                elif should_reverse and param[0] == 0.0:
+                    reverse_gate_penalty = 20000.0
                 elif not should_reverse and is_backward_traj:
                     reverse_gate_penalty = 1e9
 

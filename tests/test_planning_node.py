@@ -175,7 +175,7 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
     reverse_gate_penalty = (
         1e9
         if (front_blocked and param[0] > 0.0) or (not front_blocked and param[0] < 0.0)
-        else 0.0
+        else 20000.0 if front_blocked and param[0] == 0.0 else 0.0
     )
     return (
         score * 2000.0
@@ -265,10 +265,13 @@ def test_heading_fade_is_monotonic_in_distance():
     assert abs(terms[2] - terms[3]) < 1e-9, f"heading penalty not saturated past the fade distance: {terms}"
     assert abs(terms[2] - 10.0 * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
 
-def test_front_blocked_allows_turning_in_place_for_abeam_target():
+def test_front_blocked_prefers_reverse_before_turning():
+    vx, omega = _pick(np.array([-5.0, 0.0, 0.0]), front_blocked=True)
+    assert vx < 0.0, f"blocked target behind should reverse first, got vx={vx}, omega={omega}"
+
     for side in (5.0, -5.0):
         vx, omega = _pick(np.array([0.0, side, 0.0]), front_blocked=True)
-        assert vx == 0.0 and abs(omega) > 1e-6, f"blocked abeam target yields vx={vx}, omega={omega}"
+        assert vx < 0.0, f"blocked abeam target should prefer reverse before turning, got vx={vx}, omega={omega}"
 
 if __name__ == "__main__":
     test_goal_heading_error()
@@ -277,5 +280,5 @@ if __name__ == "__main__":
     test_goal_abeam_turns_while_driving()
     test_heading_fades_within_arrival_radius()
     test_heading_fade_is_monotonic_in_distance()
-    test_front_blocked_allows_turning_in_place_for_abeam_target()
+    test_front_blocked_prefers_reverse_before_turning()
     test_run_raycasting_comparison()
