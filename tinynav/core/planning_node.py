@@ -202,7 +202,7 @@ def generate_predefined_trajectory_vocabularies(
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
+    """Score trajectories by minimum ESDF clearance across the robot footprint."""
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
@@ -228,13 +228,15 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
             left_x = -fwd_y
             left_y = fwd_x
 
-            # center + 4 corners, unrolled for numba
+            # center + 4 corners + long-side midpoints, unrolled for numba
             check_xs = (
                 x_world,
                 x_world + fwd_x * front_len + left_x * half_w,
                 x_world + fwd_x * front_len - left_x * half_w,
                 x_world - fwd_x * rear_len  + left_x * half_w,
                 x_world - fwd_x * rear_len  - left_x * half_w,
+                x_world + left_x * half_w,
+                x_world - left_x * half_w,
             )
             check_ys = (
                 y_world,
@@ -242,9 +244,11 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
                 y_world + fwd_y * front_len - left_y * half_w,
                 y_world - fwd_y * rear_len  + left_y * half_w,
                 y_world - fwd_y * rear_len  - left_y * half_w,
+                y_world + left_y * half_w,
+                y_world - left_y * half_w,
             )
 
-            for k in range(5):
+            for k in range(7):
                 x_img = int((check_xs[k] - origin[0]) / resolution)
                 y_img = int((check_ys[k] - origin[1]) / resolution)
                 if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
