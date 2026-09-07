@@ -231,6 +231,24 @@ class MapNode(Node):
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
+        self.load_map(tinynav_map_path)
+        self.reset_map_state()
+
+        self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
+        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+        self.nav_done_pub = self.create_publisher(Bool, '/mapping/nav_done', 10)
+        self.nav_progress_pub = self.create_publisher(String, '/mapping/nav_progress', 10)
+
+        self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
+        self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
+        self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        self._save_completed = False
+        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
+
+    def load_map(self, tinynav_map_path: str) -> None:
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
@@ -260,6 +278,7 @@ class MapNode(Node):
         print(f"sdf_map.shape: {self.sdf_map.shape}")
         print(f"occupancy_map.shape: {self.occupancy_map.shape}")
 
+    def reset_map_state(self) -> None:
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
@@ -274,20 +293,6 @@ class MapNode(Node):
         self._speed_estimate: float | None = None
         self.cached_nav_path_in_map = None
         self.cached_nav_path_poi_index = -1
-
-        self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
-        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
-        self.nav_done_pub = self.create_publisher(Bool, '/mapping/nav_done', 10)
-        self.nav_progress_pub = self.create_publisher(String, '/mapping/nav_progress', 10)
-
-        self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
-        self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
-        self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
-
-        self.tf_broadcaster = TransformBroadcaster(self)
-
-        self._save_completed = False
-        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -462,27 +467,34 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
+    def select_relocalization_candidates(self, query_vlad: np.ndarray) -> list[tuple[int, float]]:
+        return [
+            (int(self.vlad_timestamps[idx_in_map]), float(similarity))
+            for idx_in_map, similarity in find_loop(
+                query_vlad,
+                self.map_vlad_descriptors,
+                -1.0,
+                self.relocalization_loop_top_k,
+            )
+        ]
+
+    def rank_relocalization_candidates(self, pnp_candidates: list, candidate_timestamps: list[int]) -> tuple[bool, np.ndarray, float]:
+        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        return success, best_pose_in_camera, pose_cov_weight
+
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
 
         query_vlad = self.get_vlad_descriptor(keyframe)
-        idx_and_similarity_array = find_loop(
-            query_vlad,
-            self.map_vlad_descriptors,
-            -1.0,
-            self.relocalization_loop_top_k,
-        )
-        if len(idx_and_similarity_array) == 0:
+        candidates = self.select_relocalization_candidates(query_vlad)
+        if len(candidates) == 0:
             print("VLAD: no relocalization candidates")
             return False, np.eye(4), -np.inf
-        candidate_timestamps = [
-            int(self.vlad_timestamps[idx_in_map])
-            for idx_in_map, _similarity in idx_and_similarity_array
-        ]
 
         pnp_candidates = []
-        for timestamp_in_map in candidate_timestamps:
+        pnp_timestamps = []
+        for timestamp_in_map, _similarity in candidates:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
             reference_matched_keypoints, keyframe_matched_keypoints, matches = self.match_keypoints(reference_features, keyframe_features)
@@ -498,8 +510,9 @@ class MapNode(Node):
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
+            pnp_timestamps.append(timestamp_in_map)
 
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
+        success, best_pose_in_camera, pose_cov_weight = self.rank_relocalization_candidates(pnp_candidates, pnp_timestamps)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
@@ -585,6 +598,9 @@ class MapNode(Node):
             pass
 
 
+    def select_fusion_constraints(self, constraints):
+        return constraints[-100:]
+
     def compute_transform_from_map_to_odom(self):
         """
         Solve the optmization problem.
@@ -603,7 +619,7 @@ class MapNode(Node):
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
-        relative_pose_constraint = relative_pose_constraint[-100:]
+        relative_pose_constraint = self.select_fusion_constraints(relative_pose_constraint)
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
@@ -620,6 +636,47 @@ class MapNode(Node):
             pose.pose.orientation.w = 1.0
             path_msg.poses.append(pose)
         self.global_plan_pub.publish(path_msg)
+
+    def poi_reached(self, poi, pos):
+        return np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0
+
+    def publish_nav_progress(self, percent, path_remaining_m, path_total_m, estimated_remaining_s):
+        self.nav_progress_pub.publish(String(data=json.dumps({
+            "poi_index": self.poi_index,
+            "percent": percent,
+            "path_remaining_m": path_remaining_m,
+            "path_total_m": path_total_m,
+            "estimated_remaining_s": estimated_remaining_s,
+        })))
+
+    def update_leg_progress(self, remaining_length):
+        now = time.time()
+        if self._leg_initial_length is None:
+            self._leg_initial_length = remaining_length
+            self._leg_start_time = now
+
+        covered = self._leg_initial_length - remaining_length
+        elapsed = now - self._leg_start_time
+        if covered > 0.1 and elapsed > 1.0:
+            self._speed_estimate = covered / elapsed
+
+        initial = self._leg_initial_length
+        percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
+        estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
+        return percent, estimated_remaining_s
+
+    def select_target_position(self, paths, closest_idx, pos):
+        max_speed = 0.5
+        accumulated_distance = 0.0
+        start_point = pos[:3]
+        target_position = paths[-1]
+        for i in range(closest_idx, len(paths) - 1):
+            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
+            if accumulated_distance > max_speed * 5:
+                target_position = paths[i]
+                break
+            start_point = paths[i]
+        return target_position
 
     def nav_target_timer_callback(self):
         if (
@@ -642,15 +699,9 @@ class MapNode(Node):
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
 
-        if np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0:
+        if self.poi_reached(poi, pos):
             if self._leg_initial_length is not None:
-                self.nav_progress_pub.publish(String(data=json.dumps({
-                    "poi_index": self.poi_index,
-                    "percent": 100.0,
-                    "path_remaining_m": 0.0,
-                    "path_total_m": round(self._leg_initial_length, 2),
-                    "estimated_remaining_s": 0.0,
-                })))
+                self.publish_nav_progress(100.0, 0.0, round(self._leg_initial_length, 2), 0.0)
             self.poi_index += 1
             self._leg_initial_length = None
             self._leg_start_time = None
@@ -693,38 +744,12 @@ class MapNode(Node):
             for i in range(closest_idx, len(paths) - 1)
         ) if closest_idx < len(paths) - 1 else 0.0
 
-        now = time.time()
-        if self._leg_initial_length is None:
-            self._leg_initial_length = remaining_length
-            self._leg_start_time = now
+        percent, estimated_remaining_s = self.update_leg_progress(remaining_length)
 
-        covered = self._leg_initial_length - remaining_length
-        elapsed = now - self._leg_start_time
-        if covered > 0.1 and elapsed > 1.0:
-            self._speed_estimate = covered / elapsed
+        self.publish_nav_progress(round(percent, 1), round(remaining_length, 2),
+                                  round(self._leg_initial_length, 2), round(estimated_remaining_s, 1))
 
-        initial = self._leg_initial_length
-        percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
-        estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
-
-        self.nav_progress_pub.publish(String(data=json.dumps({
-            "poi_index": self.poi_index,
-            "percent": round(percent, 1),
-            "path_remaining_m": round(remaining_length, 2),
-            "path_total_m": round(initial, 2),
-            "estimated_remaining_s": round(estimated_remaining_s, 1),
-        })))
-
-        max_speed = 0.5
-        accumulated_distance = 0.0
-        start_point = pos[:3]
-        target_position = paths[-1]
-        for i in range(closest_idx, len(paths) - 1):
-            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-            if accumulated_distance > max_speed * 5:
-                target_position = paths[i]
-                break
-            start_point = paths[i]
+        target_position = self.select_target_position(paths, closest_idx, pos)
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
