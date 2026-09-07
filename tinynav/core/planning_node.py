@@ -587,7 +587,7 @@ class PlanningNode(Node):
                 current_heading = goal_heading_error(traj[0], target_end)
                 idle_penalty = 0.0
                 if current_dist > 0.4 and current_heading < np.pi / 2 and abs(param[0]) < ROBOT_CONFIG.min_linear_vel:
-                    idle_penalty = 4000.0
+                    idle_penalty = 20000.0
 
                 return (
                     score * 2000
