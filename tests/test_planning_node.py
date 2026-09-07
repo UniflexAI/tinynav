@@ -385,7 +385,7 @@ def test_no_min_span_map_is_the_strict_default():
 # --- published Path: the stride cmd_vel_control's dt assumption rests on -----
 
 def _publish_path_recorder():
-    """A PlanningNode with only what _publish_path touches, via __new__ so none of
+    """A PlanningNode with only what publish_selected_path touches, via __new__ so none of
     __init__'s model/map loading runs."""
     from planning_node import PlanningNode
     node = PlanningNode.__new__(PlanningNode)
@@ -408,7 +408,7 @@ def test_published_path_keeps_every_tenth_pose():
     from planning_node import PlanningNode
     node, sent = _publish_path_recorder()
     trajs = _straight_traj(31)
-    node._publish_path(trajs, [0], Header())
+    node.publish_selected_path(trajs, [0], Header())
     assert len(sent) == 1
     assert PlanningNode.PATH_POSE_STRIDE == 10
     assert len(sent[0].poses) == 4  # 0, 10, 20, 30
@@ -420,7 +420,7 @@ def test_published_path_preserves_direction_of_travel():
     # What the all-trajectories-collide fallback relies on: cmd_vel_control reads
     # reverse off the path pointing backwards, so the sign has to survive publishing.
     node, sent = _publish_path_recorder()
-    node._publish_path(_straight_traj(21, dx=-0.1), [0], Header())
+    node.publish_selected_path(_straight_traj(21, dx=-0.1), [0], Header())
     xs = [p.pose.position.x for p in sent[0].poses]
     assert xs[1] < xs[0]
 

@@ -798,7 +798,7 @@ class PlanningNode(Node):
     # different stride would scale both by that ratio.
     PATH_POSE_STRIDE = 10
 
-    def _publish_path(self, trajectories, indices, header):
+    def publish_selected_path(self, trajectories, indices, header):
         path = Path()
         path.header = header
         path.header.frame_id = "world"
@@ -975,6 +975,52 @@ class PlanningNode(Node):
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
+    def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
+        center = self.origin + np.array(self.grid_shape) * self.resolution / 2
+        robot_pos = T[:3, 3]
+        target_center = robot_pos - np.array([0.0, 0.0, self.z_grid_drop])
+        delta = target_center - center
+        if np.linalg.norm(delta) > .1:
+            new_center = target_center
+            new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
+            self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+        new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
+        self.occupancy_grid *= 0.99
+        self.occupancy_grid += new_occ
+        self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+
+    def build_obstacle_and_esdf(self, T):
+        min_span_map = self._min_span_map(self.origin, self.resolution,
+                                          self.occupancy_grid.shape[:2])
+        obstacle_mask = build_obstacle_map(
+            self.occupancy_grid, self.origin, self.resolution,
+            robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
+        )
+        ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
+        return min_span_map, obstacle_mask, ESDF_map
+
+    def generate_trajectories(self, init_p, init_q, v_allow):
+        trajectories, params = generate_trajectory_library_3d(
+            init_p=init_p, init_q=init_q,
+            max_linear_vel=v_allow,
+            max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+            max_path_len_m=self._traj_max_len_m,
+            max_lat_acc=self._traj_max_lat_acc,
+        )
+        vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+        trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+        params = np.concatenate([params, vocab_params], axis=0)
+        return trajectories, params
+
+    def score_trajectories(self, trajectories, ESDF_map, path_dist_map, remaining_map,
+                           route_heading_map):
+        front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+        return score_trajectories_by_ESDF(
+            trajectories, ESDF_map, path_dist_map, remaining_map, route_heading_map,
+            self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
+            front_len, rear_len, half_w,
+        )
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
@@ -986,18 +1032,7 @@ class PlanningNode(Node):
             cx, cy = self.K[0, 2], self.K[1, 2]
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-            robot_pos = T[:3, 3]
-            target_center = robot_pos - np.array([0.0, 0.0, self.z_grid_drop])
-            delta = target_center - center
-            if np.linalg.norm(delta) > .1:
-                new_center = target_center
-                new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
-                self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
-            new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.99
-            self.occupancy_grid += new_occ
-            self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+            self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
             # Building the cloud costs more than the raycasting that produced it,
             # and its only consumer is a view that is usually closed.
@@ -1005,13 +1040,7 @@ class PlanningNode(Node):
                 self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            min_span_map = self._min_span_map(self.origin, self.resolution,
-                                              self.occupancy_grid.shape[:2])
-            obstacle_mask = build_obstacle_map(
-                self.occupancy_grid, self.origin, self.resolution,
-                robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
-            )
-            ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
+            min_span_map, obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
@@ -1032,16 +1061,7 @@ class PlanningNode(Node):
             # and the speed cap above are maintained either way.
             if self.target_pose is None:
                 return
-            trajectories, params = generate_trajectory_library_3d(
-                init_p=init_p, init_q=init_q,
-                max_linear_vel=v_allow,
-                max_angular_vel=ROBOT_CONFIG.max_angular_vel,
-                max_path_len_m=self._traj_max_len_m,
-                max_lat_acc=self._traj_max_lat_acc,
-            )
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-            trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-            params = np.concatenate([params, vocab_params], axis=0)
+            trajectories, params = self.generate_trajectories(init_p, init_q, v_allow)
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
@@ -1050,12 +1070,8 @@ class PlanningNode(Node):
             )
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-            scores, occ_points, path_costs, end_remainings, end_heading_errs = score_trajectories_by_ESDF(
-                trajectories, ESDF_map, path_dist_map, remaining_map, route_heading_map,
-                self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
-                front_len, rear_len, half_w,
-            )
+            scores, occ_points, path_costs, end_remainings, end_heading_errs = self.score_trajectories(
+                trajectories, ESDF_map, path_dist_map, remaining_map, route_heading_map)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             enter_threshold = 0.30
@@ -1098,7 +1114,7 @@ class PlanningNode(Node):
                     # magnitude only has to have the right sign.
                     rev = [i for i in range(len(params)) if params[i][0] < 0.0]
                     if rev:
-                        self._publish_path(trajectories, rev[:1], depth_msg.header)
+                        self.publish_selected_path(trajectories, rev[:1], depth_msg.header)
                 return
 
             # Single cost: clearance + route adherence/progress + smoothness, with the
@@ -1210,7 +1226,7 @@ class PlanningNode(Node):
             dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
             sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
-            self._publish_path(trajectories, top_indices, depth_msg.header)
+            self.publish_selected_path(trajectories, top_indices, depth_msg.header)
 
 
 def main(args=None):

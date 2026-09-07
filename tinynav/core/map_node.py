@@ -305,11 +305,32 @@ class MapNode(Node):
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
+        self.declare_parameter('climb_prior', CLIMB_PRIOR_DEFAULT)
+        self._climb_prior = bool(self.get_parameter('climb_prior').value)
+        self.load_map(tinynav_map_path)
+        self.reset_map_state()
+
+        self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
+        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
+        self.nav_done_pub = self.create_publisher(Bool, '/mapping/nav_done', 10)
+        self.nav_progress_pub = self.create_publisher(String, '/mapping/nav_progress', 10)
+
+        self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
+        self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
+        self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        self._save_completed = False
+        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
+        # Its own timer, not nav_target_timer_callback: that one returns early without
+        # POIs, and the planner needs the climb region whenever it is planning at all.
+        self.map_prior_timer = self.create_timer(1.0 / MAP_PRIOR_HZ, self.tick_map_priors)
+
+    def load_map(self, tinynav_map_path: str) -> None:
         self.map_poses = np.load(f"{tinynav_map_path}/poses.npy", allow_pickle=True).item()
         self.speed_index = None
         self.climb_index = None
-        self.declare_parameter('climb_prior', CLIMB_PRIOR_DEFAULT)
-        self._climb_prior = bool(self.get_parameter('climb_prior').value)
         self.load_map_priors(tinynav_map_path)
         self.map_K = np.load(f"{tinynav_map_path}/intrinsics.npy")
         self.db = TinyNavDB(tinynav_map_path, is_scratch=False)
@@ -344,6 +365,7 @@ class MapNode(Node):
         print(f"sdf_map.shape: {self.sdf_map.shape}")
         print(f"occupancy_map.shape: {self.occupancy_map.shape}")
 
+    def reset_map_state(self) -> None:
         self.relocalization_poses = {}
         self.relocalization_pose_weights = {}
         self.failed_relocalizations = []
@@ -368,22 +390,6 @@ class MapNode(Node):
         self.cached_nav_path_in_map = None
         self.cached_nav_path_poi_index = -1
 
-        self.poi_pub = self.create_publisher(Odometry, "/mapping/poi", 10)
-        self.poi_change_pub = self.create_publisher(Odometry, "/mapping/poi_change", 10)
-        self.nav_done_pub = self.create_publisher(Bool, '/mapping/nav_done', 10)
-        self.nav_progress_pub = self.create_publisher(String, '/mapping/nav_progress', 10)
-
-        self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
-        self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
-        self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
-
-        self.tf_broadcaster = TransformBroadcaster(self)
-
-        self._save_completed = False
-        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
-        # Its own timer, not nav_target_timer_callback: that one returns early without
-        # POIs, and the planner needs the climb region whenever it is planning at all.
-        self.map_prior_timer = self.create_timer(1.0 / MAP_PRIOR_HZ, self.tick_map_priors)
 
     def load_map_priors(self, tinynav_map_path: str) -> None:
         """Load this map's capture-path priors — speed and climb. One method so a node
@@ -835,6 +841,73 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.global_plan_pub.publish(path_msg)
 
+    def poi_reached(self, poi, pos):
+        """Arrival is measured from the CAMERA pose, not the control center. Shifting it
+        back to the control center is more literally correct ("did the body reach the
+        POI") but it costs cam_offset (0.30 m) of extra approach before arrival fires,
+        and that margin is what keeps the robot out of the planner's near-goal dead
+        zone: with a camera reference, arrival triggers while the control center is
+        still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
+        Measuring from the camera declares arrival early; that is the point.
+
+        A POI with an authored heading is parked ON, not near: the mission turns to
+        that heading where it stops, so stopping 0.5m out puts the turn in the wrong
+        place. Everything else keeps the loose radius and the margin it buys."""
+        arrive_m = (_ARRIVE_HEADING_M if self.poi_index in self.poi_has_heading
+                    else _ARRIVE_M)
+        inside = (np.linalg.norm(poi[:2] - pos[:2]) < arrive_m
+                  and abs(poi[2] - pos[2]) < 2.0)
+        # Confirmed, not sampled: see _ARRIVE_TICKS.
+        self._arrive_ticks = (self._arrive_ticks + 1) if inside else 0
+        return inside and self._arrive_ticks >= _ARRIVE_TICKS
+
+    def publish_nav_progress(self, percent, path_remaining_m, path_total_m,
+                             estimated_remaining_s, arrived):
+        self.nav_progress_pub.publish(String(data=json.dumps({
+            # The arrival edge, said in a word, and False rather than absent so a
+            # consumer can tell "this build says when it arrives" from "this build
+            # never says". `percent` is path progress and reaches 100 whenever the
+            # robot is at the END OF THE PATH -- a replan, a path that doubles back
+            # near the robot, or a pose correction that snaps the projection forward
+            # all get there without the robot being anywhere near the POI. A consumer
+            # that keyed on percent ended legs mid-route (pilot did).
+            "arrived": arrived,
+            "poi_index": self.poi_index,
+            "percent": percent,
+            "path_remaining_m": path_remaining_m,
+            "path_total_m": path_total_m,
+            "estimated_remaining_s": estimated_remaining_s,
+        })))
+
+    def update_leg_progress(self, remaining_length):
+        now = time.time()
+        if self._leg_initial_length is None:
+            self._leg_initial_length = remaining_length
+            self._leg_start_time = now
+
+        covered = self._leg_initial_length - remaining_length
+        elapsed = now - self._leg_start_time
+        if covered > 0.1 and elapsed > 1.0:
+            self._speed_estimate = covered / elapsed
+
+        initial = self._leg_initial_length
+        percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
+        estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
+        return percent, estimated_remaining_s
+
+    def select_target_position(self, paths, closest_idx, pos, cap):
+        lookahead_m = lookahead_distance_m(cap)
+        accumulated_distance = 0.0
+        start_point = pos[:3]
+        target_position = paths[-1]
+        for i in range(closest_idx, len(paths) - 1):
+            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
+            if accumulated_distance > lookahead_m:
+                target_position = paths[i]
+                break
+            start_point = paths[i]
+        return target_position
+
     def nav_target_timer_callback(self):
         if (
             self.poi_index < 0
@@ -860,43 +933,15 @@ class MapNode(Node):
 
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
-        # Arrival is measured from the CAMERA pose, not the control center. Shifting it
-        # back to the control center is more literally correct ("did the body reach the
-        # POI") but it costs cam_offset (0.30 m) of extra approach before arrival fires,
-        # and that margin is what keeps the robot out of the planner's near-goal dead
-        # zone: with a camera reference, arrival triggers while the control center is
-        # still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
-        # Measuring from the camera declares arrival early; that is the point.
-        # A POI with an authored heading is parked ON, not near: the mission turns to
-        # that heading where it stops, so stopping 0.5m out puts the turn in the wrong
-        # place. Everything else keeps the loose radius and the margin it buys (above).
-        arrive_m = (_ARRIVE_HEADING_M if self.poi_index in self.poi_has_heading
-                    else _ARRIVE_M)
-        inside = (np.linalg.norm(poi[:2] - pos[:2]) < arrive_m
-                  and abs(poi[2] - pos[2]) < 2.0)
-        # Confirmed, not sampled: see _ARRIVE_TICKS.
-        self._arrive_ticks = (self._arrive_ticks + 1) if inside else 0
-        if inside and self._arrive_ticks >= _ARRIVE_TICKS:
+        if self.poi_reached(poi, pos):
             # Unconditional: this message is the only arrival edge consumers get, so
             # gating it on _leg_initial_length (i.e. "this leg published progress at
             # least once") silently loses the arrival for a POI the robot is ALREADY
-            # standing at when the batch lands — no path is ever planned, so the
+            # standing at when the batch lands -- no path is ever planned, so the
             # length stays None. The agent-side handoff/mission then waits out its
             # whole leg timeout on a leg that is already done.
-            self.nav_progress_pub.publish(String(data=json.dumps({
-                "poi_index": self.poi_index,
-                # The arrival edge, said in a word. `percent` is path progress and
-                # reaches 100 whenever the robot is at the END OF THE PATH -- a
-                # replan, a path that doubles back near the robot, or a pose
-                # correction that snaps the projection forward all get there
-                # without the robot being anywhere near the POI. A consumer that
-                # keyed on percent ended legs mid-route (pilot did).
-                "arrived": True,
-                "percent": 100.0,
-                "path_remaining_m": 0.0,
-                "path_total_m": round(self._leg_initial_length or 0.0, 2),
-                "estimated_remaining_s": 0.0,
-            })))
+            self.publish_nav_progress(100.0, 0.0, round(self._leg_initial_length or 0.0, 2),
+                                      0.0, True)
             self.poi_index += 1
             self._arrive_ticks = 0
             self._leg_initial_length = None
@@ -940,41 +985,13 @@ class MapNode(Node):
             for i in range(closest_idx, len(paths) - 1)
         ) if closest_idx < len(paths) - 1 else 0.0
 
-        now = time.time()
-        if self._leg_initial_length is None:
-            self._leg_initial_length = remaining_length
-            self._leg_start_time = now
+        percent, estimated_remaining_s = self.update_leg_progress(remaining_length)
 
-        covered = self._leg_initial_length - remaining_length
-        elapsed = now - self._leg_start_time
-        if covered > 0.1 and elapsed > 1.0:
-            self._speed_estimate = covered / elapsed
+        self.publish_nav_progress(round(percent, 1), round(remaining_length, 2),
+                                  round(self._leg_initial_length, 2),
+                                  round(estimated_remaining_s, 1), False)
 
-        initial = self._leg_initial_length
-        percent = max(0.0, min(100.0, covered / initial * 100.0)) if initial > 0 else 0.0
-        estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
-
-        # False, not absent: a consumer can then tell "this build says when it
-        # arrives" from "this build never says", and only fall back for the latter.
-        self.nav_progress_pub.publish(String(data=json.dumps({
-            "arrived": False,
-            "poi_index": self.poi_index,
-            "percent": round(percent, 1),
-            "path_remaining_m": round(remaining_length, 2),
-            "path_total_m": round(initial, 2),
-            "estimated_remaining_s": round(estimated_remaining_s, 1),
-        })))
-
-        lookahead_m = lookahead_distance_m(cap)
-        accumulated_distance = 0.0
-        start_point = pos[:3]
-        target_position = paths[-1]
-        for i in range(closest_idx, len(paths) - 1):
-            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-            if accumulated_distance > lookahead_m:
-                target_position = paths[i]
-                break
-            start_point = paths[i]
+        target_position = self.select_target_position(paths, closest_idx, pos, cap)
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
