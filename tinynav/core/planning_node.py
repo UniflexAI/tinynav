@@ -206,7 +206,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
-    sample_step = 0.2
+    sample_step = 0.3
     length = front_len + rear_len
     width = 2.0 * half_w
     n_long = int(np.ceil(length / sample_step)) + 1
