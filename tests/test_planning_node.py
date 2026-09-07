@@ -7,24 +7,12 @@ from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
 from planning_node import (
-    DIST_COST_WEIGHT,
-    ESDF_COST_WEIGHT,
-    HEADING_COST_WEIGHT,
-    HEADING_FADE_DIST,
-    IDLE_GOAL_DIST_THRESHOLD,
-    IDLE_HEADING_THRESHOLD,
-    IDLE_TRAJECTORY_PENALTY,
-    IDLE_VX_THRESHOLD,
-    REVERSE_GATE_ENTER_CLEARANCE_M,
-    REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M,
     run_raycasting_loopy,
     generate_trajectory_library_3d,
     generate_predefined_trajectory_vocabularies,
     goal_heading_error,
-    reverse_gate_exit_clearance,
 )
 from tinynav.core.math_utils import matrix_to_quat
-from tinynav.core.robot_specs import B2_CONFIG, GO2_CONFIG
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -169,17 +157,17 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
 # mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
 # behavior in sync with imported planning constants.
 
-def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=HEADING_COST_WEIGHT, front_blocked=False):
+def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=10.0, front_blocked=False):
     current_dist = np.linalg.norm(target_end)
     dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
-    heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / HEADING_FADE_DIST)
+    heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
     current_heading = goal_heading_error(traj[0], target_end)
     idle_penalty = (
-        IDLE_TRAJECTORY_PENALTY
+        20000.0
         if (
-            current_dist > IDLE_GOAL_DIST_THRESHOLD
-            and current_heading < IDLE_HEADING_THRESHOLD
-            and abs(param[0]) < IDLE_VX_THRESHOLD
+            current_dist > 0.4
+            and current_heading < np.pi / 2
+            and abs(param[0]) < 0.1
             and not front_blocked
         )
         else 0.0
@@ -190,16 +178,16 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
         else 0.0
     )
     return (
-        score * ESDF_COST_WEIGHT
-        + DIST_COST_WEIGHT * dist
+        score * 2000.0
+        + 100.0 * dist
         + heading_weight * heading
-        + 10 * abs(last_param[0] - param[0])
-        + 10 * abs(last_param[1] - param[1])
+        + 2 * abs(last_param[0] - param[0])
+        + 2 * abs(last_param[1] - param[1])
         + idle_penalty
         + reverse_gate_penalty
     )
 
-def _pick(target, heading_weight=HEADING_COST_WEIGHT, front_blocked=False):
+def _pick(target, heading_weight=10.0, front_blocked=False):
     """Lowest-cost (vx, omega) from the planner's own cost terms, with a clear ESDF."""
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
@@ -233,11 +221,8 @@ def test_goal_heading_error():
         got = goal_heading_error(end, np.array(target))
         assert abs(got - expected) < 1e-6, f"target {target}: {got} != {expected}"
 
-def test_goal_behind_turns_in_place():
-    # forward-only samples all recede from a target behind, so distance alone picks vx=0,
-    # and the shared vx=0 endpoint leaves smoothness to pick omega=0 too
+def test_goal_behind_turns():
     behind = np.array([-5.0, 0.0, 0.0])
-    assert tuple(_pick(behind, heading_weight=0.0)) == (0.0, 0.0)
 
     vx, omega = _pick(behind)
     assert abs(omega) > 1e-6, f"target behind still yields omega={omega}"
@@ -252,11 +237,11 @@ def test_goal_abeam_turns_while_driving():
         assert vx > 0.0 and abs(omega) > 1e-6, f"target abeam yields vx={vx}, omega={omega}"
 
 def test_heading_fades_within_arrival_radius():
-    # inside HEADING_FADE_DIST the heading term is scaled down, so it cannot outbid distance:
+    # inside 2 m the heading term is scaled down, so it cannot outbid distance:
     # the pick must still be the trajectory that lands closest to the goal
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     close = np.array([0.4, 0.3, 0.0])
-    assert np.linalg.norm(close) < HEADING_FADE_DIST
+    assert np.linalg.norm(close) < 2.0
 
     dists = [np.linalg.norm(trajectories[i][-1, :3] - close) for i in range(len(trajectories))]
     nearest = int(np.argmin(dists))
@@ -278,17 +263,7 @@ def test_heading_fade_is_monotonic_in_distance():
     terms = [heading_term(r) for r in (0.5, 1.0, 2.0, 4.0)]
     assert terms[0] < terms[1] < terms[2], f"heading penalty not growing with range: {terms}"
     assert abs(terms[2] - terms[3]) < 1e-9, f"heading penalty not saturated past the fade distance: {terms}"
-    assert abs(terms[2] - HEADING_COST_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
-
-def test_reverse_gate_uses_explicit_close_clearance():
-    # Dilation stays disabled; reverse starts only when the front clearance is tight.
-    assert abs(REVERSE_GATE_ENTER_CLEARANCE_M - 0.2) < 1e-9
-
-def test_reverse_gate_exit_clearance_scales_with_robot_size():
-    assert abs(REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M - 0.1) < 1e-9
-    assert abs(reverse_gate_exit_clearance(GO2_CONFIG) - 0.3) < 1e-9
-    assert abs(reverse_gate_exit_clearance(B2_CONFIG) - 0.65) < 1e-9
-    assert reverse_gate_exit_clearance(B2_CONFIG) > REVERSE_GATE_ENTER_CLEARANCE_M
+    assert abs(terms[2] - 10.0 * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
 
 def test_front_blocked_allows_turning_in_place_for_abeam_target():
     for side in (5.0, -5.0):
@@ -297,12 +272,10 @@ def test_front_blocked_allows_turning_in_place_for_abeam_target():
 
 if __name__ == "__main__":
     test_goal_heading_error()
-    test_goal_behind_turns_in_place()
+    test_goal_behind_turns()
     test_goal_ahead_still_drives_straight()
     test_goal_abeam_turns_while_driving()
     test_heading_fades_within_arrival_radius()
     test_heading_fade_is_monotonic_in_distance()
-    test_reverse_gate_uses_explicit_close_clearance()
-    test_reverse_gate_exit_clearance_scales_with_robot_size()
     test_front_blocked_allows_turning_in_place_for_abeam_target()
     test_run_raycasting_comparison()

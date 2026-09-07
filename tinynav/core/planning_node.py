@@ -18,18 +18,6 @@ import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 
-ESDF_COST_WEIGHT = 2000.0
-DIST_COST_WEIGHT = 100.0
-HEADING_COST_WEIGHT = 10.0
-HEADING_FADE_DIST = 2.0
-IDLE_TRAJECTORY_PENALTY = 20000.0
-IDLE_GOAL_DIST_THRESHOLD = 0.4
-IDLE_HEADING_THRESHOLD = np.pi / 2
-IDLE_VX_THRESHOLD = 0.1
-FOOTPRINT_SAMPLE_STEP_M = 0.3
-REVERSE_GATE_ENTER_CLEARANCE_M = 0.2
-REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M = 0.1
-
 # === Helper functions ===
 @njit(cache=True)
 def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
@@ -218,7 +206,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
-    sample_step = FOOTPRINT_SAMPLE_STEP_M
+    sample_step = 0.3
     length = front_len + rear_len
     width = 2.0 * half_w
     n_long = int(np.ceil(length / sample_step)) + 1
@@ -308,9 +296,6 @@ def goal_heading_error(traj_end, target):
     yaw1 = R.from_quat(traj_end[3:7]).as_euler("xyz")[2] + np.pi / 2
     yaw2 = np.arctan2(dy, dx)
     return abs(np.arctan2(np.sin(yaw2 - yaw1), np.cos(yaw2 - yaw1)))
-
-def reverse_gate_exit_clearance(config=ROBOT_CONFIG):
-    return max(config.length, config.width) / 2.0 + REVERSE_GATE_EXIT_CLEARANCE_BUFFER_M
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
@@ -432,7 +417,7 @@ class PlanningNode(Node):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
         Scans start at the front face so the returned value matches physical clearance."""
         if max_dist is None:
-            max_dist = reverse_gate_exit_clearance() + self.resolution
+            max_dist = max(ROBOT_CONFIG.length, ROBOT_CONFIG.width) / 2.0 + 0.1 + self.resolution
         center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
@@ -603,10 +588,10 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            reverse_exit_clearance = reverse_gate_exit_clearance()
+            reverse_exit_clearance = max(ROBOT_CONFIG.length, ROBOT_CONFIG.width) / 2.0 + 0.1
             if self.reverse_gate_active:
                 self.reverse_gate_active = front_clearance < reverse_exit_clearance
-            elif front_clearance <= REVERSE_GATE_ENTER_CLEARANCE_M:
+            elif front_clearance <= 0.2:
                 self.reverse_gate_active = True
             should_reverse = self.reverse_gate_active
 
@@ -626,21 +611,21 @@ class PlanningNode(Node):
                 current_dist = np.linalg.norm(init_p - target_end)
                 # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
                 # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-                heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / HEADING_FADE_DIST)
+                heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
                 current_heading = goal_heading_error(traj[0], target_end)
                 idle_penalty = 0.0
                 if (
-                    current_dist > IDLE_GOAL_DIST_THRESHOLD
-                    and current_heading < IDLE_HEADING_THRESHOLD
-                    and abs(param[0]) < IDLE_VX_THRESHOLD
+                    current_dist > 0.4
+                    and current_heading < np.pi / 2
+                    and abs(param[0]) < 0.1
                     and not should_reverse
                 ):
-                    idle_penalty = IDLE_TRAJECTORY_PENALTY
+                    idle_penalty = 20000.0
 
                 return (
-                    score * ESDF_COST_WEIGHT
-                    + DIST_COST_WEIGHT * dist
-                    + HEADING_COST_WEIGHT * heading
+                    score * 2000.0
+                    + 100.0 * dist
+                    + 10.0 * heading
                     + 2 * abs(self.last_param[0] - param[0])
                     + 2 * abs(self.last_param[1] - param[1])
                     + idle_penalty
