@@ -15,6 +15,7 @@ from planning_node import (
     IDLE_HEADING_THRESHOLD,
     IDLE_TRAJECTORY_PENALTY,
     IDLE_VX_THRESHOLD,
+    REVERSE_GATE_ENTER_CLEARANCE_M,
     run_raycasting_loopy,
     generate_trajectory_library_3d,
     goal_heading_error,
@@ -254,6 +255,11 @@ def test_heading_fade_is_monotonic_in_distance():
     assert abs(terms[2] - terms[3]) < 1e-9, f"heading penalty not saturated past the fade distance: {terms}"
     assert abs(terms[2] - HEADING_COST_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
 
+def test_reverse_gate_keeps_removed_dilation_margin():
+    # Obstacle dilation is disabled in robot_specs.py. Keep the reverse gate's
+    # previous early trigger margin explicit instead of depending on a dilated mask.
+    assert abs(REVERSE_GATE_ENTER_CLEARANCE_M - 0.4) < 1e-9
+
 if __name__ == "__main__":
     test_goal_heading_error()
     test_goal_behind_turns_in_place()
@@ -261,4 +267,5 @@ if __name__ == "__main__":
     test_goal_abeam_turns_while_driving()
     test_heading_fades_within_arrival_radius()
     test_heading_fade_is_monotonic_in_distance()
+    test_reverse_gate_keeps_removed_dilation_margin()
     test_run_raycasting_comparison()

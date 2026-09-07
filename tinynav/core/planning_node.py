@@ -27,6 +27,7 @@ IDLE_GOAL_DIST_THRESHOLD = 0.4
 IDLE_HEADING_THRESHOLD = np.pi / 2
 IDLE_VX_THRESHOLD = 0.1
 FOOTPRINT_SAMPLE_STEP_M = 0.3
+REVERSE_GATE_ENTER_CLEARANCE_M = 0.4
 
 # === Helper functions ===
 @njit(cache=True)
@@ -595,12 +596,11 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            enter_threshold = 0.30
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= enter_threshold
+                should_reverse = front_clearance <= REVERSE_GATE_ENTER_CLEARANCE_M
                 reverse_gate_penalty = 0.0
                 if should_reverse and not is_backward_traj:
                         reverse_gate_penalty = 1e9
