@@ -602,10 +602,10 @@ class PlanningNode(Node):
                 is_backward_traj = param[0] < 0.0
                 should_reverse = front_clearance <= REVERSE_GATE_ENTER_CLEARANCE_M
                 reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                if should_reverse and param[0] > 0.0:
+                    reverse_gate_penalty = 1e9
                 elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                    reverse_gate_penalty = 1e9
 
                 # regular trajectory penalty
                 traj_end = np.array(traj[-1,:3])
@@ -621,6 +621,7 @@ class PlanningNode(Node):
                     current_dist > IDLE_GOAL_DIST_THRESHOLD
                     and current_heading < IDLE_HEADING_THRESHOLD
                     and abs(param[0]) < IDLE_VX_THRESHOLD
+                    and not should_reverse
                 ):
                     idle_penalty = IDLE_TRAJECTORY_PENALTY
 

@@ -18,6 +18,7 @@ from planning_node import (
     REVERSE_GATE_ENTER_CLEARANCE_M,
     run_raycasting_loopy,
     generate_trajectory_library_3d,
+    generate_predefined_trajectory_vocabularies,
     goal_heading_error,
 )
 from tinynav.core.math_utils import matrix_to_quat
@@ -165,14 +166,24 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
 # mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
 # behavior in sync with imported planning constants.
 
-def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=HEADING_COST_WEIGHT):
+def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=HEADING_COST_WEIGHT, front_blocked=False):
     current_dist = np.linalg.norm(target_end)
     dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
     heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / HEADING_FADE_DIST)
     current_heading = goal_heading_error(traj[0], target_end)
     idle_penalty = (
         IDLE_TRAJECTORY_PENALTY
-        if current_dist > IDLE_GOAL_DIST_THRESHOLD and current_heading < IDLE_HEADING_THRESHOLD and abs(param[0]) < IDLE_VX_THRESHOLD
+        if (
+            current_dist > IDLE_GOAL_DIST_THRESHOLD
+            and current_heading < IDLE_HEADING_THRESHOLD
+            and abs(param[0]) < IDLE_VX_THRESHOLD
+            and not front_blocked
+        )
+        else 0.0
+    )
+    reverse_gate_penalty = (
+        1e9
+        if (front_blocked and param[0] > 0.0) or (not front_blocked and param[0] < 0.0)
         else 0.0
     )
     return (
@@ -182,15 +193,26 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
         + 10 * abs(last_param[0] - param[0])
         + 10 * abs(last_param[1] - param[1])
         + idle_penalty
+        + reverse_gate_penalty
     )
 
-def _pick(target, heading_weight=HEADING_COST_WEIGHT):
-    """Lowest-cost (vx, omega) from the planner's own cost terms, with a clear ESDF
-    (score=0), no reverse gating and a standing start."""
+def _pick(target, heading_weight=HEADING_COST_WEIGHT, front_blocked=False):
+    """Lowest-cost (vx, omega) from the planner's own cost terms, with a clear ESDF."""
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+    params = np.concatenate([params, vocab_params], axis=0)
     last_param = np.zeros(2)
     costs = [
-        _trajectory_cost(trajectories[i], params[i], 0.0, target, last_param, heading_weight=heading_weight)
+        _trajectory_cost(
+            trajectories[i],
+            params[i],
+            0.0,
+            target,
+            last_param,
+            heading_weight=heading_weight,
+            front_blocked=front_blocked,
+        )
         for i in range(len(trajectories))
     ]
     return params[np.argsort(costs, kind='stable')[0]]
@@ -259,6 +281,11 @@ def test_reverse_gate_uses_explicit_close_clearance():
     # Dilation stays disabled; reverse starts only when the front clearance is tight.
     assert abs(REVERSE_GATE_ENTER_CLEARANCE_M - 0.2) < 1e-9
 
+def test_front_blocked_allows_turning_in_place_for_abeam_target():
+    for side in (5.0, -5.0):
+        vx, omega = _pick(np.array([0.0, side, 0.0]), front_blocked=True)
+        assert vx == 0.0 and abs(omega) > 1e-6, f"blocked abeam target yields vx={vx}, omega={omega}"
+
 if __name__ == "__main__":
     test_goal_heading_error()
     test_goal_behind_turns_in_place()
@@ -267,4 +294,5 @@ if __name__ == "__main__":
     test_heading_fades_within_arrival_radius()
     test_heading_fade_is_monotonic_in_distance()
     test_reverse_gate_uses_explicit_close_clearance()
+    test_front_blocked_allows_turning_in_place_for_abeam_target()
     test_run_raycasting_comparison()
