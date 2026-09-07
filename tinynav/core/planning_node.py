@@ -25,6 +25,7 @@ HEADING_FADE_DIST = 2.0
 IDLE_TRAJECTORY_PENALTY = 20000.0
 IDLE_GOAL_DIST_THRESHOLD = 0.4
 IDLE_HEADING_THRESHOLD = np.pi / 2
+IDLE_VX_THRESHOLD = 0.1
 FOOTPRINT_SAMPLE_STEP_M = 0.3
 
 # === Helper functions ===
@@ -619,7 +620,7 @@ class PlanningNode(Node):
                 if (
                     current_dist > IDLE_GOAL_DIST_THRESHOLD
                     and current_heading < IDLE_HEADING_THRESHOLD
-                    and abs(param[0]) < ROBOT_CONFIG.min_linear_vel
+                    and abs(param[0]) < IDLE_VX_THRESHOLD
                 ):
                     idle_penalty = IDLE_TRAJECTORY_PENALTY
 

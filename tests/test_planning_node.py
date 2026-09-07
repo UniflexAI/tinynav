@@ -14,6 +14,7 @@ from planning_node import (
     IDLE_GOAL_DIST_THRESHOLD,
     IDLE_HEADING_THRESHOLD,
     IDLE_TRAJECTORY_PENALTY,
+    IDLE_VX_THRESHOLD,
     run_raycasting_loopy,
     generate_trajectory_library_3d,
     goal_heading_error,
@@ -162,7 +163,6 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
 
 # mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
 # behavior in sync with imported planning constants.
-_MIN_LINEAR_VEL = 0.1
 
 def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=HEADING_COST_WEIGHT):
     current_dist = np.linalg.norm(target_end)
@@ -171,7 +171,7 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
     current_heading = goal_heading_error(traj[0], target_end)
     idle_penalty = (
         IDLE_TRAJECTORY_PENALTY
-        if current_dist > IDLE_GOAL_DIST_THRESHOLD and current_heading < IDLE_HEADING_THRESHOLD and abs(param[0]) < _MIN_LINEAR_VEL
+        if current_dist > IDLE_GOAL_DIST_THRESHOLD and current_heading < IDLE_HEADING_THRESHOLD and abs(param[0]) < IDLE_VX_THRESHOLD
         else 0.0
     )
     return (
