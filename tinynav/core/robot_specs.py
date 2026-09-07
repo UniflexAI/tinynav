@@ -43,6 +43,12 @@ class RobotConfig:
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
+    # Gestures selectable per-POI (see poi["action"]) that map_node plays on arrival
+    # before advancing to the next POI. Names are dispatched as "play <name>" on
+    # /service/command; unitree_control.py maps them to SDK calls per robot model.
+    # Empty for robots with no arrival-gesture support.
+    available_actions: list[str] = field(default_factory=list)
+    arrival_action_hold_s: float = 5.0
 
     @property
     def cam_offset_3d(self):
@@ -61,6 +67,10 @@ class RobotConfig:
         return float(hl - self.control_x), float(hl + self.control_x), float(hw)
 
 
+# go2/go2w share the vendored SDK's go2 SportClient (see unitree_control.py), so
+# both get the same "fun move" gesture vocabulary.
+_GO2_ACTIONS = ['Hello', 'Stretch', 'Heart']
+
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
     length=0.4, width=0.3,
@@ -68,6 +78,7 @@ GO2_CONFIG = RobotConfig(
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
     obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
+    available_actions=_GO2_ACTIONS,
 )
 
 GO2W_CONFIG = RobotConfig(
@@ -77,6 +88,7 @@ GO2W_CONFIG = RobotConfig(
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
     obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
+    available_actions=_GO2_ACTIONS,
 )
 
 B2_CONFIG = RobotConfig(
@@ -97,14 +109,23 @@ B2W_CONFIG = RobotConfig(
     obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
+# Named gestures from unitree_sdk2py's g1_arm_action_client.action_map, minus
+# "release arm" (id 0) which is a reset/neutral pose, not an arrival gesture.
+_G1_ACTIONS = [
+    'shake hand', 'high five', 'hug', 'high wave', 'clap', 'face wave',
+    'left kiss', 'heart', 'right heart', 'hands up', 'x-ray', 'right hand up',
+    'reject', 'right kiss', 'two-hand kiss',
+]
+
 G1_CONFIG = RobotConfig(
     name='g1', shape='square',
-    length=0.3, width=0.5,
+    length=0.2, width=0.3,
     camera_x=0.1, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.15,
     min_linear_vel=0.2, min_angular_vel=0.3,
     obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
+    available_actions=_G1_ACTIONS,
 )
 
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()

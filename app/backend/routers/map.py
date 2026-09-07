@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from ..map_renderer import render_map
 from ..state import runner
+from tinynav.core.robot_specs import ROBOT_CONFIG
 
 router = APIRouter(tags=['map'])
 
@@ -194,6 +195,7 @@ def _snap_to_sdf(map_path: str, x: float, y: float, search_radius: int = 8, sdf_
 class MapPoiCreateRequest(BaseModel):
     name: str
     position: list[float]  # [x, y, z]  — z will be snapped from SDF
+    action: Optional[str] = None  # gesture to play on arrival; must be in ROBOT_CONFIG.available_actions
 
 
 @router.post('/preview/{map_name}/pois')
@@ -201,6 +203,8 @@ def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
     path = _resolve_map_path(map_name)
     if len(req.position) != 3:
         raise HTTPException(400, 'position must be [x, y, z]')
+    if req.action is not None and req.action not in ROBOT_CONFIG.available_actions:
+        raise HTTPException(400, f'action must be one of {ROBOT_CONFIG.available_actions}')
 
     # Snap (x, y) to the nearest prior-path point using the SDF map.
     # The incoming z is ignored — the snapped z comes from the SDF volume.
@@ -214,7 +218,7 @@ def map_preview_create_poi(map_name: str, req: MapPoiCreateRequest):
             pois = json.load(f)
     existing_ids = [int(k) for k in pois.keys()] if pois else []
     new_id = max(existing_ids) + 1 if existing_ids else 0
-    pois[str(new_id)] = {'id': new_id, 'name': req.name, 'position': snapped_position}
+    pois[str(new_id)] = {'id': new_id, 'name': req.name, 'position': snapped_position, 'action': req.action}
     with open(pois_file, 'w') as f:
         json.dump(pois, f, indent=2)
     return pois[str(new_id)]
