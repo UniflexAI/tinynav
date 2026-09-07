@@ -7,6 +7,13 @@ from numba import njit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
 from planning_node import (
+    DIST_COST_WEIGHT,
+    ESDF_COST_WEIGHT,
+    HEADING_COST_WEIGHT,
+    HEADING_FADE_DIST,
+    IDLE_GOAL_DIST_THRESHOLD,
+    IDLE_HEADING_THRESHOLD,
+    IDLE_TRAJECTORY_PENALTY,
     run_raycasting_loopy,
     generate_trajectory_library_3d,
     goal_heading_error,
@@ -154,35 +161,29 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
                       [0.0, -1.0, 0.0]])
 
 # mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
-# the weights and heading fade distance (2.0) in sync by hand
-_ESDF_WEIGHT = 2000.0
-_DIST_WEIGHT = 100.0
-_HEADING_WEIGHT = 100.0
-_HEADING_FADE_DIST = 2.0
-_IDLE_PENALTY = 20000.0
-_IDLE_GOAL_DIST = 0.4
+# behavior in sync with imported planning constants.
 _MIN_LINEAR_VEL = 0.1
 
-def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
+def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=HEADING_COST_WEIGHT):
     current_dist = np.linalg.norm(target_end)
     dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
-    heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / _HEADING_FADE_DIST)
+    heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / HEADING_FADE_DIST)
     current_heading = goal_heading_error(traj[0], target_end)
     idle_penalty = (
-        _IDLE_PENALTY
-        if current_dist > _IDLE_GOAL_DIST and current_heading < np.pi / 2 and abs(param[0]) < _MIN_LINEAR_VEL
+        IDLE_TRAJECTORY_PENALTY
+        if current_dist > IDLE_GOAL_DIST_THRESHOLD and current_heading < IDLE_HEADING_THRESHOLD and abs(param[0]) < _MIN_LINEAR_VEL
         else 0.0
     )
     return (
-        score * _ESDF_WEIGHT
-        + _DIST_WEIGHT * dist
+        score * ESDF_COST_WEIGHT
+        + DIST_COST_WEIGHT * dist
         + heading_weight * heading
         + 10 * abs(last_param[0] - param[0])
         + 10 * abs(last_param[1] - param[1])
         + idle_penalty
     )
 
-def _pick(target, heading_weight=_HEADING_WEIGHT):
+def _pick(target, heading_weight=HEADING_COST_WEIGHT):
     """Lowest-cost (vx, omega) from the planner's own cost terms, with a clear ESDF
     (score=0), no reverse gating and a standing start."""
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
@@ -229,7 +230,7 @@ def test_heading_fades_within_arrival_radius():
     # the pick must still be the trajectory that lands closest to the goal
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     close = np.array([0.4, 0.3, 0.0])
-    assert np.linalg.norm(close) < _HEADING_FADE_DIST
+    assert np.linalg.norm(close) < HEADING_FADE_DIST
 
     dists = [np.linalg.norm(trajectories[i][-1, :3] - close) for i in range(len(trajectories))]
     nearest = int(np.argmin(dists))
@@ -251,7 +252,7 @@ def test_heading_fade_is_monotonic_in_distance():
     terms = [heading_term(r) for r in (0.5, 1.0, 2.0, 4.0)]
     assert terms[0] < terms[1] < terms[2], f"heading penalty not growing with range: {terms}"
     assert abs(terms[2] - terms[3]) < 1e-9, f"heading penalty not saturated past the fade distance: {terms}"
-    assert abs(terms[2] - _HEADING_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
+    assert abs(terms[2] - HEADING_COST_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
 
 if __name__ == "__main__":
     test_goal_heading_error()

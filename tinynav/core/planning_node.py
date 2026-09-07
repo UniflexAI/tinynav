@@ -18,6 +18,15 @@ import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 
+ESDF_COST_WEIGHT = 2000.0
+DIST_COST_WEIGHT = 100.0
+HEADING_COST_WEIGHT = 100.0
+HEADING_FADE_DIST = 2.0
+IDLE_TRAJECTORY_PENALTY = 20000.0
+IDLE_GOAL_DIST_THRESHOLD = 0.4
+IDLE_HEADING_THRESHOLD = np.pi / 2
+FOOTPRINT_SAMPLE_STEP_M = 0.3
+
 # === Helper functions ===
 @njit(cache=True)
 def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
@@ -206,7 +215,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
-    sample_step = 0.3
+    sample_step = FOOTPRINT_SAMPLE_STEP_M
     length = front_len + rear_len
     width = 2.0 * half_w
     n_long = int(np.ceil(length / sample_step)) + 1
@@ -604,16 +613,20 @@ class PlanningNode(Node):
                 current_dist = np.linalg.norm(init_p - target_end)
                 # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
                 # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-                heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
+                heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / HEADING_FADE_DIST)
                 current_heading = goal_heading_error(traj[0], target_end)
                 idle_penalty = 0.0
-                if current_dist > 0.4 and current_heading < np.pi / 2 and abs(param[0]) < ROBOT_CONFIG.min_linear_vel:
-                    idle_penalty = 20000.0
+                if (
+                    current_dist > IDLE_GOAL_DIST_THRESHOLD
+                    and current_heading < IDLE_HEADING_THRESHOLD
+                    and abs(param[0]) < ROBOT_CONFIG.min_linear_vel
+                ):
+                    idle_penalty = IDLE_TRAJECTORY_PENALTY
 
                 return (
-                    score * 2000
-                    + 100 * dist
-                    + 100 * heading
+                    score * ESDF_COST_WEIGHT
+                    + DIST_COST_WEIGHT * dist
+                    + HEADING_COST_WEIGHT * heading
                     + 10 * abs(self.last_param[0] - param[0])
                     + 10 * abs(self.last_param[1] - param[1])
                     + idle_penalty
