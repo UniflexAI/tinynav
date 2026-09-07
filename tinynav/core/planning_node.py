@@ -206,6 +206,15 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
     scores = []
     occ_points = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
+    sample_step = 0.2
+    length = front_len + rear_len
+    width = 2.0 * half_w
+    n_long = int(np.ceil(length / sample_step)) + 1
+    n_lat = int(np.ceil(width / sample_step)) + 1
+    if n_long < 2:
+        n_long = 2
+    if n_lat < 2:
+        n_lat = 2
 
     for t in range(len(trajectories)):
         traj = trajectories[t]
@@ -228,34 +237,42 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
             left_x = -fwd_y
             left_y = fwd_x
 
-            # center + 4 corners + long-side midpoints, unrolled for numba
-            check_xs = (
-                x_world,
-                x_world + fwd_x * front_len + left_x * half_w,
-                x_world + fwd_x * front_len - left_x * half_w,
-                x_world - fwd_x * rear_len  + left_x * half_w,
-                x_world - fwd_x * rear_len  - left_x * half_w,
-                x_world + left_x * half_w,
-                x_world - left_x * half_w,
-            )
-            check_ys = (
-                y_world,
-                y_world + fwd_y * front_len + left_y * half_w,
-                y_world + fwd_y * front_len - left_y * half_w,
-                y_world - fwd_y * rear_len  + left_y * half_w,
-                y_world - fwd_y * rear_len  - left_y * half_w,
-                y_world + left_y * half_w,
-                y_world - left_y * half_w,
-            )
+            # Sample the footprint perimeter by distance, plus center.
+            for li in range(n_long):
+                lon = -rear_len + length * li / (n_long - 1)
+                for side in range(2):
+                    lat = half_w if side == 0 else -half_w
+                    px = x_world + fwd_x * lon + left_x * lat
+                    py = y_world + fwd_y * lon + left_y * lat
+                    x_img = int((px - origin[0]) / resolution)
+                    y_img = int((py - origin[1]) / resolution)
+                    if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
+                        dist = ESDF_map[x_img, y_img]
+                        if dist < min_dist_for_traj:
+                            min_dist_for_traj = dist
+                            closest_step_for_traj = i
 
-            for k in range(7):
-                x_img = int((check_xs[k] - origin[0]) / resolution)
-                y_img = int((check_ys[k] - origin[1]) / resolution)
-                if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
-                    dist = ESDF_map[x_img, y_img]
-                    if dist < min_dist_for_traj:
-                        min_dist_for_traj = dist
-                        closest_step_for_traj = i
+            for wi in range(n_lat):
+                lat = -half_w + width * wi / (n_lat - 1)
+                for end in range(2):
+                    lon = front_len if end == 0 else -rear_len
+                    px = x_world + fwd_x * lon + left_x * lat
+                    py = y_world + fwd_y * lon + left_y * lat
+                    x_img = int((px - origin[0]) / resolution)
+                    y_img = int((py - origin[1]) / resolution)
+                    if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
+                        dist = ESDF_map[x_img, y_img]
+                        if dist < min_dist_for_traj:
+                            min_dist_for_traj = dist
+                            closest_step_for_traj = i
+
+            x_img = int((x_world - origin[0]) / resolution)
+            y_img = int((y_world - origin[1]) / resolution)
+            if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
+                dist = ESDF_map[x_img, y_img]
+                if dist < min_dist_for_traj:
+                    min_dist_for_traj = dist
+                    closest_step_for_traj = i
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
