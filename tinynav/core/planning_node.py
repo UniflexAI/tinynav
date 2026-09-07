@@ -580,16 +580,22 @@ class PlanningNode(Node):
                 traj_end = np.array(traj[-1,:3])
                 target_end = target_pose if target_pose is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
+                current_dist = np.linalg.norm(init_p - target_end)
                 # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
                 # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
                 heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
+                current_heading = goal_heading_error(traj[0], target_end)
+                idle_penalty = 0.0
+                if current_dist > 0.4 and current_heading < np.pi / 2 and abs(param[0]) < ROBOT_CONFIG.min_linear_vel:
+                    idle_penalty = 4000.0
 
                 return (
-                    score * 100000
+                    score * 2000
                     + 100 * dist
                     + 100 * heading
                     + 10 * abs(self.last_param[0] - param[0])
                     + 10 * abs(self.last_param[1] - param[1])
+                    + idle_penalty
                     + reverse_gate_penalty
                 )
 

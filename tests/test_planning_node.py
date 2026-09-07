@@ -154,19 +154,32 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
                       [0.0, -1.0, 0.0]])
 
 # mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
-# the weights (100000/100/100/10/10) and heading fade distance (2.0) in sync by hand
+# the weights and heading fade distance (2.0) in sync by hand
+_ESDF_WEIGHT = 2000.0
+_DIST_WEIGHT = 100.0
 _HEADING_WEIGHT = 100.0
 _HEADING_FADE_DIST = 2.0
+_IDLE_PENALTY = 4000.0
+_IDLE_GOAL_DIST = 0.4
+_MIN_LINEAR_VEL = 0.1
 
 def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
+    current_dist = np.linalg.norm(target_end)
     dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
     heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / _HEADING_FADE_DIST)
+    current_heading = goal_heading_error(traj[0], target_end)
+    idle_penalty = (
+        _IDLE_PENALTY
+        if current_dist > _IDLE_GOAL_DIST and current_heading < np.pi / 2 and abs(param[0]) < _MIN_LINEAR_VEL
+        else 0.0
+    )
     return (
-        score * 100000
-        + 100 * dist
+        score * _ESDF_WEIGHT
+        + _DIST_WEIGHT * dist
         + heading_weight * heading
         + 10 * abs(last_param[0] - param[0])
         + 10 * abs(last_param[1] - param[1])
+        + idle_penalty
     )
 
 def _pick(target, heading_weight=_HEADING_WEIGHT):

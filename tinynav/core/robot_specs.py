@@ -14,7 +14,7 @@ class ObstacleConfig:
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    dilation_cells: int = 0
 
 
 @dataclass
@@ -34,7 +34,7 @@ class RobotConfig:
     camera_y: float = 0.0
     control_x: float = 0.0
     control_y: float = 0.0
-    safety_radius: float = 0.1
+    safety_radius: float = 0.2
     # Bounds used to constrain trajectory-library velocity sampling and to clamp
     # the final published cmd_vel. Placeholder values, same for every robot until
     # real per-platform min/max linear & angular speeds are measured.
@@ -84,7 +84,7 @@ B2_CONFIG = RobotConfig(
     length=1.1, width=0.5,
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.1,
+    safety_radius=0.2,
     obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
@@ -93,7 +93,7 @@ B2W_CONFIG = RobotConfig(
     length=1.1, width=0.5,
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.1,
+    safety_radius=0.2,
     obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
@@ -102,7 +102,7 @@ G1_CONFIG = RobotConfig(
     length=0.3, width=0.5,
     camera_x=0.1, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.15,
+    safety_radius=0.2,
     min_linear_vel=0.2, min_angular_vel=0.3,
     obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
 )
