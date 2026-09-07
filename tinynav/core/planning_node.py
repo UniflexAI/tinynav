@@ -20,7 +20,7 @@ from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 
 ESDF_COST_WEIGHT = 2000.0
 DIST_COST_WEIGHT = 100.0
-HEADING_COST_WEIGHT = 100.0
+HEADING_COST_WEIGHT = 10.0
 HEADING_FADE_DIST = 2.0
 IDLE_TRAJECTORY_PENALTY = 20000.0
 IDLE_GOAL_DIST_THRESHOLD = 0.4
@@ -641,8 +641,8 @@ class PlanningNode(Node):
                     score * ESDF_COST_WEIGHT
                     + DIST_COST_WEIGHT * dist
                     + HEADING_COST_WEIGHT * heading
-                    + 10 * abs(self.last_param[0] - param[0])
-                    + 10 * abs(self.last_param[1] - param[1])
+                    + 2 * abs(self.last_param[0] - param[0])
+                    + 2 * abs(self.last_param[1] - param[1])
                     + idle_penalty
                     + reverse_gate_penalty
                 )
