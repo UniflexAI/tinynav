@@ -179,7 +179,7 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
     )
     return (
         score * 2000.0
-        + 100.0 * dist
+        + 2000.0 * dist
         + heading_weight * heading
         + 2 * abs(last_param[0] - param[0])
         + 2 * abs(last_param[1] - param[1])
@@ -258,7 +258,7 @@ def test_heading_fade_is_monotonic_in_distance():
 
     def heading_term(range_m):
         target = np.array([0.0, range_m, 0.0])  # 90 deg off the nose at every range
-        return _trajectory_cost(traj, param, 0.0, target, last_param) - 100 * range_m
+        return _trajectory_cost(traj, param, 0.0, target, last_param) - 2000.0 * range_m
 
     terms = [heading_term(r) for r in (0.5, 1.0, 2.0, 4.0)]
     assert terms[0] < terms[1] < terms[2], f"heading penalty not growing with range: {terms}"

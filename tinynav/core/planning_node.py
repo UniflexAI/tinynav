@@ -626,7 +626,7 @@ class PlanningNode(Node):
 
                 return (
                     score * 2000.0
-                    + 100.0 * dist
+                    + 2000.0 * dist
                     + 10.0 * heading
                     + 2 * abs(self.last_param[0] - param[0])
                     + 2 * abs(self.last_param[1] - param[1])
