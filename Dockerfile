@@ -76,6 +76,7 @@ RUN apt-get update && apt-get install -y ros-humble-desktop \
 
 # env
 ENV RMW_FASTRTPS_PUBLICATION_MODE=ASYNCHRONOUS
+ENV FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA
 # Limit OpenBLAS worker threads globally to avoid high CPU on small NumPy/SciPy
 # workloads on Jetson. See OpenBLAS fix context: https://github.com/OpenMathLib/OpenBLAS/pull/4388
 ENV OPENBLAS_NUM_THREADS=1
