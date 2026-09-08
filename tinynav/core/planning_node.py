@@ -585,8 +585,8 @@ class PlanningNode(Node):
                 heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
 
                 return (
-                    score * 100000
-                    + 100 * dist
+                    score * 2000
+                    + 1000 * dist
                     + 100 * heading
                     + 10 * abs(self.last_param[0] - param[0])
                     + 10 * abs(self.last_param[1] - param[1])
