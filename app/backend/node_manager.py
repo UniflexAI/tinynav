@@ -56,7 +56,10 @@ _IMAGE_TOPICS_LOOPER = [
     '/slam/depth',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
-_PREVIEW_MIN_INTERVAL = 0.05  # 20 fps
+# Preview is watched over the uplink, and JPEG has no inter-frame compression,
+# so its bitrate scales with the frame rate -- lower this on a relayed link.
+_PREVIEW_MAX_FPS = float(os.environ.get('TINYNAV_PREVIEW_MAX_FPS', '20'))
+_PREVIEW_MIN_INTERVAL = 1.0 / _PREVIEW_MAX_FPS if _PREVIEW_MAX_FPS > 0 else 0.0
 _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
 _PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
