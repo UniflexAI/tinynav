@@ -188,8 +188,8 @@ _ARRIVE_M = 0.5
 # 2Hz: long enough that a jump has to be confirmed by the pose that follows it,
 # short enough to cost nothing on a real arrival.
 _ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '2'))
-# ...and for a POI that carries an arrival heading, where being 0.5m out matters.
-_ARRIVE_HEADING_M = 0.2
+# ...and for a POI that carries an arrival heading. The same radius: see poi_reached.
+_ARRIVE_HEADING_M = 0.5
 
 # The target pose is a carrot at a TIME horizon, so how far along the path it sits rides
 # the speed actually driven: the capture-speed prior this node publishes, times the same
@@ -850,9 +850,12 @@ class MapNode(Node):
         still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
         Measuring from the camera declares arrival early; that is the point.
 
-        A POI with an authored heading is parked ON, not near: the mission turns to
-        that heading where it stops, so stopping 0.5m out puts the turn in the wrong
-        place. Everything else keeps the loose radius and the margin it buys."""
+        A POI with an authored heading gets the same radius as any other. Parking ON
+        it would put the turn in the right place, but 0.2m from the camera is not
+        reachable on b2 -- its camera leads the control centre by 0.5m and the planner
+        drives the control centre onto the goal, so the tighter radius only ever
+        withheld an arrival that pilot's footprint rule then had to declare
+        (pilot/nav/arrive.py). The operator's call, 2026-09-08."""
         arrive_m = (_ARRIVE_HEADING_M if self.poi_index in self.poi_has_heading
                     else _ARRIVE_M)
         inside = (np.linalg.norm(poi[:2] - pos[:2]) < arrive_m
