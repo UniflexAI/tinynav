@@ -9,7 +9,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'cor
 from planning_node import (
     run_raycasting_loopy,
     generate_trajectory_library_3d,
+    generate_predefined_trajectory_vocabularies,
     goal_heading_error,
+    update_reverse_state,
+    REVERSE_ENTER_CLEARANCE,
+    REVERSE_EXIT_CLEARANCE,
 )
 from tinynav.core.math_utils import matrix_to_quat
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
@@ -180,6 +184,18 @@ def _pick(target, heading_weight=_HEADING_WEIGHT):
     ]
     return params[np.argsort(costs, kind='stable')[0]]
 
+def _pick_reverse(target, last_param=(0.0, 0.0)):
+    """Lowest-cost (vx, omega) among the reverse vocab with the gate forcing reverse
+    (all forward trajectories gated out), clear ESDF (score=0)."""
+    trajectories, params = generate_predefined_trajectory_vocabularies(
+        init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X), max_angular_vel=0.75)
+    last_param = np.asarray(last_param, dtype=np.float64)
+    costs = [
+        _trajectory_cost(trajectories[i], params[i], 0.0, target, last_param)
+        for i in range(len(trajectories))
+    ]
+    return params[np.argmin(costs)]
+
 def test_goal_heading_error():
     end = np.zeros(7)
     end[3:] = matrix_to_quat(_FACING_X)
@@ -240,6 +256,56 @@ def test_heading_fade_is_monotonic_in_distance():
     assert abs(terms[2] - terms[3]) < 1e-9, f"heading penalty not saturated past the fade distance: {terms}"
     assert abs(terms[2] - _HEADING_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
 
+def test_reverse_vocab_is_a_fan():
+    trajs, params = generate_predefined_trajectory_vocabularies(
+        init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X), max_angular_vel=0.75)
+    # one arc per omega sample, symmetric around the straight-back arc
+    assert len(params) == 7
+    assert np.allclose(params[:, 1], np.linspace(-0.75, 0.75, 7))
+    assert np.all(params[:, 0] == -0.2)  # all backward
+    # straight-back member matches the old single vocabulary: ~0.62 m behind, heading unchanged
+    straight = trajs[int(np.argmin(np.abs(params[:, 1])))]
+    assert np.allclose(straight[-1, :2], [-0.62, 0.0], atol=1e-6)
+    assert abs(goal_heading_error(straight[-1], np.array([5.0, 0.0, 0.0]))) < 1e-6
+    # turning members actually change heading: end orientation = initial @ R_y(omega*steps*dt);
+    # steps = duration/dt + 1 because the loop rotates+moves before recording step 0
+    from tinynav.core.math_utils import rotvec_to_matrix as _rvm
+    for i in (0, -1):
+        arc = trajs[i]
+        total_rot = params[i, 1] * (3.0 / 0.1 + 1) * 0.1
+        expected_quat = matrix_to_quat(_FACING_X @ _rvm(np.array([0.0, total_rot, 0.0])))
+        assert np.allclose(arc[-1, 3:], expected_quat, atol=1e-9), f"arc {i} end orientation off"
+
+def test_reverse_swing_toward_offset_goal():
+    # goal ahead but offset to one side and walled off: the fan should pick an arc
+    # that swings the nose toward the goal side instead of backing straight
+    # body +X (left) maps to world -Y under _FACING_X, so ahead-left is (+x, -y)
+    vx, omega = _pick_reverse(np.array([3.5, -3.5, 0.0]))
+    assert vx < 0.0
+    assert omega > 1e-6, f"goal ahead-left yields straight/away arc omega={omega}"
+    # mirrored goal swings the other way
+    vx, omega = _pick_reverse(np.array([3.5, 3.5, 0.0]))
+    assert vx < 0.0
+    assert omega < -1e-6, f"goal ahead-right yields straight/away arc omega={omega}"
+
+def test_reverse_straight_when_goal_dead_ahead():
+    # goal straight behind the wall: no side is preferred, keep the nose on goal
+    vx, omega = _pick_reverse(np.array([5.0, 0.0, 0.0]))
+    assert vx < 0.0 and abs(omega) < 1e-6, f"dead-ahead goal yields vx={vx}, omega={omega}"
+
+def test_reverse_gate_hysteresis():
+    # engage at/below the enter threshold
+    assert update_reverse_state(False, REVERSE_ENTER_CLEARANCE) is True
+    assert update_reverse_state(False, REVERSE_ENTER_CLEARANCE + 0.01) is False
+    # once reversing, stay engaged until clearance passes the exit threshold
+    assert update_reverse_state(True, REVERSE_ENTER_CLEARANCE + 0.01) is True
+    assert update_reverse_state(True, REVERSE_EXIT_CLEARANCE) is True
+    assert update_reverse_state(True, REVERSE_EXIT_CLEARANCE + 0.01) is False
+    # boundary band between the thresholds is sticky in whichever state we're in
+    mid = (REVERSE_ENTER_CLEARANCE + REVERSE_EXIT_CLEARANCE) / 2
+    assert update_reverse_state(False, mid) is False
+    assert update_reverse_state(True, mid) is True
+
 if __name__ == "__main__":
     test_goal_heading_error()
     test_goal_behind_turns_in_place()
@@ -247,4 +313,8 @@ if __name__ == "__main__":
     test_goal_abeam_turns_while_driving()
     test_heading_fades_within_arrival_radius()
     test_heading_fade_is_monotonic_in_distance()
+    test_reverse_vocab_is_a_fan()
+    test_reverse_swing_toward_offset_goal()
+    test_reverse_straight_when_goal_dead_ahead()
+    test_reverse_gate_hysteresis()
     test_run_raycasting_comparison()

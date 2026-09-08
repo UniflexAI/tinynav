@@ -172,30 +172,37 @@ def generate_trajectory_library_3d(
 
 def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
+    reverse_speed=0.2, max_angular_vel=0.75, num_omega=7,
 ):
     """
-    Predefined trajectory vocabularies.
+    Predefined trajectory vocabularies: a reverse fan.
+
+    Constant reverse speed crossed with a range of turn rates, so the robot can
+    back out of a dead end while swinging its nose toward the goal side instead
+    of only reversing straight behind. Collision safety is enforced later by the
+    shared ESDF scoring, exactly like the forward trajectories.
     """
     num_steps = int(duration / dt) + 1
     trajectories = []
     params = []
 
-    # constant reverse trajectory
-    # vx = -0.2 m/s, omega = 0
-    reverse_speed = 0.2
-    p = init_p.copy()
-    q = quat_to_matrix(init_q)
-    traj = np.empty((num_steps, 7), dtype=np.float64)
-    for i in range(num_steps):
-        v_world = q @ np.array([0.0, 0.0, -reverse_speed])
-        p += v_world * dt
-        traj[i, :3] = p
-        traj[i, 3:] = matrix_to_quat(q)
-    for i in range(num_steps):
-        traj[i, 2] = traj[0, 2]
-    trajectories.append(traj)
-    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
+    for omega_y in np.linspace(-max_angular_vel, max_angular_vel, num_omega):
+        p = init_p.copy()
+        q = quat_to_matrix(init_q)
+        traj = np.empty((num_steps, 7), dtype=np.float64)
+        for i in range(num_steps):
+            dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+            q = q @ dq
+            v_world = q @ np.array([0.0, 0.0, -reverse_speed])
+            p += v_world * dt
+            traj[i, :3] = p
+            traj[i, 3:] = matrix_to_quat(q)
+        # keep z flat, same hack as the forward library
+        for i in range(num_steps):
+            traj[i, 2] = traj[0, 2]
+        trajectories.append(traj)
+        params.append(np.array([-reverse_speed, omega_y], dtype=np.float64))
 
     return np.asarray(trajectories), np.asarray(params)
 
@@ -276,6 +283,20 @@ def goal_heading_error(traj_end, target):
     yaw2 = np.arctan2(dy, dx)
     return abs(np.arctan2(np.sin(yaw2 - yaw1), np.cos(yaw2 - yaw1)))
 
+REVERSE_ENTER_CLEARANCE = 0.30  # m of front clearance at/below which reverse mode engages
+REVERSE_EXIT_CLEARANCE = 0.45   # m of front clearance required to leave reverse mode
+
+
+def update_reverse_state(reversing, front_clearance,
+                         enter_threshold=REVERSE_ENTER_CLEARANCE,
+                         exit_threshold=REVERSE_EXIT_CLEARANCE):
+    """Hysteresis for the reverse gate: engage below enter_threshold, stay engaged
+    until clearance recovers past exit_threshold, so the gate cannot chatter
+    right at the boundary while the robot creeps backward."""
+    if reversing:
+        return front_clearance <= exit_threshold
+    return front_clearance <= enter_threshold
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -334,6 +355,7 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
+        self.reversing = False  # latched reverse-mode state (hysteresis via update_reverse_state)
         self.obstacle_config = ROBOT_CONFIG.obstacle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -550,7 +572,10 @@ class PlanningNode(Node):
                 max_linear_vel=ROBOT_CONFIG.max_linear_vel,
                 max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             )
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(
+                init_p=init_p, init_q=init_q,
+                max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+            )
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
             self.last_T = T
@@ -564,17 +589,13 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            enter_threshold = 0.30
+            self.reversing = update_reverse_state(self.reversing, front_clearance)
 
             def cost_function(traj, param, score, target_pose):
-                # predefined backward trajectory penalty
+                # reverse gate: while reversing only backward trajectories are eligible,
+                # and vice versa; entry/exit hysteresis lives in update_reverse_state
                 is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= enter_threshold
-                reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
-                elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                reverse_gate_penalty = 0.0 if self.reversing == is_backward_traj else 1e9
 
                 # regular trajectory penalty
                 traj_end = np.array(traj[-1,:3])
