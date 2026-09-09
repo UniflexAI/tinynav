@@ -195,9 +195,94 @@ def generate_predefined_trajectory_vocabularies(
     for i in range(num_steps):
         traj[i, 2] = traj[0, 2]
     trajectories.append(traj)
-    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
+    # (vx, omega) repeated for both stages: a constant maneuver looks the same
+    # to the stage-1 smoothness term used downstream.
+    params.append(np.array([-reverse_speed, 0.0, -reverse_speed, 0.0], dtype=np.float64))
 
     return np.asarray(trajectories), np.asarray(params)
+
+@njit(cache=True)
+def generate_two_stage_trajectory_library_3d(
+    duration=3.0, dt=0.1,
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
+    max_linear_vel=0.5, max_angular_vel=np.pi / 3,
+    n_vx_per_stage=4, n_omega_per_stage=5,
+):
+    """Two-stage constant-control lattice: each half of the horizon picks its own
+    (vx, omega), so a trajectory can change curvature mid-horizon (go straight then
+    turn, or rotate in place then drive off) which a single constant-control arc
+    can never represent. Candidate count is the square of the per-stage count
+    (e.g. 20 controls/stage -> 400 trajectories); still cheap relative to the
+    raycasting/ESDF stages, which dominate the planning loop's runtime.
+
+    vx needs more than a {0, max} bang-bang choice: with only two speed levels,
+    the only achievable stopping distances over the full horizon are 0, half and
+    full range, so a target that lands between those gets "rounded" to the
+    nearest one every cycle - if that's the near-zero option, the robot picks
+    "stand still, then drive" forever and never actually moves (the executed
+    command only ever covers the first stage). A finer vx grid lets a mostly-
+    constant speed land close to the target directly, like the single-stage
+    planner it replaced.
+    """
+    # split the same step count generate_trajectory_library_3d/
+    # generate_predefined_trajectory_vocabularies use, so the resulting arrays
+    # concatenate with theirs regardless of duration/dt rounding
+    num_steps = int(duration / dt) + 1
+    num_steps_stage = num_steps // 2
+
+    vx_samples = np.linspace(0.0, max_linear_vel, n_vx_per_stage)
+    omega_samples = np.linspace(-max_angular_vel, max_angular_vel, n_omega_per_stage)
+    n_vx = len(vx_samples)
+    n_omega = len(omega_samples)
+    n_stage_controls = n_vx * n_omega
+
+    stage_vx = np.empty(n_stage_controls)
+    stage_omega = np.empty(n_stage_controls)
+    k = 0
+    for i in range(n_vx):
+        for j in range(n_omega):
+            stage_vx[k] = vx_samples[i]
+            stage_omega[k] = omega_samples[j]
+            k += 1
+
+    n_traj = n_stage_controls * n_stage_controls
+    trajectories = np.empty((n_traj, num_steps, 7))
+    params = np.empty((n_traj, 4))
+
+    idx = -1
+    for a in range(n_stage_controls):
+        vx1 = stage_vx[a]
+        omega1 = stage_omega[a]
+        for b in range(n_stage_controls):
+            vx2 = stage_vx[b]
+            omega2 = stage_omega[b]
+            idx += 1
+            p = init_p.copy()
+            q = quat_to_matrix(init_q)
+            traj = np.empty((num_steps, 7))
+            for i in range(num_steps_stage):
+                dq = rotvec_to_matrix(np.array([0.0, omega1 * dt, 0.0]))
+                q = q @ dq
+                v_world = q @ np.array([0.0, 0.0, vx1])
+                p = p + v_world * dt
+                traj[i, :3] = p
+                traj[i, 3:] = matrix_to_quat(q)
+            for i in range(num_steps_stage, num_steps):
+                dq = rotvec_to_matrix(np.array([0.0, omega2 * dt, 0.0]))
+                q = q @ dq
+                v_world = q @ np.array([0.0, 0.0, vx2])
+                p = p + v_world * dt
+                traj[i, :3] = p
+                traj[i, 3:] = matrix_to_quat(q)
+            #hack
+            for i in range(num_steps):
+                traj[i, 2] = traj[0, 2]
+            trajectories[idx] = traj
+            params[idx, 0] = vx1
+            params[idx, 1] = omega1
+            params[idx, 2] = vx2
+            params[idx, 3] = omega2
+    return trajectories, params
 
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
@@ -333,7 +418,7 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_T = None
-        self.last_param = (0.0, 0.0) # acc and gyro
+        self.last_param = (0.0, 0.0, 0.0, 0.0)  # (vx1, omega1, vx2, omega2) of the previous pick
         self.obstacle_config = ROBOT_CONFIG.obstacle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -545,7 +630,7 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectory_library_3d(
+            trajectories, params = generate_two_stage_trajectory_library_3d(
                 init_p=init_p, init_q=init_q,
                 max_linear_vel=ROBOT_CONFIG.max_linear_vel,
                 max_angular_vel=ROBOT_CONFIG.max_angular_vel,
@@ -563,6 +648,14 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
+            # index of the last stage-1 sample: only stage 1 is ever actually
+            # executed (the controller derives cmd_vel from the path's first
+            # ~second), so scoring only the full 3s endpoint lets the planner
+            # "plan" to move during stage 2 while picking vx1=0 every cycle -
+            # the robot then never moves, since that stage 2 is replanned away
+            # every tick. Blending in the stage-1 endpoint makes early progress
+            # count too.
+            stage1_end_idx = len(trajectories[0]) // 2 - 1
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
@@ -574,13 +667,23 @@ class PlanningNode(Node):
                 elif not should_reverse and is_backward_traj:
                         reverse_gate_penalty = 1e9
 
-                # regular trajectory penalty
-                traj_end = np.array(traj[-1,:3])
-                target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
+                # regular trajectory penalty, blended between where stage 1
+                # (the part that's actually executed) ends and the full
+                # horizon end (a softer lookahead so we don't drive into a
+                # dead end just to close the gap fastest)
+                target_end = target_pose if target_pose is not None else np.array(traj[-1, :3])
+
+                def dist_and_heading(pose):
+                    d = np.linalg.norm(np.array(pose[:3]) - target_end)
+                    h = goal_heading_error(pose, target_end) * min(1.0, d / 2.0)
+                    return d, h
+
+                dist_final, heading_final = dist_and_heading(traj[-1])
+                dist_mid, heading_mid = dist_and_heading(traj[stage1_end_idx])
+                dist = 0.5 * (dist_final + dist_mid)
                 # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
                 # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-                heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
+                heading = 0.5 * (heading_final + heading_mid)
 
                 return (
                     score * 2000

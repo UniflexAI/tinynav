@@ -9,8 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'cor
 from planning_node import (
     run_raycasting_loopy,
     generate_trajectory_library_3d,
+    generate_two_stage_trajectory_library_3d,
     goal_heading_error,
 )
+from scipy.spatial.transform import Rotation as R
 from tinynav.core.math_utils import matrix_to_quat
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -171,6 +173,31 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
         + 10 * abs(last_param[1] - param[1])
     )
 
+def _two_stage_trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
+    """Mirrors PlanningNode.cost_function's two-stage variant: blends the
+    stage-1 endpoint (what's actually executed) with the full-horizon endpoint
+    (a softer lookahead), instead of scoring the full-horizon endpoint alone -
+    otherwise the planner can "plan" progress into a stage 2 that never
+    actually runs, picking vx1=0 every cycle and never moving."""
+    stage1_end_idx = len(traj) // 2 - 1
+
+    def dist_and_heading(pose):
+        d = np.linalg.norm(np.asarray(pose[:3]) - target_end)
+        h = goal_heading_error(pose, target_end) * min(1.0, d / _HEADING_FADE_DIST)
+        return d, h
+
+    dist_final, heading_final = dist_and_heading(traj[-1])
+    dist_mid, heading_mid = dist_and_heading(traj[stage1_end_idx])
+    dist = 0.5 * (dist_final + dist_mid)
+    heading = 0.5 * (heading_final + heading_mid)
+    return (
+        score * _ESDF_WEIGHT
+        + _DIST_WEIGHT * dist
+        + heading_weight * heading
+        + 10 * abs(last_param[0] - param[0])
+        + 10 * abs(last_param[1] - param[1])
+    )
+
 def _pick(target, heading_weight=_HEADING_WEIGHT):
     """Lowest-cost (vx, omega) from the planner's own cost terms, with a clear ESDF
     (score=0), no reverse gating and a standing start."""
@@ -244,6 +271,83 @@ def test_heading_fade_is_monotonic_in_distance():
     assert terms[0] < terms[1] < terms[2], f"heading penalty not growing with range: {terms}"
     assert abs(terms[2] - terms[3]) < 1e-9, f"heading penalty not saturated past the fade distance: {terms}"
     assert abs(terms[2] - _HEADING_WEIGHT * np.pi / 2) < 1e-9, f"saturated penalty {terms[2]} != full weight"
+
+def _pick_two_stage(target, heading_weight=_HEADING_WEIGHT):
+    """Same selection logic as _pick, but over the two-stage lattice, using
+    _two_stage_trajectory_cost (mirrors PlanningNode.cost_function)."""
+    trajectories, params = generate_two_stage_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    last_param = np.zeros(4)
+    costs = [
+        _two_stage_trajectory_cost(trajectories[i], params[i], 0.0, target, last_param, heading_weight=heading_weight)
+        for i in range(len(trajectories))
+    ]
+    return params[np.argsort(costs, kind='stable')[0]]
+
+def test_two_stage_trajectory_count_and_shape():
+    trajectories, params = generate_two_stage_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    single_trajectories, _ = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    assert params.shape == (trajectories.shape[0], 4), "params must carry (vx1, omega1, vx2, omega2)"
+    assert trajectories.shape[0] == 400, "default 4 vx x 5 omega per stage, squared, should be 400"
+    # candidate count is higher than the single-stage lattice it replaced (finer
+    # vx resolution per stage is needed - see test_two_stage_intermediate_distance_still_moves
+    # - not just omega), but scoring is still <1ms even at this count (see the
+    # traj-score benchmark in the PR description), well under the raycasting
+    # stage that dominates the planning loop
+    assert trajectories.shape[0] / single_trajectories.shape[0] <= 5.0
+
+def test_two_stage_expresses_straight_then_turn():
+    # a shape a single constant-curvature arc cannot produce: no drift during
+    # stage 1, then a sharp turn during stage 2
+    trajectories, params = generate_two_stage_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    straight_then_turn = np.where(
+        (params[:, 1] == 0.0) & (params[:, 0] > 0.0) & (np.abs(params[:, 3]) > 0.5)
+    )[0]
+    assert len(straight_then_turn) > 0, "expected at least one straight->turn candidate in the lattice"
+
+    idx = straight_then_turn[0]
+    traj = trajectories[idx]
+    # traj[i] is the pose after (i+1) integration steps (see the two-stage
+    # generator), so the last stage-1 sample sits at the midpoint minus one.
+    stage1_end = len(traj) // 2 - 1
+
+    def yaw(pose):
+        return R.from_quat(pose[3:7]).as_euler("xyz")[2]
+
+    # heading barely changes during the straight stage 1, then swings sharply
+    # during the turning stage 2 - a single constant-curvature arc can't do this
+    heading_change_stage1 = abs(yaw(traj[stage1_end]) - yaw(traj[0]))
+    heading_change_stage2 = abs(yaw(traj[-1]) - yaw(traj[stage1_end]))
+    assert heading_change_stage1 < 1e-6
+    assert heading_change_stage2 > 0.5
+
+def test_two_stage_goal_ahead_drives_straight_both_stages():
+    vx1, omega1, vx2, omega2 = _pick_two_stage(np.array([5.0, 0.0, 0.0]))
+    assert vx1 > 0.0 and abs(omega1) < 1e-6, f"target ahead yields vx1={vx1}, omega1={omega1}"
+    assert vx2 > 0.0 and abs(omega2) < 1e-6, f"target ahead yields vx2={vx2}, omega2={omega2}"
+
+def test_two_stage_goal_abeam_turns_while_driving():
+    for side in (5.0, -5.0):
+        vx1, omega1, vx2, omega2 = _pick_two_stage(np.array([0.0, side, 0.0]))
+        assert vx1 > 0.0, f"target abeam yields vx1={vx1}"
+        assert abs(omega1) > 1e-6 or abs(omega2) > 1e-6, "expected some turning toward an abeam target"
+
+def test_two_stage_intermediate_distance_still_moves():
+    # regression: a coarse {0, max} vx grid can only land the horizon's end
+    # point at ~0, half, or full range, so a target between those gets
+    # "rounded" to whichever is numerically closest every cycle. If that's the
+    # near-zero one, the plan always starts with vx1=0 - and since the
+    # executed command only ever covers stage 1 (see PlanningNode.
+    # cost_function's smoothness term, which compares against the previous
+    # stage-1 pick), the robot never actually moves even though a forward
+    # target is trivially reachable. A finer vx grid must keep vx1 > 0 across
+    # the whole reachable range, not just at its extremes.
+    # very close targets (<~0.5m) are excluded: there ties legitimately favor
+    # "already close enough, don't overshoot", same as the arrival-radius fade
+    # in the real cost function - the regression this guards is freezing well
+    # short of a target that's comfortably within the reachable range.
+    for target_x in (0.6, 0.9, 1.2, 1.4):
+        vx1, omega1, vx2, omega2 = _pick_two_stage(np.array([target_x, 0.0, 0.0]))
+        assert vx1 > 0.0, f"target at distance {target_x} yields vx1={vx1} (planner would never move)"
 
 if __name__ == "__main__":
     test_goal_heading_error()
