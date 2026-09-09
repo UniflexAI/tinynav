@@ -18,6 +18,11 @@ import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 
+# Mirrors CmdVelControlNode.max_linear_acc (tinynav/platforms/cmd_vel_control.py) -
+# keep these in sync by hand. Used to penalize picking a stage-1 speed the real
+# robot's cmd_vel rate limiter can't actually reach in one planning cycle.
+CMD_VEL_MAX_LINEAR_ACC = 0.6  # m/s^2
+
 # === Helper functions ===
 @njit(cache=True)
 def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
@@ -202,25 +207,56 @@ def generate_predefined_trajectory_vocabularies(
     return np.asarray(trajectories), np.asarray(params)
 
 @njit(cache=True)
+def _integrate_two_stage(init_p, init_q, vx1, omega1, vx2, omega2, num_steps_stage, num_steps, dt):
+    p = init_p.copy()
+    q = quat_to_matrix(init_q)
+    traj = np.empty((num_steps, 7))
+    for i in range(num_steps_stage):
+        dq = rotvec_to_matrix(np.array([0.0, omega1 * dt, 0.0]))
+        q = q @ dq
+        v_world = q @ np.array([0.0, 0.0, vx1])
+        p = p + v_world * dt
+        traj[i, :3] = p
+        traj[i, 3:] = matrix_to_quat(q)
+    for i in range(num_steps_stage, num_steps):
+        dq = rotvec_to_matrix(np.array([0.0, omega2 * dt, 0.0]))
+        q = q @ dq
+        v_world = q @ np.array([0.0, 0.0, vx2])
+        p = p + v_world * dt
+        traj[i, :3] = p
+        traj[i, 3:] = matrix_to_quat(q)
+    #hack
+    for i in range(num_steps):
+        traj[i, 2] = traj[0, 2]
+    return traj
+
+
+@njit(cache=True)
 def generate_two_stage_trajectory_library_3d(
     duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    n_vx_per_stage=2, n_omega_per_stage=5,
+    n_vx_per_stage=2, n_omega_per_stage=5, n_coast_speeds=7,
 ):
     """Two-stage constant-control lattice: each half of the horizon picks its own
     (vx, omega), so a trajectory can change curvature mid-horizon (go straight then
     turn, or rotate in place then drive off) which a single constant-control arc
     can never represent. Candidate count is the square of the per-stage count
-    (e.g. 10 controls/stage -> 100 trajectories), matched to roughly today's
-    single-stage candidate count so ESDF scoring cost doesn't regress on-robot.
+    plus the coast set (e.g. 10 controls/stage -> 100, plus 7 coast -> 107),
+    matched to roughly today's single-stage candidate count so ESDF scoring
+    cost doesn't regress on-robot.
 
-    vx is a coarse {0, max} bang-bang choice on purpose: PlanningNode.cost_function
-    blends the stage-1 endpoint into the distance/heading score specifically so a
-    target landing between the grid's few achievable stopping distances still
-    picks a moving stage 1 (see test_two_stage_intermediate_distance_still_moves)
-    - a finer vx grid isn't needed for that, and would just multiply candidate
-    count (and thus scoring time) for no behavioral gain.
+    vx is a coarse {0, max} bang-bang choice in the turning grid on purpose -
+    PlanningNode.cost_function blends the stage-1 endpoint into the distance/
+    heading score so a target between the grid's few achievable stopping
+    distances still picks a moving stage 1 (test_two_stage_intermediate_distance_still_moves).
+    But that grid alone forces an abrupt max-speed-to-stop transition the moment
+    an obstacle (e.g. a corridor wall before a turn) makes continuing at max
+    speed unsafe, which a real robot's acceleration limit can't track without
+    overshooting past where it needed to slow down. The extra straight-line
+    "coast" candidates (same speed both stages, omega=0) restore the fine
+    speed graduation the single-stage planner had, so the planner can start
+    decelerating several cycles in advance instead of slamming to a stop.
     """
     # split the same step count generate_trajectory_library_3d/
     # generate_predefined_trajectory_vocabularies use, so the resulting arrays
@@ -243,7 +279,9 @@ def generate_two_stage_trajectory_library_3d(
             stage_omega[k] = omega_samples[j]
             k += 1
 
-    n_traj = n_stage_controls * n_stage_controls
+    coast_speeds = np.linspace(0.0, max_linear_vel, n_coast_speeds)
+
+    n_traj = n_stage_controls * n_stage_controls + n_coast_speeds
     trajectories = np.empty((n_traj, num_steps, 7))
     params = np.empty((n_traj, 4))
 
@@ -255,31 +293,21 @@ def generate_two_stage_trajectory_library_3d(
             vx2 = stage_vx[b]
             omega2 = stage_omega[b]
             idx += 1
-            p = init_p.copy()
-            q = quat_to_matrix(init_q)
-            traj = np.empty((num_steps, 7))
-            for i in range(num_steps_stage):
-                dq = rotvec_to_matrix(np.array([0.0, omega1 * dt, 0.0]))
-                q = q @ dq
-                v_world = q @ np.array([0.0, 0.0, vx1])
-                p = p + v_world * dt
-                traj[i, :3] = p
-                traj[i, 3:] = matrix_to_quat(q)
-            for i in range(num_steps_stage, num_steps):
-                dq = rotvec_to_matrix(np.array([0.0, omega2 * dt, 0.0]))
-                q = q @ dq
-                v_world = q @ np.array([0.0, 0.0, vx2])
-                p = p + v_world * dt
-                traj[i, :3] = p
-                traj[i, 3:] = matrix_to_quat(q)
-            #hack
-            for i in range(num_steps):
-                traj[i, 2] = traj[0, 2]
-            trajectories[idx] = traj
+            trajectories[idx] = _integrate_two_stage(init_p, init_q, vx1, omega1, vx2, omega2, num_steps_stage, num_steps, dt)
             params[idx, 0] = vx1
             params[idx, 1] = omega1
             params[idx, 2] = vx2
             params[idx, 3] = omega2
+
+    for c in range(n_coast_speeds):
+        vx = coast_speeds[c]
+        idx += 1
+        trajectories[idx] = _integrate_two_stage(init_p, init_q, vx, 0.0, vx, 0.0, num_steps_stage, num_steps, dt)
+        params[idx, 0] = vx
+        params[idx, 1] = 0.0
+        params[idx, 2] = vx
+        params[idx, 3] = 0.0
+
     return trajectories, params
 
 @njit(cache=True)
@@ -417,6 +445,7 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_T = None
         self.last_param = (0.0, 0.0, 0.0, 0.0)  # (vx1, omega1, vx2, omega2) of the previous pick
+        self.planning_dt = 0.1  # seconds between the last two sync_callback invocations
         self.obstacle_config = ROBOT_CONFIG.obstacle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -591,7 +620,8 @@ class PlanningNode(Node):
                 self.smoothed_velocity = 0.0
                 self.last_stamp = 0
                 self.smoothed_velocity = 0.0
-            velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
+            self.planning_dt = stamp - self.last_stamp
+            velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / self.planning_dt
             self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
@@ -654,6 +684,13 @@ class PlanningNode(Node):
             # every tick. Blending in the stage-1 endpoint makes early progress
             # count too.
             stage1_end_idx = len(trajectories[0]) // 2 - 1
+            # cmd_vel_control.py rate-limits linear.x toward whatever stage-1 speed
+            # we pick here, at CMD_VEL_MAX_LINEAR_ACC; it cannot actually reach a
+            # much slower speed within one planning cycle. Requesting more
+            # deceleration than that is achievable is a request the low-level
+            # controller can only fulfil late, so the robot keeps coasting past
+            # where it needed to slow down (e.g. overshooting into a corner).
+            feasible_dv = CMD_VEL_MAX_LINEAR_ACC * max(self.planning_dt, 0.03)
 
             def cost_function(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
@@ -683,12 +720,15 @@ class PlanningNode(Node):
                 # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
                 heading = 0.5 * (heading_final + heading_mid)
 
+                infeasible_decel = max(0.0, (self.last_param[0] - param[0]) - feasible_dv)
+
                 return (
                     score * 2000
                     + 1000 * dist
                     + 100 * heading
                     + 10 * abs(self.last_param[0] - param[0])
                     + 10 * abs(self.last_param[1] - param[1])
+                    + 500 * infeasible_decel
                     + reverse_gate_penalty
                 )
 

@@ -161,6 +161,8 @@ _ESDF_WEIGHT = 2000.0
 _DIST_WEIGHT = 1000.0
 _HEADING_WEIGHT = 100.0
 _HEADING_FADE_DIST = 2.0
+_CMD_VEL_MAX_LINEAR_ACC = 0.6
+_DECEL_WEIGHT = 500.0
 
 def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
     dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
@@ -173,12 +175,15 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
         + 10 * abs(last_param[1] - param[1])
     )
 
-def _two_stage_trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
+def _two_stage_trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT, planning_dt=0.1):
     """Mirrors PlanningNode.cost_function's two-stage variant: blends the
     stage-1 endpoint (what's actually executed) with the full-horizon endpoint
     (a softer lookahead), instead of scoring the full-horizon endpoint alone -
     otherwise the planner can "plan" progress into a stage 2 that never
-    actually runs, picking vx1=0 every cycle and never moving."""
+    actually runs, picking vx1=0 every cycle and never moving. Also penalizes
+    requesting more deceleration than CmdVelControlNode's rate limiter can
+    actually deliver in one planning cycle, which otherwise lets the planner
+    coast at speed right up to an obstacle and overshoot while it brakes."""
     stage1_end_idx = len(traj) // 2 - 1
 
     def dist_and_heading(pose):
@@ -190,12 +195,15 @@ def _two_stage_trajectory_cost(traj, param, score, target_end, last_param, headi
     dist_mid, heading_mid = dist_and_heading(traj[stage1_end_idx])
     dist = 0.5 * (dist_final + dist_mid)
     heading = 0.5 * (heading_final + heading_mid)
+    feasible_dv = _CMD_VEL_MAX_LINEAR_ACC * max(planning_dt, 0.03)
+    infeasible_decel = max(0.0, (last_param[0] - param[0]) - feasible_dv)
     return (
         score * _ESDF_WEIGHT
         + _DIST_WEIGHT * dist
         + heading_weight * heading
         + 10 * abs(last_param[0] - param[0])
         + 10 * abs(last_param[1] - param[1])
+        + _DECEL_WEIGHT * infeasible_decel
     )
 
 def _pick(target, heading_weight=_HEADING_WEIGHT):
@@ -287,7 +295,7 @@ def test_two_stage_trajectory_count_and_shape():
     trajectories, params = generate_two_stage_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     single_trajectories, _ = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     assert params.shape == (trajectories.shape[0], 4), "params must carry (vx1, omega1, vx2, omega2)"
-    assert trajectories.shape[0] == 100, "default 2 vx x 5 omega per stage, squared, should be 100"
+    assert trajectories.shape[0] == 107, "default 2x5 squared (100) plus 7 coast speeds, should be 107"
     # candidate count should stay in the same ballpark as the single-stage lattice
     # it replaced, so ESDF scoring cost doesn't regress on-robot (a finer vx grid
     # isn't needed for arrival precision - the blended stage-1/full-horizon cost
