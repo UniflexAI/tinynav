@@ -569,3 +569,103 @@ def test_the_lattice_covers_every_robot_the_repo_ships():
                 worst = max(worst, min(np.hypot(x - sx, y - sy) for sx, sy in samples))
         assert worst <= 0.1 + 1e-9, (
             f'footprint {fl+rl:.2f}x{2*hw:.2f} leaves a {worst:.3f} m gap')
+
+
+# --- the all-collision escape ---------------------------------------------------
+class _EscapeNode:
+    """Just the two methods the escape decision is built from, on a real b2
+    footprint. `_footprint_hits` is the shipped one -- bound off PlanningNode so a
+    change to the lattice or to the sampling reaches this test."""
+
+    def __init__(self, obstacle_xy=None, resolution=0.05, origin=(-2.0, -2.0)):
+        self.resolution = resolution
+        self.origin = np.array(origin)
+        n = 120
+        self.mask = np.zeros((n, n), dtype=bool)
+        if obstacle_xy is not None:
+            xi = int((obstacle_xy[0] - origin[0]) / resolution)
+            yi = int((obstacle_xy[1] - origin[1]) / resolution)
+            self.mask[xi, yi] = True
+
+    def camera_to_robot_center(self, T):
+        return np.array([0.0, 0.0, 0.0])
+
+
+def _hits_at(obstacle_xy):
+    """The shipped `_footprint_hits`, for a robot at the origin facing +x."""
+    from planning_node import PlanningNode
+    node = _EscapeNode(obstacle_xy)
+    # body +z forward, so the rotation puts world +x under the body's forward axis
+    T = np.eye(4)
+    T[:3, :3] = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    return PlanningNode._footprint_hits(node, T, node.mask)
+
+
+def test_a_cell_under_the_body_is_reported_as_a_body_hit():
+    """It is what says the standing-still row itself collides: a row that never
+    leaves the current pose can only be inf if a footprint sample is already on an
+    obstacle cell. Sampled through the shipped lattice, so a cell has to land on a
+    sample -- exactly the condition the scorer uses."""
+    off_fwd, off_lat = footprint_lattice(0.25, 0.35, 0.15, 0.1)   # the go2 default
+    on_sample = (float(off_fwd[3]), float(off_lat[3]))
+    hits, n = _hits_at(on_sample)
+    assert hits, f'a cell on sample {on_sample} was not seen'
+    assert n == len(off_fwd)
+
+
+def test_a_cell_beyond_the_footprint_is_not_a_body_hit():
+    """The paired normal path: standing on clear ground reports no body hits, so
+    the all-collision branch is not where an open-ground stall lands."""
+    hits, _ = _hits_at((1.50, 0.0))        # 1.1 m past the nose
+    assert hits == [], f'a cell 1.5 m away was read as under the robot: {hits}'
+
+
+def test_the_report_names_where_the_hits_are():
+    """Scattered singles are odometry-drift phantoms; a blob is a real obstacle.
+    The offsets are the only way to tell, so they have to be in the line."""
+    from planning_node import PlanningNode
+    off_fwd, off_lat = footprint_lattice(0.25, 0.35, 0.15, 0.1)
+    hits, n = _hits_at((float(off_fwd[3]), float(off_lat[3])))
+    line = PlanningNode._hits_report(hits, n)
+    assert 'body_hits=%d/%d' % (len(hits), n) in line
+    assert '(' in line and ',' in line, f'no offsets in the report: {line}'
+    assert PlanningNode._hits_report([], n) == 'body_hits=0/%d' % n
+
+
+def _sync_callback_src():
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core',
+                            'planning_node.py')).read()
+    return next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+                and n.name == 'sync_callback')
+
+
+def test_the_reverse_family_is_armed_by_having_no_way_forward():
+    """The freeze on 122 sat at front_clearance 0.60-0.75 with every forward
+    trajectory in collision, and the clearance proxy answered `should_reverse=False`
+    -- so standing still, which is neither colliding nor gated, stayed the cost
+    minimum for 21s. Whether there IS a way forward is measured, not proxied."""
+    fn = _sync_callback_src()
+    assign = next(n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                  and any(getattr(t, 'id', None) == 'should_reverse' for t in n.targets))
+    names = {n.id for n in ast.walk(assign.value) if isinstance(n, ast.Name)}
+    assert 'n_fwd_ok' in names, (
+        'should_reverse is back to reading only the forward corridor: '
+        f'{sorted(names)}')
+    assert 'front_clearance' in names, (
+        'the close-obstacle case was dropped along with the proxy')
+
+
+def test_the_all_collision_branch_publishes_nothing():
+    """Reaching it means the standing-still row is inf too, so a footprint sample
+    is already on an obstacle cell and every trajectory is inf whichever way it
+    points. There is no direction in the scores, so an escape there would be
+    blind -- and a reverse row published from it was dead code."""
+    fn = _sync_callback_src()
+    allcoll = next(n for n in ast.walk(fn) if isinstance(n, ast.If)
+                   and isinstance(n.test, ast.Call)
+                   and getattr(n.test.func, 'id', None) == 'all')
+    calls = {getattr(c.func, 'attr', None) for c in ast.walk(allcoll)
+             if isinstance(c, ast.Call)}
+    assert 'publish_selected_path' not in calls, (
+        'the all-collision branch publishes a path again -- from scores that '
+        'cannot tell one direction from another')

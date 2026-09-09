@@ -911,15 +911,16 @@ class PlanningNode(Node):
         self.footprint_pub.publish(msg)
 
     def _footprint_hits(self, T, obstacle_mask):
-        """Which part of the robot the collision is on, as a log fragment.
+        """Which footprint samples are standing on obstacle cells, as body-frame
+        (forward, left) offsets. Sampled on the same lattice
+        `score_trajectories_by_ESDF` scores with, so the decision below and the
+        scores it is reacting to cannot disagree about where the robot is.
 
-        "Everything collides" has two very different causes and the old line could
-        not tell them apart: the robot is genuinely wedged, or the denser lattice is
-        landing on phantom ground cells (it samples 5.8x as many cells as the old
-        five points, so it is 5.8x as likely to hit one). A real obstacle is a blob
-        against one part of the body; noise is scattered single cells. So this
-        reports where the hits are and how many, on the same lattice
-        `score_trajectories_by_ESDF` scores with.
+        **This is what tells a wedged robot from an uninformative score.** When a
+        cell under the body is an obstacle, EVERY trajectory is inf -- forward,
+        reverse and standing still alike -- so the scores say nothing about which
+        way is out. When the body is clear, "everything collides" really does mean
+        the blockage is ahead along the rollouts.
         """
         center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
@@ -937,12 +938,17 @@ class PlanningNode(Node):
             yi = int((y - self.origin[1]) / self.resolution)
             if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
                 hits.append((float(off_fwd[k]), float(off_lat[k])))
+        return hits, len(off_fwd)
+
+    @staticmethod
+    def _hits_report(hits, n_samples):
+        """The hits as a log fragment. A real obstacle is a blob against one part
+        of the body; the phantom cells odometry drift smears in are scattered
+        singles, so where they are is the reading that matters."""
         if not hits:
-            # Standing clear: the collisions are all somewhere along the rollouts,
-            # not under the robot, so the blockage really is ahead.
-            return f'body_hits=0/{len(off_fwd)}'
+            return f'body_hits=0/{n_samples}'
         where = ' '.join(f'({f:+.2f},{l:+.2f})' for f, l in hits[:8])
-        return (f'body_hits={len(hits)}/{len(off_fwd)} at {where}'
+        return (f'body_hits={len(hits)}/{n_samples} at {where}'
                 + (' ...' if len(hits) > 8 else ''))
 
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
@@ -1148,8 +1154,16 @@ class PlanningNode(Node):
                 trajectories, ESDF_map, path_dist_map, remaining_map, route_heading_map)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # **The reverse family is armed by there being no way forward.** The
+            # clearance reading is a proxy for that and it was the only judge, so a
+            # robot with every forward trajectory in collision at 0.60-0.75 m read
+            # `should_reverse=False`, and standing still -- which is neither
+            # colliding nor gated -- was the cost minimum. 21 s of that on 122 on
+            # 2026-09-09, with nothing published at all.
             enter_threshold = 0.30
-            should_reverse = front_clearance <= enter_threshold
+            n_fwd_ok = sum(1 for i in range(len(trajectories))
+                           if params[i][0] > 1e-3 and scores[i] != float('inf'))
+            should_reverse = front_clearance <= enter_threshold or n_fwd_ok == 0
 
             target = self.target_pose
 
@@ -1163,33 +1177,31 @@ class PlanningNode(Node):
                     heading_of_pose7(pose7))
 
             if all(s == float('inf') for s in scores):
-                # Diagnose WHERE it collides: is the robot's own footprint cell already
-                # an obstacle (phantom ground/self), or is it genuinely walled in?
                 center = self.camera_to_robot_center(T)
                 cxi = int((center[0] - self.origin[0]) / self.resolution)
                 cyi = int((center[1] - self.origin[1]) / self.resolution)
                 rows, cols = obstacle_mask.shape
-                center_obst = (0 <= cxi < rows and 0 <= cyi < cols and obstacle_mask[cxi, cyi])
+                hits, n_samples = self._footprint_hits(T, obstacle_mask)
                 self.get_logger().warn(
                     f'All trajectories in collision. obst_cells={int(obstacle_mask.sum())} '
-                    f'center_cell_obstacle={center_obst} front_clearance={front_clearance:.2f} '
+                    f'front_clearance={front_clearance:.2f} '
                     f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
                     f'should_reverse={should_reverse} '
-                    f'{self._footprint_hits(T, obstacle_mask)}'
+                    f'{self._hits_report(hits, n_samples)}'
                 )
-                # Fallback: if the blockage is ahead (not already under the footprint),
-                # back out slowly instead of freezing so the next cycle can re-plan.
-                # When the footprint cell is itself an obstacle (phantom ground/self)
-                # we stay put rather than reversing blindly into noise.
-                if should_reverse and not center_obst:
-                    # The predefined vocabulary's straight-back row. Published as the
-                    # Path rather than as a separate command, because that Path is the
-                    # only thing cmd_vel_control reads -- and it drives reverse at its
-                    # own fixed speed once the path points backwards, so the row's
-                    # magnitude only has to have the right sign.
-                    rev = [i for i in range(len(params)) if params[i][0] < 0.0]
-                    if rev:
-                        self.publish_selected_path(trajectories, rev[:1], depth_msg.header)
+                # **Nothing is published, and that is the honest answer here.**
+                # Reaching this branch means even the standing-still row is inf,
+                # and a row that never leaves the current pose can only collide if
+                # a footprint sample is already on an obstacle cell -- which the
+                # report above names. Every trajectory is then inf whichever way it
+                # points, so the scores carry no direction and any escape would be
+                # blind. Backing out belongs to `should_reverse` above, which fires
+                # while the body is still clear and there is a score to read.
+                #
+                # It is also where odometry drift lands: a stationary pose churning
+                # metres of phantom path smears the occupancy grid into cells under
+                # the robot (measured on 122: 3.28 m of odom path for 0.05 m of
+                # relocalized motion). The fix for that is upstream of here.
                 return
 
             # Single cost: clearance + route adherence/progress + smoothness, with the
@@ -1271,10 +1283,8 @@ class PlanningNode(Node):
 
             self.last_param = params[top_indices[0]]
 
-            # Confirm what actually got selected: if vx≈0 while non-colliding forward
-            # trajectories exist, the robot is "stuck by cost", not by collision.
-            n_fwd_ok = sum(1 for i in range(len(trajectories))
-                           if params[i][0] > 1e-3 and scores[i] != float('inf'))
+            # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
+            # anything else means stuck by cost with somewhere to go.
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
