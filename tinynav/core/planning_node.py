@@ -299,9 +299,10 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
                                 route_heading_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
     """
-    Score trajectories by ESDF clearance over the footprint (center + 4 corners), plus
-    two lookups against the global route (path_dist_map, remaining_map -- see
-    build_route_fields), which share ESDF_map's shape, origin and resolution.
+    Score trajectories by ESDF clearance over the footprint, sampled on a lattice fine
+    enough that no obstacle can hide between the samples (see below), plus two lookups
+    against the global route (path_dist_map, remaining_map -- see build_route_fields),
+    which share ESDF_map's shape, origin and resolution.
     :return: per trajectory, the obstacle score (inf on collision), the step index of the
              minimum clearance, the worst (max) distance from the trajectory center to the
              route over the whole trajectory, the route arc length still ahead of its end
@@ -313,6 +314,41 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
     end_heading_errs = []
     end_remainings = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
+
+    # --- footprint samples, centre first -------------------------------------
+    # **Five points (centre + corners) left a hole where it hurts most.** On a b2
+    # (0.80 x 0.30 m) the middle of the front edge is 0.15 m from either front
+    # corner and 0.40 m from the centre, so an obstacle against the robot's nose
+    # read min ESDF 0.15 m -- above safety_radius, hence score 0.0, the same as
+    # open space. `_front_obstacle_dist` samples that midpoint and did see it, so
+    # the two halves of the planner disagreed by construction.
+    #
+    # A lattice of pitch (dx, dy) leaves every footprint point within
+    # sqrt((dx/2)^2 + (dy/2)^2) of a sample, so pitch <= safety_radius*sqrt(2)
+    # makes "every sample reads more than safety_radius" a proof that the whole
+    # footprint is clear. The pitch follows from safety_radius; it is not a knob.
+    pitch = safety_radius * np.sqrt(2.0)
+    n_long = int(np.ceil((front_len + rear_len) / pitch)) + 1
+    n_lat = int(np.ceil((2.0 * half_w) / pitch)) + 1
+    if n_long < 2:
+        n_long = 2
+    if n_lat < 2:
+        n_lat = 2
+    off_fwd = np.empty(n_long * n_lat + 1, dtype=np.float64)
+    off_lat = np.empty(n_long * n_lat + 1, dtype=np.float64)
+    # Index 0 is the centre and stays the centre: the route lookups below read it.
+    off_fwd[0] = 0.0
+    off_lat[0] = 0.0
+    n_samp = 1
+    for a in range(n_long):
+        f = -rear_len + (front_len + rear_len) * a / (n_long - 1)
+        for b in range(n_lat):
+            l = -half_w + (2.0 * half_w) * b / (n_lat - 1)
+            if f == 0.0 and l == 0.0:
+                continue                      # already sample 0
+            off_fwd[n_samp] = f
+            off_lat[n_samp] = l
+            n_samp += 1
 
     for t in range(len(trajectories)):
         traj = trajectories[t]
@@ -342,25 +378,11 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             left_x = -fwd_y
             left_y = fwd_x
 
-            # center + 4 corners, unrolled for numba
-            check_xs = (
-                x_world,
-                x_world + fwd_x * front_len + left_x * half_w,
-                x_world + fwd_x * front_len - left_x * half_w,
-                x_world - fwd_x * rear_len  + left_x * half_w,
-                x_world - fwd_x * rear_len  - left_x * half_w,
-            )
-            check_ys = (
-                y_world,
-                y_world + fwd_y * front_len + left_y * half_w,
-                y_world + fwd_y * front_len - left_y * half_w,
-                y_world - fwd_y * rear_len  + left_y * half_w,
-                y_world - fwd_y * rear_len  - left_y * half_w,
-            )
-
-            for k in range(5):
-                x_img = int((check_xs[k] - origin[0]) / resolution)
-                y_img = int((check_ys[k] - origin[1]) / resolution)
+            for k in range(n_samp):
+                cx = x_world + fwd_x * off_fwd[k] + left_x * off_lat[k]
+                cy = y_world + fwd_y * off_fwd[k] + left_y * off_lat[k]
+                x_img = int((cx - origin[0]) / resolution)
+                y_img = int((cy - origin[1]) / resolution)
                 if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
                     dist = ESDF_map[x_img, y_img]
                     if dist < min_dist_for_traj:

@@ -481,3 +481,85 @@ def test_every_attribute_the_route_reads_is_built_in_init():
     missing = sorted(a for a in self_attrs_read(fns['_route_in_world'])
                      if a not in built and a not in methods)
     assert not missing, f'_route_in_world reads what __init__ never builds: {missing}'
+
+
+# --- footprint sampling ---------------------------------------------------------
+# A b2 as the planner sees it: 0.80 x 0.30 m about the control centre.
+_B2 = dict(front_len=0.4, rear_len=0.4, half_w=0.15, safety_radius=0.1)
+
+
+def _flat_fields(shape):
+    """Route maps that rank nothing, so only the clearance score moves."""
+    return (np.zeros(shape), np.zeros(shape), np.zeros(shape))
+
+
+def _esdf_with_obstacle(shape, resolution, origin, obst_xy):
+    """A true Euclidean distance field to a single obstacle cell."""
+    xs = origin[0] + resolution * np.arange(shape[0])
+    ys = origin[1] + resolution * np.arange(shape[1])
+    gx, gy = np.meshgrid(xs, ys, indexing='ij')
+    return np.sqrt((gx - obst_xy[0]) ** 2 + (gy - obst_xy[1]) ** 2)
+
+
+def _score_standing_at(pose_xy, obst_xy):
+    """Clearance score for a robot standing still at `pose_xy`, facing +x."""
+    shape, resolution, origin = (120, 120), 0.05, np.array([-1.0, -1.0])
+    ESDF = _esdf_with_obstacle(shape, resolution, origin, obst_xy)
+    path_dist, remaining, route_heading = _flat_fields(shape)
+    # facing +x with the body-+z-forward convention this file uses
+    q = matrix_to_quat(np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+    traj = np.array([[[pose_xy[0], pose_xy[1], 0.0, q[0], q[1], q[2], q[3]]] * 4])
+    scores, _, _, _, _ = score_trajectories_by_ESDF(
+        traj, ESDF, path_dist, remaining, route_heading, origin, resolution,
+        _B2['safety_radius'], _B2['front_len'], _B2['rear_len'], _B2['half_w'])
+    return scores[0]
+
+
+def test_an_obstacle_against_the_nose_is_not_open_space():
+    """The bug: the middle of the front edge sat 0.15 m from either front corner,
+    so with only centre+corners sampled an obstacle touching the robot's nose read
+    min ESDF 0.15 m -- above safety_radius, scored 0.0, ranked as open space."""
+    nose = _score_standing_at((0.0, 0.0), (0.4, 0.0))
+    assert nose > 0.0, 'an obstacle at the front-edge midpoint scored as open space'
+
+    side = _score_standing_at((0.0, 0.0), (0.0, 0.15))
+    assert side > 0.0, 'an obstacle at the side-edge midpoint scored as open space'
+
+
+def test_open_space_still_scores_zero():
+    """The other half of the same claim: a denser lattice must not start finding
+    obstacles where there are none, or every trajectory pays and the robot stops."""
+    assert _score_standing_at((0.0, 0.0), (5.0, 5.0)) == 0.0
+
+
+def test_no_point_of_the_footprint_is_further_than_safety_radius_from_a_sample():
+    """The property the pitch is derived from, checked against the shipped code's
+    own lattice rather than against a count of points: read the offsets back out of
+    the source so a future edit to the pitch is tested, not just described."""
+    src = ast.parse(open(os.path.join(os.path.dirname(__file__), '..', 'tinynav',
+                                      'core', 'planning_node.py')).read())
+    fn = next(n for n in ast.walk(src) if isinstance(n, ast.FunctionDef)
+              and n.name == 'score_trajectories_by_ESDF')
+    pitch_expr = next(n.value for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                      and any(getattr(t, 'id', None) == 'pitch' for t in n.targets))
+    # `pitch = safety_radius * np.sqrt(2.0)` -- evaluate it for this robot
+    pitch = eval(compile(ast.Expression(pitch_expr), '<pitch>', 'eval'),
+                 {'np': np}, {'safety_radius': _B2['safety_radius']})
+
+    fl, rl, hw = _B2['front_len'], _B2['rear_len'], _B2['half_w']
+    n_long = max(2, int(np.ceil((fl + rl) / pitch)) + 1)
+    n_lat = max(2, int(np.ceil((2 * hw) / pitch)) + 1)
+    samples = [(-rl + (fl + rl) * a / (n_long - 1), -hw + 2 * hw * b / (n_lat - 1))
+               for a in range(n_long) for b in range(n_lat)]
+
+    n = 121
+    worst = 0.0
+    for i in range(n):
+        for j in range(n):
+            x = -rl + (fl + rl) * i / (n - 1)
+            y = -hw + 2 * hw * j / (n - 1)
+            worst = max(worst, min(np.hypot(x - sx, y - sy) for sx, sy in samples))
+    assert worst <= _B2['safety_radius'] + 1e-9, (
+        f'a point of the footprint sits {worst:.3f} m from the nearest sample, '
+        f'further than safety_radius {_B2["safety_radius"]} m -- an obstacle can '
+        'hide there and read as clearance')
