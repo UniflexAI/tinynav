@@ -299,6 +299,18 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def generate_trajectories(init_p, init_q):
+    trajectories, params = generate_trajectory_library_3d(
+        init_p=init_p, init_q=init_q,
+        max_linear_vel=ROBOT_CONFIG.max_linear_vel,
+        max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+    )
+    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+    trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+    params = np.concatenate([params, vocab_params], axis=0)
+    return trajectories, params
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -529,17 +541,6 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-    def generate_trajectories(self, init_p, init_q):
-        trajectories, params = generate_trajectory_library_3d(
-            init_p=init_p, init_q=init_q,
-            max_linear_vel=ROBOT_CONFIG.max_linear_vel,
-            max_angular_vel=ROBOT_CONFIG.max_angular_vel,
-        )
-        vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-        trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-        params = np.concatenate([params, vocab_params], axis=0)
-        return trajectories, params
-
     def trajectory_cost(self, traj, param, score, target_pose, front_clearance, enter_threshold):
         # predefined backward trajectory penalty
         is_backward_traj = param[0] < 0.0
@@ -617,7 +618,7 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = self.generate_trajectories(init_p, init_q)
+            trajectories, params = generate_trajectories(init_p, init_q)
             self.last_T = T
             self.last_stamp = stamp
 

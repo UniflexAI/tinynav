@@ -175,6 +175,40 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
+def select_relocalization_candidates(query_vlad: np.ndarray, map_vlad_descriptors: np.ndarray, vlad_timestamps: np.ndarray, top_k: int) -> list[tuple[int, float]]:
+    return [
+        (int(vlad_timestamps[idx_in_map]), float(similarity))
+        for idx_in_map, similarity in find_loop(
+            query_vlad,
+            map_vlad_descriptors,
+            -1.0,
+            top_k,
+        )
+    ]
+
+def rank_relocalization_candidates(pnp_candidates: list, map_K: np.ndarray) -> tuple[bool, np.ndarray, float]:
+    success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, map_K)
+    return success, best_pose_in_camera, pose_cov_weight
+
+def select_fusion_constraints(constraints):
+    return constraints[-100:]
+
+def poi_reached(poi, pos):
+    return np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0
+
+def select_target_position(paths, closest_idx, pos):
+    max_speed = 0.5
+    accumulated_distance = 0.0
+    start_point = pos[:3]
+    target_position = paths[-1]
+    for i in range(closest_idx, len(paths) - 1):
+        accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
+        if accumulated_distance > max_speed * 5:
+            target_position = paths[i]
+            break
+        start_point = paths[i]
+    return target_position
+
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
         """Initialization
@@ -467,33 +501,17 @@ class MapNode(Node):
             path_msg.poses.append(pose)
         self.pose_graph_trajectory_pub.publish(path_msg)
 
-    def select_relocalization_candidates(self, query_vlad: np.ndarray) -> list[tuple[int, float]]:
-        return [
-            (int(self.vlad_timestamps[idx_in_map]), float(similarity))
-            for idx_in_map, similarity in find_loop(
-                query_vlad,
-                self.map_vlad_descriptors,
-                -1.0,
-                self.relocalization_loop_top_k,
-            )
-        ]
-
-    def rank_relocalization_candidates(self, pnp_candidates: list, candidate_timestamps: list[int]) -> tuple[bool, np.ndarray, float]:
-        success, best_pose_in_camera, pose_cov_weight, _, _, _ = rerank_by_pnp_inliers(pnp_candidates, self.map_K)
-        return success, best_pose_in_camera, pose_cov_weight
-
     def relocalize_with_depth(self, keyframe: np.ndarray, keyframe_features: dict, K: np.ndarray | None) -> tuple[bool, np.ndarray, float]:
         if K is None:
             return False, np.eye(4), -np.inf
 
         query_vlad = self.get_vlad_descriptor(keyframe)
-        candidates = self.select_relocalization_candidates(query_vlad)
+        candidates = select_relocalization_candidates(query_vlad, self.map_vlad_descriptors, self.vlad_timestamps, self.relocalization_loop_top_k)
         if len(candidates) == 0:
             print("VLAD: no relocalization candidates")
             return False, np.eye(4), -np.inf
 
         pnp_candidates = []
-        pnp_timestamps = []
         for timestamp_in_map, _similarity in candidates:
             reference_keyframe_pose = self.map_poses[timestamp_in_map]
             reference_depth, _, reference_features, _, _ = self.db.get_depth_embedding_features_images(timestamp_in_map)
@@ -510,9 +528,8 @@ class MapNode(Node):
                 print(f"not enough landmarks to relocalize, {point_count}")
                 continue
             pnp_candidates.append((point_3d_in_world_list, point_2d_in_keyframe_list))
-            pnp_timestamps.append(timestamp_in_map)
 
-        success, best_pose_in_camera, pose_cov_weight = self.rank_relocalization_candidates(pnp_candidates, pnp_timestamps)
+        success, best_pose_in_camera, pose_cov_weight = rank_relocalization_candidates(pnp_candidates, self.map_K)
         if success:
             print(f"relocalization pose : {best_pose_in_camera}")
             return True, best_pose_in_camera, pose_cov_weight
@@ -598,9 +615,6 @@ class MapNode(Node):
             pass
 
 
-    def select_fusion_constraints(self, constraints):
-        return constraints[-100:]
-
     def compute_transform_from_map_to_odom(self):
         """
         Solve the optmization problem.
@@ -619,7 +633,7 @@ class MapNode(Node):
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
-        relative_pose_constraint = self.select_fusion_constraints(relative_pose_constraint)
+        relative_pose_constraint = select_fusion_constraints(relative_pose_constraint)
         optimized_parameters = pose_graph_solve(optimized_parameters, relative_pose_constraint, constant_pose_index_dict, max_iteration_num = 1000)
         self.T_from_map_to_odom = optimized_parameters[0]
 
@@ -636,9 +650,6 @@ class MapNode(Node):
             pose.pose.orientation.w = 1.0
             path_msg.poses.append(pose)
         self.global_plan_pub.publish(path_msg)
-
-    def poi_reached(self, poi, pos):
-        return np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0
 
     def publish_nav_progress(self, percent, path_remaining_m, path_total_m, estimated_remaining_s):
         self.nav_progress_pub.publish(String(data=json.dumps({
@@ -665,19 +676,6 @@ class MapNode(Node):
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
         return percent, estimated_remaining_s
 
-    def select_target_position(self, paths, closest_idx, pos):
-        max_speed = 0.5
-        accumulated_distance = 0.0
-        start_point = pos[:3]
-        target_position = paths[-1]
-        for i in range(closest_idx, len(paths) - 1):
-            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-            if accumulated_distance > max_speed * 5:
-                target_position = paths[i]
-                break
-            start_point = paths[i]
-        return target_position
-
     def nav_target_timer_callback(self):
         if (
             self.poi_index < 0
@@ -699,7 +697,7 @@ class MapNode(Node):
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
 
-        if self.poi_reached(poi, pos):
+        if poi_reached(poi, pos):
             if self._leg_initial_length is not None:
                 self.publish_nav_progress(100.0, 0.0, round(self._leg_initial_length, 2), 0.0)
             self.poi_index += 1
@@ -749,7 +747,7 @@ class MapNode(Node):
         self.publish_nav_progress(round(percent, 1), round(remaining_length, 2),
                                   round(self._leg_initial_length, 2), round(estimated_remaining_s, 1))
 
-        target_position = self.select_target_position(paths, closest_idx, pos)
+        target_position = select_target_position(paths, closest_idx, pos)
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
