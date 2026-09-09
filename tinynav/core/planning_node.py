@@ -313,15 +313,28 @@ def generate_two_stage_trajectory_library_3d(
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
+    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners).
+
+    Also returns endpoint_scores: the same clearance -> score curve applied to
+    the trajectory's *last* step alone, without the time-decay below. The
+    decay intentionally discounts a close approach happening later in the
+    horizon (there's time to replan before then) - but that also means a
+    trajectory that ends right next to an obstacle gets almost no safety
+    penalty for it, right when the distance-to-goal term is most rewarding
+    that same endpoint for being close to progress. endpoint_scores lets the
+    caller add an undiscounted penalty back in for that specific case.
+    """
     scores = []
     occ_points = []
+    endpoint_scores = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
 
     for t in range(len(trajectories)):
         traj = trajectories[t]
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
+        min_dist_at_end = float('inf')
+        last_step = len(traj) - 1
 
         for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
@@ -363,6 +376,8 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
                     if dist < min_dist_for_traj:
                         min_dist_for_traj = dist
                         closest_step_for_traj = i
+                    if i == last_step and dist < min_dist_at_end:
+                        min_dist_at_end = dist
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
@@ -377,7 +392,14 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
-    return scores, occ_points
+
+        if min_dist_at_end < 1e-3:
+            endpoint_scores.append(float('inf'))
+        elif min_dist_at_end > safety_radius or min_dist_at_end == float('inf'):
+            endpoint_scores.append(0.0)
+        else:
+            endpoint_scores.append(1.0 / (min_dist_at_end + 1e-3))
+    return scores, occ_points, endpoint_scores
 
 def goal_heading_error(traj_end, target):
     """Absolute yaw error between a trajectory's end heading and the bearing to the target."""
@@ -671,7 +693,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
+            scores, occ_points, endpoint_scores = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
@@ -692,7 +714,7 @@ class PlanningNode(Node):
             # where it needed to slow down (e.g. overshooting into a corner).
             feasible_dv = CMD_VEL_MAX_LINEAR_ACC * max(self.planning_dt, 0.03)
 
-            def cost_function(traj, param, score, target_pose):
+            def cost_function(traj, param, score, endpoint_score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
                 should_reverse = front_clearance <= enter_threshold
@@ -724,6 +746,7 @@ class PlanningNode(Node):
 
                 return (
                     score * 2000
+                    + endpoint_score * 2000
                     + 1000 * dist
                     + 100 * heading
                     + 10 * abs(self.last_param[0] - param[0])
@@ -733,7 +756,7 @@ class PlanningNode(Node):
                 )
 
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], endpoint_scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             # path
