@@ -295,6 +295,47 @@ def angle_between(a, b):
 
 
 @njit(cache=True)
+def footprint_lattice(front_len, rear_len, half_w, safety_radius):
+    """Body-frame (forward, left) offsets covering the footprint, centre first.
+
+    **Five points -- centre plus corners -- left a hole where it hurts most.** On a
+    b2 (0.80 x 0.30 m) the middle of the front edge sat 0.15 m from either front
+    corner, so an obstacle touching the robot's nose read min ESDF 0.15 m: above
+    safety_radius, scored 0.0, ranked as open space. `_front_obstacle_dist` samples
+    that midpoint and did see it, so the two halves of the planner disagreed by
+    construction.
+
+    A lattice of pitch (dx, dy) leaves every footprint point within
+    sqrt((dx/2)^2 + (dy/2)^2) of a sample, so pitch <= safety_radius*sqrt(2) makes
+    "every sample clears safety_radius" a proof that the whole footprint does. The
+    pitch follows from safety_radius; it is not a knob.
+    """
+    pitch = safety_radius * np.sqrt(2.0)
+    n_long = int(np.ceil((front_len + rear_len) / pitch)) + 1
+    n_lat = int(np.ceil((2.0 * half_w) / pitch)) + 1
+    if n_long < 2:
+        n_long = 2
+    if n_lat < 2:
+        n_lat = 2
+    fwd = np.empty(n_long * n_lat + 1, dtype=np.float64)
+    lat = np.empty(n_long * n_lat + 1, dtype=np.float64)
+    # Index 0 is the centre and stays the centre: the route lookups read it.
+    fwd[0] = 0.0
+    lat[0] = 0.0
+    n = 1
+    for a in range(n_long):
+        f = -rear_len + (front_len + rear_len) * a / (n_long - 1)
+        for b in range(n_lat):
+            l = -half_w + (2.0 * half_w) * b / (n_lat - 1)
+            if f == 0.0 and l == 0.0:
+                continue                      # already sample 0
+            fwd[n] = f
+            lat[n] = l
+            n += 1
+    return fwd[:n], lat[:n]
+
+
+@njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
                                 route_heading_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
@@ -315,40 +356,8 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
     end_remainings = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
 
-    # --- footprint samples, centre first -------------------------------------
-    # **Five points (centre + corners) left a hole where it hurts most.** On a b2
-    # (0.80 x 0.30 m) the middle of the front edge is 0.15 m from either front
-    # corner and 0.40 m from the centre, so an obstacle against the robot's nose
-    # read min ESDF 0.15 m -- above safety_radius, hence score 0.0, the same as
-    # open space. `_front_obstacle_dist` samples that midpoint and did see it, so
-    # the two halves of the planner disagreed by construction.
-    #
-    # A lattice of pitch (dx, dy) leaves every footprint point within
-    # sqrt((dx/2)^2 + (dy/2)^2) of a sample, so pitch <= safety_radius*sqrt(2)
-    # makes "every sample reads more than safety_radius" a proof that the whole
-    # footprint is clear. The pitch follows from safety_radius; it is not a knob.
-    pitch = safety_radius * np.sqrt(2.0)
-    n_long = int(np.ceil((front_len + rear_len) / pitch)) + 1
-    n_lat = int(np.ceil((2.0 * half_w) / pitch)) + 1
-    if n_long < 2:
-        n_long = 2
-    if n_lat < 2:
-        n_lat = 2
-    off_fwd = np.empty(n_long * n_lat + 1, dtype=np.float64)
-    off_lat = np.empty(n_long * n_lat + 1, dtype=np.float64)
-    # Index 0 is the centre and stays the centre: the route lookups below read it.
-    off_fwd[0] = 0.0
-    off_lat[0] = 0.0
-    n_samp = 1
-    for a in range(n_long):
-        f = -rear_len + (front_len + rear_len) * a / (n_long - 1)
-        for b in range(n_lat):
-            l = -half_w + (2.0 * half_w) * b / (n_lat - 1)
-            if f == 0.0 and l == 0.0:
-                continue                      # already sample 0
-            off_fwd[n_samp] = f
-            off_lat[n_samp] = l
-            n_samp += 1
+    off_fwd, off_lat = footprint_lattice(front_len, rear_len, half_w, safety_radius)
+    n_samp = len(off_fwd)
 
     for t in range(len(trajectories)):
         traj = trajectories[t]
@@ -901,6 +910,41 @@ class PlanningNode(Node):
         msg.points = points
         self.footprint_pub.publish(msg)
 
+    def _footprint_hits(self, T, obstacle_mask):
+        """Which part of the robot the collision is on, as a log fragment.
+
+        "Everything collides" has two very different causes and the old line could
+        not tell them apart: the robot is genuinely wedged, or the denser lattice is
+        landing on phantom ground cells (it samples 5.8x as many cells as the old
+        five points, so it is 5.8x as likely to hit one). A real obstacle is a blob
+        against one part of the body; noise is scattered single cells. So this
+        reports where the hits are and how many, on the same lattice
+        `score_trajectories_by_ESDF` scores with.
+        """
+        center = self.camera_to_robot_center(T)
+        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
+        fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
+        lx, ly = -fy, fx
+        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+        off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
+        rows, cols = obstacle_mask.shape
+        hits = []
+        for k in range(len(off_fwd)):
+            x = center[0] + fx * off_fwd[k] + lx * off_lat[k]
+            y = center[1] + fy * off_fwd[k] + ly * off_lat[k]
+            xi = int((x - self.origin[0]) / self.resolution)
+            yi = int((y - self.origin[1]) / self.resolution)
+            if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
+                hits.append((float(off_fwd[k]), float(off_lat[k])))
+        if not hits:
+            # Standing clear: the collisions are all somewhere along the rollouts,
+            # not under the robot, so the blockage really is ahead.
+            return f'body_hits=0/{len(off_fwd)}'
+        where = ' '.join(f'({f:+.2f},{l:+.2f})' for f, l in hits[:8])
+        return (f'body_hits={len(hits)}/{len(off_fwd)} at {where}'
+                + (' ...' if len(hits) > 8 else ''))
+
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
         Scans start at the front face so the returned value matches physical clearance."""
@@ -1130,7 +1174,8 @@ class PlanningNode(Node):
                     f'All trajectories in collision. obst_cells={int(obstacle_mask.sum())} '
                     f'center_cell_obstacle={center_obst} front_clearance={front_clearance:.2f} '
                     f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
-                    f'should_reverse={should_reverse}'
+                    f'should_reverse={should_reverse} '
+                    f'{self._footprint_hits(T, obstacle_mask)}'
                 )
                 # Fallback: if the blockage is ahead (not already under the footprint),
                 # back out slowly instead of freezing so the next cycle can re-plan.

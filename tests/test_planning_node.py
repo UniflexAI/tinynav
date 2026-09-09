@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'cor
 from std_msgs.msg import Header
 from math_utils import matrix_to_quat
 from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
-                           route_heading_penalty, score_trajectories_by_ESDF)
+                           route_heading_penalty, score_trajectories_by_ESDF,
+                           footprint_lattice)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -533,24 +534,14 @@ def test_open_space_still_scores_zero():
 
 
 def test_no_point_of_the_footprint_is_further_than_safety_radius_from_a_sample():
-    """The property the pitch is derived from, checked against the shipped code's
-    own lattice rather than against a count of points: read the offsets back out of
-    the source so a future edit to the pitch is tested, not just described."""
-    src = ast.parse(open(os.path.join(os.path.dirname(__file__), '..', 'tinynav',
-                                      'core', 'planning_node.py')).read())
-    fn = next(n for n in ast.walk(src) if isinstance(n, ast.FunctionDef)
-              and n.name == 'score_trajectories_by_ESDF')
-    pitch_expr = next(n.value for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                      and any(getattr(t, 'id', None) == 'pitch' for t in n.targets))
-    # `pitch = safety_radius * np.sqrt(2.0)` -- evaluate it for this robot
-    pitch = eval(compile(ast.Expression(pitch_expr), '<pitch>', 'eval'),
-                 {'np': np}, {'safety_radius': _B2['safety_radius']})
-
+    """The property the pitch is derived from, asserted against the lattice the
+    scorer actually uses: every point of the footprint must sit within
+    safety_radius of some sample, or an obstacle can hide between them and read
+    as clearance."""
     fl, rl, hw = _B2['front_len'], _B2['rear_len'], _B2['half_w']
-    n_long = max(2, int(np.ceil((fl + rl) / pitch)) + 1)
-    n_lat = max(2, int(np.ceil((2 * hw) / pitch)) + 1)
-    samples = [(-rl + (fl + rl) * a / (n_long - 1), -hw + 2 * hw * b / (n_lat - 1))
-               for a in range(n_long) for b in range(n_lat)]
+    off_fwd, off_lat = footprint_lattice(fl, rl, hw, _B2['safety_radius'])
+    samples = list(zip(off_fwd, off_lat))
+    assert (0.0, 0.0) in samples, 'the centre must stay sample 0 -- the route reads it'
 
     n = 121
     worst = 0.0
@@ -563,3 +554,18 @@ def test_no_point_of_the_footprint_is_further_than_safety_radius_from_a_sample()
         f'a point of the footprint sits {worst:.3f} m from the nearest sample, '
         f'further than safety_radius {_B2["safety_radius"]} m -- an obstacle can '
         'hide there and read as clearance')
+
+
+def test_the_lattice_covers_every_robot_the_repo_ships():
+    """The pitch is derived, so this must hold for any footprint, not just a b2."""
+    for fl, rl, hw in ((0.4, 0.4, 0.15), (0.25, 0.35, 0.15), (0.3, 0.3, 0.3)):
+        off_fwd, off_lat = footprint_lattice(fl, rl, hw, 0.1)
+        samples = list(zip(off_fwd, off_lat))
+        worst = 0.0
+        for i in range(61):
+            for j in range(61):
+                x = -rl + (fl + rl) * i / 60
+                y = -hw + 2 * hw * j / 60
+                worst = max(worst, min(np.hypot(x - sx, y - sy) for sx, sy in samples))
+        assert worst <= 0.1 + 1e-9, (
+            f'footprint {fl+rl:.2f}x{2*hw:.2f} leaves a {worst:.3f} m gap')
