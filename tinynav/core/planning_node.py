@@ -658,8 +658,16 @@ class PlanningNode(Node):
             Path, '/mapping/global_plan', self._on_global_route, 1
         )
         self._global_route_map_xy = None
-        # obstacle score dominates (1e5 multiplier); among survivors, progress drives
-        # speed and follow keeps the robot from cutting across to a closer route point
+        # Per unit of ESDF clearance score, which is nonzero only inside safety_radius
+        # (a collision is inf and no weight reaches it). 200 against w_route_progress's
+        # 100/m is upstream #246's balance carried over: it moved 100000/100 to
+        # 2000/1000, a 500x drop in the clearance term's weight relative to progress,
+        # and the same ratio here is 200 because this fork's progress term already
+        # weighs 100/m. Grazing at safety_radius now costs about 20 m of route
+        # progress, where it used to cost 9900 m.
+        self.w_clearance = 200.0
+        # among survivors, progress drives speed and follow keeps the robot from
+        # cutting across to a closer route point
         self.w_route_progress = 100.0
         self.w_path_follow = 80.0
         # pulls the last stretch onto the exact goal, since remaining_map alone
@@ -1120,7 +1128,7 @@ class PlanningNode(Node):
             # Single cost: clearance + route adherence/progress + smoothness, with the
             # reverse gate as a large additive penalty rather than a hard filter. The
             # penalty degrades gracefully on its own -- a colliding trajectory costs
-            # scores[i]*100000 == inf, which loses to any non-colliding gate violator --
+            # scores[i]*w_clearance == inf, which loses to any non-colliding gate violator --
             # so it already gives the "never stall outright" fallback that a two-stage
             # filter had to spell out, in one term. Clearance stays soft on purpose:
             # safety_radius is a margin, not a collision boundary, and a corridor
@@ -1186,7 +1194,7 @@ class PlanningNode(Node):
                     positional = (self.w_route_progress * end_remainings[i]
                                   + self.w_path_follow * path_costs[i]
                                   + terminal)
-                return (scores[i] * 100000
+                return (scores[i] * self.w_clearance
                         + positional
                         + 10 * smooth
                         + heading_penalty
