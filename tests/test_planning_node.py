@@ -287,13 +287,13 @@ def test_two_stage_trajectory_count_and_shape():
     trajectories, params = generate_two_stage_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     single_trajectories, _ = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     assert params.shape == (trajectories.shape[0], 4), "params must carry (vx1, omega1, vx2, omega2)"
-    assert trajectories.shape[0] == 400, "default 4 vx x 5 omega per stage, squared, should be 400"
-    # candidate count is higher than the single-stage lattice it replaced (finer
-    # vx resolution per stage is needed - see test_two_stage_intermediate_distance_still_moves
-    # - not just omega), but scoring is still <1ms even at this count (see the
-    # traj-score benchmark in the PR description), well under the raycasting
-    # stage that dominates the planning loop
-    assert trajectories.shape[0] / single_trajectories.shape[0] <= 5.0
+    assert trajectories.shape[0] == 100, "default 2 vx x 5 omega per stage, squared, should be 100"
+    # candidate count should stay in the same ballpark as the single-stage lattice
+    # it replaced, so ESDF scoring cost doesn't regress on-robot (a finer vx grid
+    # isn't needed for arrival precision - the blended stage-1/full-horizon cost
+    # in PlanningNode.cost_function handles that instead, see
+    # test_two_stage_intermediate_distance_still_moves)
+    assert 0.5 <= trajectories.shape[0] / single_trajectories.shape[0] <= 2.0
 
 def test_two_stage_expresses_straight_then_turn():
     # a shape a single constant-curvature arc cannot produce: no drift during

@@ -206,23 +206,21 @@ def generate_two_stage_trajectory_library_3d(
     duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    n_vx_per_stage=4, n_omega_per_stage=5,
+    n_vx_per_stage=2, n_omega_per_stage=5,
 ):
     """Two-stage constant-control lattice: each half of the horizon picks its own
     (vx, omega), so a trajectory can change curvature mid-horizon (go straight then
     turn, or rotate in place then drive off) which a single constant-control arc
     can never represent. Candidate count is the square of the per-stage count
-    (e.g. 20 controls/stage -> 400 trajectories); still cheap relative to the
-    raycasting/ESDF stages, which dominate the planning loop's runtime.
+    (e.g. 10 controls/stage -> 100 trajectories), matched to roughly today's
+    single-stage candidate count so ESDF scoring cost doesn't regress on-robot.
 
-    vx needs more than a {0, max} bang-bang choice: with only two speed levels,
-    the only achievable stopping distances over the full horizon are 0, half and
-    full range, so a target that lands between those gets "rounded" to the
-    nearest one every cycle - if that's the near-zero option, the robot picks
-    "stand still, then drive" forever and never actually moves (the executed
-    command only ever covers the first stage). A finer vx grid lets a mostly-
-    constant speed land close to the target directly, like the single-stage
-    planner it replaced.
+    vx is a coarse {0, max} bang-bang choice on purpose: PlanningNode.cost_function
+    blends the stage-1 endpoint into the distance/heading score specifically so a
+    target landing between the grid's few achievable stopping distances still
+    picks a moving stage 1 (see test_two_stage_intermediate_distance_still_moves)
+    - a finer vx grid isn't needed for that, and would just multiply candidate
+    count (and thus scoring time) for no behavioral gain.
     """
     # split the same step count generate_trajectory_library_3d/
     # generate_predefined_trajectory_vocabularies use, so the resulting arrays
