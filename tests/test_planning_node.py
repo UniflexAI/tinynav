@@ -11,6 +11,7 @@ from planning_node import (
     generate_trajectory_library_3d,
     generate_two_stage_trajectory_library_3d,
     goal_heading_error,
+    reverse_gate_hysteresis,
 )
 from scipy.spatial.transform import Rotation as R
 from tinynav.core.math_utils import matrix_to_quat
@@ -381,6 +382,30 @@ def test_two_stage_intermediate_distance_still_moves():
     for target_x in (0.6, 0.9, 1.2, 1.4):
         vx1, omega1, vx2, omega2 = _pick_two_stage(np.array([target_x, 0.0, 0.0]))
         assert vx1 > 0.0, f"target at distance {target_x} yields vx1={vx1} (planner would never move)"
+
+def test_reverse_gate_hysteresis_ignores_noise_at_single_threshold():
+    # regression: a rosbag capture showed the old single-threshold gate
+    # (should_reverse = front_clearance <= 0.30) flipping forward<->reverse
+    # every planning cycle when front_clearance hovered right at 0.30 with
+    # ESDF/depth noise - each flip swaps a 1e9-cost gap between forward and
+    # reverse candidates, so the robot's actual path alternated wildly.
+    in_reverse = False
+    for clearance in (0.30, 0.29, 0.31, 0.30, 0.29, 0.31):
+        in_reverse = reverse_gate_hysteresis(clearance, in_reverse)
+        assert in_reverse is False, "noise straddling the old single threshold must not enter reverse"
+
+def test_reverse_gate_hysteresis_enters_and_exits():
+    in_reverse = False
+    in_reverse = reverse_gate_hysteresis(0.5, in_reverse)
+    assert in_reverse is False, "plenty of clearance should stay in forward mode"
+    in_reverse = reverse_gate_hysteresis(0.20, in_reverse)
+    assert in_reverse is True, "clearance under the enter threshold must trigger reverse"
+    # once in reverse, clearance has to recover past the (higher) exit
+    # threshold, not just back above the enter threshold, to leave reverse
+    in_reverse = reverse_gate_hysteresis(0.30, in_reverse)
+    assert in_reverse is True, "clearance between the two thresholds must stay in reverse"
+    in_reverse = reverse_gate_hysteresis(0.45, in_reverse)
+    assert in_reverse is False, "clearance past the exit threshold should leave reverse"
 
 if __name__ == "__main__":
     test_goal_heading_error()

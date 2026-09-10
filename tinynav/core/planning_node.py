@@ -419,6 +419,16 @@ def goal_heading_error(traj_end, target):
     yaw2 = np.arctan2(dy, dx)
     return abs(np.arctan2(np.sin(yaw2 - yaw1), np.cos(yaw2 - yaw1)))
 
+def reverse_gate_hysteresis(front_clearance, in_reverse_mode, enter_threshold=0.25, exit_threshold=0.40):
+    """Schmitt trigger for the forward/reverse gate: a single threshold flickers
+    when front_clearance sits right on the boundary (ESDF/depth noise between
+    frames), and each flip swaps a 1e9-cost gap between forward and reverse
+    candidates - entering reverse needs to get closer than exiting needs to
+    clear, so noise within that band can't flip the state on its own."""
+    if in_reverse_mode:
+        return front_clearance < exit_threshold
+    return front_clearance <= enter_threshold
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -478,6 +488,7 @@ class PlanningNode(Node):
         self.last_T = None
         self.last_param = (0.0, 0.0, 0.0, 0.0)  # (vx1, omega1, vx2, omega2) of the previous pick
         self.planning_dt = 0.1  # seconds between the last two sync_callback invocations
+        self.in_reverse_mode = False  # hysteresis state for the reverse gate below
         self.obstacle_config = ROBOT_CONFIG.obstacle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -713,7 +724,12 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            enter_threshold = 0.30
+            # a rosbag capture showed a single-threshold reverse gate flipping
+            # forward<->reverse every planning cycle (~100ms) for seconds at a
+            # time whenever front_clearance sat right on the boundary; see
+            # reverse_gate_hysteresis for why.
+            should_reverse = reverse_gate_hysteresis(front_clearance, self.in_reverse_mode)
+            self.in_reverse_mode = should_reverse
             # index of the last stage-1 sample: only stage 1 is ever actually
             # executed (the controller derives cmd_vel from the path's first
             # ~second), so scoring only the full 3s endpoint lets the planner
@@ -730,7 +746,6 @@ class PlanningNode(Node):
             def cost_function(traj, param, score, endpoint_score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
-                should_reverse = front_clearance <= enter_threshold
                 reverse_gate_penalty = 0.0
                 if should_reverse and not is_backward_traj:
                         reverse_gate_penalty = 1e9
