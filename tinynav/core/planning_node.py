@@ -328,6 +328,7 @@ class PlanningNode(Node):
         self.grid_shape = (100, 100, 10)
         self.resolution = 0.05
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
+        self.free_space_esdf = float(np.hypot(*self.grid_shape[:2])) * self.resolution
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
@@ -533,7 +534,10 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
-            ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
+            if obstacle_mask.any():
+                ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
+            else:
+                ESDF_map = np.full(obstacle_mask.shape, self.free_space_esdf, dtype=np.float32)
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
