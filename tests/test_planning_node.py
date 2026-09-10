@@ -303,6 +303,31 @@ def test_two_stage_trajectory_count_and_shape():
     # test_two_stage_intermediate_distance_still_moves)
     assert 0.5 <= trajectories.shape[0] / single_trajectories.shape[0] <= 2.0
 
+def test_two_stage_dynamic_window_bounds_stage1_speed():
+    # only stage 1 is ever executed, so every candidate's vx1 must be reachable
+    # from the robot's current speed within one planning cycle - otherwise the
+    # planner can request a speed change the real acceleration limit can't
+    # deliver in time (this is what caused corner overshoot: see the
+    # feasible_dv commit history)
+    current_vx, max_vx_step = 0.3, 0.072
+    trajectories, params = generate_two_stage_trajectory_library_3d(
+        init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X),
+        max_linear_vel=0.5, max_angular_vel=0.75,
+        current_vx=current_vx, max_vx_step=max_vx_step,
+    )
+    vx1 = params[:, 0]
+    assert np.all(vx1 >= current_vx - max_vx_step - 1e-9)
+    assert np.all(vx1 <= current_vx + max_vx_step + 1e-9)
+
+    # default (no current_vx/max_vx_step given) stays unconstrained, so callers
+    # that don't track a "current speed" - e.g. the tests above - see the same
+    # full [0, max_linear_vel] behavior as before this change
+    _, unconstrained_params = generate_two_stage_trajectory_library_3d(
+        init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X),
+        max_linear_vel=0.5, max_angular_vel=0.75,
+    )
+    assert unconstrained_params[:, 0].max() == 0.5
+
 def test_two_stage_expresses_straight_then_turn():
     # a shape a single constant-curvature arc cannot produce: no drift during
     # stage 1, then a sharp turn during stage 2
