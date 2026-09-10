@@ -187,7 +187,8 @@ def generate_predefined_trajectory_vocabularies(
     params = []
 
     # constant reverse trajectory
-    # vx = -0.3 m/s, omega = 0
+    # vx = -0.3 m/s, omega = 0 (must match CmdVelControlNode.fixed_reverse_speed
+    # in tinynav/platforms/cmd_vel_control.py)
     reverse_speed = 0.3
     p = init_p.copy()
     q = quat_to_matrix(init_q)
