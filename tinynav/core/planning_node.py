@@ -254,28 +254,21 @@ def generate_two_stage_trajectory_library_3d(
     duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    n_vx_per_stage=2, n_omega_per_stage=5, n_coast_speeds=7,
-    current_vx=0.0, max_vx_step=1e9,
+    num_samples_per_stage=5,
 ):
-    """Two-stage constant-control lattice: each half of the horizon picks its own
-    (vx, omega), so a trajectory can change curvature mid-horizon (go straight then
-    turn, or rotate in place then drive off) which a single constant-control arc
-    can never represent. Candidate count is the square of the per-stage count
-    plus the coast set (e.g. 10 controls/stage -> 100, plus 7 coast -> 107),
-    matched to roughly today's single-stage candidate count so ESDF scoring
-    cost doesn't regress on-robot.
+    """Two-stage lattice: each half of the horizon runs the same sampling as
+    generate_trajectory_library_3d - vx graduated over the full [0, max] range,
+    not a coarse bang-bang choice - just for half the duration, chained
+    together (position/orientation carry over continuously at the midpoint;
+    stage 2 picks its own independent (vx, omega) from there). This mirrors
+    main's single-stage design for each half instead of a hand-rolled dynamic
+    window/coast-candidate scheme compensating for a coarser one, so it
+    inherits the same smooth speed graduation main already has.
 
-    Dynamic window on stage 1's vx (current_vx, max_vx_step): only stage 1 is
-    ever actually executed (the controller derives cmd_vel from the near-term
-    path), so its vx must be reachable from the robot's current speed within
-    one planning cycle - sampling the full [0, max] range let the planner pick
-    a stage-1 speed the real robot's acceleration limit can't reach yet,
-    coasting past where it needed to slow down before the low-level rate
-    limiter caught up. Callers pass current_vx = last commanded speed and
-    max_vx_step = max_linear_acc * planning_period; defaults (0, 1e9) recover
-    the old unconstrained [0, max] sampling for callers that don't track that
-    (e.g. tests). Stage 2 is a soft lookahead, not something ever executed
-    as-is, so it keeps sampling the full range.
+    Candidate count is the square of the per-stage count (num_samples_per_stage=5
+    -> n_vx=3, n_omega=5 -> 15/stage -> 225 total), a bit above main's ~105 but
+    still cheap next to raycasting/ESDF; lower num_samples_per_stage if that
+    matters more than turning resolution on a given robot.
     """
     # split the same step count generate_trajectory_library_3d/
     # generate_predefined_trajectory_vocabularies use, so the resulting arrays
@@ -283,58 +276,38 @@ def generate_two_stage_trajectory_library_3d(
     num_steps = int(duration / dt) + 1
     num_steps_stage = num_steps // 2
 
-    vx1_lo = max(0.0, current_vx - max_vx_step)
-    vx1_hi = min(max_linear_vel, current_vx + max_vx_step)
-    if vx1_hi < vx1_lo:
-        vx1_hi = vx1_lo
-    vx1_samples = np.linspace(vx1_lo, vx1_hi, n_vx_per_stage)
-    vx2_samples = np.linspace(0.0, max_linear_vel, n_vx_per_stage)
-    omega_samples = np.linspace(-max_angular_vel, max_angular_vel, n_omega_per_stage)
-    n_vx = n_vx_per_stage
+    n_vx = max(3, int(num_samples_per_stage / 2))
+    vx_samples = np.linspace(0.0, max_linear_vel, n_vx)
+    omega_samples = np.linspace(-max_angular_vel, max_angular_vel, num_samples_per_stage)
     n_omega = len(omega_samples)
     n_stage_controls = n_vx * n_omega
 
-    stage1_vx = np.empty(n_stage_controls)
-    stage1_omega = np.empty(n_stage_controls)
-    stage2_vx = np.empty(n_stage_controls)
-    stage2_omega = np.empty(n_stage_controls)
+    stage_vx = np.empty(n_stage_controls)
+    stage_omega = np.empty(n_stage_controls)
     k = 0
     for i in range(n_vx):
         for j in range(n_omega):
-            stage1_vx[k] = vx1_samples[i]
-            stage1_omega[k] = omega_samples[j]
-            stage2_vx[k] = vx2_samples[i]
-            stage2_omega[k] = omega_samples[j]
+            stage_vx[k] = vx_samples[i]
+            stage_omega[k] = omega_samples[j]
             k += 1
 
-    coast_speeds = np.linspace(vx1_lo, vx1_hi, n_coast_speeds)
-
-    n_traj = n_stage_controls * n_stage_controls + n_coast_speeds
+    n_traj = n_stage_controls * n_stage_controls
     trajectories = np.empty((n_traj, num_steps, 7))
     params = np.empty((n_traj, 4))
 
     idx = -1
     for a in range(n_stage_controls):
-        vx1 = stage1_vx[a]
-        omega1 = stage1_omega[a]
+        vx1 = stage_vx[a]
+        omega1 = stage_omega[a]
         for b in range(n_stage_controls):
-            vx2 = stage2_vx[b]
-            omega2 = stage2_omega[b]
+            vx2 = stage_vx[b]
+            omega2 = stage_omega[b]
             idx += 1
             trajectories[idx] = _integrate_two_stage(init_p, init_q, vx1, omega1, vx2, omega2, num_steps_stage, num_steps, dt)
             params[idx, 0] = vx1
             params[idx, 1] = omega1
             params[idx, 2] = vx2
             params[idx, 3] = omega2
-
-    for c in range(n_coast_speeds):
-        vx = coast_speeds[c]
-        idx += 1
-        trajectories[idx] = _integrate_two_stage(init_p, init_q, vx, 0.0, vx, 0.0, num_steps_stage, num_steps, dt)
-        params[idx, 0] = vx
-        params[idx, 1] = 0.0
-        params[idx, 2] = vx
-        params[idx, 3] = 0.0
 
     return trajectories, params
 
@@ -750,17 +723,16 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            # dynamic window: stage 1's vx may only move away from the last
-            # commanded speed by what CMD_VEL_MAX_LINEAR_ACC actually allows in
-            # one planning cycle (see generate_two_stage_trajectory_library_3d)
-            feasible_dv = CMD_VEL_MAX_LINEAR_ACC * max(self.planning_dt, 0.03)
             trajectories, params = generate_two_stage_trajectory_library_3d(
                 init_p=init_p, init_q=init_q,
                 max_linear_vel=ROBOT_CONFIG.max_linear_vel,
                 max_angular_vel=ROBOT_CONFIG.max_angular_vel,
-                current_vx=self.last_param[0],
-                max_vx_step=feasible_dv,
             )
+            # cost_function's infeasible_decel term still needs this: how much
+            # CMD_VEL_MAX_LINEAR_ACC actually allows a speed to change by in one
+            # planning cycle, as a safety-net penalty (not a sampling constraint
+            # anymore) against picking a stage-1 speed too far from the last one.
+            feasible_dv = CMD_VEL_MAX_LINEAR_ACC * max(self.planning_dt, 0.03)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)

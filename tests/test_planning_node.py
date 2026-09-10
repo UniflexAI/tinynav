@@ -297,38 +297,23 @@ def test_two_stage_trajectory_count_and_shape():
     trajectories, params = generate_two_stage_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     single_trajectories, _ = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     assert params.shape == (trajectories.shape[0], 4), "params must carry (vx1, omega1, vx2, omega2)"
-    assert trajectories.shape[0] == 107, "default 2x5 squared (100) plus 7 coast speeds, should be 107"
+    assert trajectories.shape[0] == 225, "default n_vx=3 x n_omega=5 squared, should be 225"
     # candidate count should stay in the same ballpark as the single-stage lattice
-    # it replaced, so ESDF scoring cost doesn't regress on-robot (a finer vx grid
-    # isn't needed for arrival precision - the blended stage-1/full-horizon cost
-    # in PlanningNode.cost_function handles that instead, see
-    # test_two_stage_intermediate_distance_still_moves)
-    assert 0.5 <= trajectories.shape[0] / single_trajectories.shape[0] <= 2.0
+    # it replaced, so ESDF scoring cost doesn't regress on-robot
+    assert trajectories.shape[0] / single_trajectories.shape[0] <= 3.0
 
-def test_two_stage_dynamic_window_bounds_stage1_speed():
-    # only stage 1 is ever executed, so every candidate's vx1 must be reachable
-    # from the robot's current speed within one planning cycle - otherwise the
-    # planner can request a speed change the real acceleration limit can't
-    # deliver in time (this is what caused corner overshoot: see the
-    # feasible_dv commit history)
-    current_vx, max_vx_step = 0.3, 0.072
+def test_two_stage_vx_graduated_like_single_stage():
+    # each stage should sample vx the same way generate_trajectory_library_3d
+    # does (graduated across the full range), not a coarse {0, max} bang-bang -
+    # main's fine graduation is what gives smooth deceleration for free,
+    # without needing a dynamic window or extra "coast" candidates bolted on
     trajectories, params = generate_two_stage_trajectory_library_3d(
         init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X),
-        max_linear_vel=0.5, max_angular_vel=0.75,
-        current_vx=current_vx, max_vx_step=max_vx_step,
+        max_linear_vel=0.6, max_angular_vel=0.75,
     )
-    vx1 = params[:, 0]
-    assert np.all(vx1 >= current_vx - max_vx_step - 1e-9)
-    assert np.all(vx1 <= current_vx + max_vx_step + 1e-9)
-
-    # default (no current_vx/max_vx_step given) stays unconstrained, so callers
-    # that don't track a "current speed" - e.g. the tests above - see the same
-    # full [0, max_linear_vel] behavior as before this change
-    _, unconstrained_params = generate_two_stage_trajectory_library_3d(
-        init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X),
-        max_linear_vel=0.5, max_angular_vel=0.75,
-    )
-    assert unconstrained_params[:, 0].max() == 0.5
+    vx1_levels = sorted(set(np.round(params[:, 0], 6)))
+    assert len(vx1_levels) == 3, f"expected 3 vx levels per stage, got {vx1_levels}"
+    assert vx1_levels[0] == 0.0 and vx1_levels[-1] == 0.6
 
 def test_two_stage_expresses_straight_then_turn():
     # a shape a single constant-curvature arc cannot produce: no drift during
