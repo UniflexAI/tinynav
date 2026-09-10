@@ -516,18 +516,6 @@ class PlanningNode(Node):
         velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
         self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
 
-    def build_obstacle_and_esdf(self, T):
-        obstacle_mask = build_obstacle_map(
-            self.occupancy_grid, self.origin, self.resolution,
-            robot_z=T[2, 3], config=self.obstacle_config,
-        )
-        ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
-        return obstacle_mask, ESDF_map
-
-    def score_trajectories(self, trajectories, ESDF_map):
-        front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-        return score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
-
     def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
         center = self.origin + np.array(self.grid_shape) * self.resolution / 2
         robot_pos = T[:3, 3]
@@ -606,7 +594,11 @@ class PlanningNode(Node):
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
+            obstacle_mask = build_obstacle_map(
+                self.occupancy_grid, self.origin, self.resolution,
+                robot_z=T[2, 3], config=self.obstacle_config,
+            )
+            ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
@@ -623,7 +615,8 @@ class PlanningNode(Node):
             self.last_stamp = stamp
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            scores, occ_points = self.score_trajectories(trajectories, ESDF_map)
+            front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
