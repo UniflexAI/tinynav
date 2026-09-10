@@ -23,6 +23,23 @@ from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 # robot's cmd_vel rate limiter can't actually reach in one planning cycle.
 CMD_VEL_MAX_LINEAR_ACC = 0.6  # m/s^2
 
+# Stuck detection: reversing has no sensing of what's behind the robot at all
+# (single forward-facing depth camera), so if it backs into something never
+# mapped, ESDF-based scoring has no way to know and will keep picking the same
+# maneuver forever - a rosbag showed the robot commanding reverse for ~2
+# minutes with ~0 net odometry displacement. If we've been commanding
+# meaningful motion for STUCK_TIMEOUT_S but smoothed_velocity says we haven't
+# actually gone anywhere, discourage repeating that direction for
+# STUCK_RECOVERY_COOLDOWN_S so the planner tries turning/the other direction
+# instead of looping on a maneuver that provably isn't working.
+STUCK_COMMAND_THRESHOLD = 0.05   # m/s; below this, we're not really "trying" to move
+STUCK_SPEED_THRESHOLD = 0.05     # m/s; below this, we're not actually moving
+STUCK_TIMEOUT_S = 3.0
+STUCK_RECOVERY_COOLDOWN_S = 6.0
+# less than the 1e9 hard gates, so it's a strong preference, not an absolute
+# ban, in case the discouraged direction is the only option left
+STUCK_DIRECTION_PENALTY = 1e6
+
 # === Helper functions ===
 @njit(cache=True)
 def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
@@ -430,6 +447,28 @@ def reverse_gate_hysteresis(front_clearance, in_reverse_mode, enter_threshold=0.
         return front_clearance < exit_threshold
     return front_clearance <= enter_threshold
 
+def update_stuck_state(last_vx, smoothed_velocity, stamp, stuck_since, stuck_direction, stuck_recovery_until,
+                        command_threshold=STUCK_COMMAND_THRESHOLD, speed_threshold=STUCK_SPEED_THRESHOLD,
+                        timeout_s=STUCK_TIMEOUT_S, recovery_cooldown_s=STUCK_RECOVERY_COOLDOWN_S):
+    """Track whether the last commanded direction (last_vx's sign) has actually
+    moved the robot. Reversing (and driving forward) has no way to sense
+    whether the direction it's committing to is physically blocked by
+    something never mapped, so if smoothed_velocity stays near zero despite
+    commanding real motion for timeout_s, mark that direction as stuck for
+    recovery_cooldown_s so the caller can steer the planner away from
+    repeating it. Returns the updated (stuck_since, stuck_direction, stuck_recovery_until)."""
+    commanding_motion = abs(last_vx) > command_threshold
+    if commanding_motion and smoothed_velocity < speed_threshold:
+        if stuck_since is None:
+            stuck_since = stamp
+        elif stamp - stuck_since > timeout_s:
+            stuck_direction = float(np.sign(last_vx))
+            stuck_recovery_until = stamp + recovery_cooldown_s
+            stuck_since = stamp
+    else:
+        stuck_since = None
+    return stuck_since, stuck_direction, stuck_recovery_until
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -490,6 +529,9 @@ class PlanningNode(Node):
         self.last_param = (0.0, 0.0, 0.0, 0.0)  # (vx1, omega1, vx2, omega2) of the previous pick
         self.planning_dt = 0.1  # seconds between the last two sync_callback invocations
         self.in_reverse_mode = False  # hysteresis state for the reverse gate below
+        self.stuck_since = None       # stamp when "commanding motion but not moving" started, or None
+        self.stuck_direction = 0.0    # sign(vx1) we were stuck trying, while stuck_recovery_until is active
+        self.stuck_recovery_until = 0.0  # stamp until which stuck_direction is discouraged
         self.obstacle_config = ROBOT_CONFIG.obstacle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
@@ -670,6 +712,12 @@ class PlanningNode(Node):
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
+            # stuck detection: did last cycle's commanded direction actually move us?
+            self.stuck_since, self.stuck_direction, self.stuck_recovery_until = update_stuck_state(
+                self.last_param[0], self.smoothed_velocity, stamp,
+                self.stuck_since, self.stuck_direction, self.stuck_recovery_until,
+            )
+
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             center = self.origin + np.array(self.grid_shape) * self.resolution / 2
             robot_pos = T[:3, 3]
@@ -743,6 +791,7 @@ class PlanningNode(Node):
             # window); this term is now mostly a no-op for forward candidates and
             # only still bites the fixed-speed reverse vocab trajectory, which the
             # reverse_gate_penalty below already gates independently.
+            stuck_recovery_active = stamp < self.stuck_recovery_until
 
             def cost_function(traj, param, score, endpoint_score, target_pose):
                 # predefined backward trajectory penalty
@@ -773,6 +822,10 @@ class PlanningNode(Node):
 
                 infeasible_decel = max(0.0, (self.last_param[0] - param[0]) - feasible_dv)
 
+                stuck_penalty = 0.0
+                if stuck_recovery_active and np.sign(param[0]) == self.stuck_direction and param[0] != 0.0:
+                    stuck_penalty = STUCK_DIRECTION_PENALTY
+
                 return (
                     score * 2000
                     + endpoint_score * 2000
@@ -782,6 +835,7 @@ class PlanningNode(Node):
                     + 10 * abs(self.last_param[1] - param[1])
                     + 500 * infeasible_decel
                     + reverse_gate_penalty
+                    + stuck_penalty
                 )
 
             top_k = 1

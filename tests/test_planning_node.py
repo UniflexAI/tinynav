@@ -12,6 +12,7 @@ from planning_node import (
     generate_two_stage_trajectory_library_3d,
     goal_heading_error,
     reverse_gate_hysteresis,
+    update_stuck_state,
 )
 from scipy.spatial.transform import Rotation as R
 from tinynav.core.math_utils import matrix_to_quat
@@ -406,6 +407,55 @@ def test_reverse_gate_hysteresis_enters_and_exits():
     assert in_reverse is True, "clearance between the two thresholds must stay in reverse"
     in_reverse = reverse_gate_hysteresis(0.45, in_reverse)
     assert in_reverse is False, "clearance past the exit threshold should leave reverse"
+
+def test_stuck_state_triggers_after_sustained_no_progress():
+    # regression: a rosbag showed the robot commanding -0.3 m/s reverse for
+    # ~2 minutes with ~0 net odometry displacement, because reversing has no
+    # sensing of what's behind the robot and can't tell the maneuver isn't
+    # working. update_stuck_state should flag the direction as stuck once
+    # commanding motion for longer than timeout_s produces no real speed.
+    since, direction, until = None, 0.0, 0.0
+    t = 0.0
+    for _ in range(50):  # 50 * 0.1s = 5s of commanding -0.3 while not moving
+        t += 0.1
+        since, direction, until = update_stuck_state(
+            last_vx=-0.3, smoothed_velocity=0.0, stamp=t,
+            stuck_since=since, stuck_direction=direction, stuck_recovery_until=until,
+            timeout_s=3.0, recovery_cooldown_s=6.0,
+        )
+    assert direction == -1.0, "should flag the backward direction as stuck"
+    assert until > t, "recovery cooldown should extend into the future"
+
+def test_stuck_state_resets_once_actually_moving():
+    since, direction, until = None, 0.0, 0.0
+    t = 0.0
+    for _ in range(50):
+        t += 0.1
+        since, direction, until = update_stuck_state(
+            last_vx=-0.3, smoothed_velocity=0.0, stamp=t,
+            stuck_since=since, stuck_direction=direction, stuck_recovery_until=until,
+        )
+    assert direction == -1.0
+    # now the robot actually starts moving - stuck_since must clear so a
+    # future stall doesn't instantly re-trigger off a stale timer
+    since, direction, until = update_stuck_state(
+        last_vx=-0.3, smoothed_velocity=0.5, stamp=t + 0.1,
+        stuck_since=since, stuck_direction=direction, stuck_recovery_until=until,
+    )
+    assert since is None
+
+def test_stuck_state_does_not_trigger_while_still_accelerating():
+    # commanding motion for less than timeout_s must not trigger, otherwise
+    # this would fire during every normal acceleration ramp-up
+    since, direction, until = None, 0.0, 0.0
+    t = 0.0
+    for _ in range(20):  # 2s, under the 3s timeout
+        t += 0.1
+        since, direction, until = update_stuck_state(
+            last_vx=-0.3, smoothed_velocity=0.0, stamp=t,
+            stuck_since=since, stuck_direction=direction, stuck_recovery_until=until,
+        )
+    assert until == 0.0, "must not trigger recovery before timeout_s has elapsed"
 
 if __name__ == "__main__":
     test_goal_heading_error()
