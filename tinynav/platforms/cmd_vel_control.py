@@ -14,6 +14,17 @@ from tinynav.core.robot_specs import ROBOT_CONFIG
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
 
+def compute_heading_err(p, min_displacement=0.03):
+    """Bearing (in the robot's frame) to the near-term path point, or 0.0 if
+    the displacement is too small to trust. atan2(p[1], p[0]) on a near-zero
+    vector is bearing-of-noise, not a real heading - letting that noise
+    through made the forced-turn gates below fire in a random direction
+    whenever the planned segment was near-stationary, which reads as the
+    robot randomly twitching in place instead of standing still or gliding."""
+    if np.hypot(p[0], p[1]) > min_displacement:
+        return float(np.arctan2(p[1], p[0]))
+    return 0.0
+
 class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
@@ -58,6 +69,7 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
+        self.min_displacement_for_heading_err = 0.03  # meters, see compute_heading_err
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -191,7 +203,7 @@ class CmdVelControlNode(Node):
         T_robot_2 = T2 @ self.T_robot_to_camera
         T_robot_2_to_1 = np.linalg.inv(T_robot_1) @ T_robot_2
         p = T_robot_2_to_1[:3, 3]
-        heading_err = float(np.arctan2(p[1], p[0]))
+        heading_err = compute_heading_err(p, self.min_displacement_for_heading_err)
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
         dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
