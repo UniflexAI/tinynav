@@ -65,7 +65,12 @@ class CmdVelControlNode(Node):
         self.min_effective_linear_speed = self.robot.min_linear_vel
         self.min_effective_angular_speed = self.robot.min_angular_vel
         self.linear_engage_threshold = 0.04
-        self.fixed_reverse_speed = 0.2
+        # must match reverse_speed in generate_predefined_trajectory_vocabularies
+        # (tinynav/core/planning_node.py) - bumped from 0.2, which a rosbag showed
+        # getting the robot stuck reversing in place for ~2 minutes (0 net
+        # displacement) against something the forward-only depth camera can't
+        # see behind it; 0.2 m/s may not be enough push to break free.
+        self.fixed_reverse_speed = 0.3
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
