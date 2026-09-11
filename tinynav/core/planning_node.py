@@ -52,6 +52,15 @@ _OBJECT_MESH_ASSETS = {
     },
 }
 
+# Voxels currently tagged (object_class_grid, see apply_object_hits/decay_object_grids)
+# as one of these classes are known-dynamic: fade them out fast so a person/car
+# that has moved on doesn't linger as a stale obstacle just because the camera
+# no longer points at that spot to clear it with fresh raycasting evidence.
+# Untagged voxels get no passive decay at all -- real static structure should
+# only ever be cleared by actual depth evidence, not by time alone.
+_FAST_DECAY_CLASS_IDS = (0, 2)  # person, car
+_FAST_DECAY_FACTOR = 0.9
+
 
 def _yaw_to_quat(yaw):
     return (0.0, 0.0, np.sin(yaw / 2.0), np.cos(yaw / 2.0))
@@ -819,7 +828,8 @@ class PlanningNode(Node):
             )
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-        self.occupancy_grid *= 0.99
+        fast_decay = np.isin(self.object_class_grid, _FAST_DECAY_CLASS_IDS)
+        self.occupancy_grid[fast_decay] *= _FAST_DECAY_FACTOR
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
