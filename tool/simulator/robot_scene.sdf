@@ -1,45 +1,13 @@
 <?xml version="1.0" ?>
 <sdf version="1.9">
     <world name="tugbot_depot_world">
-        <plugin filename="gz-sim-triggered-publisher-system"
-            name="gz::sim::systems::TriggeredPublisher">
-            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
-                <match field="data">16777234</match>
-            </input>
-            <output type="ignition.msgs.Twist" topic="/cmd_vel">
-                linear: {x: 0.0}, angular: {z: 0.5}
-            </output>
-        </plugin>
-        <plugin filename="gz-sim-triggered-publisher-system"
-            name="gz::sim::systems::TriggeredPublisher">
-            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
-                <match field="data">16777235</match>
-            </input>
-            <output type="ignition.msgs.Twist" topic="/cmd_vel">
-                linear: {x: 0.5}, angular: {z: 0.0}
-            </output>
-        </plugin>
-        <plugin filename="gz-sim-triggered-publisher-system"
-            name="gz::sim::systems::TriggeredPublisher">
-            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
-                <match field="data">16777236</match>
-            </input>
-            <output type="ignition.msgs.Twist" topic="/cmd_vel">
-                linear: {x: 0.0}, angular: {z: -0.5}
-            </output>
-        </plugin>
-        <plugin filename="gz-sim-triggered-publisher-system"
-            name="gz::sim::systems::TriggeredPublisher">
-            <input type="ignition.msgs.Int32" topic="/keyboard/keypress">
-            <match field="data">16777237</match>
-            </input>
-            <output type="ignition.msgs.Twist" topic="/cmd_vel">
-                linear: {x: -0.5}, angular: {z: 0.0}
-            </output>
-        </plugin>
-
+        <!-- Keyboard teleop lives in tinynav/platforms/keyboard_teleop.py (global
+             X listener). The old gz-side TriggeredPublisher arrow plugins were
+             removed: they published /cmd_vel on keypress with no zero-on-release
+             counterpart, so a stale auto-repeat event after keyup kept the gz
+             diff-drive (which holds its last twist) rolling. -->
         <physics name="1ms" type="ignored">
-            <max_step_size>0.01</max_step_size>
+            <max_step_size>0.001</max_step_size>
             <real_time_factor>1</real_time_factor>
         </physics>
         <plugin
@@ -90,7 +58,7 @@
                     </surface>
                 </collision>
             </link>
-            <pose>0 0 0 0 0 0</pose>
+            <pose>0 0 0.002 0 0 0</pose>
         </model>
 
         <include>
@@ -98,6 +66,7 @@
                 https://fuel.ignitionrobotics.org/1.0/OpenRobotics/models/Depot
             </uri>
             <pose>7.19009 1.09982 0 0 0 0</pose>
+            <static>true</static>
         </include>
 
         <model name='depot_collision'>
@@ -446,52 +415,49 @@
             </link>
         </model>
 
-        <!-- Robot Model -->
-        <model name='vehicle_blue' canonical_link='chassis'>
+        <!-- Robot Model: LeKiwi-like cylindrical base.
+             Dims from SIGRobotics-UIUC/LeKiwi URDF: wheel r=0.033, track 0.19,
+             base ~0.2m. Stereo baseline stays 0.051 (matches camera_info). -->
+        <model name='lekiwi' canonical_link='chassis'>
             <plugin
                 filename="gz-sim-diff-drive-system"
                 name="gz::sim::systems::DiffDrive">
                 <left_joint>left_wheel_joint</left_joint>
                 <right_joint>right_wheel_joint</right_joint>
-                <wheel_separation>1.2</wheel_separation>
-                <wheel_radius>0.4</wheel_radius>
-                <odom_publish_frequency>1</odom_publish_frequency>
+                <wheel_separation>0.19</wheel_separation>
+                <wheel_radius>0.033</wheel_radius>
+                <odom_publish_frequency>20</odom_publish_frequency>
                 <topic>cmd_vel</topic>
             </plugin>
 
             <pose relative_to='world'>0 0 0 0 0 0</pose>
             <link name='chassis'>
-
+                <pose relative_to='__model__'>0 0 0.083 0 0 0</pose>
                 <sensor name="imu_sensor" type="imu">
                     <always_on>1</always_on>
                     <update_rate>200</update_rate>
                     <visualize>true</visualize>
-                    <topic>/camera/camera/accel/sample</topic>
-                    <!-- Direct camera coordinate system -->
-                    <!-- Camera: x=right, y=down, z=forward -->
-                    <!-- This pose directly aligns with camera coordinates -->
-                    <pose>1.0 0 0.4 1.5708 3.14159 -1.5708</pose>
+                    <topic>/camera/camera/imu</topic>
+                    <pose>0.05 0 0.02 1.5708 3.14159 1.5708</pose>
                 </sensor>
-
-                <pose relative_to='__model__'>0.5 0 0.4 0 0 0</pose>
-                <inertial> <!--inertial properties of the link mass, inertia matix-->
-                    <mass>1.14395</mass>
+                <inertial>
+                    <mass>1.0</mass>
                     <inertia>
-                        <ixx>0.095329</ixx>
+                        <ixx>0.0033</ixx>
                         <ixy>0</ixy>
                         <ixz>0</ixz>
-                        <iyy>0.381317</iyy>
+                        <iyy>0.0033</iyy>
                         <iyz>0</iyz>
-                        <izz>0.476646</izz>
+                        <izz>0.005</izz>
                     </inertia>
                 </inertial>
                 <visual name='visual'>
                     <geometry>
-                        <box>
-                            <size>2.0 1.0 0.5</size>
-                        </box>
+                        <cylinder>
+                            <radius>0.1</radius>
+                            <length>0.1</length>
+                        </cylinder>
                     </geometry>
-                    <!--let's add color to our link-->
                     <material>
                         <ambient>0.0 0.0 1.0 1</ambient>
                         <diffuse>0.0 0.0 1.0 1</diffuse>
@@ -499,32 +465,33 @@
                     </material>
                 </visual>
                 <collision name='collision'>
-                        <geometry>
-                            <box>
-                                <size>2.0 1.0 0.5</size>
-                            </box>
-                        </geometry>
+                    <geometry>
+                        <cylinder>
+                            <radius>0.1</radius>
+                            <length>0.1</length>
+                        </cylinder>
+                    </geometry>
                 </collision>
             </link>
-            
-            <!-- Infra1 Camera Link (Left) -->
+
+            <!-- Infra1 Camera Link (Left), world height ~0.10m -->
             <link name='infra1_link'>
-                <pose relative_to="chassis">1.0 0.0255 0.4 0 0 0</pose>
+                <pose relative_to="chassis">0.09 0.0255 0.017 0 0 0</pose>
                 <inertial>
-                    <mass>0.1</mass>
+                    <mass>0.03</mass>
                     <inertia>
-                        <ixx>0.001</ixx>
+                        <ixx>1e-5</ixx>
                         <ixy>0</ixy>
                         <ixz>0</ixz>
-                        <iyy>0.001</iyy>
+                        <iyy>1e-5</iyy>
                         <iyz>0</iyz>
-                        <izz>0.001</izz>
+                        <izz>1e-5</izz>
                     </inertia>
                 </inertial>
                 <visual name='visual'>
                     <geometry>
                         <box>
-                            <size>0.05 0.05 0.05</size>
+                            <size>0.025 0.025 0.025</size>
                         </box>
                     </geometry>
                     <material>
@@ -536,7 +503,7 @@
                 <collision name='collision'>
                     <geometry>
                         <box>
-                            <size>0.05 0.05 0.05</size>
+                            <size>0.025 0.025 0.025</size>
                         </box>
                     </geometry>
                 </collision>
@@ -544,7 +511,7 @@
                     <camera>
                         <horizontal_fov>1.5708</horizontal_fov>
                         <image>
-                            <width>848</width>
+                            <width>544</width>
                             <height>480</height>
                             <format>L8</format>
                         </image>
@@ -554,30 +521,30 @@
                         </clip>
                     </camera>
                     <always_on>1</always_on>
-                    <update_rate>30</update_rate>
+                    <update_rate>15</update_rate>
                     <visualize>true</visualize>
                     <topic>/camera/camera/infra1/image_rect_raw</topic>
                 </sensor>
             </link>
-            
+
             <!-- Infra2 Camera Link (Right) -->
             <link name='infra2_link'>
-                <pose relative_to="chassis">1.0 -0.0255 0.4 0 0 0</pose>
+                <pose relative_to="chassis">0.09 -0.0255 0.017 0 0 0</pose>
                 <inertial>
-                    <mass>0.1</mass>
+                    <mass>0.03</mass>
                     <inertia>
-                        <ixx>0.001</ixx>
+                        <ixx>1e-5</ixx>
                         <ixy>0</ixy>
                         <ixz>0</ixz>
-                        <iyy>0.001</iyy>
+                        <iyy>1e-5</iyy>
                         <iyz>0</iyz>
-                        <izz>0.001</izz>
+                        <izz>1e-5</izz>
                     </inertia>
                 </inertial>
                 <visual name='visual'>
                     <geometry>
                         <box>
-                            <size>0.05 0.05 0.05</size>
+                            <size>0.025 0.025 0.025</size>
                         </box>
                     </geometry>
                     <material>
@@ -589,7 +556,7 @@
                 <collision name='collision'>
                     <geometry>
                         <box>
-                            <size>0.05 0.05 0.05</size>
+                            <size>0.025 0.025 0.025</size>
                         </box>
                     </geometry>
                 </collision>
@@ -597,7 +564,7 @@
                     <camera>
                         <horizontal_fov>1.5708</horizontal_fov>
                         <image>
-                            <width>848</width>
+                            <width>544</width>
                             <height>480</height>
                             <format>L8</format>
                         </image>
@@ -607,30 +574,84 @@
                         </clip>
                     </camera>
                     <always_on>1</always_on>
-                    <update_rate>30</update_rate>
+                    <update_rate>15</update_rate>
                     <visualize>true</visualize>
                     <topic>/camera/camera/infra2/image_rect_raw</topic>
                 </sensor>
             </link>
-            
+
+            <!-- Color Camera Link (RGB), centered between the IR pair.
+                 Same intrinsics as the IR cameras so camera_info K applies verbatim. -->
+            <link name='color_link'>
+                <pose relative_to="chassis">0.09 0 0.017 0 0 0</pose>
+                <inertial>
+                    <mass>0.03</mass>
+                    <inertia>
+                        <ixx>1e-5</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>1e-5</iyy>
+                        <iyz>0</iyz>
+                        <izz>1e-5</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <box>
+                            <size>0.025 0.025 0.025</size>
+                        </box>
+                    </geometry>
+                    <material>
+                        <ambient>0.2 0.2 0.2 1</ambient>
+                        <diffuse>0.2 0.2 0.2 1</diffuse>
+                        <specular>0.2 0.2 0.2 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                    <geometry>
+                        <box>
+                            <size>0.025 0.025 0.025</size>
+                        </box>
+                    </geometry>
+                </collision>
+                <sensor name="color" type="camera">
+                    <camera>
+                        <horizontal_fov>1.5708</horizontal_fov>
+                        <image>
+                            <width>544</width>
+                            <height>480</height>
+                            <format>RGB_INT8</format>
+                        </image>
+                        <clip>
+                            <near>0.1</near>
+                            <far>100</far>
+                        </clip>
+                    </camera>
+                    <always_on>1</always_on>
+                    <update_rate>15</update_rate>
+                    <visualize>true</visualize>
+                    <topic>/camera/camera/color/image_raw</topic>
+                </sensor>
+            </link>
+
             <link name='left_wheel'>
-                <pose relative_to="chassis">-0.5 0.6 0 -1.5707 0 0</pose>
+                <pose relative_to="chassis">0 0.095 -0.05 -1.5707 0 0</pose>
                 <inertial>
-                    <mass>1</mass>
+                    <mass>0.05</mass>
                     <inertia>
-                        <ixx>0.043333</ixx>
+                        <ixx>1.5e-5</ixx>
                         <ixy>0</ixy>
                         <ixz>0</ixz>
-                        <iyy>0.043333</iyy>
+                        <iyy>1.5e-5</iyy>
                         <iyz>0</iyz>
-                        <izz>0.08</izz>
+                        <izz>2.7e-5</izz>
                     </inertia>
                 </inertial>
                 <visual name='visual'>
                     <geometry>
                         <cylinder>
-                            <radius>0.4</radius>
-                            <length>0.2</length>
+                            <radius>0.033</radius>
+                            <length>0.02</length>
                         </cylinder>
                     </geometry>
                     <material>
@@ -642,31 +663,31 @@
                 <collision name='collision'>
                     <geometry>
                         <cylinder>
-                            <radius>0.4</radius>
-                            <length>0.2</length>
+                            <radius>0.033</radius>
+                            <length>0.02</length>
                         </cylinder>
                     </geometry>
                 </collision>
             </link>
-            
+
             <link name='right_wheel'>
-                <pose relative_to="chassis">-0.5 -0.6 0 -1.5707 0 0</pose>
+                <pose relative_to="chassis">0 -0.095 -0.05 -1.5707 0 0</pose>
                 <inertial>
-                    <mass>1</mass>
+                    <mass>0.05</mass>
                     <inertia>
-                        <ixx>0.043333</ixx>
+                        <ixx>1.5e-5</ixx>
                         <ixy>0</ixy>
                         <ixz>0</ixz>
-                        <iyy>0.043333</iyy>
+                        <iyy>1.5e-5</iyy>
                         <iyz>0</iyz>
-                        <izz>0.08</izz>
+                        <izz>2.7e-5</izz>
                     </inertia>
                 </inertial>
                 <visual name='visual'>
                     <geometry>
                         <cylinder>
-                            <radius>0.4</radius>
-                            <length>0.2</length>
+                            <radius>0.033</radius>
+                            <length>0.02</length>
                         </cylinder>
                     </geometry>
                     <material>
@@ -678,13 +699,13 @@
                 <collision name='collision'>
                     <geometry>
                         <cylinder>
-                            <radius>0.4</radius>
-                            <length>0.2</length>
+                            <radius>0.033</radius>
+                            <length>0.02</length>
                         </cylinder>
                     </geometry>
                 </collision>
             </link>
-            
+
             <joint name='left_wheel_joint' type='revolute'>
                 <parent>chassis</parent>
                 <child>left_wheel</child>
@@ -692,7 +713,7 @@
                     <xyz>0 0 1</xyz>
                 </axis>
             </joint>
-            
+
             <joint name='right_wheel_joint' type='revolute'>
                 <parent>chassis</parent>
                 <child>right_wheel</child>
@@ -700,27 +721,27 @@
                     <xyz>0 0 1</xyz>
                 </axis>
             </joint>
-            
+
             <frame name="caster_frame" attached_to='chassis'>
-                <pose>0.8 0 -0.2 0 0 0</pose>
+                <pose>-0.07 0 -0.062 0 0 0</pose>
             </frame>
             <link name='caster'>
                 <pose relative_to='caster_frame'/>
                 <inertial>
-                    <mass>1</mass>
+                    <mass>0.05</mass>
                     <inertia>
-                        <ixx>0.016</ixx>
+                        <ixx>8e-6</ixx>
                         <ixy>0</ixy>
                         <ixz>0</ixz>
-                        <iyy>0.016</iyy>
+                        <iyy>8e-6</iyy>
                         <iyz>0</iyz>
-                        <izz>0.016</izz>
+                        <izz>8e-6</izz>
                     </inertia>
                 </inertial>
                 <visual name='visual'>
                     <geometry>
                         <sphere>
-                            <radius>0.2</radius>
+                            <radius>0.02</radius>
                         </sphere>
                     </geometry>
                     <material>
@@ -732,27 +753,74 @@
                 <collision name='collision'>
                     <geometry>
                         <sphere>
-                            <radius>0.2</radius>
+                            <radius>0.02</radius>
                         </sphere>
                     </geometry>
                 </collision>
             </link>
-            
+
             <joint name='caster_wheel' type='ball'>
                 <parent>chassis</parent>
                 <child>caster</child>
             </joint>
-            
-            <!-- Infra1 Camera Joint -->
+
+            <!-- Front ball caster: balances the forward camera weight so the
+                 chassis stays level on the two drive wheels. -->
+            <frame name="front_caster_frame" attached_to='chassis'>
+                <pose>0.07 0 -0.062 0 0 0</pose>
+            </frame>
+            <link name='front_caster'>
+                <pose relative_to='front_caster_frame'/>
+                <inertial>
+                    <mass>0.05</mass>
+                    <inertia>
+                        <ixx>8e-6</ixx>
+                        <ixy>0</ixy>
+                        <ixz>0</ixz>
+                        <iyy>8e-6</iyy>
+                        <iyz>0</iyz>
+                        <izz>8e-6</izz>
+                    </inertia>
+                </inertial>
+                <visual name='visual'>
+                    <geometry>
+                        <sphere>
+                            <radius>0.02</radius>
+                        </sphere>
+                    </geometry>
+                    <material>
+                        <ambient>0.0 1 0.0 1</ambient>
+                        <diffuse>0.0 1 0.0 1</diffuse>
+                        <specular>0.0 1 0.0 1</specular>
+                    </material>
+                </visual>
+                <collision name='collision'>
+                    <geometry>
+                        <sphere>
+                            <radius>0.02</radius>
+                        </sphere>
+                    </geometry>
+                </collision>
+            </link>
+
+            <joint name='front_caster_wheel' type='ball'>
+                <parent>chassis</parent>
+                <child>front_caster</child>
+            </joint>
+
             <joint name='infra1_joint' type='fixed'>
                 <parent>chassis</parent>
                 <child>infra1_link</child>
             </joint>
-            
-            <!-- Infra2 Camera Joint -->
+
             <joint name='infra2_joint' type='fixed'>
                 <parent>chassis</parent>
                 <child>infra2_link</child>
+            </joint>
+
+            <joint name='color_joint' type='fixed'>
+                <parent>chassis</parent>
+                <child>color_link</child>
             </joint>
         </model>
 

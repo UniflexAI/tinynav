@@ -4,6 +4,7 @@ import logging
 import sys
 import threading
 import time
+import traceback
 import cv2
 from message_filters import Subscriber, ApproximateTimeSynchronizer, InputAligner, SimpleFilter
 import numpy as np
@@ -240,6 +241,7 @@ class PerceptionNode(Node):
             self.stereo_queue.put_nowait(stereo_pair_msg)
 
     def _process_stereo_worker(self):
+        consecutive_failures = 0
         while not self.stopped:
             stereo_pair_msg = self.stereo_queue.get()
             if stereo_pair_msg is None:
@@ -248,8 +250,31 @@ class PerceptionNode(Node):
             left_msg = stereo_pair_msg.left_msg
             right_msg = stereo_pair_msg.right_msg
             loop_start = time.perf_counter()
-            with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n\n", logger=self.logger.info):
-                processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
+            try:
+                with Timer(name="Perception Loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms\n", logger=self.logger.info):
+                    processed = self._async_loop.run_until_complete(self.process(left_msg, right_msg))
+            except Exception:
+                # The factor graph is rebuilt from scratch every frame, so
+                # continuing lets the next frame retry with fresh geometry;
+                # only log the failure context for offline diagnosis.
+                consecutive_failures += 1
+                kf = self.keyframe_queue[-1] if self.keyframe_queue else None
+                with self.imu_measurements_lock:
+                    imu_pending = len(self.imu_measurements)
+                    last_gyro = np.linalg.norm(self.imu_measurements[-1][2]) if self.imu_measurements else float("nan")
+                self.logger.error(
+                    "VIO failed on frame at %.3f (%d consecutive):\n%s"
+                    "  keyframes=%d last_kf_t=%s imu_cnt=%s latest_imu_t=%s imu_pending=%d last_gyro_norm=%.3f",
+                    stamp2second(left_msg.header.stamp), consecutive_failures,
+                    traceback.format_exc(),
+                    len(self.keyframe_queue),
+                    f"{kf.timestamp:.3f}" if kf else "-",
+                    kf.imu_measurement_count if kf else "-",
+                    f"{kf.latest_imu_timestamp:.3f}" if kf else "-",
+                    imu_pending, last_gyro,
+                )
+                continue
+            consecutive_failures = 0
             if processed:
                 processed["stats"]["loop_ms"] = (time.perf_counter() - loop_start) * 1000.0
                 self.stats_pub.publish(String(data=json.dumps(processed)))
@@ -645,5 +670,9 @@ def main(args=None):
     rclpy.shutdown()
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s.%(msecs)03d %(levelname)s %(filename)s:%(lineno)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     main()

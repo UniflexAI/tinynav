@@ -742,7 +742,6 @@ Visualization Manager:
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 749
   HeightMap:
     collapsed: false
   Hide Left Dock: false
@@ -760,9 +759,6 @@ Window Geometry:
     collapsed: false
   Views:
     collapsed: false
-  Width: 1272
-  X: 1280
-  Y: 782
   color image:
     collapsed: false
   gray image:

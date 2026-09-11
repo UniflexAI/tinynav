@@ -1044,7 +1044,7 @@ class ImageTransportsNode(Node):
 if __name__ == '__main__':
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(filename)s:%(lineno)s - %(message)s",
+        format="%(asctime)s.%(msecs)03d %(levelname)s %(filename)s:%(lineno)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     rclpy.init()

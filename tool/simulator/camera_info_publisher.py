@@ -10,11 +10,11 @@ class CameraInfoPublisher(Node):
         super().__init__('camera_info_publisher')
         
         # Camera parameters
-        self.width = 848
+        self.width = 544
         self.height = 480
-        self.fx = 423.99843311309814  # focal length x
-        self.fy = 423.99847984313965  # focal length y
-        self.cx = 424.0  # principal point x
+        self.fx = 272.0  # focal length x
+        self.fy = 272.0  # focal length y
+        self.cx = 272.0  # principal point x
         self.cy = 240.0  # principal point y
         
         # Stereo baseline (distance between cameras)
@@ -25,6 +25,9 @@ class CameraInfoPublisher(Node):
             CameraInfo, '/camera/camera/infra1/camera_info', 10)
         self.right_camera_info_pub = self.create_publisher(
             CameraInfo, '/camera/camera/infra2/camera_info', 10)
+        # Same virtual geometry as the IR cameras, so K/P are identical.
+        self.color_camera_info_pub = self.create_publisher(
+            CameraInfo, '/camera/camera/color/camera_info', 10)
         
         # Create timer to publish camera_info
         self.timer = self.create_timer(0.1, self.publish_camera_info)  # 10Hz
@@ -101,6 +104,12 @@ class CameraInfoPublisher(Node):
         right_msg = self.create_camera_info(is_right_camera=True)
         right_msg.header.stamp = now.to_msg()
         self.right_camera_info_pub.publish(right_msg)
+
+        # Color camera shares the IR cameras' intrinsics (same SDF geometry).
+        color_msg = self.create_camera_info(is_right_camera=False)
+        color_msg.header.frame_id = 'vehicle_blue/color_link/color'
+        color_msg.header.stamp = now.to_msg()
+        self.color_camera_info_pub.publish(color_msg)
 
 def main(args=None):
     rclpy.init(args=args)
