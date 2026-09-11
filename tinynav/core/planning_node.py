@@ -544,6 +544,7 @@ class PlanningNode(Node):
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.object_voxel_pub = self.create_publisher(PointCloud2, '/planning/object_voxels', 10)
         self.object_marker_pub = self.create_publisher(MarkerArray, '/planning/object_markers', 10)
+        self.object_debug_image_pub = self.create_publisher(CompressedImage, '/planning/object_detections/compressed', 1)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
 
@@ -936,6 +937,31 @@ class PlanningNode(Node):
 
         self.object_marker_pub.publish(marker_array)
 
+    def publish_object_debug_image(self, color_image, detections):
+        """Publish the color frame with detection boxes drawn, as a plain JPEG
+        CompressedImage. Reuses app/backend/node_manager.py's existing
+        compressed-image preview path (the same one the Looper color feed
+        already uses) instead of adding a new streaming mechanism, so it just
+        shows up as another selectable topic in the web UI's camera picker.
+        """
+        from tinynav.core.models_trt import COCO_CLASS_NAMES
+
+        bgr = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
+        for class_id, score, x1, y1, x2, y2 in detections:
+            p1, p2 = (int(x1), int(y1)), (int(x2), int(y2))
+            color = tuple(int(c) for c in _OBJECT_CLASS_PALETTE[class_id % len(_OBJECT_CLASS_PALETTE)])
+            cv2.rectangle(bgr, p1, p2, color, 2)
+            label = f"{COCO_CLASS_NAMES[class_id]} {score:.2f}"
+            cv2.putText(bgr, label, (p1[0], max(0, p1[1] - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+        ok, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            return
+        msg = CompressedImage()
+        msg.format = 'jpeg'
+        msg.data = buf.tobytes()
+        self.object_debug_image_pub.publish(msg)
+
     def _get_detector(self):
         """Lazily construct the TensorRT detector (and resolve the class-name
         allowlist) so nodes/tests that never exercise object detection don't
@@ -992,6 +1018,7 @@ class PlanningNode(Node):
                 )
                 apply_object_hits(self.object_class_grid, self.object_ttl_grid, hits, det_config.ttl_frames)
                 self.publish_object_markers(marker_anchors, depth_msg.header.stamp)
+                self.publish_object_debug_image(self.latest_color_image, detections)
             decay_object_grids(self.object_class_grid, self.object_ttl_grid)
             self.publish_object_voxel_cloud(self.object_class_grid, self.resolution, self.origin)
 

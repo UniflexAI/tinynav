@@ -42,18 +42,23 @@ _MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
 
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
 _COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
+# planning_node's color frame with detection boxes drawn in, published as a
+# plain JPEG regardless of sensor mode (not a raw camera topic).
+_OBJECT_DETECTIONS_TOPIC = '/planning/object_detections/compressed'
 
 _IMAGE_TOPICS_REALSENSE = [
     _COLOR_TOPIC_REALSENSE,
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
+    _OBJECT_DETECTIONS_TOPIC,
 ]
 _IMAGE_TOPICS_LOOPER = [
     _COLOR_TOPIC_LOOPER,
     '/camera/camera/infra1/image_rect_raw',
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
+    _OBJECT_DETECTIONS_TOPIC,
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
 _PREVIEW_MIN_INTERVAL = 0.05  # 20 fps
@@ -562,7 +567,7 @@ class BackendNode(Ros2NodeManager):
                 self.destroy_subscription(self._image_subs.pop(topic))
 
     def _make_image_sub(self, topic: str):
-        if topic == _COLOR_TOPIC_LOOPER:
+        if topic in (_COLOR_TOPIC_LOOPER, _OBJECT_DETECTIONS_TOPIC):
             return self.create_subscription(
                 CompressedImage, topic,
                 lambda msg, t=topic: self._on_compressed_image(msg, t),
