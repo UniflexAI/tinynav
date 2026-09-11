@@ -22,6 +22,14 @@ from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 # keep these in sync by hand. Used to penalize picking a stage-1 speed the real
 # robot's cmd_vel rate limiter can't actually reach in one planning cycle.
 CMD_VEL_MAX_LINEAR_ACC = 0.6  # m/s^2
+# Mirrors CmdVelControlNode.max_angular_acc, which is declared there but not
+# actually enforced ("Do not acceleration-limit yaw... the planner/control
+# layer already decides the turn rate") - cmd_vel passes omega straight
+# through, so the planner is the only place a jerky pick can be caught. A
+# rosbag showed the selected omega jumping up to 0.75 rad/s between
+# consecutive ~0.1s planning cycles (p90 change 0.26 rad/s) with no
+# analogous safety net to the linear one below.
+CMD_VEL_MAX_ANGULAR_ACC = 0.8  # rad/s^2
 
 # Stuck detection: reversing has no sensing of what's behind the robot at all
 # (single forward-facing depth camera), so if it backs into something never
@@ -698,7 +706,7 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-    def trajectory_cost(self, traj, param, score, target_pose, should_reverse):
+    def trajectory_cost(self, traj, param, score, endpoint_score, target_pose, should_reverse, stage1_end_idx, feasible_dv, feasible_dw, stuck_recovery_active):
         # predefined backward trajectory penalty
         is_backward_traj = param[0] < 0.0
         reverse_gate_penalty = 0.0
@@ -707,21 +715,45 @@ class PlanningNode(Node):
         elif not should_reverse and is_backward_traj:
                 reverse_gate_penalty = 1e9
 
-        # regular trajectory penalty
-        traj_end = np.array(traj[-1,:3])
-        target_end = target_pose if target_pose is not None else traj_end
-        dist = np.linalg.norm(traj_end - target_end)
+        # regular trajectory penalty, blended between where stage 1 (the part
+        # that's actually executed) ends and the full horizon end (a softer
+        # lookahead so we don't drive into a dead end just to close the gap
+        # fastest)
+        target_end = target_pose if target_pose is not None else np.array(traj[-1, :3])
+
+        def dist_and_heading(pose):
+            d = np.linalg.norm(np.array(pose[:3]) - target_end)
+            h = goal_heading_error(pose, target_end) * min(1.0, d / 2.0)
+            return d, h
+
+        dist_final, heading_final = dist_and_heading(traj[-1])
+        dist_mid, heading_mid = dist_and_heading(traj[stage1_end_idx])
+        dist = 0.5 * (dist_final + dist_mid)
         # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
         # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-        heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
+        heading = 0.5 * (heading_final + heading_mid)
+
+        infeasible_decel = max(0.0, (self.last_param[0] - param[0]) - feasible_dv)
+        # angular counterpart: cmd_vel_control passes omega straight through with
+        # no rate limiting of its own, so a jerky pick here reaches the robot
+        # exactly as picked
+        infeasible_angular_accel = max(0.0, abs(self.last_param[1] - param[1]) - feasible_dw)
+
+        stuck_penalty = 0.0
+        if stuck_recovery_active and np.sign(param[0]) == self.stuck_direction and param[0] != 0.0:
+            stuck_penalty = STUCK_DIRECTION_PENALTY
 
         return (
             score * 2000
+            + endpoint_score * 2000
             + 1000 * dist
             + 100 * heading
             + 10 * abs(self.last_param[0] - param[0])
             + 10 * abs(self.last_param[1] - param[1])
+            + 500 * infeasible_decel
+            + 500 * infeasible_angular_accel
             + reverse_gate_penalty
+            + stuck_penalty
         )
 
     def publish_selected_path(self, trajectories, top_indices, header):
@@ -789,11 +821,13 @@ class PlanningNode(Node):
                 max_linear_vel=ROBOT_CONFIG.max_linear_vel,
                 max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             )
-            # cost_function's infeasible_decel term still needs this: how much
-            # CMD_VEL_MAX_LINEAR_ACC actually allows a speed to change by in one
-            # planning cycle, as a safety-net penalty (not a sampling constraint
-            # anymore) against picking a stage-1 speed too far from the last one.
+            # trajectory_cost's infeasible_decel/infeasible_angular_accel terms
+            # need these: how much CMD_VEL_MAX_LINEAR_ACC/CMD_VEL_MAX_ANGULAR_ACC
+            # actually allow vx/omega to change by in one planning cycle, as a
+            # safety-net penalty (not a sampling constraint) against picking a
+            # stage-1 control too far from the last one.
             feasible_dv = CMD_VEL_MAX_LINEAR_ACC * max(self.planning_dt, 0.03)
+            feasible_dw = CMD_VEL_MAX_ANGULAR_ACC * max(self.planning_dt, 0.03)
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
             trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
             params = np.concatenate([params, vocab_params], axis=0)
@@ -817,59 +851,14 @@ class PlanningNode(Node):
             # every tick. Blending in the stage-1 endpoint makes early progress
             # count too.
             stage1_end_idx = len(trajectories[0]) // 2 - 1
-            # feasible_dv already constrained stage 1's vx sampling above (dynamic
-            # window); this term is now mostly a no-op for forward candidates and
-            # only still bites the fixed-speed reverse vocab trajectory, which the
-            # reverse_gate_penalty below already gates independently.
             stuck_recovery_active = stamp < self.stuck_recovery_until
 
-            def cost_function(traj, param, score, endpoint_score, target_pose):
-                # predefined backward trajectory penalty
-                is_backward_traj = param[0] < 0.0
-                reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
-                elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
-
-                # regular trajectory penalty, blended between where stage 1
-                # (the part that's actually executed) ends and the full
-                # horizon end (a softer lookahead so we don't drive into a
-                # dead end just to close the gap fastest)
-                target_end = target_pose if target_pose is not None else np.array(traj[-1, :3])
-
-                def dist_and_heading(pose):
-                    d = np.linalg.norm(np.array(pose[:3]) - target_end)
-                    h = goal_heading_error(pose, target_end) * min(1.0, d / 2.0)
-                    return d, h
-
-                dist_final, heading_final = dist_and_heading(traj[-1])
-                dist_mid, heading_mid = dist_and_heading(traj[stage1_end_idx])
-                dist = 0.5 * (dist_final + dist_mid)
-                # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
-                # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-                heading = 0.5 * (heading_final + heading_mid)
-
-                infeasible_decel = max(0.0, (self.last_param[0] - param[0]) - feasible_dv)
-
-                stuck_penalty = 0.0
-                if stuck_recovery_active and np.sign(param[0]) == self.stuck_direction and param[0] != 0.0:
-                    stuck_penalty = STUCK_DIRECTION_PENALTY
-
-                return (
-                    score * 2000
-                    + endpoint_score * 2000
-                    + 1000 * dist
-                    + 100 * heading
-                    + 10 * abs(self.last_param[0] - param[0])
-                    + 10 * abs(self.last_param[1] - param[1])
-                    + 500 * infeasible_decel
-                    + reverse_gate_penalty
-                    + stuck_penalty
-                )
-
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], endpoint_scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([
+                self.trajectory_cost(trajectories[i], params[i], scores[i], endpoint_scores[i], self.target_pose,
+                                      should_reverse, stage1_end_idx, feasible_dv, feasible_dw, stuck_recovery_active)
+                for i in range(len(trajectories))
+            ]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             if self.target_pose is None:
