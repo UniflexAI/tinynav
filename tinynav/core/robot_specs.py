@@ -30,7 +30,7 @@ class ObjectDetectionConfig:
     iou_threshold: float = 0.45
     ttl_frames: int = 20
     detect_every_n_frames: int = 1
-    kept_class_names: tuple[str, ...] = ("person", "car")
+    kept_class_names: tuple[str, ...] = ("person", "car", "chair", "potted_plant", "dining_table")
 
 
 @dataclass
