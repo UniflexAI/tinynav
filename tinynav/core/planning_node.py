@@ -502,7 +502,18 @@ def project_color_detections_to_voxels(
         in_box = (color_u >= x1) & (color_u < x2) & (color_v >= y1) & (color_v < y2)
         if not np.any(in_box):
             continue
-        anchor_xy = np.median(points_world[in_box, :2], axis=0)
+        # Anchor on the box's NEAREST depth point, not the median of every
+        # matched pixel: a loosely-cropped box (or the gaps between limbs)
+        # still includes background depth pixels behind the actual object,
+        # and those are farther away, so they skew a naive average's
+        # world-space position by more than their pixel count suggests --
+        # easily landing the anchor on a wall/furniture meters behind the
+        # real detection, which then gets tagged as the moving/dynamic class
+        # and fast-decayed away even though it's real static structure. The
+        # detected object necessarily occludes whatever is behind it, so the
+        # closest point in the box is reliably a point on it.
+        nearest = np.argmin(points_depth[in_box, 2])
+        anchor_xy = points_world[in_box, :2][nearest]
         column_hits = label_occupied_column(occupancy_grid, class_id, anchor_xy[0], anchor_xy[1], origin, resolution, occ_threshold)
         if column_hits.shape[0] == 0:
             continue
