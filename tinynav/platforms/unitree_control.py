@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import rclpy
 from rclpy.node import Node
@@ -52,6 +53,92 @@ class RobotStatus(Enum):
     SITTING = "sitting"
 
 
+# A reply RPC slower than this is logged. ClassicWalk waits up to the client
+# timeout (10s) for a reply, on the rt/cmd_vel reader thread.
+_SLOW_RPC_S = 0.3
+# A pause in rt/cmd_vel longer than this is a gap: logged if it came mid-motion,
+# and the next motion re-asserts the gait.
+_CMD_GAP_S = 0.5
+# Chassis watchdog: a command at least this large, held this long, while the
+# chassis reports no motion, is logged as "not executing".
+_STALL_CMD_V = 0.1
+_STALL_CMD_W = 0.2
+_STALL_CHASSIS_V = 0.03
+_STALL_CHASSIS_W = 0.05
+_STALL_AFTER_S = 2.0
+_REPEAT_S = 5.0
+_SPORT_STATE_SILENT_S = 1.0
+
+
+class ChassisWatch:
+    """Compares what was commanded with what rt/sportmodestate says the chassis is
+    doing. Logs only; never changes a command."""
+
+    def __init__(self, log):
+        self.log = log
+        self.cmd = (0.0, 0.0, 0.0)
+        self.cmd_at = None
+        self.state = None
+        self.v = (0.0, 0.0)
+        self.yaw_speed = 0.0
+        self.range_obstacle = ()
+        self.state_at = None
+        self._stall_since = None
+        self._stall_logged_at = None
+        self._silent_logged = False
+
+    def on_cmd(self, now, vx, vy, wz):
+        self.cmd = (vx, vy, wz)
+        self.cmd_at = now
+
+    def on_sport_state(self, now, mode, gait, error_code, v, yaw_speed, range_obstacle):
+        key = (mode, gait, error_code)
+        if key != self.state:
+            was = '' if self.state is None else f' (was mode={self.state[0]} gait={self.state[1]} error_code={self.state[2]})'
+            (self.log.warning if error_code else self.log.info)(
+                f'[chassis] mode={mode} gait={gait} error_code={error_code}{was}')
+            self.state = key
+        self.v = (v[0], v[1])
+        self.yaw_speed = yaw_speed
+        self.range_obstacle = range_obstacle
+        self.state_at = now
+
+    def check(self, now):
+        if self.state_at is not None:
+            silent = now - self.state_at
+            if silent > _SPORT_STATE_SILENT_S and not self._silent_logged:
+                self.log.warning(f'[chassis] rt/sportmodestate silent for {silent:.1f}s')
+                self._silent_logged = True
+            elif silent <= _SPORT_STATE_SILENT_S and self._silent_logged:
+                self.log.info('[chassis] rt/sportmodestate back')
+                self._silent_logged = False
+
+        vx, vy, wz = self.cmd
+        commanded = (self.cmd_at is not None and now - self.cmd_at < _CMD_GAP_S
+                     and (math.hypot(vx, vy) >= _STALL_CMD_V or abs(wz) >= _STALL_CMD_W))
+        still = (self.state_at is not None
+                 and math.hypot(*self.v) < _STALL_CHASSIS_V
+                 and abs(self.yaw_speed) < _STALL_CHASSIS_W)
+        if commanded and still:
+            if self._stall_since is None:
+                self._stall_since = now
+            held = now - self._stall_since
+            if held >= _STALL_AFTER_S and (self._stall_logged_at is None
+                                           or now - self._stall_logged_at >= _REPEAT_S):
+                self._stall_logged_at = now
+                mode, gait, err = self.state or (None, None, None)
+                self.log.warning(
+                    f'[chassis] not executing for {held:.1f}s: commanded vx={vx:.2f} vy={vy:.2f} '
+                    f'wz={wz:.2f}, chassis v={math.hypot(*self.v):.3f} yaw_speed={self.yaw_speed:.3f} '
+                    f'mode={mode} gait={gait} error_code={err} '
+                    f'range_obstacle={[round(float(r), 2) for r in self.range_obstacle]}')
+        else:
+            if self._stall_logged_at is not None:
+                self.log.info(f'[chassis] executing again after {now - self._stall_since:.1f}s')
+            self._stall_since = None
+            self._stall_logged_at = None
+
+
 class Ros2UnitreeManagerNode(Node):
     def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
         super().__init__('ros2_unitree_manager')
@@ -71,6 +158,13 @@ class Ros2UnitreeManagerNode(Node):
         self.battery = 0.0
         self.last_twist_time = None
         self.logger = self.get_logger()
+        # The last command was non-zero (so the next non-zero is not a start).
+        self._walking = False
+        # The next Move re-asserts ClassicWalk first: set at every motion start.
+        self._gait_due = False
+        self._move_failures = 0
+        self._move_failure_logged_at = None
+        self.watch = ChassisWatch(self.logger)
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -96,23 +190,72 @@ class Ros2UnitreeManagerNode(Node):
             self.chassis_odom_subscriber = ChannelSubscriber("rt/utlidar/robot_odom", Odometry_)
             self.chassis_odom_subscriber.Init(self.ChassisOdomMessageHandler, 10)
 
+            from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+            self.sport_state_subscriber = ChannelSubscriber("rt/sportmodestate", SportModeState_)
+            self.sport_state_subscriber.Init(self.SportStateMessageHandler, 10)
+            self._watch_timer = self.create_timer(0.5, lambda: self.watch.check(time.monotonic()))
+
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
-        current_time = time.time()
-        if self.last_twist_time is not None:
-            time_interval = current_time - self.last_twist_time
-            self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
-        self.last_twist_time = current_time
-
-        if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
-            self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")
-            self.sport_client.ClassicWalk(True)
-            self.sport_client.Move(msg.linear.x, msg.linear.y, msg.angular.z)
-        else:
-            self.sport_client.StopMove()
+        # Runs on the SDK reader thread: an exception escaping here kills the
+        # subscription (see ActionMessageHandler).
+        try:
+            self._on_twist(time.monotonic(), float(msg.linear.x), float(msg.linear.y),
+                           float(msg.angular.z))
+        except Exception:
+            self.logger.exception("cmd_vel handling failed")
         time.sleep(0.02)
+
+    def _on_twist(self, now, vx, vy, wz):
+        gap = None if self.last_twist_time is None else now - self.last_twist_time
+        self.last_twist_time = now
+        if gap is not None and gap > _CMD_GAP_S:
+            if self._walking:
+                self.logger.warning(f'[cmd_vel] rt/cmd_vel silent for {gap:.2f}s mid-motion')
+            self._gait_due = True
+
+        if vx != 0 or vy != 0 or wz != 0:
+            if not self._walking:
+                self._gait_due = True
+            # Once per motion start, not per message: it is a reply RPC and a lost
+            # reply would hold this thread for the whole client timeout.
+            if self._gait_due and self.is_quadruped:
+                self._timed_call('ClassicWalk', lambda: self.sport_client.ClassicWalk(True))
+            self._gait_due = False
+            self._walking = True
+        else:
+            # A zero Move, not StopMove: StopMove is a reply RPC on this thread.
+            self._walking = False
+        code = self.sport_client.Move(vx, vy, wz)
+        if code != 0:
+            self._move_failed(now, code)
+        self.watch.on_cmd(now, vx, vy, wz)
+
+    def _timed_call(self, name, call):
+        t0 = time.monotonic()
+        code = call()
+        took = time.monotonic() - t0
+        if code != 0 or took > _SLOW_RPC_S:
+            self.logger.warning(f'[sport] {name} code={code} took {took:.2f}s')
+        return code
+
+    def _move_failed(self, now, code):
+        self._move_failures += 1
+        if self._move_failure_logged_at is None or now - self._move_failure_logged_at >= _REPEAT_S:
+            self.logger.warning(f'[sport] Move send failed code={code} '
+                                f'({self._move_failures} failures so far)')
+            self._move_failure_logged_at = now
+
+    def SportStateMessageHandler(self, msg):
+        # 500Hz on the SDK reader thread: keep it to field copies.
+        try:
+            self.watch.on_sport_state(time.monotonic(), int(msg.mode), int(msg.gait_type),
+                                      int(msg.error_code), msg.velocity, float(msg.yaw_speed),
+                                      msg.range_obstacle)
+        except Exception as e:
+            self.logger.error(f"Error in SportStateMessageHandler: {e}")
 
     def ActionMessageHandler(self, msg: String_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
