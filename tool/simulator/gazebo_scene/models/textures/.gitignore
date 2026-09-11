@@ -1,0 +1,2 @@
+# textures are generated at runtime by gen_textures.py
+*.png

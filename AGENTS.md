@@ -12,6 +12,8 @@ This repo hosts **TinyNav**, a ROS 2 Humble–based stereo SLAM + mapping + plan
 - `tinynav/cpp/`: raycasting, pose graph solve, bundle adjustment; built into `tinynav_cpp_bind`.
 - `tinynav/models/`: prebuilt TensorRT engines (SuperPoint, LightGlue, stereo fusion, etc).
 - `scripts/`: tmux launchers (`run_navigation.sh`, `run_planning.sh`, `run_rosbag_examples.sh`, `run_rosbag_build_map.sh`, `run_realsense_*`), env checks, 3DGS generation helper.
+- `tool/simulator/worlds/`: gz world SDFs (`robot_scene_empty.sdf` for scripted scenes, `robot_scene.sdf` for the depot factory).
+- `tool/simulator/gazebo_scene/`: gz sim runtime — scripted obstacle scenes (`scene_runner.py`), scene config (`scenes/`, `obstacles.json`), procedural textures, and helpers (`sim_gt_reloc.py`, `camera_info_publisher.py`, `pub_target.sh`).
 - `docs/`: quickstart docs and RViz config.
 - `tinynav_db/`, `tinynav_temp/`, `tinynav_map/`: stored map artifacts, shelve DBs (`TinyNavDB` in `build_map_node.py`).
 - `tests/`: unit/benchmark tests (`test_planning_node.py`, `test_map_node.py`, `test_func.py`, disjoint set tests, TRT loading checks).
@@ -32,6 +34,7 @@ This repo hosts **TinyNav**, a ROS 2 Humble–based stereo SLAM + mapping + plan
 - Planning-only tmux session: `bash scripts/run_planning.sh`.
 - Map building from rosbag or RealSense recording: `bash scripts/run_rosbag_build_map.sh` (combine with `run_realsense_sensor.sh` and `run_realsense_bag_record.sh` to capture data).
 - Map-based navigation (perception + planning + map + control + RViz): `bash scripts/run_navigation.sh`.
+- Gz sim: `bash scripts/run_simulator.sh [--map] [--world <sdf>] [--auto <scene>]`. Default empty world; `--auto <scene>` runs a scripted obstacle scene; `--world tool/simulator/worlds/robot_scene.sdf` loads the depot factory. Without `--map`, `sim_gt_reloc.py` corrects odometry into the gazebo frame.
 - 3D Gaussian Splatting map generation: `bash scripts/run_3dgs_generation.sh`.
 
 ## Testing

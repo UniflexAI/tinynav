@@ -1,0 +1,20 @@
+{
+  "desc": "L型弯道: 起点(0,0)朝+x, 直行5m后北拐3.6m, 净宽1.2m, 墙=depot纸箱",
+  "robot": {"name": "lekiwi", "pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
+  "models": [
+    {"line": {"name": "wall_south", "type": "crate", "from": [-1.2, -1.311], "to": [5.6, -1.311], "spacing": 1.28, "yaw": 0.0}},
+    {"line": {"name": "wall_north", "type": "crate", "from": [-1.2, 1.311], "to": [3.689, 1.311], "spacing": 1.28, "yaw": 0.0}},
+    {"line": {"name": "wall_west", "type": "crate", "from": [3.689, 1.311], "to": [3.689, 5.211], "spacing": 1.28, "yaw": 1.5708}},
+    {"line": {"name": "wall_east", "type": "crate", "from": [6.311, -1.311], "to": [6.311, 5.211], "spacing": 1.28, "yaw": 1.5708}},
+    {"line": {"name": "cap_north", "type": "crate", "from": [3.689, 5.211], "to": [6.311, 5.211], "spacing": 1.28, "yaw": 0.0}},
+    {"line": {"name": "cap_west", "type": "crate", "from": [-1.911, -1.311], "to": [-1.911, 1.311], "spacing": 1.28, "yaw": 1.5708}},
+    {"name": "deco_pilar", "type": "pilar", "pose": [2.0, -3.5, 1.0, 0.0, 0.0, 0.0]}
+  ],
+  "path": {
+    "points": [[0.0, 0.0], [5.0, 0.0], [5.0, 3.6]],
+    "lookahead": 2.5,
+    "tolerance": 0.5,
+    "timeout": 180,
+    "rate": 2
+  }
+}

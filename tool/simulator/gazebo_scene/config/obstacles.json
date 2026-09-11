@@ -1,0 +1,19 @@
+{
+  "crate": {
+    "desc": "纸箱 1.288x1.422x1.288, 随机纹理(8变体轮换)",
+    "size": [1.288, 1.422, 1.288],
+    "texture_prefix": "crate",
+    "texture_variants": 8
+  },
+  "thin_wall": {
+    "desc": "薄墙板 1.288x0.15x1.288 (窄于箱体厚度时保持通道净宽)",
+    "size": [1.288, 0.15, 1.288],
+    "texture_prefix": "crate",
+    "texture_variants": 8
+  },
+  "pilar": {
+    "desc": "立柱 0.465x0.465x2",
+    "size": [0.465, 0.465, 2.0],
+    "color": [0.55, 0.55, 0.6]
+  }
+}

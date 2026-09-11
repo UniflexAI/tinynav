@@ -1,0 +1,22 @@
+{
+  "desc": "Z型弯道(窄): 起点(0,0)朝+x直行5m, 左拐北行2m, 右拐东行3m至(8,2), 净宽1.0m",
+  "robot": {"name": "lekiwi", "pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
+  "models": [
+    {"line": {"name": "wall_s1", "type": "crate", "from": [-1.2, -1.211], "to": [6.211, -1.211], "spacing": 1.28, "yaw": 0.0}},
+    {"line": {"name": "wall_n1", "type": "crate", "from": [-1.2, 1.211], "to": [3.789, 1.211], "spacing": 1.28, "yaw": 0.0}},
+    {"line": {"name": "wall_w2", "type": "crate", "from": [3.789, 1.211], "to": [3.789, 3.211], "spacing": 1.28, "yaw": 1.5708}},
+    {"line": {"name": "wall_e2", "type": "crate", "from": [6.211, -1.211], "to": [6.211, 0.789], "spacing": 1.28, "yaw": 1.5708}},
+    {"line": {"name": "wall_s3", "type": "crate", "from": [6.211, 0.789], "to": [9.211, 0.789], "spacing": 1.28, "yaw": 0.0}},
+    {"line": {"name": "wall_n3", "type": "crate", "from": [3.789, 3.211], "to": [9.211, 3.211], "spacing": 1.28, "yaw": 0.0}},
+    {"line": {"name": "cap_east", "type": "crate", "from": [9.211, 0.789], "to": [9.211, 3.211], "spacing": 1.28, "yaw": 1.5708}},
+    {"line": {"name": "cap_west", "type": "crate", "from": [-1.911, -1.211], "to": [-1.911, 1.211], "spacing": 1.28, "yaw": 1.5708}},
+    {"name": "deco_pilar", "type": "pilar", "pose": [1.5, 3.5, 1.0, 0.0, 0.0, 0.0]}
+  ],
+  "path": {
+    "points": [[0.0, 0.0], [5.0, 0.0], [5.0, 2.0], [8.0, 2.0]],
+    "lookahead": 2.5,
+    "tolerance": 0.5,
+    "timeout": 180,
+    "rate": 2
+  }
+}

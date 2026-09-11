@@ -656,7 +656,9 @@ def main(args=None):
     rclpy.init(args=args)
     parser = argparse.ArgumentParser(description='Run TinyNav perception node.')
     parser.add_argument('--verbose_timer', action='store_true', help='Print timing for key pipeline stages.')
-    parsed_args = parser.parse_args(args=sys.argv[1:] if args is None else args)
+    # parse_known_args: rclpy.init above already consumed --ros-args remaps
+    # (e.g. the sim remaps /slam/odometry_visual to ..._raw for sim_gt_reloc)
+    parsed_args, _ = parser.parse_known_args(args=sys.argv[1:] if args is None else args)
 
     perception_node = PerceptionNode(verbose_timer=parsed_args.verbose_timer)
     imu_propagator_node = ImuPropagatorNode()
