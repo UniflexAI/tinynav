@@ -1,15 +1,18 @@
-"""unitree_control's rt/cmd_vel path and its chassis watchdog.
+"""unitree_control's rt/cmd_vel path, its gait worker, and its chassis watchdog.
 
-ClassicWalk and StopMove are reply RPCs that wait up to the client timeout on the
-rt/cmd_vel reader thread; ClassicWalk used to be sent before every Move. These pin
-that ClassicWalk is once per motion start, that a stop is a zero Move, and that the
-diagnostics say something when the chassis stops executing and nothing when it does.
+ClassicWalk and StopMove are reply RPCs that wait up to the client timeout. Run on
+the rt/cmd_vel reader thread they hold every queued Move behind them, which is what
+the robot's walk-two-steps-and-stop was. These pin that the reader thread never waits
+on a reply RPC, that the gait is asserted once per motion start, that a stop is a zero
+Move, and that the diagnostics speak up when the chassis stops executing and stay
+quiet when it does not.
 
 Needs unitree_sdk2py and rclpy, so this runs in the device container.
 """
 from __future__ import annotations
 
 import os
+import threading
 import time
 import unittest
 
@@ -40,8 +43,10 @@ class _Sport:
     def __init__(self, walk_delay=0.0):
         self.calls = []
         self.walk_delay = walk_delay
+        self.walk_entered = threading.Event()
 
     def ClassicWalk(self, flag):
+        self.walk_entered.set()
         time.sleep(self.walk_delay)
         self.calls.append('ClassicWalk')
         return 0
@@ -58,7 +63,17 @@ class _Sport:
         return self.calls.count(name)
 
 
-def _node(sport=None):
+class _GaitSpy:
+    """Stands in for GaitWorker: counts hand-offs without starting a thread."""
+
+    def __init__(self):
+        self.requests = 0
+
+    def request(self):
+        self.requests += 1
+
+
+def _node(sport=None, gait=None):
     node = uc.Ros2UnitreeManagerNode.__new__(uc.Ros2UnitreeManagerNode)
     node.logger = _Log()
     node.sport_client = sport or _Sport()
@@ -69,6 +84,7 @@ def _node(sport=None):
     node._move_failures = 0
     node._move_failure_logged_at = None
     node.watch = uc.ChassisWatch(node.logger)
+    node.gait = gait if gait is not None else _GaitSpy()
     return node
 
 
@@ -79,18 +95,18 @@ def _drive(node, t0, n, v, dt=1.0 / 12.0):
 
 
 class TestTwistPath(unittest.TestCase):
-    def test_classic_walk_once_per_motion_start_not_per_move(self):
+    def test_gait_requested_once_per_motion_start_not_per_move(self):
         node = _node()
         t = _drive(node, 0.0, 10, 0.5)
         t = _drive(node, t, 5, 0.0)
         _drive(node, t, 10, 0.5)
-        sport = node.sport_client
-        self.assertEqual(sport.count('Move'), 20)
-        self.assertEqual(sport.count('ClassicWalk'), 2)
-        # Each ClassicWalk precedes the first Move of its motion.
-        self.assertEqual(sport.calls[0], 'ClassicWalk')
-        last_zero = len(sport.calls) - 1 - sport.calls[::-1].index('Move0')
-        self.assertEqual(sport.calls[last_zero + 1], 'ClassicWalk')
+        self.assertEqual(node.sport_client.count('Move'), 20)
+        self.assertEqual(node.gait.requests, 2)
+
+    def test_the_reader_thread_never_calls_the_gait_rpc(self):
+        node = _node()
+        _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.sport_client.count('ClassicWalk'), 0)
 
     def test_zero_command_is_a_zero_move_never_stopmove(self):
         node = _node()
@@ -106,23 +122,13 @@ class TestTwistPath(unittest.TestCase):
         t = _drive(node, 0.0, 12, 0.5)
         _drive(node, t + 1.0, 3, 0.5)
         self.assertTrue(node.logger.has('warning', 'rt/cmd_vel silent'))
-        self.assertEqual(node.sport_client.count('ClassicWalk'), 2)
+        self.assertEqual(node.gait.requests, 2)
 
     def test_steady_stream_logs_no_gap(self):
         node = _node()
         _drive(node, 0.0, 36, 0.5)
         self.assertFalse(node.logger.has('warning', 'silent'))
-        self.assertEqual(node.sport_client.count('ClassicWalk'), 1)
-
-    def test_slow_reply_is_logged(self):
-        node = _node(_Sport(walk_delay=uc._SLOW_RPC_S + 0.05))
-        node._on_twist(0.0, 0.5, 0.0, 0.0)
-        self.assertTrue(node.logger.has('warning', '[sport] ClassicWalk'))
-
-    def test_fast_reply_is_not_logged(self):
-        node = _node()
-        node._on_twist(0.0, 0.5, 0.0, 0.0)
-        self.assertFalse(node.logger.has('warning', '[sport]'))
+        self.assertEqual(node.gait.requests, 1)
 
     def test_move_send_failure_is_logged_rate_limited(self):
         sport = _Sport()
@@ -131,6 +137,105 @@ class TestTwistPath(unittest.TestCase):
         _drive(node, 0.0, 24, 0.5)
         fails = [m for lv, m in node.logger.lines if 'Move send failed' in m]
         self.assertEqual(len(fails), 1)
+
+
+class TestGaitWorker(unittest.TestCase):
+    """The reply RPC lives here now, so this is where the 10s wait has to be absorbed."""
+
+    def test_a_stuck_gait_rpc_does_not_hold_up_move(self):
+        # The regression this whole change is about: a ClassicWalk that never gets a
+        # reply used to sit on the reader thread and starve Move.
+        released = threading.Event()
+        sport = _Sport()
+        sport.ClassicWalk = lambda flag: (sport.walk_entered.set(), released.wait(5), 0)[-1]
+        node = _node(sport)
+        node.gait = uc.GaitWorker(lambda: sport.ClassicWalk(True), node.logger)
+        node.gait.start()
+        try:
+            t0 = time.monotonic()
+            _drive(node, 0.0, 12, 0.5)
+            elapsed = time.monotonic() - t0
+            self.assertTrue(sport.walk_entered.wait(2), 'the worker never ran the RPC')
+            self.assertEqual(sport.count('Move'), 12)
+            self.assertLess(elapsed, 1.0)
+        finally:
+            released.set()
+            node.gait.stop()
+
+    def test_calling_the_stuck_rpc_inline_does_block(self):
+        # Pairs with the test above: shows the timing assertion can fail.
+        blocked = uc.GaitWorker(lambda: time.sleep(0.3) or 0, _Log())
+        t0 = time.monotonic()
+        blocked.run_once()
+        self.assertGreaterEqual(time.monotonic() - t0, 0.3)
+
+    def test_slow_reply_is_logged(self):
+        log = _Log()
+        uc.GaitWorker(lambda: time.sleep(uc._SLOW_RPC_S + 0.05) or 0, log).run_once()
+        self.assertTrue(log.has('warning', '[sport] ClassicWalk'))
+
+    def test_fast_reply_is_not_logged(self):
+        log = _Log()
+        uc.GaitWorker(lambda: 0, log).run_once()
+        self.assertFalse(log.has('warning', '[sport]'))
+
+    def test_nonzero_code_is_logged_however_fast(self):
+        log = _Log()
+        uc.GaitWorker(lambda: 3104, log).run_once()
+        self.assertTrue(log.has('warning', 'code=3104'))
+
+    def test_a_raising_rpc_does_not_kill_the_worker(self):
+        log = _Log()
+        calls = []
+
+        def call():
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError('boom')
+            return 0
+
+        worker = uc.GaitWorker(call, log)
+        worker.start()
+        try:
+            worker.request()
+            deadline = time.monotonic() + 2
+            while len(calls) < 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(log.has('error', 'raised'))
+            worker.request()
+            while len(calls) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(calls), 2)
+        finally:
+            worker.stop()
+
+    def test_requests_during_a_call_coalesce_into_one(self):
+        released = threading.Event()
+        entered = threading.Event()
+        calls = []
+
+        def call():
+            calls.append(1)
+            entered.set()
+            released.wait(5)
+            return 0
+
+        worker = uc.GaitWorker(call, _Log())
+        worker.start()
+        try:
+            worker.request()
+            self.assertTrue(entered.wait(2))
+            for _ in range(20):
+                worker.request()
+            released.set()
+            deadline = time.monotonic() + 2
+            while len(calls) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            # 21 requests, two calls: the first, and one standing for all the rest.
+            self.assertEqual(len(calls), 2)
+        finally:
+            released.set()
+            worker.stop()
 
 
 class TestChassisWatch(unittest.TestCase):

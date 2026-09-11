@@ -2,6 +2,7 @@ import argparse
 import math
 import os
 import rclpy
+import threading
 from rclpy.node import Node
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
@@ -54,7 +55,7 @@ class RobotStatus(Enum):
 
 
 # A reply RPC slower than this is logged. ClassicWalk waits up to the client
-# timeout (10s) for a reply, on the rt/cmd_vel reader thread.
+# timeout (10s) for a reply, so it runs on GaitWorker's thread, not a reader's.
 _SLOW_RPC_S = 0.3
 # A pause in rt/cmd_vel longer than this is a gap: logged if it came mid-motion,
 # and the next motion re-asserts the gait.
@@ -68,6 +69,61 @@ _STALL_CHASSIS_W = 0.05
 _STALL_AFTER_S = 2.0
 _REPEAT_S = 5.0
 _SPORT_STATE_SILENT_S = 1.0
+
+
+class GaitWorker:
+    """Asserts the walking gait off the rt/cmd_vel reader thread.
+
+    ClassicWalk waits for a reply up to the client timeout (10s). Called inline it
+    holds the reader thread, and every queued Move waits behind it -- the robot walks
+    two steps and stops for ten seconds. Worse, the stall shows up as a cmd_vel gap,
+    which re-arms the gait and chains another one: 2026-09-11 15:24 was five in a row.
+
+    Requests coalesce. What matters is that the gait is asserted soon, not how many
+    times, so a request while a call is in flight is absorbed into the next one.
+    """
+
+    def __init__(self, call, log, name='ClassicWalk'):
+        self._call = call
+        self._log = log
+        self._name = name
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name='gait-worker', daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def request(self):
+        """Non-blocking: safe to call from a reader thread."""
+        self._wake.set()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def _run(self):
+        while True:
+            self._wake.wait()
+            if self._stop.is_set():
+                return
+            self._wake.clear()
+            self.run_once()
+
+    def run_once(self):
+        """One gait assertion, timed and logged. Separated out so it can be driven
+        without a thread."""
+        t0 = time.monotonic()
+        try:
+            code = self._call()
+        except Exception:
+            self._log.exception(f'[sport] {self._name} raised')
+            return
+        took = time.monotonic() - t0
+        if code != 0 or took > _SLOW_RPC_S:
+            self._log.warning(f'[sport] {self._name} code={code} took {took:.2f}s')
 
 
 class ChassisWatch:
@@ -165,6 +221,10 @@ class Ros2UnitreeManagerNode(Node):
         self._move_failures = 0
         self._move_failure_logged_at = None
         self.watch = ChassisWatch(self.logger)
+        self.gait = None
+        if self.is_quadruped:
+            self.gait = GaitWorker(lambda: self.sport_client.ClassicWalk(True), self.logger)
+            self.gait.start()
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
@@ -219,10 +279,10 @@ class Ros2UnitreeManagerNode(Node):
         if vx != 0 or vy != 0 or wz != 0:
             if not self._walking:
                 self._gait_due = True
-            # Once per motion start, not per message: it is a reply RPC and a lost
-            # reply would hold this thread for the whole client timeout.
-            if self._gait_due and self.is_quadruped:
-                self._timed_call('ClassicWalk', lambda: self.sport_client.ClassicWalk(True))
+            # Handed off, never called here: it is a reply RPC, and this thread must
+            # stay free to keep pushing Move at the chassis.
+            if self._gait_due and self.gait is not None:
+                self.gait.request()
             self._gait_due = False
             self._walking = True
         else:
@@ -232,14 +292,6 @@ class Ros2UnitreeManagerNode(Node):
         if code != 0:
             self._move_failed(now, code)
         self.watch.on_cmd(now, vx, vy, wz)
-
-    def _timed_call(self, name, call):
-        t0 = time.monotonic()
-        code = call()
-        took = time.monotonic() - t0
-        if code != 0 or took > _SLOW_RPC_S:
-            self.logger.warning(f'[sport] {name} code={code} took {took:.2f}s')
-        return code
 
     def _move_failed(self, now, code):
         self._move_failures += 1
@@ -367,7 +419,11 @@ def main(args=None):
 
     rclpy.init(args=ros_args)
     node = Ros2UnitreeManagerNode(parsed_args.network_interface)
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    finally:
+        if node.gait is not None:
+            node.gait.stop()
     node.destroy_node()
     rclpy.shutdown()
 
