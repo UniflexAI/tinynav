@@ -164,6 +164,7 @@ _DIST_WEIGHT = 1000.0
 _HEADING_WEIGHT = 100.0
 _HEADING_FADE_DIST = 2.0
 _CMD_VEL_MAX_LINEAR_ACC = 0.6
+_CMD_VEL_MAX_ANGULAR_ACC = 0.8
 _DECEL_WEIGHT = 500.0
 
 def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=_HEADING_WEIGHT):
@@ -185,7 +186,9 @@ def _two_stage_trajectory_cost(traj, param, score, target_end, last_param, headi
     actually runs, picking vx1=0 every cycle and never moving. Also penalizes
     requesting more deceleration than CmdVelControlNode's rate limiter can
     actually deliver in one planning cycle, which otherwise lets the planner
-    coast at speed right up to an obstacle and overshoot while it brakes."""
+    coast at speed right up to an obstacle and overshoot while it brakes. The
+    same safety net applies to omega: cmd_vel_control passes it straight
+    through with no rate limiting of its own."""
     stage1_end_idx = len(traj) // 2 - 1
 
     def dist_and_heading(pose):
@@ -198,7 +201,9 @@ def _two_stage_trajectory_cost(traj, param, score, target_end, last_param, headi
     dist = 0.5 * (dist_final + dist_mid)
     heading = 0.5 * (heading_final + heading_mid)
     feasible_dv = _CMD_VEL_MAX_LINEAR_ACC * max(planning_dt, 0.03)
+    feasible_dw = _CMD_VEL_MAX_ANGULAR_ACC * max(planning_dt, 0.03)
     infeasible_decel = max(0.0, (last_param[0] - param[0]) - feasible_dv)
+    infeasible_angular_accel = max(0.0, abs(last_param[1] - param[1]) - feasible_dw)
     return (
         score * _ESDF_WEIGHT
         + _DIST_WEIGHT * dist
@@ -206,6 +211,7 @@ def _two_stage_trajectory_cost(traj, param, score, target_end, last_param, headi
         + 10 * abs(last_param[0] - param[0])
         + 10 * abs(last_param[1] - param[1])
         + _DECEL_WEIGHT * infeasible_decel
+        + _DECEL_WEIGHT * infeasible_angular_accel
     )
 
 def _pick(target, heading_weight=_HEADING_WEIGHT):
@@ -441,6 +447,31 @@ def test_stuck_state_does_not_trigger_while_still_accelerating():
             stuck_since=since, stuck_direction=direction, stuck_recovery_until=until,
         )
     assert until == 0.0, "must not trigger recovery before timeout_s has elapsed"
+
+def test_angular_accel_penalty_discourages_jerky_omega():
+    # regression: cmd_vel_control does not rate-limit omega at all ("the
+    # planner/control layer already decides the turn rate"), so a large
+    # cycle-to-cycle jump reaches the robot exactly as picked. A rosbag
+    # showed the selected omega jumping up to 0.75 rad/s between consecutive
+    # ~0.1s planning cycles with no safety net analogous to the linear one.
+    traj = np.zeros((31, 7))
+    traj[:, 3:] = matrix_to_quat(_FACING_X)
+    target = np.array([5.0, 0.0, 0.0])
+    last_param = np.array([0.5, 0.0, 0.5, 0.0])
+    planning_dt = 0.1  # feasible_dw = 0.8 * 0.1 = 0.08 rad/s
+
+    smooth_param = np.array([0.5, 0.05, 0.5, 0.05])  # omega jump within feasible_dw
+    jerky_param = np.array([0.5, 0.75, 0.5, 0.75])   # omega jump far beyond it
+
+    cost_smooth = _two_stage_trajectory_cost(traj, smooth_param, 0.0, target, last_param, planning_dt=planning_dt)
+    cost_jerky = _two_stage_trajectory_cost(traj, jerky_param, 0.0, target, last_param, planning_dt=planning_dt)
+    # both candidates share the same traj/target/score, so any cost gap comes
+    # only from how their own (vx, omega) compare to last_param - the jerky
+    # jump should cost substantially more than just the existing 10x|domega|
+    # smoothness term would (10 * (0.75 - 0.05) = 7.0) once the angular
+    # safety net is included
+    assert cost_jerky - cost_smooth > 100.0, \
+        f"expected the angular safety net to dominate the cost gap, got {cost_jerky - cost_smooth:.2f}"
 
 if __name__ == "__main__":
     test_goal_heading_error()

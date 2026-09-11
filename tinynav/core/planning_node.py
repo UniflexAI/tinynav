@@ -22,6 +22,14 @@ from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 # keep these in sync by hand. Used to penalize picking a stage-1 speed the real
 # robot's cmd_vel rate limiter can't actually reach in one planning cycle.
 CMD_VEL_MAX_LINEAR_ACC = 0.6  # m/s^2
+# Mirrors CmdVelControlNode.max_angular_acc, which is declared there but not
+# actually enforced ("Do not acceleration-limit yaw... the planner/control
+# layer already decides the turn rate") - cmd_vel passes omega straight
+# through, so the planner is the only place a jerky pick can be caught. A
+# rosbag showed the selected omega jumping up to 0.75 rad/s between
+# consecutive ~0.1s planning cycles (p90 change 0.26 rad/s) with no
+# analogous safety net to the linear one below.
+CMD_VEL_MAX_ANGULAR_ACC = 0.8  # rad/s^2
 
 # Stuck detection: reversing has no sensing of what's behind the robot at all
 # (single forward-facing depth camera), so if it backs into something never
@@ -701,7 +709,7 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-    def trajectory_cost(self, traj, param, score, endpoint_score, target_pose, should_reverse, stage1_end_idx, feasible_dv, stuck_recovery_active):
+    def trajectory_cost(self, traj, param, score, endpoint_score, target_pose, should_reverse, stage1_end_idx, feasible_dv, feasible_dw, stuck_recovery_active):
         # predefined backward trajectory penalty
         is_backward_traj = param[0] < 0.0
         reverse_gate_penalty = 0.0
@@ -729,6 +737,10 @@ class PlanningNode(Node):
         heading = 0.5 * (heading_final + heading_mid)
 
         infeasible_decel = max(0.0, (self.last_param[0] - param[0]) - feasible_dv)
+        # angular counterpart: cmd_vel_control passes omega straight through with
+        # no rate limiting of its own, so a jerky pick here reaches the robot
+        # exactly as picked
+        infeasible_angular_accel = max(0.0, abs(self.last_param[1] - param[1]) - feasible_dw)
 
         stuck_penalty = 0.0
         if stuck_recovery_active and np.sign(param[0]) == self.stuck_direction and param[0] != 0.0:
@@ -742,6 +754,7 @@ class PlanningNode(Node):
             + 10 * abs(self.last_param[0] - param[0])
             + 10 * abs(self.last_param[1] - param[1])
             + 500 * infeasible_decel
+            + 500 * infeasible_angular_accel
             + reverse_gate_penalty
             + stuck_penalty
         )
@@ -807,11 +820,13 @@ class PlanningNode(Node):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectories(init_p, init_q)
-            # trajectory_cost's infeasible_decel term needs this: how much
-            # CMD_VEL_MAX_LINEAR_ACC actually allows a speed to change by in one
-            # planning cycle, as a safety-net penalty against picking a stage-1
-            # speed too far from the last one.
+            # trajectory_cost's infeasible_decel/infeasible_angular_accel terms
+            # need these: how much CMD_VEL_MAX_LINEAR_ACC/CMD_VEL_MAX_ANGULAR_ACC
+            # actually allow vx/omega to change by in one planning cycle, as a
+            # safety-net penalty against picking a stage-1 control too far from
+            # the last one.
             feasible_dv = CMD_VEL_MAX_LINEAR_ACC * max(self.planning_dt, 0.03)
+            feasible_dw = CMD_VEL_MAX_ANGULAR_ACC * max(self.planning_dt, 0.03)
             self.last_T = T
             self.last_stamp = stamp
 
@@ -840,7 +855,7 @@ class PlanningNode(Node):
             top_k = 1
             top_indices = np.argsort(np.array([
                 self.trajectory_cost(trajectories[i], params[i], scores[i], endpoint_scores[i], self.target_pose,
-                                      should_reverse, stage1_end_idx, feasible_dv, stuck_recovery_active)
+                                      should_reverse, stage1_end_idx, feasible_dv, feasible_dw, stuck_recovery_active)
                 for i in range(len(trajectories))
             ]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
