@@ -465,6 +465,18 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def generate_trajectories(init_p, init_q):
+    trajectories, params = generate_two_stage_trajectory_library_3d(
+        init_p=init_p, init_q=init_q,
+        max_linear_vel=ROBOT_CONFIG.max_linear_vel,
+        max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+    )
+    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+    trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+    params = np.concatenate([params, vocab_params], axis=0)
+    return trajectories, params
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -666,6 +678,94 @@ class PlanningNode(Node):
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
+    def update_velocity_estimate(self, T, stamp):
+        if self.last_T is None:
+            self.last_T = T.copy()
+            self.smoothed_velocity = 0.0
+            self.last_stamp = 0
+            self.smoothed_velocity = 0.0
+        self.planning_dt = stamp - self.last_stamp
+        velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / self.planning_dt
+        self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
+
+    def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
+        center = self.origin + np.array(self.grid_shape) * self.resolution / 2
+        robot_pos = T[:3, 3]
+        delta = robot_pos - center
+        if np.linalg.norm(delta) > .1:
+            new_center = robot_pos
+            new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
+            self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
+        new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
+        self.occupancy_grid *= 0.99
+        self.occupancy_grid += new_occ
+        self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+
+    def trajectory_cost(self, traj, param, score, endpoint_score, target_pose, should_reverse, stage1_end_idx, feasible_dv, stuck_recovery_active):
+        # predefined backward trajectory penalty
+        is_backward_traj = param[0] < 0.0
+        reverse_gate_penalty = 0.0
+        if should_reverse and not is_backward_traj:
+                reverse_gate_penalty = 1e9
+        elif not should_reverse and is_backward_traj:
+                reverse_gate_penalty = 1e9
+
+        # regular trajectory penalty, blended between where stage 1 (the part
+        # that's actually executed) ends and the full horizon end (a softer
+        # lookahead so we don't drive into a dead end just to close the gap
+        # fastest)
+        target_end = target_pose if target_pose is not None else np.array(traj[-1, :3])
+
+        def dist_and_heading(pose):
+            d = np.linalg.norm(np.array(pose[:3]) - target_end)
+            h = goal_heading_error(pose, target_end) * min(1.0, d / 2.0)
+            return d, h
+
+        dist_final, heading_final = dist_and_heading(traj[-1])
+        dist_mid, heading_mid = dist_and_heading(traj[stage1_end_idx])
+        dist = 0.5 * (dist_final + dist_mid)
+        # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
+        # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
+        heading = 0.5 * (heading_final + heading_mid)
+
+        infeasible_decel = max(0.0, (self.last_param[0] - param[0]) - feasible_dv)
+
+        stuck_penalty = 0.0
+        if stuck_recovery_active and np.sign(param[0]) == self.stuck_direction and param[0] != 0.0:
+            stuck_penalty = STUCK_DIRECTION_PENALTY
+
+        return (
+            score * 2000
+            + endpoint_score * 2000
+            + 1000 * dist
+            + 100 * heading
+            + 10 * abs(self.last_param[0] - param[0])
+            + 10 * abs(self.last_param[1] - param[1])
+            + 500 * infeasible_decel
+            + reverse_gate_penalty
+            + stuck_penalty
+        )
+
+    def publish_selected_path(self, trajectories, top_indices, header):
+        path = Path()
+        path.header = header
+        path.header.frame_id = "world"
+
+        for i in top_indices:
+            for j in range(0, len(trajectories[i]), 10):
+                x,y,z,qx,qy,qz,qw = trajectories[i][j]
+                pose = PoseStamped()
+                pose.header = header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = z
+                pose.pose.orientation.x = qx
+                pose.pose.orientation.y = qy
+                pose.pose.orientation.z = qz
+                pose.pose.orientation.w = qw
+                path.poses.append(pose)
+        self.path_pub.publish(path)
+
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
@@ -674,14 +774,7 @@ class PlanningNode(Node):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T,_ = msg2np(odom_msg)
-            if self.last_T is None:
-                self.last_T = T.copy()
-                self.smoothed_velocity = 0.0
-                self.last_stamp = 0
-                self.smoothed_velocity = 0.0
-            self.planning_dt = stamp - self.last_stamp
-            velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / self.planning_dt
-            self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
+            self.update_velocity_estimate(T, stamp)
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
@@ -692,17 +785,7 @@ class PlanningNode(Node):
             )
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-            robot_pos = T[:3, 3]
-            delta = robot_pos - center
-            if np.linalg.norm(delta) > .1:
-                new_center = robot_pos
-                new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
-                self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
-            new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-            self.occupancy_grid *= 0.99
-            self.occupancy_grid += new_occ
-            self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
+            self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
@@ -723,19 +806,12 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_two_stage_trajectory_library_3d(
-                init_p=init_p, init_q=init_q,
-                max_linear_vel=ROBOT_CONFIG.max_linear_vel,
-                max_angular_vel=ROBOT_CONFIG.max_angular_vel,
-            )
-            # cost_function's infeasible_decel term still needs this: how much
+            trajectories, params = generate_trajectories(init_p, init_q)
+            # trajectory_cost's infeasible_decel term needs this: how much
             # CMD_VEL_MAX_LINEAR_ACC actually allows a speed to change by in one
-            # planning cycle, as a safety-net penalty (not a sampling constraint
-            # anymore) against picking a stage-1 speed too far from the last one.
+            # planning cycle, as a safety-net penalty against picking a stage-1
+            # speed too far from the last one.
             feasible_dv = CMD_VEL_MAX_LINEAR_ACC * max(self.planning_dt, 0.03)
-            vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-            trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-            params = np.concatenate([params, vocab_params], axis=0)
             self.last_T = T
             self.last_stamp = stamp
 
@@ -759,65 +835,15 @@ class PlanningNode(Node):
             # every tick. Blending in the stage-1 endpoint makes early progress
             # count too.
             stage1_end_idx = len(trajectories[0]) // 2 - 1
-            # feasible_dv already constrained stage 1's vx sampling above (dynamic
-            # window); this term is now mostly a no-op for forward candidates and
-            # only still bites the fixed-speed reverse vocab trajectory, which the
-            # reverse_gate_penalty below already gates independently.
             stuck_recovery_active = stamp < self.stuck_recovery_until
 
-            def cost_function(traj, param, score, endpoint_score, target_pose):
-                # predefined backward trajectory penalty
-                is_backward_traj = param[0] < 0.0
-                reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
-                elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
-
-                # regular trajectory penalty, blended between where stage 1
-                # (the part that's actually executed) ends and the full
-                # horizon end (a softer lookahead so we don't drive into a
-                # dead end just to close the gap fastest)
-                target_end = target_pose if target_pose is not None else np.array(traj[-1, :3])
-
-                def dist_and_heading(pose):
-                    d = np.linalg.norm(np.array(pose[:3]) - target_end)
-                    h = goal_heading_error(pose, target_end) * min(1.0, d / 2.0)
-                    return d, h
-
-                dist_final, heading_final = dist_and_heading(traj[-1])
-                dist_mid, heading_mid = dist_and_heading(traj[stage1_end_idx])
-                dist = 0.5 * (dist_final + dist_mid)
-                # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
-                # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-                heading = 0.5 * (heading_final + heading_mid)
-
-                infeasible_decel = max(0.0, (self.last_param[0] - param[0]) - feasible_dv)
-
-                stuck_penalty = 0.0
-                if stuck_recovery_active and np.sign(param[0]) == self.stuck_direction and param[0] != 0.0:
-                    stuck_penalty = STUCK_DIRECTION_PENALTY
-
-                return (
-                    score * 2000
-                    + endpoint_score * 2000
-                    + 1000 * dist
-                    + 100 * heading
-                    + 10 * abs(self.last_param[0] - param[0])
-                    + 10 * abs(self.last_param[1] - param[1])
-                    + 500 * infeasible_decel
-                    + reverse_gate_penalty
-                    + stuck_penalty
-                )
-
             top_k = 1
-            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], endpoint_scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([
+                self.trajectory_cost(trajectories[i], params[i], scores[i], endpoint_scores[i], self.target_pose,
+                                      should_reverse, stage1_end_idx, feasible_dv, stuck_recovery_active)
+                for i in range(len(trajectories))
+            ]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
-
-            # path
-            path = Path()
-            path.header = depth_msg.header
-            path.header.frame_id = "world"
 
             if self.target_pose is None:
                 return
@@ -826,20 +852,7 @@ class PlanningNode(Node):
                 self.get_logger().info('All trajectories in collision, stopping path.')
                 return
 
-            for i in top_indices:
-                for j in range(0, len(trajectories[i]), 10):
-                    x,y,z,qx,qy,qz,qw = trajectories[i][j]
-                    pose = PoseStamped()
-                    pose.header = depth_msg.header
-                    pose.pose.position.x = x
-                    pose.pose.position.y = y
-                    pose.pose.position.z = z
-                    pose.pose.orientation.x = qx
-                    pose.pose.orientation.y = qy
-                    pose.pose.orientation.z = qz
-                    pose.pose.orientation.w = qw
-                    path.poses.append(pose)
-            self.path_pub.publish(path)
+            self.publish_selected_path(trajectories, top_indices, depth_msg.header)
 
 def main(args=None):
     rclpy.init(args=args)
