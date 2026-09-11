@@ -182,8 +182,8 @@ def generate_predefined_trajectory_vocabularies(
     params = []
 
     # constant reverse trajectory
-    # vx = -0.2 m/s, omega = 0
-    reverse_speed = 0.2
+    # vx = -0.3 m/s, omega = 0
+    reverse_speed = 0.3
     p = init_p.copy()
     q = quat_to_matrix(init_q)
     traj = np.empty((num_steps, 7), dtype=np.float64)
@@ -351,6 +351,14 @@ class PlanningNode(Node):
         self.current_pose = None  # Store the latest pose from odometry
 
         self.smoothed_velocity = 0.0
+
+        # Reverse gate hysteresis: engage reverse at reverse_enter_threshold, stay
+        # engaged until front_clearance climbs past the higher reverse_exit_threshold.
+        # A single threshold flip-flopped forward/backward every cycle when
+        # front_clearance jittered near the boundary.
+        self.reverse_enter_threshold = 0.30
+        self.reverse_exit_threshold = 0.45
+        self.reverse_engaged = False
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -529,10 +537,9 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-    def trajectory_cost(self, traj, param, score, target_pose, front_clearance, enter_threshold):
+    def trajectory_cost(self, traj, param, score, target_pose, should_reverse):
         # predefined backward trajectory penalty
         is_backward_traj = param[0] < 0.0
-        should_reverse = front_clearance <= enter_threshold
         reverse_gate_penalty = 0.0
         if should_reverse and not is_backward_traj:
                 reverse_gate_penalty = 1e9
@@ -620,10 +627,12 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            enter_threshold = 0.30
+            threshold = self.reverse_exit_threshold if self.reverse_engaged else self.reverse_enter_threshold
+            should_reverse = front_clearance <= threshold
+            self.reverse_engaged = should_reverse
 
             top_k = 1
-            top_indices = np.argsort(np.array([self.trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, front_clearance, enter_threshold) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            top_indices = np.argsort(np.array([self.trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, should_reverse) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
 
             if self.target_pose is None:
