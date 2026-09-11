@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../core/models.dart';
+import 'object_icons.dart';
 
 class LocalVoxelPainter extends CustomPainter {
   final List<VoxelPoint> points;
@@ -10,6 +11,7 @@ class LocalVoxelPainter extends CustomPainter {
   final List<TrajPoint> globalPath;
   final List<TrajPoint> footprint;
   final TrajPoint? navTargetPose;
+  final List<ObjectDetection> objectDetections;
   final Pose? odomPose;
   final double viewYaw;
 
@@ -19,6 +21,7 @@ class LocalVoxelPainter extends CustomPainter {
     this.globalPath = const [],
     this.footprint = const [],
     this.navTargetPose,
+    this.objectDetections = const [],
     this.odomPose,
     this.viewYaw = 0.0,
   });
@@ -54,6 +57,7 @@ class LocalVoxelPainter extends CustomPainter {
     _drawPath(canvas, center, scale, trajectory, Colors.cyanAccent, 2.6);
     _drawFootprint(canvas, center, scale);
     if (navTargetPose != null) _drawNavTarget(canvas, center, scale, navTargetPose!);
+    _drawObjectDetections(canvas, center, scale, pose);
     _drawRobotArrow(canvas, center, scale, pose.yaw);
   }
 
@@ -186,6 +190,32 @@ class LocalVoxelPainter extends CustomPainter {
     canvas.drawCircle(c, 3, Paint()..color = const Color(0xFFFF6D00));
   }
 
+  void _drawObjectDetections(Canvas canvas, Offset center, double scale, Pose pose) {
+    for (final det in objectDetections) {
+      final c = _project3d(center, scale, det.x - pose.x, det.y - pose.y, det.z - (pose.z ?? 0.0));
+      _drawObjectIcon(canvas, c, det.classId);
+    }
+  }
+
+  void _drawObjectIcon(Canvas canvas, Offset c, int classId) {
+    final color = objectColorFor(classId);
+    canvas.drawCircle(c, 11, Paint()..color = color.withOpacity(0.85));
+    canvas.drawCircle(c, 11, Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 1.4);
+    final icon = objectIconFor(classId);
+    final tp = TextPainter(textDirection: TextDirection.ltr)
+      ..text = TextSpan(
+        text: String.fromCharCode(icon.codePoint),
+        style: TextStyle(
+          fontSize: 14,
+          fontFamily: icon.fontFamily,
+          package: icon.fontPackage,
+          color: Colors.white,
+        ),
+      )
+      ..layout();
+    tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
+  }
+
   void _drawRobotArrow(Canvas canvas, Offset center, double scale, double yaw) {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
@@ -221,6 +251,7 @@ class LocalVoxelPainter extends CustomPainter {
       oldDelegate.globalPath != globalPath ||
       oldDelegate.footprint != footprint ||
       oldDelegate.navTargetPose != navTargetPose ||
+      oldDelegate.objectDetections != objectDetections ||
       oldDelegate.odomPose != odomPose ||
       oldDelegate.viewYaw != viewYaw;
 }

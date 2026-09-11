@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../core/models.dart';
+import 'object_icons.dart';
 
 /// Renders robot arrow, local trajectory, and global path on the local planning canvas.
 /// The canvas maps to the planning grid: robot is always at center.
@@ -17,6 +18,7 @@ class LocalPlanningPainter extends CustomPainter {
   final bool showGlobalPath;
   final bool showFootprint;
   final TrajPoint? navTargetPose;
+  final List<ObjectDetection> objectDetections;
 
   const LocalPlanningPainter({
     required this.trajectory,
@@ -28,6 +30,7 @@ class LocalPlanningPainter extends CustomPainter {
     this.showGlobalPath = true,
     this.showFootprint = true,
     this.navTargetPose,
+    this.objectDetections = const [],
   });
 
   @override
@@ -52,6 +55,8 @@ class LocalPlanningPainter extends CustomPainter {
       _drawNavTarget(canvas, cx, cy, scaleX, scaleY, pose, navTargetPose!);
 
     if (showFootprint) _drawFootprint(canvas, cx, cy, scaleX, scaleY, pose);
+
+    _drawObjectDetections(canvas, cx, cy, scaleX, scaleY, pose);
 
     // Small arrow on top of everything
     _drawRobotArrow(canvas, Offset(cx, cy), pose?.yaw ?? 0.0);
@@ -184,6 +189,33 @@ class LocalPlanningPainter extends CustomPainter {
     }
   }
 
+  void _drawObjectDetections(Canvas canvas, double cx, double cy,
+      double scaleX, double scaleY, Pose? pose) {
+    if (pose == null || objectDetections.isEmpty) return;
+    for (final det in objectDetections) {
+      final c = Offset(
+        cx + (det.x - pose.x) * scaleX,
+        cy - (det.y - pose.y) * scaleY,
+      );
+      final color = objectColorFor(det.classId);
+      canvas.drawCircle(c, 9, Paint()..color = color.withOpacity(0.85));
+      canvas.drawCircle(c, 9, Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 1.2);
+      final icon = objectIconFor(det.classId);
+      final tp = TextPainter(textDirection: TextDirection.ltr)
+        ..text = TextSpan(
+          text: String.fromCharCode(icon.codePoint),
+          style: TextStyle(
+            fontSize: 12,
+            fontFamily: icon.fontFamily,
+            package: icon.fontPackage,
+            color: Colors.white,
+          ),
+        )
+        ..layout();
+      tp.paint(canvas, c - Offset(tp.width / 2, tp.height / 2));
+    }
+  }
+
   void _drawRobotArrow(Canvas canvas, Offset center, double yaw) {
     final cosY = math.cos(yaw);
     final sinY = math.sin(yaw);
@@ -215,5 +247,6 @@ class LocalPlanningPainter extends CustomPainter {
       showTrajectory != old.showTrajectory ||
       showGlobalPath != old.showGlobalPath ||
       showFootprint != old.showFootprint ||
-      navTargetPose != old.navTargetPose;
+      navTargetPose != old.navTargetPose ||
+      objectDetections != old.objectDetections;
 }

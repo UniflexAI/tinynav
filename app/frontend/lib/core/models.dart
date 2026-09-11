@@ -154,6 +154,14 @@ class VoxelPoint {
   const VoxelPoint(this.x, this.y, this.z);
 }
 
+class ObjectDetection {
+  final int classId;
+  final double x;
+  final double y;
+  final double z;
+  const ObjectDetection(this.classId, this.x, this.y, this.z);
+}
+
 class GridInfo {
   final double originX;
   final double originY;
@@ -192,6 +200,7 @@ class PlanningState {
   final TrajPoint? navTargetPose;
   final List<TrajPoint> footprint;
   final List<VoxelPoint> voxelPoints;
+  final List<ObjectDetection> objectDetections;
 
   const PlanningState({
     required this.localized,
@@ -207,6 +216,7 @@ class PlanningState {
     this.navTargetPose,
     this.footprint = const [],
     this.voxelPoints = const [],
+    this.objectDetections = const [],
   });
 
   factory PlanningState.fromJson(Map<String, dynamic> j) {
@@ -252,6 +262,15 @@ class PlanningState {
       voxelPoints: (j['voxel_points'] as List? ?? []).map((p) {
         final m = p as Map<String, dynamic>;
         return VoxelPoint(
+          (m['x'] as num).toDouble(),
+          (m['y'] as num).toDouble(),
+          (m['z'] as num).toDouble(),
+        );
+      }).toList(),
+      objectDetections: (j['object_detections'] as List? ?? []).map((p) {
+        final m = p as Map<String, dynamic>;
+        return ObjectDetection(
+          m['class_id'] as int,
           (m['x'] as num).toDouble(),
           (m['y'] as num).toDouble(),
           (m['z'] as num).toDouble(),

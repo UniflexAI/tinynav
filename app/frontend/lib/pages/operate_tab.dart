@@ -566,6 +566,7 @@ class _LocalPlanningViewState extends ConsumerState<_LocalPlanningView> {
                                   showGlobalPath: widget.showGlobalPath,
                                   showFootprint: widget.showFootprint,
                                   navTargetPose: targetPose,
+                                  objectDetections: p.objectDetections,
                                 ),
                               )
                             else
@@ -761,6 +762,7 @@ class _Local3dPlanningViewState extends State<_Local3dPlanningView> {
                     globalPath: p?.globalPath ?? const [],
                     footprint: p?.footprint ?? const [],
                     navTargetPose: p?.navTargetPose,
+                    objectDetections: p?.objectDetections ?? const [],
                     odomPose: p?.odomPose,
                     viewYaw: _viewYaw,
                   ),

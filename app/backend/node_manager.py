@@ -28,6 +28,7 @@ from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
+from visualization_msgs.msg import MarkerArray
 
 from tool.ros2_node_manager import Ros2NodeManager
 
@@ -149,6 +150,7 @@ class BackendNode(Ros2NodeManager):
         self._global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
         self._voxel_points: list = []
+        self._object_detections: list = []
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
@@ -176,6 +178,9 @@ class BackendNode(Ros2NodeManager):
         )
         self.create_subscription(
             PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+        )
+        self.create_subscription(
+            MarkerArray, '/planning/object_markers', self._on_object_markers, 1
         )
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -406,6 +411,28 @@ class BackendNode(Ros2NodeManager):
         except Exception:
             pass
 
+    def _on_object_markers(self, msg: MarkerArray):
+        """Store the latest detected-object anchors (class_id + world position)
+        for the web UI. planning_node republishes this every detection frame
+        (empty array included), so replacing rather than merging keeps this in
+        sync with what's currently detected instead of accumulating stale hits.
+        """
+        detections = []
+        for marker in msg.markers:
+            class_id_str = marker.ns.rsplit('_', 1)[-1]
+            try:
+                class_id = int(class_id_str)
+            except ValueError:
+                continue
+            detections.append({
+                'class_id': class_id,
+                'x': marker.pose.position.x,
+                'y': marker.pose.position.y,
+                'z': marker.pose.position.z,
+            })
+        with self._lock:
+            self._object_detections = detections
+
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
@@ -624,6 +651,7 @@ class BackendNode(Ros2NodeManager):
                 'nav_target_pose': self._nav_target_pose,
                 'footprint': list(self._footprint),
                 'voxel_points': list(self._voxel_points),
+                'object_detections': list(self._object_detections),
             }
         snapshot['global_path'] = self._transform_path_via_tf(path_snapshot)
         return snapshot
