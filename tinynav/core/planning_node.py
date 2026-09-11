@@ -900,19 +900,17 @@ class PlanningNode(Node):
         self.object_voxel_pub.publish(pc2.create_cloud(header, fields, points))
 
     def publish_object_markers(self, marker_anchors, stamp):
-        """Publish one Marker per detection, positioned at its world-frame
-        ground anchor: a mesh for classes with a registered asset
-        (_OBJECT_MESH_ASSETS), a plain colored sphere otherwise. Every kept
-        class gets a marker here (not just the ones with a mesh) since this
-        is also app/backend/node_manager.py's only source for per-instance
-        detection anchors — restricting it to mesh-only classes would silently
-        hide any newly allow-listed class from the web app.
+        """Publish one mesh Marker per detection with a registered asset
+        (_OBJECT_MESH_ASSETS), positioned at its world-frame ground anchor.
         Auto-expires after a couple of frames so a Marker disappears promptly
         once its detection stops recurring, instead of freezing in place.
         """
         marker_array = MarkerArray()
         per_class_index = {}
         for class_id, x, y, z_ground in marker_anchors:
+            asset = _OBJECT_MESH_ASSETS.get(class_id)
+            if asset is None:
+                continue
             index = per_class_index.get(class_id, 0)
             per_class_index[class_id] = index + 1
 
@@ -920,30 +918,21 @@ class PlanningNode(Node):
             marker.header = Header(stamp=stamp, frame_id="world")
             marker.ns = f"object_{class_id}"
             marker.id = index
+            marker.type = Marker.MESH_RESOURCE
             marker.action = Marker.ADD
+            marker.mesh_resource = asset["uri"]
+            marker.mesh_use_embedded_materials = True
             marker.pose.position.x = float(x)
             marker.pose.position.y = float(y)
             marker.pose.position.z = float(z_ground)
+            qx, qy, qz, qw = _yaw_to_quat(asset["yaw"])
+            marker.pose.orientation.x = qx
+            marker.pose.orientation.y = qy
+            marker.pose.orientation.z = qz
+            marker.pose.orientation.w = qw
+            marker.scale.x, marker.scale.y, marker.scale.z = asset["scale"]
+            marker.color.a = 1.0
             marker.lifetime.sec = 1
-
-            asset = _OBJECT_MESH_ASSETS.get(class_id)
-            if asset is not None:
-                marker.type = Marker.MESH_RESOURCE
-                marker.mesh_resource = asset["uri"]
-                marker.mesh_use_embedded_materials = True
-                qx, qy, qz, qw = _yaw_to_quat(asset["yaw"])
-                marker.pose.orientation.x = qx
-                marker.pose.orientation.y = qy
-                marker.pose.orientation.z = qz
-                marker.pose.orientation.w = qw
-                marker.scale.x, marker.scale.y, marker.scale.z = asset["scale"]
-                marker.color.a = 1.0
-            else:
-                marker.type = Marker.SPHERE
-                marker.pose.orientation.w = 1.0
-                marker.scale.x = marker.scale.y = marker.scale.z = 0.3
-                b, g, r = (float(c) / 255.0 for c in _OBJECT_CLASS_PALETTE[class_id % len(_OBJECT_CLASS_PALETTE)])
-                marker.color.r, marker.color.g, marker.color.b, marker.color.a = r, g, b, 0.9
             marker_array.markers.append(marker)
 
         self.object_marker_pub.publish(marker_array)
