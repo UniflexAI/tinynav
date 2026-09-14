@@ -1,4 +1,3 @@
-import array
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
@@ -297,64 +296,6 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def camera_to_robot_center(T):
-    """World control-center position derived from camera pose T_cam->world."""
-    return T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
-
-
-def esdf_of(obstacle_mask, resolution):
-    return distance_transform_edt(~obstacle_mask).astype(np.float32) * resolution
-
-
-# The two state messages planning_vis_node rebuilds the views from. Arrays go in through
-# array.array: assigning a list or bytes makes rclpy type-check every element.
-def mask_plane_z(grid_origin_z, z_layers, resolution):
-    return grid_origin_z + z_layers * resolution / 2
-
-
-def grid_origin(mask_origin, resolution, z_layers):
-    return mask_origin - np.array([0.0, 0.0, z_layers * resolution / 2])
-
-
-def obstacle_mask_msg(mask, origin, resolution, z, stamp):
-    """100 = obstacle, column-major."""
-    msg = OccupancyGrid()
-    msg.header = Header(stamp=stamp, frame_id="world")
-    msg.info.resolution = resolution
-    msg.info.width = mask.shape[1]
-    msg.info.height = mask.shape[0]
-    msg.info.origin.position.x = origin[0]
-    msg.info.origin.position.y = origin[1]
-    msg.info.origin.position.z = z
-    msg.info.origin.orientation.w = 1.0
-    msg.data = array.array('b', np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tobytes())
-    return msg
-
-
-def mask_from_msg(msg):
-    """(mask as bool (X, Y), resolution, origin of the mask plane)."""
-    info = msg.info
-    mask = np.frombuffer(msg.data, dtype=np.int8).reshape(info.height, info.width, order="F") > 0
-    # Undo float32 on the wire, so derived values match planning's own double.
-    resolution = round(float(info.resolution), 6)
-    p = info.origin.position
-    return mask, resolution, np.array([p.x, p.y, p.z])
-
-
-def occupancy_3d_msg(grid, header):
-    """The raw (X, Y, Z) occupancy grid as a float64 Image."""
-    X, Y, Z = grid.shape
-    msg = Image(header=header, height=X, width=Y, encoding=f"64FC{Z}", step=Y * Z * 8)
-    msg.data = array.array('B')
-    msg.data.frombytes(memoryview(np.ascontiguousarray(grid, dtype=np.float64)).cast('B'))
-    return msg
-
-
-def grid_from_msg(msg):
-    z = int(msg.encoding[len("64FC"):])
-    return np.frombuffer(msg.data, dtype=np.float64).reshape(msg.height, msg.width, z)
-
-
 def generate_trajectories(init_p, init_q):
     trajectories, params = generate_trajectory_library_3d(
         init_p=init_p, init_q=init_q,
@@ -380,8 +321,8 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
-        # Only what planning decides on; planning_vis_node rebuilds the views from these.
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
+        # the raw grid, for planning_vis_node's views
         self.occupancy_3d_pub = self.create_publisher(Image, '/planning/occupancy_3d', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
@@ -434,10 +375,14 @@ class PlanningNode(Node):
             self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camerainfo_sub)
 
+    def camera_to_robot_center(self, T):
+        """World control-center position derived from camera pose T_cam->world."""
+        return T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
+
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
         Scans start at the front face so the returned value matches physical clearance."""
-        center = camera_to_robot_center(T)
+        center = self.camera_to_robot_center(T)
         fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
         n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
         fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
@@ -454,6 +399,21 @@ class PlanningNode(Node):
                 if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
                     return d_from_face
         return max_dist + 1.0
+
+    def publish_obstacle_mask(self, mask, stamp):
+        msg = OccupancyGrid()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.info.resolution = self.resolution
+        msg.info.width = mask.shape[1]
+        msg.info.height = mask.shape[0]
+        msg.info.origin.position.x = self.origin[0]
+        msg.info.origin.position.y = self.origin[1]
+        msg.info.origin.position.z = self.origin[2] + self.grid_shape[2] * self.resolution / 2
+        msg.info.origin.orientation.w = 1.0
+        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
+        self.obstacle_mask_pub.publish(msg)
 
     def update_velocity_estimate(self, T, stamp):
         if self.last_T is None:
@@ -543,17 +503,15 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
-            ESDF_map = esdf_of(obstacle_mask, self.resolution)
+            ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            mask_z = mask_plane_z(self.origin[2], self.grid_shape[2], self.resolution)
-            self.obstacle_mask_pub.publish(obstacle_mask_msg(
-                obstacle_mask, self.origin, self.resolution, mask_z, depth_msg.header.stamp))
+            self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
             if self.occupancy_3d_pub.get_subscription_count() > 0:
-                self.occupancy_3d_pub.publish(occupancy_3d_msg(self.occupancy_grid, depth_msg.header))
+                self.occupancy_3d_pub.publish(self.bridge.cv2_to_imgmsg(self.occupancy_grid, header=depth_msg.header))
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            init_p = camera_to_robot_center(T)
+            init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
             trajectories, params = generate_trajectories(init_p, init_q)
             self.last_T = T
