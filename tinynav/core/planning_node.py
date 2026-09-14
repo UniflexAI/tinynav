@@ -1,3 +1,4 @@
+import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -355,8 +356,8 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 10)
-        self.resolution = 0.05
+        self.grid_shape = (50, 50, 20)
+        self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
@@ -626,9 +627,10 @@ class PlanningNode(Node):
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
+            # rviz-only debug topics, no subscribers in app/ or the control nodes
+            # self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
+            # self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
             self.publish_footprint(T, depth_msg.header.stamp)
 
@@ -643,23 +645,38 @@ class PlanningNode(Node):
             front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
             scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
 
-        with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+        with Timer(name='pub_gate', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             threshold = self.reverse_exit_threshold if self.reverse_engaged else self.reverse_enter_threshold
             should_reverse = front_clearance <= threshold
             self.reverse_engaged = should_reverse
 
+        # DEBUG: split out from the old 'pub' timer, plus a wall-vs-CPU-time check, to tell
+        # apart "this thread got preempted" (wall high, cpu low: scheduling/thermal contention
+        # from something else on the Nano) from "this loop itself got slower" (wall ~= cpu:
+        # GC pause or genuinely more work) when investigating the pub latency spikes.
+        with Timer(name='pub_cost', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            wall_t0 = time.perf_counter()
+            cpu_t0 = time.process_time()
             top_k = 1
             top_indices = np.argsort(np.array([self.trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, should_reverse) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
+            wall_ms = (time.perf_counter() - wall_t0) * 1000.0
+            cpu_ms = (time.process_time() - cpu_t0) * 1000.0
+            if wall_ms > 15.0:
+                self.get_logger().warn(
+                    f'pub_cost slow: wall={wall_ms:.1f}ms cpu={cpu_ms:.1f}ms '
+                    f'gap={wall_ms - cpu_ms:.1f}ms (large gap -> preempted; gap~0 -> GC/genuine slowdown)'
+                )
 
-            if self.target_pose is None:
-                return
+        if self.target_pose is None:
+            return
 
-            if all(s == float('inf') for s in scores):
-                self.get_logger().info('All trajectories in collision, stopping path.')
-                return
+        if all(s == float('inf') for s in scores):
+            self.get_logger().info('All trajectories in collision, stopping path.')
+            return
 
+        with Timer(name='pub_publish', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_selected_path(trajectories, top_indices, depth_msg.header)
 
 def main(args=None):

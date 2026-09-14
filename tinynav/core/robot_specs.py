@@ -67,7 +67,7 @@ GO2_CONFIG = RobotConfig(
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
+    obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.4, dilation_cells=1),
 )
 
 GO2W_CONFIG = RobotConfig(
