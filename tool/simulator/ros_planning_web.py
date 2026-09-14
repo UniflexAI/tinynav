@@ -437,6 +437,7 @@ EXECUTOR: MultiThreadedExecutor | None = None
 PROCS: list[subprocess.Popen] = []
 CHILD_SCRIPTS = (
     "tinynav/core/planning_node.py",
+    "tinynav/core/planning_vis_node.py",
     "tinynav/platforms/simulator_control.py",
 )
 _LAST_PLANNING_RESET = 0.0
