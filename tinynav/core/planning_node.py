@@ -61,6 +61,13 @@ _OBJECT_MESH_ASSETS = {
 _FAST_DECAY_CLASS_IDS = (0, 2)  # person, car
 _FAST_DECAY_FACTOR = 0.9
 
+# How far past the detection's nearest depth point (in meters) other matched
+# pixels can be and still count as the same physical object, when tagging
+# voxel columns for fast decay. Person/car are a few tens of cm thick, so a
+# point this much farther than the nearest one is almost certainly background
+# behind the object rather than more of the object itself.
+_OBJECT_FOOTPRINT_DEPTH_MARGIN_M = 0.3
+
 
 def _yaw_to_quat(yaw):
     return (0.0, 0.0, np.sin(yaw / 2.0), np.cos(yaw / 2.0))
@@ -512,11 +519,31 @@ def project_color_detections_to_voxels(
         # and fast-decayed away even though it's real static structure. The
         # detected object necessarily occludes whatever is behind it, so the
         # closest point in the box is reliably a point on it.
-        nearest = np.argmin(points_depth[in_box, 2])
-        anchor_xy = points_world[in_box, :2][nearest]
-        column_hits = label_occupied_column(occupancy_grid, class_id, anchor_xy[0], anchor_xy[1], origin, resolution, occ_threshold)
-        if column_hits.shape[0] == 0:
+        box_depth = points_depth[in_box, 2]
+        box_xy = points_world[in_box, :2]
+        nearest = np.argmin(box_depth)
+        anchor_xy = box_xy[nearest]
+
+        # Tag every column the object's own body spans, not just the anchor's
+        # single column: the anchor is one point, but a person/car is several
+        # voxel columns wide, and only tagged columns get fast-decayed. Left
+        # at one column, most of the object's real occupancy sat untagged and
+        # lingered indefinitely after it moved on. Pixels within the depth
+        # margin of the nearest point are still the object (per the anchoring
+        # rationale above); farther ones are background and stay untagged.
+        near_xy = box_xy[box_depth <= box_depth[nearest] + _OBJECT_FOOTPRINT_DEPTH_MARGIN_M]
+        voxel_cols = np.unique(np.floor((near_xy - origin[:2]) / resolution).astype(np.int32), axis=0)
+
+        column_hits = []
+        for vx, vy in voxel_cols:
+            col_x = origin[0] + (vx + 0.5) * resolution
+            col_y = origin[1] + (vy + 0.5) * resolution
+            hit = label_occupied_column(occupancy_grid, class_id, col_x, col_y, origin, resolution, occ_threshold)
+            if hit.shape[0]:
+                column_hits.append(hit)
+        if not column_hits:
             continue
+        column_hits = np.concatenate(column_hits, axis=0)
         hits.append(column_hits)
         z_ground = origin[2] + column_hits[:, 2].min() * resolution
         marker_anchors.append((class_id, anchor_xy[0], anchor_xy[1], z_ground))
