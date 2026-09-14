@@ -617,7 +617,9 @@ class PlanningNode(Node):
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            # disabled: app's manual-target z-lookup (operate_tab.dart _nearbyVoxelMedianZ)
+            # falls back to current robot height when this is off; accepted tradeoff
+            # self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(
