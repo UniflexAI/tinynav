@@ -4,6 +4,7 @@ import time
 import sys
 import os
 from numba import njit
+from scipy.spatial.transform import Rotation as R
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
 from planning_node import (
@@ -172,8 +173,8 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
     )
 
 def _pick(target, heading_weight=_HEADING_WEIGHT):
-    """Lowest-cost (vx, omega) from the planner's own cost terms, with a clear ESDF
-    (score=0), no reverse gating and a standing start."""
+    """Lowest-cost (vx, omega1, omega2) from the planner's own cost terms, with a clear
+    ESDF (score=0), no reverse gating and a standing start."""
     trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
     last_param = np.zeros(2)
     costs = [
@@ -201,19 +202,19 @@ def test_goal_behind_curves_toward_target():
     # gain outweighs the smoothness cost of moving, so the pick curves instead of standing
     # still or rotating in place
     behind = np.array([-5.0, 0.0, 0.0])
-    vx0, omega0 = _pick(behind, heading_weight=0.0)
+    vx0, omega0, _ = _pick(behind, heading_weight=0.0)
     assert vx0 > 0.0 and abs(omega0) > 1e-6, f"target behind (no heading term) yields vx={vx0}, omega={omega0}"
 
-    vx, omega = _pick(behind)
+    vx, omega, _ = _pick(behind)
     assert vx > 0.0 and abs(omega) > 1e-6, f"target behind still yields vx={vx}, omega={omega}"
 
 def test_goal_ahead_still_drives_straight():
-    vx, omega = _pick(np.array([5.0, 0.0, 0.0]))
+    vx, omega, _ = _pick(np.array([5.0, 0.0, 0.0]))
     assert vx > 0.0 and abs(omega) < 1e-6, f"target ahead yields vx={vx}, omega={omega}"
 
 def test_goal_abeam_turns_while_driving():
     for side in (5.0, -5.0):
-        vx, omega = _pick(np.array([0.0, side, 0.0]))
+        vx, omega, _ = _pick(np.array([0.0, side, 0.0]))
         assert vx > 0.0 and abs(omega) > 1e-6, f"target abeam yields vx={vx}, omega={omega}"
 
 def test_heading_fades_within_arrival_radius():
@@ -227,6 +228,33 @@ def test_heading_fades_within_arrival_radius():
     nearest = int(np.argmin(dists))
     picked = _pick(close)
     assert tuple(picked) == tuple(params[nearest]), f"close goal picked {picked}, not nearest {params[nearest]}"
+
+def test_two_stage_lattice_matches_single_stage_trajectory_count():
+    # the two-stage lattice trades vx/omega resolution for an extra omega branch point,
+    # but the total trajectory count (and thus scoring cost: trajectories * steps) must
+    # stay the same as the old single-stage lattice so Jetson Nano compute budget holds
+    trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    assert len(trajectories) == 105, f"expected 105 trajectories (7*5*3), got {len(trajectories)}"
+    assert params.shape[1] == 3, "params should carry (vx, omega1, omega2)"
+
+def test_two_stage_lattice_bends_mid_horizon():
+    # a trajectory with omega1 != omega2 must actually change its turn rate partway
+    # through the horizon (not just at the very last step), proving the second stage
+    # is a real branch point rather than a no-op tacked onto a constant-rate arc
+    trajectories, params = generate_trajectory_library_3d(init_p=np.zeros(3), init_q=matrix_to_quat(_FACING_X))
+    candidates = [i for i in range(len(params)) if params[i, 0] > 0.0 and params[i, 1] != params[i, 2]]
+    assert candidates, "expected at least one trajectory where stage-1 and stage-2 omega differ"
+
+    i = candidates[0]
+    traj = trajectories[i]
+    mid = len(traj) // 2
+    yaw = np.array([R.from_quat(traj[j, 3:7]).as_euler("xyz")[2] for j in range(len(traj))])
+    rate_stage1 = abs(yaw[mid] - yaw[1])
+    rate_stage2 = abs(yaw[-1] - yaw[mid])
+    assert abs(rate_stage1 - rate_stage2) > 1e-3, (
+        f"turn rate should differ between stages for omega1={params[i,1]}, omega2={params[i,2]} "
+        f"(stage1 delta={rate_stage1}, stage2 delta={rate_stage2})"
+    )
 
 def test_heading_fade_is_monotonic_in_distance():
     # same bearing error, different range: the heading penalty grows with distance and saturates
@@ -251,5 +279,7 @@ if __name__ == "__main__":
     test_goal_ahead_still_drives_straight()
     test_goal_abeam_turns_while_driving()
     test_heading_fades_within_arrival_radius()
+    test_two_stage_lattice_matches_single_stage_trajectory_count()
+    test_two_stage_lattice_bends_mid_horizon()
     test_heading_fade_is_monotonic_in_distance()
     test_run_raycasting_comparison()

@@ -131,42 +131,60 @@ def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
+    stage1_fraction=0.5,
 ):
-    """Regular sampled lattice (forward-only)."""
+    """Two-stage sampled lattice (forward-only).
+
+    Each trajectory holds a constant speed but its turn rate is piecewise-constant:
+    omega1 for the first stage1_fraction of the horizon, then omega2 for the rest.
+    That lets a candidate turn and then straighten (or tighten, or reverse curvature)
+    within one planning horizon, which a single constant-arc lattice cannot express.
+    The three sample counts are chosen so their product still equals n_vx * num_samples
+    (the single-stage trajectory count) at the same num_samples, so the added omega2
+    branch comes at no extra trajectory-count/scoring cost versus the old lattice.
+    """
     num_steps = int(duration / dt) + 1
+    stage1_steps = int(round((num_steps - 1) * stage1_fraction)) + 1
 
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
+    n_omega1 = max(3, int(num_samples / 3))
+    n_omega2 = max(3, int(num_samples / 5))
     vx_samples = np.linspace(0.0, vx_max, n_vx)
-    omega_y_samples = np.linspace(-max_angular_vel, max_angular_vel, num_samples)
+    omega1_samples = np.linspace(-max_angular_vel, max_angular_vel, n_omega1)
+    omega2_samples = np.linspace(-max_angular_vel, max_angular_vel, n_omega2)
 
-    num_samples = len(vx_samples) * len(omega_y_samples)
+    num_trajs = len(vx_samples) * len(omega1_samples) * len(omega2_samples)
 
-    trajectories = np.empty((num_samples, num_steps, 7))
-    params = np.empty((num_samples, 2))
+    trajectories = np.empty((num_trajs, num_steps, 7))
+    params = np.empty((num_trajs, 3))
 
     k = -1
     for i_vx in range(len(vx_samples)):
-        for i_omega in range(len(omega_y_samples)):
-            k += 1
-            vx = vx_samples[i_vx]
-            omega_y = omega_y_samples[i_omega]
-            p = init_p.copy()
-            q = quat_to_matrix(init_q)
-            traj = np.empty((num_steps, 7))
-            for i in range(num_steps):
-                dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
-                q = q @ dq
-                v_world = q @ np.array([0.0, 0.0, vx])
-                p += v_world * dt
-                traj[i, :3] = p
-                traj[i, 3:] = matrix_to_quat(q)
-            #hack
-            for i in range(num_steps):
-                traj[i, 2] = traj[0, 2]
-            trajectories[k] = traj
-            params[k, 0] = vx
-            params[k, 1] = omega_y
+        vx = vx_samples[i_vx]
+        for i_o1 in range(len(omega1_samples)):
+            omega1 = omega1_samples[i_o1]
+            for i_o2 in range(len(omega2_samples)):
+                omega2 = omega2_samples[i_o2]
+                k += 1
+                p = init_p.copy()
+                q = quat_to_matrix(init_q)
+                traj = np.empty((num_steps, 7))
+                for i in range(num_steps):
+                    omega_y = omega1 if i < stage1_steps else omega2
+                    dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+                    q = q @ dq
+                    v_world = q @ np.array([0.0, 0.0, vx])
+                    p += v_world * dt
+                    traj[i, :3] = p
+                    traj[i, 3:] = matrix_to_quat(q)
+                #hack
+                for i in range(num_steps):
+                    traj[i, 2] = traj[0, 2]
+                trajectories[k] = traj
+                params[k, 0] = vx
+                params[k, 1] = omega1
+                params[k, 2] = omega2
     return trajectories, params
 
 
@@ -195,7 +213,7 @@ def generate_predefined_trajectory_vocabularies(
     for i in range(num_steps):
         traj[i, 2] = traj[0, 2]
     trajectories.append(traj)
-    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
+    params.append(np.array([-reverse_speed, 0.0, 0.0], dtype=np.float64))
 
     return np.asarray(trajectories), np.asarray(params)
 
