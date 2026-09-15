@@ -1092,14 +1092,30 @@ class PlanningNode(Node):
         params = np.concatenate([params, vocab_params], axis=0)
         return trajectories, params
 
-    def score_trajectories(self, trajectories, ESDF_map, path_dist_map, remaining_map,
+    def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
                            route_heading_map):
         front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-        return score_trajectories_by_ESDF(
-            trajectories, ESDF_map, path_dist_map, remaining_map, route_heading_map,
-            self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
-            front_len, rear_len, half_w,
-        )
+
+        def score(trajs):
+            return score_trajectories_by_ESDF(
+                np.ascontiguousarray(trajs), ESDF_map, path_dist_map, remaining_map,
+                route_heading_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
+                front_len, rear_len, half_w,
+            )
+
+        scores, occ_points, path_costs, end_remainings, end_heading_errs = score(trajectories)
+        # **The pose every candidate starts from is not a choice any of them made.** One
+        # footprint sample on an obstacle cell there makes every row inf, reverse included,
+        # so the scores stop saying which way is out exactly when that is the question. The
+        # reverse rows are scored on the trajectory minus that first pose; steps 1.. are
+        # checked as ever, so a rear that really is blocked is still inf and still refused.
+        back = np.flatnonzero(params[:, 0] < 0.0)
+        if len(back) and trajectories.shape[1] > 1:
+            moved = score(trajectories[back][:, 1:])
+            for j, i in enumerate(back):
+                (scores[i], occ_points[i], path_costs[i],
+                 end_remainings[i], end_heading_errs[i]) = (col[j] for col in moved)
+        return scores, occ_points, path_costs, end_remainings, end_heading_errs
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -1151,7 +1167,7 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             scores, occ_points, path_costs, end_remainings, end_heading_errs = self.score_trajectories(
-                trajectories, ESDF_map, path_dist_map, remaining_map, route_heading_map)
+                trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             # **The reverse family is armed by there being no way forward.** The
@@ -1190,13 +1206,11 @@ class PlanningNode(Node):
                     f'{self._hits_report(hits, n_samples)}'
                 )
                 # **Nothing is published, and that is the honest answer here.**
-                # Reaching this branch means even the standing-still row is inf,
-                # and a row that never leaves the current pose can only collide if
-                # a footprint sample is already on an obstacle cell -- which the
-                # report above names. Every trajectory is then inf whichever way it
-                # points, so the scores carry no direction and any escape would be
-                # blind. Backing out belongs to `should_reverse` above, which fires
-                # while the body is still clear and there is a score to read.
+                # Reaching this branch now means the reverse row is inf too, and it
+                # is scored from the pose after the current one (score_trajectories)
+                # -- so this is no longer a footprint sample underfoot vetoing every
+                # candidate alike, it is the way out being blocked as well. The
+                # report above names which part of the body is on an obstacle cell.
                 #
                 # It is also where odometry drift lands: a stationary pose churning
                 # metres of phantom path smears the occupancy grid into cells under

@@ -9,9 +9,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core'))
 from std_msgs.msg import Header
 from math_utils import matrix_to_quat
+from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
                            route_heading_penalty, score_trajectories_by_ESDF,
-                           footprint_lattice)
+                           footprint_lattice, PlanningNode, ROBOT_CONFIG)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -669,3 +670,69 @@ def test_the_all_collision_branch_publishes_nothing():
     assert 'publish_selected_path' not in calls, (
         'the all-collision branch publishes a path again -- from scores that '
         'cannot tell one direction from another')
+
+
+class _Grid:
+    """Just the two attributes `score_trajectories` reads off the node."""
+
+    score_trajectories = PlanningNode.score_trajectories
+
+    def __init__(self, origin, resolution):
+        self.origin, self.resolution = origin, resolution
+
+
+_SHAPE, _RES, _ORIGIN = (160, 160), 0.05, np.array([-3.0, -3.0])
+
+
+def _cell(xy):
+    """The cell a world point falls in, by the arithmetic the scorer itself uses."""
+    return (int((xy[0] - _ORIGIN[0]) / _RES), int((xy[1] - _ORIGIN[1]) / _RES))
+
+
+def _esdf_of_cell(cell):
+    """A distance field around one occupied cell, built the way the node builds it."""
+    mask = np.zeros(_SHAPE, dtype=bool)
+    mask[cell] = True
+    return distance_transform_edt(~mask).astype(np.float32) * _RES
+
+
+def _score_rows(obst_xy, back_step):
+    """Score a standing-still row and a reverse row, both starting at the origin
+    facing +x, against one obstacle cell. Returns (standing, reverse)."""
+    ESDF = _esdf_of_cell(_cell(obst_xy))
+    path_dist, remaining, route_heading = _flat_fields(_SHAPE)
+    q = matrix_to_quat(np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+    here = [0.0, 0.0, 0.0, q[0], q[1], q[2], q[3]]
+    standing = [list(here) for _ in range(4)]
+    reverse = [[-back_step * k] + here[1:] for k in range(4)]
+    scores, _, _, _, _ = _Grid(_ORIGIN, _RES).score_trajectories(
+        np.array([standing, reverse]), np.array([[0.0, 0.0], [-0.3, 0.0]]),
+        ESDF, path_dist, remaining, route_heading)
+    return scores[0], scores[1]
+
+
+def _edge_samples():
+    """The frontmost and rearmost footprint samples, on one side."""
+    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+    off_fwd, _ = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
+    return (float(max(off_fwd)), -hw), (float(min(off_fwd)), -hw)
+
+
+def test_the_pose_it_starts_from_does_not_veto_backing_out_of_it():
+    """An obstacle against the nose is on a footprint sample at step 0, and step 0
+    is every candidate\'s -- so it used to make the reverse row inf as well, and the
+    scores carried no direction at the one moment they had to."""
+    nose, _ = _edge_samples()
+    standing, reverse = _score_rows(nose, back_step=_RES)
+    assert standing == float('inf'), 'standing on the obstacle is still a collision'
+    assert reverse < float('inf'), 'backing off it was refused for the pose it backs off'
+
+
+def test_but_a_blocked_rear_still_refuses_the_reverse_row():
+    """The other half: only the starting pose is excused. Steps 1.. are checked as
+    ever, so reverse into something really there is still inf."""
+    _, tail = _edge_samples()
+    behind = (tail[0] - 2 * _RES, tail[1])
+    standing, reverse = _score_rows(behind, back_step=_RES)
+    assert standing < float('inf'), 'nothing is touching the robot where it stands'
+    assert reverse == float('inf'), 'reverse drove into the obstacle behind it'
