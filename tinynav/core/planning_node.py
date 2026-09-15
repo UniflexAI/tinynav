@@ -256,8 +256,8 @@ def generate_predefined_trajectory_vocabularies(
     params = []
 
     # constant reverse trajectory
-    # vx = -0.2 m/s, omega = 0
-    reverse_speed = 0.2
+    # vx = -0.3 m/s, omega = 0
+    reverse_speed = 0.3
     p = init_p.copy()
     q = quat_to_matrix(init_q)
     traj = np.empty((num_steps, 7), dtype=np.float64)

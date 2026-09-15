@@ -59,7 +59,7 @@ class CmdVelControlNode(Node):
         # No measured value for the turn axis yet, so it keeps the old behaviour
         # (request below the executable minimum reads as a stop).
         self.angular_engage_threshold = self.min_effective_angular_speed
-        self.fixed_reverse_speed = 0.2
+        self.fixed_reverse_speed = 0.3
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
