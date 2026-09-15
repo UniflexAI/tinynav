@@ -1544,7 +1544,8 @@ class PlanningNode(Node):
             self.occupancy_grid *= 0.994
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            # Debug-only and expensive; keep disabled during navigation.
+            # self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -1647,7 +1648,8 @@ class PlanningNode(Node):
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
+            # Debug-only and expensive; keep disabled during navigation.
+            # self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, header.stamp)

@@ -119,6 +119,10 @@ _RTK_YAW_INIT_CLEARANCE_M = float(os.environ.get('TINYNAV_RTK_YAW_INIT_CLEARANCE
 _RTK_YAW_INIT_CLEARANCE_MAX_AGE_S = float(
     os.environ.get('TINYNAV_RTK_YAW_INIT_CLEARANCE_MAX_AGE_S', '1.0')
 )
+_LOC_ASSIST_PROBE_DISTANCE_M = float(os.environ.get('TINYNAV_LOC_ASSIST_PROBE_DISTANCE_M', '0.3'))
+_LOC_ASSIST_PROBE_SPEED_MPS = float(os.environ.get('TINYNAV_LOC_ASSIST_PROBE_SPEED_MPS', '0.12'))
+_LOC_ASSIST_PROBE_CLEARANCE_M = float(os.environ.get('TINYNAV_LOC_ASSIST_PROBE_CLEARANCE_M', '0.8'))
+_LOC_ASSIST_PROBE_TIMEOUT_S = float(os.environ.get('TINYNAV_LOC_ASSIST_PROBE_TIMEOUT_S', '4.0'))
 _VIO_STATUS_NORMAL = {'TRACKING', 'TRACKING_STATIC'}
 
 
@@ -446,6 +450,19 @@ class BackendNode(Ros2NodeManager):
                 ('blocked', round(clearance, 1)),
                 f'RTK yaw-init blocked: front_clearance={clearance:.2f}m '
                 f'< required={_RTK_YAW_INIT_CLEARANCE_M:.2f}m',
+            )
+            return False
+        return True
+
+    def _front_is_clear_for_loc_probe(self) -> bool:
+        clearance = self._latest_front_clearance()
+        if clearance is None:
+            self.get_logger().warn('Localization assist forward probe skipped: no fresh /planning/front_clearance')
+            return False
+        if clearance < _LOC_ASSIST_PROBE_CLEARANCE_M:
+            self.get_logger().info(
+                f'Localization assist forward probe skipped: front_clearance={clearance:.2f}m '
+                f'< required={_LOC_ASSIST_PROBE_CLEARANCE_M:.2f}m'
             )
             return False
         return True
@@ -2294,6 +2311,7 @@ class BackendNode(Ros2NodeManager):
         - Return to the initial direction, wait dwell_s
         - Turn right 10° from the initial direction, wait dwell_s
         - Return to the initial direction, wait dwell_s
+        - If still not localized and front clearance is safe, probe forward 0.3m
         - Repeat until localized
 
         The turn amount is closed-loop against SLAM odometry yaw. While turning,
@@ -2338,6 +2356,8 @@ class BackendNode(Ros2NodeManager):
                     return
                 if self._wait_or_localized(dwell_s, stop):
                     return
+            if self._probe_forward_for_loc_assist(cmd_rate_hz, stop):
+                return
 
     @staticmethod
     def _wrap_angle(angle: float) -> float:
@@ -2354,6 +2374,19 @@ class BackendNode(Ros2NodeManager):
             return None
         yaw = pose.get('yaw')
         return float(yaw) if yaw is not None else None
+
+    def _latest_odom_xy(self, max_age_s: float = 1.0) -> np.ndarray | None:
+        with self._lock:
+            pose = self._odom_pose
+            received_at = self._odom_pose_received_at
+        if pose is None or received_at is None:
+            return None
+        if time.monotonic() - received_at > max_age_s:
+            return None
+        try:
+            return np.array([float(pose['x']), float(pose['y'])], dtype=np.float64)
+        except (KeyError, TypeError, ValueError):
+            return None
 
     def _turn_relative_by_odom(
         self,
@@ -2464,6 +2497,64 @@ class BackendNode(Ros2NodeManager):
 
             angular_z = math.copysign(abs(angular_speed), error)
             self._publish_cmd_vel(0.0, angular_z)
+            time.sleep(interval)
+
+    def _probe_forward_for_loc_assist(self, cmd_rate_hz: float, stop: threading.Event) -> bool:
+        if _LOC_ASSIST_PROBE_DISTANCE_M <= 0.0 or _LOC_ASSIST_PROBE_SPEED_MPS <= 0.0:
+            return False
+        if not self._front_is_clear_for_loc_probe():
+            return False
+
+        interval = 1.0 / max(cmd_rate_hz, 1.0)
+        start_xy = self._latest_odom_xy()
+        start_wait = time.monotonic()
+        while start_xy is None:
+            if self._should_stop_loc_assist(stop):
+                return True
+            self._publish_cmd_vel(0.0, 0.0)
+            if time.monotonic() - start_wait > 5.0:
+                self.get_logger().warn('Localization assist forward probe waiting for fresh odometry')
+                start_wait = time.monotonic()
+            time.sleep(interval)
+            start_xy = self._latest_odom_xy()
+
+        deadline = time.monotonic() + max(_LOC_ASSIST_PROBE_TIMEOUT_S, 0.0)
+        self.get_logger().info(
+            f'Localization assist forward probe started: distance={_LOC_ASSIST_PROBE_DISTANCE_M:.2f}m '
+            f'speed={_LOC_ASSIST_PROBE_SPEED_MPS:.2f}m/s '
+            f'clearance_required={_LOC_ASSIST_PROBE_CLEARANCE_M:.2f}m'
+        )
+
+        while True:
+            if self._should_stop_loc_assist(stop):
+                return True
+            if not self._front_is_clear_for_loc_probe():
+                self._publish_cmd_vel(0.0, 0.0)
+                return False
+
+            current_xy = self._latest_odom_xy()
+            if current_xy is None:
+                self._publish_cmd_vel(0.0, 0.0)
+                time.sleep(interval)
+                continue
+
+            traveled = float(np.linalg.norm(current_xy - start_xy))
+            if traveled >= _LOC_ASSIST_PROBE_DISTANCE_M:
+                self._publish_cmd_vel(0.0, 0.0)
+                self.get_logger().info(
+                    f'Localization assist forward probe finished: traveled={traveled:.2f}m'
+                )
+                return False
+
+            if time.monotonic() > deadline:
+                self._publish_cmd_vel(0.0, 0.0)
+                self.get_logger().warn(
+                    f'Localization assist forward probe timeout: traveled={traveled:.2f}m '
+                    f'< target={_LOC_ASSIST_PROBE_DISTANCE_M:.2f}m'
+                )
+                return False
+
+            self._publish_cmd_vel(_LOC_ASSIST_PROBE_SPEED_MPS, 0.0)
             time.sleep(interval)
 
     def _should_stop_loc_assist(self, stop: threading.Event) -> bool:
