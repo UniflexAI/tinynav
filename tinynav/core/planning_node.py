@@ -620,7 +620,7 @@ def _rear_depth_worker_main(baseline_m, stop_event, t_shared, k_shared, origin_s
         fx, fy = K[0, 0], K[1, 1]
         cx, cy = K[0, 2], K[1, 2]
         # grid params must match PlanningNode defaults
-        grid_shape = (80, 80, 40)
+        grid_shape = (80, 80, 80)
         resolution = 0.1
         origin = np.array(origin_shared[:], dtype=np.float64)
         step = 4
@@ -763,7 +763,7 @@ class PlanningNode(Node):
         self.lidar_pose_sub = None
         self.lidar_ts = None
 
-        self.grid_shape = (80, 80, 40)
+        self.grid_shape = (80, 80, 80)
         self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 4
