@@ -12,7 +12,8 @@ from math_utils import matrix_to_quat
 from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
                            route_heading_penalty, score_trajectories_by_ESDF,
-                           footprint_lattice, PlanningNode, ROBOT_CONFIG)
+                           footprint_lattice, PlanningNode, ROBOT_CONFIG,
+                           reverse_armed, REVERSE_ENTER_M)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -736,3 +737,39 @@ def test_but_a_blocked_rear_still_refuses_the_reverse_row():
     standing, reverse = _score_rows(behind, back_step=_RES)
     assert standing < float('inf'), 'nothing is touching the robot where it stands'
     assert reverse == float('inf'), 'reverse drove into the obstacle behind it'
+
+
+def _steps_to(metres, res):
+    """Every reading the forward scan can report out to `metres`, as it computes
+    them -- `step * res`, which is where the float lands."""
+    return [step * res for step in range(int(round(metres / res)) + 1)]
+
+
+def test_the_reverse_gate_fires_at_the_distance_it_is_written_for():
+    """`front_clearance` counts grid steps, so it never lands exactly on a threshold
+    in metres: 6 * 0.05 is 0.30000000000000004. Compared against 0.30 the gate was
+    shut at its own number -- 720 frames of `front_clr=0.30 should_reverse=False` on
+    122 on 2026-09-16, the robot stationary in front of something 0.30 m away."""
+    for res in (0.05, 0.1):
+        for d in _steps_to(REVERSE_ENTER_M, res):
+            assert reverse_armed(d, 99, res), \
+                f'{d:.2f} m ahead at res {res} did not arm reverse'
+
+
+def test_but_a_reading_a_step_further_out_does_not():
+    """The other half. The slack is under one step, so it admits the reading nearest
+    the threshold and no further one -- otherwise it is just a wider threshold that
+    nobody chose."""
+    for res in (0.05, 0.1):
+        beyond = int(round(REVERSE_ENTER_M / res)) + 1
+        for step in range(beyond, beyond + 20):
+            d = step * res
+            assert not reverse_armed(d, 99, res), \
+                f'{d:.2f} m ahead at res {res} armed reverse'
+
+
+def test_and_no_way_forward_arms_it_however_far_the_wall_is():
+    """The clearance reading is a proxy for "can we go forward", not the question:
+    every forward trajectory in collision at 0.60-0.75 m read False and the robot
+    stood still -- 21 s of that on 122 on 2026-09-09, nothing published at all."""
+    assert reverse_armed(3.0, 0, 0.05)

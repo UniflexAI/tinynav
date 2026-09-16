@@ -294,6 +294,26 @@ def angle_between(a, b):
     return abs(np.arctan2(np.sin(d), np.cos(d)))
 
 
+#: How short the way forward has to be for the reverse family to be armed.
+REVERSE_ENTER_M = 0.30
+
+
+def reverse_armed(front_clearance, n_fwd_ok, resolution):
+    """**The reverse family is armed by there being no way forward.** Clearance is a
+    proxy for that and was once the only judge, so a robot with every forward
+    trajectory in collision at 0.60-0.75 m read False and stood still -- 21 s of that
+    on 122 on 2026-09-09, with nothing published at all.
+
+    Half a cell of slack because `front_clearance` counts grid steps: it lands on
+    multiples of `resolution` and so never exactly on a threshold in metres. 6 * 0.05
+    is 0.30000000000000004, above 0.30, which shut this gate at its own number -- 720
+    frames of `front_clr=0.30 should_reverse=False` on 122 on 2026-09-16, the robot
+    stationary in front of something 0.30 m away for five minutes. The slack is under
+    one step, so it admits the step nearest the threshold and no further one.
+    """
+    return front_clearance <= REVERSE_ENTER_M + resolution / 2 or n_fwd_ok == 0
+
+
 @njit(cache=True)
 def footprint_lattice(front_len, rear_len, half_w, safety_radius):
     """Body-frame (forward, left) offsets covering the footprint, centre first.
@@ -1170,16 +1190,9 @@ class PlanningNode(Node):
                 trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            # **The reverse family is armed by there being no way forward.** The
-            # clearance reading is a proxy for that and it was the only judge, so a
-            # robot with every forward trajectory in collision at 0.60-0.75 m read
-            # `should_reverse=False`, and standing still -- which is neither
-            # colliding nor gated -- was the cost minimum. 21 s of that on 122 on
-            # 2026-09-09, with nothing published at all.
-            enter_threshold = 0.30
             n_fwd_ok = sum(1 for i in range(len(trajectories))
                            if params[i][0] > 1e-3 and scores[i] != float('inf'))
-            should_reverse = front_clearance <= enter_threshold or n_fwd_ok == 0
+            should_reverse = reverse_armed(front_clearance, n_fwd_ok, self.resolution)
 
             target = self.target_pose
 
