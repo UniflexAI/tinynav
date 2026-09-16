@@ -24,6 +24,7 @@ import rclpy
 import rclpy.time
 import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos_event import SubscriptionEventCallbacks
 from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
@@ -55,7 +56,10 @@ _IMAGE_TOPICS_LOOPER = [
     '/slam/depth',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
-_PREVIEW_MIN_INTERVAL = 0.05  # 20 fps
+# Preview is watched over the uplink, and JPEG has no inter-frame compression,
+# so its bitrate scales with the frame rate -- lower this on a relayed link.
+_PREVIEW_MAX_FPS = float(os.environ.get('TINYNAV_PREVIEW_MAX_FPS', '20'))
+_PREVIEW_MIN_INTERVAL = 1.0 / _PREVIEW_MAX_FPS if _PREVIEW_MAX_FPS > 0 else 0.0
 _PREVIEW_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_MAX_EDGE_PX', '320'))
 _PREVIEW_JPEG_QUALITY = int(os.environ.get('TINYNAV_PREVIEW_JPEG_QUALITY', '50'))
 _PREVIEW_HIGH_MAX_EDGE_PX = int(os.environ.get('TINYNAV_PREVIEW_HIGH_MAX_EDGE_PX', '640'))
@@ -143,29 +147,53 @@ class BackendNode(Ros2NodeManager):
         self._odom_pose_at_kf: dict | None = None  # odom pose snapshotted at last mapPose update
         self._map_pose: dict | None = None
         self._localized: bool = False
+        self._reloc_seq: int = 0   # monotonic count of accepted relocalization fixes
+        # Last /map/reloc_status word: 'fused' on every relocalization the solve took,
+        # 'seeded' / 'unseeded' / 'switch_refused' across a map switch. 'unseeded' is
+        # the one the UI needs -- no fix is published until the camera finds one there,
+        # so `localized` alone would still show the map being left.
+        self._reloc_status: str = ''
+        # The capture-speed prior at the robot (path_speed.npy, via map_node). None
+        # where the map has no answer -- off-path, or a map baked before the prior
+        # existed -- which the topic says as +inf and JSON cannot carry.
+        self._path_speed: float | None = None
         self._esdf_bytes: bytes = b''
         self._obstacle_bytes: bytes = b''
         self._trajectory: list = []
         self._global_path: list = []
         self._footprint: list = []   # 4 corner points [{x,y},...] in world frame
         self._voxel_points: list = []
+        # Subscribed only while someone is watching the planning stream: decoding
+        # the cloud into points costs more than everything else this node does per
+        # frame, and it feeds nothing but that view.
+        self._voxel_sub = None
+        self._planning_watchers = 0
         self._grid_info: dict | None = None
         self._nav_target_pose: dict | None = None
 
         self.create_subscription(Float32, '/mapping/percent', self._on_mapping_percent, 10)
-        self.create_subscription(Odometry, '/slam/odometry_visual', self._on_slam_odom, 10)
+        # message_lost is what tells a hole in these stamps apart from a hole this
+        # node punched in them by falling behind; nothing observable here does.
+        self.odom_lost_total = 0
+        self.create_subscription(
+            Odometry, '/slam/odometry_visual', self._on_slam_odom, 10,
+            event_callbacks=SubscriptionEventCallbacks(message_lost=self._on_odom_lost))
         self.create_subscription(
             Odometry, '/mapping/current_pose_in_map', self._on_pose_in_map, 10
         )
-        # Mark localized as soon as any relocalization succeeds (published unconditionally
-        # by map_node, unlike current_pose_in_map which requires POIs to be set).
+        # Mark localized on the FUSED fix, not on /map/relocalization -- that one fires
+        # on every successful PnP, including the outliers lock-once exists to reject, so
+        # gating on it claims localized while T_from_map_to_odom is still None.
         self.create_subscription(
-            Odometry, '/map/relocalization', self._on_relocalization, 10
+            Odometry, '/map/relocalization_fix', self._on_relocalization, 10
         )
+        self.create_subscription(String, '/map/reloc_status', self._on_reloc_status, 10)
+        self.create_subscription(Float32, '/planning/speed_cap', self._on_path_speed, 10)
         self.create_subscription(Image, '/planning/height_map', self._on_height_map, 1)
         self.create_subscription(
             OccupancyGrid, '/planning/obstacle_mask', self._on_obstacle_mask, 1
         )
+        self.create_subscription(Bool, '/planning/on_stairs', self._on_on_stairs, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self._on_trajectory_path, 1)
         self.create_subscription(Path, '/mapping/global_plan', self._on_global_plan, 1)
         self.create_subscription(
@@ -173,9 +201,6 @@ class BackendNode(Ros2NodeManager):
         )
         self.create_subscription(
             PointCloud, '/planning/footprint', self._on_footprint, 1
-        )
-        self.create_subscription(
-            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
         )
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -203,7 +228,10 @@ class BackendNode(Ros2NodeManager):
         # Sensor mode detection and image subscriptions
         self._sensor_mode: str = 'unknown'  # 'looper' | 'realsense' | 'unknown'
         self._image_subs: dict = {}
-        self._image_sub_lock = threading.Lock()
+        # Guards the subscription slots -- _image_subs and _voxel_sub. Separate from
+        # self._lock because destroying a subscription waits for in-flight
+        # callbacks, and those take self._lock.
+        self._subs_lock = threading.Lock()
         self._last_frame: dict[str, bytes] = {}   # topic -> latest JPEG bytes
         self._last_frame_time: dict[str, float] = {}
         self._looper_bridge_proc: subprocess.Popen | None = None
@@ -222,6 +250,7 @@ class BackendNode(Ros2NodeManager):
         self._nav_nodes_running: bool = False
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
+        self._on_stairs: bool = False
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
@@ -292,10 +321,35 @@ class BackendNode(Ros2NodeManager):
                 pass
 
     def _on_relocalization(self, msg: Odometry):
+        # One message per fusion of map->odom, so it doubles as the liveness count the
+        # frontend flashes a badge on (_reloc_seq). Under lock-once that is a single
+        # message per run.
         pose = self._odom_to_dict(msg, source='map')
         with self._lock:
             self._map_pose = pose
             self._localized = True
+            self._reloc_seq += 1
+            # A fix landing outranks any status word, including one left by a previous
+            # map_node process -- the status topic has no way to retract those itself.
+            self._reloc_status = ''
+
+    def _on_reloc_status(self, msg: String):
+        status = str(msg.data)
+        with self._lock:
+            self._reloc_status = status
+        if status == 'unseeded':
+            self.get_logger().warning(
+                '[reloc] the new map was loaded with no seed: nav has no pose on it '
+                'until a relocalization lands')
+
+    def _on_path_speed(self, msg: Float32):
+        v = float(msg.data)
+        with self._lock:
+            self._path_speed = v if math.isfinite(v) else None
+
+    def _on_on_stairs(self, msg: Bool):
+        with self._lock:
+            self._on_stairs = bool(msg.data)
 
     def _on_nav_target_pose(self, msg: Odometry):
         with self._lock:
@@ -360,8 +414,14 @@ class BackendNode(Ros2NodeManager):
             self._trajectory = pts
 
     def _on_global_plan(self, msg: Path):
+        # z is kept. It used to be dropped here and the odom-frame copy was then
+        # rotated with z=0 -- harmless on a map built around z~0, and a whole-path
+        # skew on one built 157m off it (map_2026_08_07: every POI sits at
+        # z=-157), because a degree of tilt across 157m is metres of sideways
+        # error, identically on every point.
         pts = [
-            {'x': p.pose.position.x, 'y': p.pose.position.y}
+            {'x': p.pose.position.x, 'y': p.pose.position.y,
+             'z': p.pose.position.z}
             for p in msg.poses
         ]
         with self._lock:
@@ -388,6 +448,9 @@ class BackendNode(Ros2NodeManager):
             corners = [{'x': p.x, 'y': p.y} for p in msg.points]
         with self._lock:
             self._footprint = corners
+
+    def _on_odom_lost(self, info):
+        self.odom_lost_total += info.total_count_change
 
     def _on_occupied_voxels(self, msg: PointCloud2):
         """Store a downsampled local 3D occupied voxel cloud for the web UI."""
@@ -438,22 +501,41 @@ class BackendNode(Ros2NodeManager):
         ])
 
     def _transform_path_via_tf(self, path: list) -> list:
-        """Transform map-frame path points to odom (world) frame via TF lookup."""
+        """Transform map-frame path points to odom (world) frame via TF lookup.
+
+        The point's own z goes through the rotation. Substituting 0 for it is only
+        harmless when the map is built around z=0; on a map whose frame sits 157m
+        away it tilts the whole path sideways by metres.
+
+        A missing TF returns **nothing**, not the map-frame points: handing those
+        back unchanged labels map coordinates as odom ones, and the consumer draws
+        a path tens of metres from the robot with no way to tell.
+        """
         if not path:
             return path
         try:
             t = self._tf_buffer.lookup_transform('world', 'map', rclpy.time.Time())
-            tr = t.transform.translation
-            rot = t.transform.rotation
-            R = self._quat_to_rot(rot.x, rot.y, rot.z, rot.w)
-            trans = np.array([tr.x, tr.y, tr.z])
-            result = []
-            for pt in path:
-                p = R @ np.array([pt['x'], pt['y'], 0.0]) + trans
-                result.append({'x': float(p[0]), 'y': float(p[1])})
-            return result
-        except Exception:
-            return path  # TF not yet available — fall back to map-frame coords
+        except Exception as exc:  # noqa: BLE001 - any TF failure means "no answer"
+            self._note_no_tf(exc)
+            return []
+        tr = t.transform.translation
+        rot = t.transform.rotation
+        R = self._quat_to_rot(rot.x, rot.y, rot.z, rot.w)
+        trans = np.array([tr.x, tr.y, tr.z])
+        return [
+            {'x': float(p[0]), 'y': float(p[1])}
+            for p in (R @ np.array([pt['x'], pt['y'], pt.get('z', 0.0)]) + trans
+                      for pt in path)
+        ]
+
+    def _note_no_tf(self, exc) -> None:
+        """Say it once a second at most: the snapshot is built at the UI's rate."""
+        now = time.time()
+        if now - getattr(self, '_no_tf_said', 0.0) < 1.0:
+            return
+        self._no_tf_said = now
+        self.get_logger().warning(
+            f'no world<-map transform, so the global path has no odom-frame form: {exc}')
 
     # ------------------------------------------------------------------ #
     # Sensor / camera                                                      #
@@ -515,24 +597,55 @@ class BackendNode(Ros2NodeManager):
         self._sync_image_sub(topic)
 
     def _sync_image_sub(self, topic: str):
-        """Bring the subscription in line with whether anyone is still watching.
+        """Make the subscription match whether anyone is still listening.
 
-        Viewers come and go concurrently, so whether to subscribe is read here
-        rather than carried in from the caller: a decision made before this lock
-        was taken can already be stale, and acting on it leaves a second reader
-        on the topic that _image_subs no longer names and no later removal frees.
-
-        This runs under its own lock, not self._lock: destroy_subscription waits
-        for the executor to leave the callback, and the executor takes self._lock
-        to fan a frame out to viewers.
-        """
-        with self._image_sub_lock:
+        Re-reads the callback list here rather than trusting a first/empty flag
+        computed by the caller: add and remove decide outside this lock, so two
+        callers could each see themselves as the first and create a subscription
+        each -- the loser then leaks, invisible to _image_subs and still pulling
+        a full image stream off the Looper. The reverse order dropped a
+        subscription another caller was still using."""
+        with self._subs_lock:
             with self._lock:
-                watched = bool(self.preview_callbacks.get(topic))
-            if watched and topic not in self._image_subs:
+                wanted = bool(self.preview_callbacks.get(topic))
+            have = topic in self._image_subs
+            if wanted and not have:
                 self._image_subs[topic] = self._make_image_sub(topic)
-            elif not watched and topic in self._image_subs:
+            elif not wanted and have:
+                # self._lock is released here: destroy waits for in-flight
+                # callbacks, which take it.
                 self.destroy_subscription(self._image_subs.pop(topic))
+
+    def add_planning_watcher(self):
+        """Register a planning-stream viewer; subscribes on the first one."""
+        with self._lock:
+            self._planning_watchers += 1
+        self._sync_voxel_sub()
+
+    def remove_planning_watcher(self):
+        """Unregister a viewer; drops the subscription when the last one leaves."""
+        with self._lock:
+            self._planning_watchers = max(0, self._planning_watchers - 1)
+        self._sync_voxel_sub()
+
+    def _sync_voxel_sub(self):
+        """Make the voxel subscription match whether anyone is watching.
+
+        Same shape as _sync_image_sub, and for the same reason: the count is
+        re-read here so a decision taken by a caller cannot be acted on after it
+        has gone stale."""
+        with self._subs_lock:
+            with self._lock:
+                wanted = self._planning_watchers > 0
+            if wanted and self._voxel_sub is None:
+                self._voxel_sub = self.create_subscription(
+                    PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+                )
+            elif not wanted and self._voxel_sub is not None:
+                self.destroy_subscription(self._voxel_sub)
+                self._voxel_sub = None
+                with self._lock:
+                    self._voxel_points = []
 
     def _make_image_sub(self, topic: str):
         if topic == _COLOR_TOPIC_LOOPER:
@@ -612,6 +725,9 @@ class BackendNode(Ros2NodeManager):
             path_snapshot = list(self._global_path)
             snapshot = {
                 'localized': self._localized,
+                'reloc_seq': self._reloc_seq,
+                'reloc_status': self._reloc_status,
+                'path_speed': self._path_speed,
                 'odom_pose': self._odom_pose,
                 'odom_pose_at_kf': self._odom_pose_at_kf,
                 'map_pose': self._map_pose,
@@ -680,6 +796,7 @@ class BackendNode(Ros2NodeManager):
             nav_nodes = self._nav_nodes_running
             nav_paused = self._nav_paused
             nav_active = self._nav_active
+            on_stairs = self._on_stairs
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -693,6 +810,7 @@ class BackendNode(Ros2NodeManager):
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
             'navActive': nav_active,
+            'onStairs': on_stairs,
         }
 
     @staticmethod
@@ -820,6 +938,7 @@ class BackendNode(Ros2NodeManager):
             self._global_path = []
             self._nav_target_pose = None
             self._nav_paused = False
+            self._on_stairs = False
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
@@ -856,6 +975,12 @@ class BackendNode(Ros2NodeManager):
             self._map_pose = None
             self._global_path = []
             self._nav_target_pose = None
+        # Re-latch resume on /nav/paused: the freshly spawned cmd_vel_control is a
+        # TRANSIENT_LOCAL subscriber and would otherwise inherit a stale 'paused'
+        # latched before this restart and silently freeze — a POI sent after
+        # relocalize would be swallowed. _set_nav_paused resets the flag and
+        # re-latches together (mirrors cmd_stop_nav_nodes resetting _nav_paused).
+        self._set_nav_paused(False)
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
@@ -1131,15 +1256,19 @@ class BackendNode(Ros2NodeManager):
         else:
             self._stop_all()
 
-    def cmd_nav_pause(self):
+    def _set_nav_paused(self, paused: bool):
+        """Set the pause flag and re-latch /nav/paused together, so the in-memory
+        flag and the latched topic (which a freshly spawned cmd_vel_control reads
+        on startup) can never diverge. Single source for pause/resume/restart."""
         with self._lock:
-            self._nav_paused = True
-        self._pause_pub.publish(Bool(data=True))
+            self._nav_paused = paused
+        self._pause_pub.publish(Bool(data=paused))
+
+    def cmd_nav_pause(self):
+        self._set_nav_paused(True)
 
     def cmd_nav_resume(self):
-        with self._lock:
-            self._nav_paused = False
-        self._pause_pub.publish(Bool(data=False))
+        self._set_nav_paused(False)
 
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))

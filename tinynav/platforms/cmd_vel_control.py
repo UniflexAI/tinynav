@@ -53,7 +53,12 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = self.robot.min_linear_vel
         self.min_effective_angular_speed = self.robot.min_angular_vel
+        # How small a REQUEST means the planner is stopping rather than driving -- not
+        # the same quantity as the speed the chassis can execute. See `_snap`.
         self.linear_engage_threshold = 0.04
+        # No measured value for the turn axis yet, so it keeps the old behaviour
+        # (request below the executable minimum reads as a stop).
+        self.angular_engage_threshold = self.min_effective_angular_speed
         self.fixed_reverse_speed = 0.3
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
@@ -89,6 +94,21 @@ class CmdVelControlNode(Node):
 
     def pose_callback(self, msg):
         self.pose = msg
+
+    @staticmethod
+    def _snap(limited: float, requested: float, min_exec: float, engage: float) -> float:
+        """The chassis cannot execute speeds below `min_exec`, so an acceleration-limited
+        value inside that band is either a ramp still climbing (snap up) or the tail of a
+        stop (snap to 0). The planner's own `requested` says which, judged against
+        `engage` -- how small a request means stopping. Using `min_exec` for both makes
+        every request inside the band read as a stop, which is what silenced the linear
+        axis when min_linear_vel was raised to 0.2.
+        """
+        if abs(limited) >= min_exec:
+            return limited
+        if abs(requested) >= engage:
+            return float(np.sign(requested) * min_exec)
+        return 0.0
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
@@ -141,19 +161,12 @@ class CmdVelControlNode(Node):
         # and forced rotate-in-place should take effect immediately.
         out.angular.z = float(np.clip(target_cmd.angular.z, -self.max_angular_speed, self.max_angular_speed))
 
-        # Linear x: robot cannot execute tiny non-zero speeds reliably.
-        # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
-        if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
-        elif abs(out.linear.x) < self.min_effective_linear_speed:
-            out.linear.x = 0.0
-
-        # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
-        if 0.0 < abs(out.angular.z) < self.min_effective_angular_speed:
-            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed:
-                out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
-            else:
-                out.angular.z = 0.0
+        out.linear.x = self._snap(out.linear.x, target_cmd.linear.x,
+                                  self.min_effective_linear_speed,
+                                  self.linear_engage_threshold)
+        out.angular.z = self._snap(out.angular.z, target_cmd.angular.z,
+                                   self.min_effective_angular_speed,
+                                   self.angular_engage_threshold)
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out

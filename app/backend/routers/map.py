@@ -53,8 +53,10 @@ def map_current():
         _, meta = render_map(node.map_path)
     except Exception as e:
         raise HTTPException(500, str(e))
+    name = os.path.basename(os.path.realpath(node.map_path)) if os.path.islink(node.map_path) else None
     return {
         'imageUrl': '/map/image',
+        'name': name,
         **meta,
     }
 

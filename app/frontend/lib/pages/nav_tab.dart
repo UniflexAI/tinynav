@@ -180,6 +180,23 @@ class _NavStatusCardState extends ConsumerState<_NavStatusCard> {
                     : const Text('Cancel'),
               ),
           ]),
+          if (isNavigating && s.onStairs) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.orange.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.stairs, color: Colors.orange, size: 20),
+                SizedBox(width: 8),
+                Text('Stairs ahead',
+                    style: TextStyle(
+                        color: Colors.orange, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ],
           if (active) ...[
             const SizedBox(height: 10),
             ClipRRect(

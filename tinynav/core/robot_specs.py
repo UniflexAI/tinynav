@@ -9,12 +9,25 @@ class ObstacleConfig:
 
     z-band is relative to camera height (T[2, 3]). Taller robots need a wider
     band so hanging obstacles and low walls still count as collisions.
+
+    The values here are this fork's, measured on its rigs, and they are NOT upstream's
+    (which are -0.4/0.4, 0.1, 0.2, 2). They arrived as one global config inside
+    planning_node -- `94e9871` tuned min_wall_span_m to 0.05 and `95ec80a` the
+    occupancy threshold -- and moved here when upstream made the config per-robot.
+    The move is upstream's structure with the fork's numbers. The band below is the
+    default for every robot except b2, which the operator widened to -0.6/0.6 on
+    2026-09-03 -- that is what this field is per-robot for, and it is a judgement about
+    a rig rather than something a merge should have done on its own.
     """
-    robot_z_bottom: float = -0.4
-    robot_z_top: float = 0.4
-    occ_threshold: float = 0.1
-    min_wall_span_m: float = 0.2
-    dilation_cells: int = 2
+    robot_z_bottom: float = -0.45
+    robot_z_top: float = 0.2
+    occ_threshold: float = 0.05
+    min_wall_span_m: float = 0.05
+    #: Only cells whose lowest occupied voxel sits within this of robot_z_bottom are
+    #: span-filtered: walls span, stair risers and ground bumps do not. Cells starting
+    #: above the band are floating obstacles and keep a single-voxel noise floor.
+    ground_band_m: float = 0.3
+    dilation_cells: int = 0
 
 
 @dataclass
@@ -63,38 +76,43 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
-    length=0.4, width=0.3,
-    camera_x=0.2, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
+    length=0.6, width=0.3,
+    camera_x=0.35, camera_y=0.0,
+    control_x=0.05, control_y=0.0,
+    safety_radius=0.1,
 )
 
 GO2W_CONFIG = RobotConfig(
     name='go2w', shape='square',
-    length=0.4, width=0.3,
-    camera_x=0.2, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
-    safety_radius=0.2,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),
+    length=0.6, width=0.3,
+    camera_x=0.35, camera_y=0.0,
+    control_x=0.05, control_y=0.0,
+    safety_radius=0.1,
 )
 
 B2_CONFIG = RobotConfig(
     name='b2', shape='square',
-    length=1.1, width=0.5,
-    camera_x=0.3, camera_y=0.0,
+    length=0.8, width=0.3,
+    camera_x=0.5, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
+    # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
+    # robot could barely move: cmd_vel_control DROPS a target below this rather than
+    # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
+    # sample that drive was 0.000 or exactly 0.200. Raising it needs the planner's own
+    # speed floor raised with it.
+    # Taller than the default band covers: the operator's call, 2026-09-03. This is
+    # the same band upstream ships for b2, adopted now that someone has judged it
+    # rather than as a side effect of a merge.
     obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
 B2W_CONFIG = RobotConfig(
     name='b2w', shape='square',
-    length=1.1, width=0.5,
-    camera_x=0.3, camera_y=0.0,
+    length=0.8, width=0.3,
+    camera_x=0.5, camera_y=0.0,
     control_x=0.0, control_y=0.0,
     safety_radius=0.1,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
 G1_CONFIG = RobotConfig(
@@ -104,7 +122,6 @@ G1_CONFIG = RobotConfig(
     control_x=0.0, control_y=0.0,
     safety_radius=0.15,
     min_linear_vel=0.2, min_angular_vel=0.3,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
 )
 
 LEKIWI_CONFIG = RobotConfig(

@@ -1,22 +1,38 @@
+"""Occupancy-grid + ESDF + trajectory-library planner.
+
+The planner builds a rolling 3D occupancy grid from depth, derives a 2D
+obstacle map + ESDF, samples a trajectory library, and selects the trajectory
+that minimizes a cost of clearance + route adherence/progress (+ smoothness,
++ goal heading for turn-in-place candidates), subject to a hard collision filter
+and a reverse gate. With no route available it falls back to distance-to-goal.
+"""
+
+
 import rclpy
 from rclpy.node import Node
+from tf2_ros import Buffer, TransformListener
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
-from scipy.ndimage import distance_transform_edt, binary_dilation
-from scipy.spatial.transform import Rotation as R
+from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
+from dataclasses import replace
 from numba import njit
-import message_filters
-from rclpy.time import Time
-from sensor_msgs.msg import PointCloud2, PointCloud
-from geometry_msgs.msg import PoseStamped, Point32
-import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
-from codetiming import Timer
 import cv2
+import rclpy
+import message_filters
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
+from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
+from nav_msgs.msg import Path, Odometry, OccupancyGrid
+from geometry_msgs.msg import PoseStamped, Point32
+from std_msgs.msg import Header, Float32
+from cv_bridge import CvBridge
+import sensor_msgs_py.point_cloud2 as pc2
+from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
 
 # === Helper functions ===
 @njit(cache=True)
@@ -102,9 +118,22 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
     return occupancy_grid
 
 
-def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
+def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None,
+                       min_span_map=None):
     """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
-    Walls have large z-span; stair risers / ground bumps have small span."""
+    The span filter only applies to cells whose lowest occupied voxel sits near
+    the ground (within ground_band_m of robot_z_bottom): walls have large z-span
+    while stair risers / ground bumps have small span. Cells whose occupancy
+    starts above that ground band (floating / mid-height obstacles) use a
+    single-voxel span threshold (resolution) just to reject single-voxel
+    noise, so real low-profile obstacles are still kept.
+
+    `min_span_map` is an optional (h,w) array overriding min_wall_span_m per cell,
+    which is how a caller marks somewhere a riser should read as a step rather than
+    a wall. Cells it relaxes skip the ground-band gate -- on a staircase the ground
+    is the staircase, and the steps ahead sit above the band. Per cell, not a global
+    switch, so low obstacles beside a staircase keep blocking while it is being
+    climbed; the caller owns what the regions mean."""
     config = config or ObstacleConfig()
     h, w, z_dim = occupancy_grid.shape
     z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
@@ -116,49 +145,94 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
         band_occ = occupancy_grid[:, :, z_mask] > config.occ_threshold
         has_occ = np.any(band_occ, axis=2)
         n_z = band_occ.shape[2]
+        z_rel_band = z_rel[z_mask]
         z_idx = np.arange(n_z, dtype=np.float32)
         occ_high = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
         occ_low = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], n_z).min(axis=2)
         z_span = (occ_high - occ_low) * resolution
-        obstacle = has_occ & (z_span >= config.min_wall_span_m)
+        # relative height of the lowest occupied voxel in each cell
+        low_z_rel = z_rel_band[np.clip(occ_low, 0, n_z - 1).astype(np.int64)]
+        near_ground = low_z_rel <= config.robot_z_bottom + config.ground_band_m
+        min_span = config.min_wall_span_m if min_span_map is None else min_span_map
+        # A relaxed cell keeps its threshold at any height: mid-climb the steps ahead
+        # start above the ground band, so gating on height would read every riser
+        # above it as a floating obstacle.
+        relaxed = False if min_span_map is None else min_span_map > config.min_wall_span_m
+        # ground-anchored (or caller-relaxed) cells: full span filter (wall vs
+        # stair/bump); floating cells: single-voxel span filter just to reject noise
+        span_ok = np.where(near_ground | relaxed,
+                           z_span >= min_span,
+                           z_span >= resolution)
+        obstacle = has_occ & span_ok
 
     if config.dilation_cells > 0 and np.any(obstacle):
         obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
     return obstacle
+
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
+    max_path_len_m=1e9, max_lat_acc=1e9,
 ):
-    """Regular sampled lattice (forward-only)."""
+    """Regular sampled lattice (forward-only).
+
+    Two caps shape the lattice beyond the velocity bounds, because `duration` alone
+    ties both the planning horizon and the turn rate to whatever speed is allowed:
+
+    `max_path_len_m` caps a trajectory's ARC LENGTH, not its speed. Without it the
+    lattice reaches vx*duration -- at 1.34 m/s over 3 s that is a 4 m arc, committing
+    the robot to a shape further out than the obstacle map is worth trusting. A
+    trajectory that hits the cap freezes in place for its remaining steps, so vx (the
+    commanded speed, and the feedforward) is untouched: it still travels fast, it is
+    just drawn less far. vx=0 rows never accumulate length, which is what leaves the
+    turn-in-place vocabulary at its full `duration` of rotation -- the cost function's
+    heading term depends on those rows swinging a real angle.
+
+    `max_lat_acc` caps vx*omega, so the same steering that is fine at a crawl is not
+    offered at speed. It binds only above max_lat_acc/max_angular_vel; below that the
+    omega range is unchanged, and at a standstill it does not bind at all.
+    """
     num_steps = int(duration / dt) + 1
 
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
+    n_omega = num_samples
     vx_samples = np.linspace(0.0, vx_max, n_vx)
-    omega_y_samples = np.linspace(-max_angular_vel, max_angular_vel, num_samples)
 
-    num_samples = len(vx_samples) * len(omega_y_samples)
+    num_samples = n_vx * n_omega
 
     trajectories = np.empty((num_samples, num_steps, 7))
     params = np.empty((num_samples, 2))
 
     k = -1
-    for i_vx in range(len(vx_samples)):
-        for i_omega in range(len(omega_y_samples)):
+    for i_vx in range(n_vx):
+        vx = vx_samples[i_vx]
+        # Per-speed omega range: the lattice stays rectangular (n_vx * n_omega rows),
+        # only the span of each row's omega shrinks as vx rises.
+        omega_lim = max_angular_vel
+        if vx > 1e-6 and max_lat_acc / vx < omega_lim:
+            omega_lim = max_lat_acc / vx
+        omega_y_samples = np.linspace(-omega_lim, omega_lim, n_omega)
+        # Nominal arc length per step; 0 for the stationary rows, which is why the
+        # length cap cannot touch them.
+        step_len = vx * dt
+        for i_omega in range(n_omega):
             k += 1
-            vx = vx_samples[i_vx]
             omega_y = omega_y_samples[i_omega]
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
+            path_len = 0.0
             for i in range(num_steps):
-                dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
-                q = q @ dq
-                v_world = q @ np.array([0.0, 0.0, vx])
-                p += v_world * dt
+                if path_len + step_len <= max_path_len_m:
+                    dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+                    q = q @ dq
+                    v_world = q @ np.array([0.0, 0.0, vx])
+                    p += v_world * dt
+                    path_len += step_len
                 traj[i, :3] = p
                 traj[i, 3:] = matrix_to_quat(q)
             #hack
@@ -199,21 +273,106 @@ def generate_predefined_trajectory_vocabularies(
 
     return np.asarray(trajectories), np.asarray(params)
 
+
 @njit(cache=True)
-def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safety_radius=0.1,
+def heading_of_pose7(pose7):
+    """World heading (rad) of a trajectory pose: its body +Z axis -- this stack's
+    forward -- projected onto world XY.
+
+    `math_utils.heading_of` is the same convention off a rotation matrix and says why
+    it may only live in one place; this is its njit-able form for the pose7 rows the
+    lattice carries, and the callback below calls it too so there is one copy.
+    """
+    qx, qy, qz, qw = pose7[3], pose7[4], pose7[5], pose7[6]
+    return np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
+
+
+@njit(cache=True)
+def angle_between(a, b):
+    """|a - b| folded into [0, pi]. `math_utils.wrap_angle` in njit form."""
+    d = a - b
+    return abs(np.arctan2(np.sin(d), np.cos(d)))
+
+
+@njit(cache=True)
+def footprint_lattice(front_len, rear_len, half_w, safety_radius):
+    """Body-frame (forward, left) offsets covering the footprint, centre first.
+
+    **Five points -- centre plus corners -- left a hole where it hurts most.** On a
+    b2 (0.80 x 0.30 m) the middle of the front edge sat 0.15 m from either front
+    corner, so an obstacle touching the robot's nose read min ESDF 0.15 m: above
+    safety_radius, scored 0.0, ranked as open space. `_front_obstacle_dist` samples
+    that midpoint and did see it, so the two halves of the planner disagreed by
+    construction.
+
+    A lattice of pitch (dx, dy) leaves every footprint point within
+    sqrt((dx/2)^2 + (dy/2)^2) of a sample, so pitch <= safety_radius*sqrt(2) makes
+    "every sample clears safety_radius" a proof that the whole footprint does. The
+    pitch follows from safety_radius; it is not a knob.
+    """
+    pitch = safety_radius * np.sqrt(2.0)
+    n_long = int(np.ceil((front_len + rear_len) / pitch)) + 1
+    n_lat = int(np.ceil((2.0 * half_w) / pitch)) + 1
+    if n_long < 2:
+        n_long = 2
+    if n_lat < 2:
+        n_lat = 2
+    fwd = np.empty(n_long * n_lat + 1, dtype=np.float64)
+    lat = np.empty(n_long * n_lat + 1, dtype=np.float64)
+    # Index 0 is the centre and stays the centre: the route lookups read it.
+    fwd[0] = 0.0
+    lat[0] = 0.0
+    n = 1
+    for a in range(n_long):
+        f = -rear_len + (front_len + rear_len) * a / (n_long - 1)
+        for b in range(n_lat):
+            l = -half_w + (2.0 * half_w) * b / (n_lat - 1)
+            if f == 0.0 and l == 0.0:
+                continue                      # already sample 0
+            fwd[n] = f
+            lat[n] = l
+            n += 1
+    return fwd[:n], lat[:n]
+
+
+@njit(cache=True)
+def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
+                                route_heading_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15):
-    """Score trajectories by minimum ESDF clearance across the robot footprint (center + 4 corners)."""
+    """
+    Score trajectories by ESDF clearance over the footprint, sampled on a lattice fine
+    enough that no obstacle can hide between the samples (see below), plus two lookups
+    against the global route (path_dist_map, remaining_map -- see build_route_fields),
+    which share ESDF_map's shape, origin and resolution.
+    :return: per trajectory, the obstacle score (inf on collision), the step index of the
+             minimum clearance, the worst (max) distance from the trajectory center to the
+             route over the whole trajectory, the route arc length still ahead of its end
+             cell, and how far its end heading is from the route's own direction there.
+    """
     scores = []
     occ_points = []
+    path_costs = []
+    end_heading_errs = []
+    end_remainings = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
+
+    off_fwd, off_lat = footprint_lattice(front_len, rear_len, half_w, safety_radius)
+    n_samp = len(off_fwd)
 
     for t in range(len(trajectories)):
         traj = trajectories[t]
         min_dist_for_traj = float('inf')
         closest_step_for_traj = -1
+        path_cost_max = 0.0
+        path_cost_n = 0
+        traveled_arc = 0.0
 
         for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
+            if i > 0:
+                dx = x_world - traj[i - 1, 0]
+                dy = y_world - traj[i - 1, 1]
+                traveled_arc += (dx * dx + dy * dy) ** 0.5
             qx, qy, qz, qw = traj[i, 3], traj[i, 4], traj[i, 5], traj[i, 6]
 
             # world XY forward from quaternion (body +Z forward)
@@ -228,30 +387,52 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
             left_x = -fwd_y
             left_y = fwd_x
 
-            # center + 4 corners, unrolled for numba
-            check_xs = (
-                x_world,
-                x_world + fwd_x * front_len + left_x * half_w,
-                x_world + fwd_x * front_len - left_x * half_w,
-                x_world - fwd_x * rear_len  + left_x * half_w,
-                x_world - fwd_x * rear_len  - left_x * half_w,
-            )
-            check_ys = (
-                y_world,
-                y_world + fwd_y * front_len + left_y * half_w,
-                y_world + fwd_y * front_len - left_y * half_w,
-                y_world - fwd_y * rear_len  + left_y * half_w,
-                y_world - fwd_y * rear_len  - left_y * half_w,
-            )
-
-            for k in range(5):
-                x_img = int((check_xs[k] - origin[0]) / resolution)
-                y_img = int((check_ys[k] - origin[1]) / resolution)
+            for k in range(n_samp):
+                cx = x_world + fwd_x * off_fwd[k] + left_x * off_lat[k]
+                cy = y_world + fwd_y * off_fwd[k] + left_y * off_lat[k]
+                x_img = int((cx - origin[0]) / resolution)
+                y_img = int((cy - origin[1]) / resolution)
                 if 0 <= x_img < ESDF_rows and 0 <= y_img < ESDF_cols:
                     dist = ESDF_map[x_img, y_img]
                     if dist < min_dist_for_traj:
                         min_dist_for_traj = dist
                         closest_step_for_traj = i
+                    if k == 0:  # route adherence is measured on the center only
+                        center_path_dist = float(path_dist_map[x_img, y_img])
+                        if center_path_dist > path_cost_max:
+                            path_cost_max = center_path_dist
+                        path_cost_n += 1
+
+        if path_cost_n > 0:
+            path_costs.append(path_cost_max)
+        else:
+            path_costs.append(1e3)  # the whole trajectory left the grid
+
+        end_x_img = int((traj[-1, 0] - origin[0]) / resolution)
+        end_y_img = int((traj[-1, 1] - origin[1]) / resolution)
+        if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
+            end_remaining = float(remaining_map[end_x_img, end_y_img])
+        else:
+            end_remaining = 1e3
+
+        # How far the trajectory ends up pointing from the way the route runs there.
+        # Measured at the end cell, on the same body-+z-forward convention the rest of
+        # this file uses. 0 when the end left the grid: an off-grid end is already
+        # punished through path_cost/remaining, and a heading against a route we cannot
+        # look up would be a number invented from nothing.
+        end_heading_err = 0.0
+        if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
+            end_heading_err = angle_between(heading_of_pose7(traj[-1]),
+                                            route_heading_map[end_x_img, end_y_img])
+        end_heading_errs.append(end_heading_err)
+
+        start_x_img = int((traj[0, 0] - origin[0]) / resolution)
+        start_y_img = int((traj[0, 1] - origin[1]) / resolution)
+        if 0 <= start_x_img < ESDF_rows and 0 <= start_y_img < ESDF_cols:
+            start_remaining = float(remaining_map[start_x_img, start_y_img])
+            if start_remaining < 1e3:
+                end_remaining = max(end_remaining, start_remaining - traveled_arc)
+        end_remainings.append(end_remaining)
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
@@ -266,15 +447,8 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, origin, resolution, safet
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
-    return scores, occ_points
+    return scores, occ_points, path_costs, end_remainings, end_heading_errs
 
-def goal_heading_error(traj_end, target):
-    """Absolute yaw error between a trajectory's end heading and the bearing to the target."""
-    dx = target[0] - traj_end[0]
-    dy = target[1] - traj_end[1]
-    yaw1 = R.from_quat(traj_end[3:7]).as_euler("xyz")[2] + np.pi / 2
-    yaw2 = np.arctan2(dy, dx)
-    return abs(np.arctan2(np.sin(yaw2 - yaw1), np.cos(yaw2 - yaw1)))
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
@@ -299,22 +473,104 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def generate_trajectories(init_p, init_q):
-    trajectories, params = generate_trajectory_library_3d(
-        init_p=init_p, init_q=init_q,
-        max_linear_vel=ROBOT_CONFIG.max_linear_vel,
-        max_angular_vel=ROBOT_CONFIG.max_angular_vel,
-    )
-    vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-    trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-    params = np.concatenate([params, vocab_params], axis=0)
-    return trajectories, params
+def route_band_fade(end_remaining_m, terminal_band_m):
+    """How much of the route is still ahead, as 0..1 over the last `terminal_band_m`.
+
+    One encoding of the band, because two terms hand over across it: outside it the
+    route says which way to point and how much progress is left, inside it the route
+    has run out (remaining_map saturates at 0 and can rank nothing) and the goal --
+    its position and its bearing -- takes over. Written twice, the two would drift and
+    the robot would be pulled toward two different headings on arrival.
+    """
+    return min(1.0, end_remaining_m / max(terminal_band_m, 1e-6))
+
+
+def route_heading_penalty(weight, heading_err_rad, end_remaining_m, terminal_band_m):
+    """What a candidate pays for not pointing the way the route runs.
+
+    A separate function because it is the whole fix and it has to be assertable: the
+    cost it feeds is a closure inside a 200-line callback, so a test that only checked
+    the heading FIELD would go green with this term deleted from the cost.
+    """
+    return weight * heading_err_rad * route_band_fade(end_remaining_m, terminal_band_m)
+
+
+def build_route_fields(route_xy, shape, origin, resolution):
+    """
+    Rasterize a route into the lookup maps read by the DWA scoring, so scoring costs
+    one array lookup per trajectory point instead of a search over route points.
+    :param route_xy: (N, 2) route in world xy, e.g. map_node's global plan transformed
+                     into this node's world/odom frame -- the path is already clean of
+                     static obstacles by construction, this just makes it queryable.
+    :return: (path_dist_map, remaining_map, route_heading_map, has_route). path_dist_map
+             is the distance in m from each cell to the nearest route cell, remaining_map
+             is the route arc length still ahead, and route_heading_map is the direction
+             the route runs there -- all three with off-route cells inheriting the value
+             of their nearest route cell, from one EDT. The heading is what lets the
+             scoring ask "is this trajectory pointing along the route": the bearing to
+             the goal cannot answer that at a corner, where pointing at the goal IS
+             cutting the corner.
+    """
+    path_dist_map = np.full(shape, 1e3, dtype=np.float32)
+    remaining_map = np.full(shape, 1e3, dtype=np.float32)
+    route_heading_map = np.zeros(shape, dtype=np.float32)
+    if len(route_xy) < 2:
+        return path_dist_map, remaining_map, route_heading_map, False
+
+    rows, cols = shape
+    route = np.asarray(route_xy, dtype=float)
+    node_arc = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(route, axis=0), axis=1))))
+    arc = float(node_arc[-1])
+    if arc < 1e-9:
+        return path_dist_map, remaining_map, route_heading_map, False
+
+    # resample at half-cell steps so the rasterized line has no gaps for the EDT
+    sample_arc = np.linspace(0.0, arc, int(np.ceil(arc / (0.5 * resolution))) + 1)
+    sx = np.interp(sample_arc, node_arc, route[:, 0])
+    sy = np.interp(sample_arc, node_arc, route[:, 1])
+    r = ((sx - origin[0]) / resolution).astype(np.int64)
+    c = ((sy - origin[1]) / resolution).astype(np.int64)
+    inside = (r >= 0) & (r < rows) & (c >= 0) & (c < cols)
+    if not np.any(inside):
+        return path_dist_map, remaining_map, route_heading_map, False
+
+    # Which way the route RUNS at each sample. Taken as the direction of the SEGMENT
+    # the sample sits on, not as a gradient of the resampled points: the route is
+    # piecewise linear, so the segment is the exact answer, and a gradient would smear
+    # the two directions together across the corner cell -- the one place this field
+    # exists to be sharp.
+    seg = np.diff(route, axis=0)
+    seg_of = np.clip(np.searchsorted(node_arc, sample_arc, side='right') - 1,
+                     0, len(seg) - 1)
+    tang = np.arctan2(seg[seg_of, 1], seg[seg_of, 0])
+
+    route_mask = np.zeros(shape, dtype=bool)
+    arc_map = np.zeros(shape, dtype=np.float32)
+    heading_map = np.zeros(shape, dtype=np.float32)
+    route_mask[r[inside], c[inside]] = True
+    arc_map[r[inside], c[inside]] = sample_arc[inside]  # a cell crossed twice keeps the later arc
+    heading_map[r[inside], c[inside]] = tang[inside]
+
+    # One EDT, three fields: each off-route cell takes the arc and the direction of its
+    # nearest route cell. A gather, not an average -- so the headings need no cos/sin
+    # decomposition to survive the wrap at +/-pi.
+    dist_cells, (near_r, near_c) = distance_transform_edt(~route_mask, return_indices=True)
+    path_dist_map = (dist_cells * resolution).astype(np.float32)
+    remaining_map = (arc - arc_map[near_r, near_c]).astype(np.float32)
+    route_heading_map = heading_map[near_r, near_c]
+    return path_dist_map, remaining_map, route_heading_map, True
 
 
 # === PlanningNode class ===
 class PlanningNode(Node):
-    def __init__(self):
-        super().__init__('planning_node')
+    """Occupancy-grid + ESDF + trajectory-library planner.
+
+    Cost = clearance + distance-to-goal + smoothness + goal heading (stationary
+    candidates only), subject to a hard collision filter and a reverse gate.
+    """
+
+    def __init__(self, node_name='planning_node'):
+        super().__init__(node_name)
         self.get_logger().info(
             f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
             f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
@@ -324,53 +580,299 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
+        # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
+        # consumes this directly instead of reverse-engineering it from path poses.
+        # angular.x is a backward-segment flag (fixed-speed reverse vocabulary).
+        # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
+        # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
-        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
+        latest_depth_only = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE
+        )
+        poses_covering_one_depth_frame = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE
+        )
+        self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth',
+                                                    qos_profile=latest_depth_only)
+        self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual',
+                                                   qos_profile=poses_covering_one_depth_frame)
 
         self.ts = message_filters.TimeSynchronizer([self.depth_sub, self.pose_sub], queue_size=10)
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 10)
         self.resolution = 0.05
+        # Ground-anchored span filter (walls/bumps vs stair risers) now applies
+        # everywhere when map_node's `climb_prior` parameter is false (no climb-region
+        # relaxation at all) -- so its default is the same single-voxel noise floor as the
+        # floating-obstacle check, to avoid filtering out real low/thin obstacles.
+        # A ROS parameter, like the climb knobs below, so a site can retune from the
+        # launch without a code edit.
+        # Per robot, from robot_specs, with the site's override on top: upstream made
+        # the config per-robot and this keeps that plumbing rather than building a
+        # fresh one from class defaults.
+        self.declare_parameter('min_wall_span_m',
+                               ROBOT_CONFIG.obstacle.min_wall_span_m)
+        self.obstacle_config = replace(
+            ROBOT_CONFIG.obstacle,
+            min_wall_span_m=float(self.get_parameter('min_wall_span_m').value))
+        # Derive the grid's z extent and vertical offset from the obstacle band so
+        # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
+        z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
+        self.grid_shape = (100, 100, z_layers)
+        self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
+
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
+        # ESDF of a completely free slice: an empty obstacle mask would otherwise
+        # hand distance_transform_edt an all-true input and read as all-zero
+        # distance, i.e. every cell in collision (gz sim starts on empty ground).
         self.free_space_esdf = float(np.hypot(*self.grid_shape[:2])) * self.resolution
-        self.step = 10
+        self.step = 4
+        self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
+
+        # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
+        # Peak forward speed is modulated per cycle by the free space ahead: the open-space
+        # TARGET in tight spots creeps to vx_min (this also subsumes the old openness prior).
+        # The open target itself is the capture-speed prior (see _open_target_speed) when
+        # available, else vx_max -- so vx_max is the no-capture fallback, NOT the ceiling;
+        # the prior may raise the target above it, up to vx_hard_max (hardware absolute).
+        # Depth latency (~100ms) + raycast makes the effective clearance smaller than
+        # measured, so the schedule discounts it by v*t_react (see _speed_from_clearance).
+        self.declare_parameter('vx_max', 0.6)        # open-space target when NO capture prior (fallback)
+        self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (hardware)
+        self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
+        self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
+        self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
+        self.declare_parameter('clear_scan_m', 2.0)  # forward clearance scan cap (m)
+        self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
+        # Arc-length cap on a lattice trajectory (m). Bounds how far ahead a plan
+        # commits, independently of vx -- see generate_trajectory_library_3d.
+        self.declare_parameter('traj_max_len_m', 2.5)
+        # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
+        # max_lat_acc/max_angular_vel; below that the omega range is unchanged.
+        self.declare_parameter('traj_max_lat_acc', 0.5)
+        self._vx_max = float(self.get_parameter('vx_max').value)
+        self._vx_hard_max = float(self.get_parameter('vx_hard_max').value)
+        self._vx_min = float(self.get_parameter('vx_min').value)
+        self._clear_c0_m = float(self.get_parameter('clear_c0_m').value)
+        self._clear_open_m = float(self.get_parameter('clear_open_m').value)
+        self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
+        self._t_react_s = float(self.get_parameter('t_react_s').value)
+        self._traj_max_len_m = float(self.get_parameter('traj_max_len_m').value)
+        self._traj_max_lat_acc = float(self.get_parameter('traj_max_lat_acc').value)
+
+        # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
+        # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
+        # so a distant wall could not veto a trajectory whose near segment is clear --
+        # but it let the planner commit to trajectories it had not fully vetted, and the
+        # freeze it was meant to prevent turned out to have other causes.
+
+        # Fixed-speed reverse fallback: driven when every trajectory is in collision
+        # but the blockage is ahead (not already under the footprint).
+
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
-        self.last_T = None
-        self.last_param = (0.0, 0.0) # acc and gyro
-        self.obstacle_config = ROBOT_CONFIG.obstacle
-        self.stamp = None
-        self.current_pose = None  # Store the latest pose from odometry
-
-        self.smoothed_velocity = 0.0
-
-        # Reverse gate hysteresis: engage reverse at reverse_enter_threshold, stay
-        # engaged until front_clearance climbs past the higher reverse_exit_threshold.
-        # A single threshold flip-flopped forward/backward every cycle when
-        # front_clearance jittered near the boundary.
-        self.reverse_enter_threshold = 0.30
-        self.reverse_exit_threshold = 0.45
-        self.reverse_engaged = False
+        self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
+        # map_node's global plan already avoids static obstacles by construction --
+        # DWA scoring below just needs it as two queryable maps (build_route_fields).
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+        self.global_route_sub = self.create_subscription(
+            Path, '/mapping/global_plan', self._on_global_route, 1
+        )
+        self._global_route_map_xy = None
+        # Per unit of ESDF clearance score, which is nonzero only inside safety_radius
+        # (a collision is inf and no weight reaches it). 200 against w_route_progress's
+        # 100/m is upstream #246's balance carried over: it moved 100000/100 to
+        # 2000/1000, a 500x drop in the clearance term's weight relative to progress,
+        # and the same ratio here is 200 because this fork's progress term already
+        # weighs 100/m. Grazing at safety_radius now costs about 20 m of route
+        # progress, where it used to cost 9900 m.
+        self.w_clearance = 200.0
+        # among survivors, progress drives speed and follow keeps the robot from
+        # cutting across to a closer route point
+        self.w_route_progress = 100.0
+        self.w_path_follow = 80.0
+        # pulls the last stretch onto the exact goal, since remaining_map alone
+        # saturates at 0 before reaching it
+        self.w_goal_terminal = 100.0
+        # The last metres of route, over which the goal takes over from the route: the
+        # goal's position arms w_goal_terminal and its bearing replaces the route's
+        # direction in the heading term (route_band_fade).
+        self.route_terminal_band = 0.5
+        # Per radian the trajectory's end heading is off the route's own direction.
+        # Comparable to w_path_follow on purpose: half a radian off the route weighs
+        # about as much as being 0.37 m beside it, so a turn is chosen for the reason a
+        # human would give -- it points the right way -- and not by a few centimetres of
+        # end position that the smoothness term can outvote.
+        self.w_route_heading = 60.0
+
+        # Climb region: the capture-path points, in this grid's frame, that the map
+        # says were climbed through. Cells near them relax the obstacle z-span filter
+        # so a riser reads as a step, and only those cells do -- everything beside the
+        # staircase keeps the strict default. Producer: core_runtime's PilotMapNode.
+        # No message, or a stale stream, means no region, i.e. strict everywhere.
+        # Both radius and span are deliberately small: a relaxed cell cannot see an
+        # obstacle shorter than the span, and the labels that open these regions are
+        # inferred from path z, which VIO drift fakes -- a generous radius relaxed most
+        # of a route on the strength of a handful of real runs. A ROS parameter, so a
+        # site can be retuned from the launch without a code edit.
+        self.declare_parameter('climb_region_radius_m', 0.75)
+        self._climb_region_cells = int(round(
+            float(self.get_parameter('climb_region_radius_m').value) / self.resolution))
+        self.declare_parameter('climb_region_ttl_s', 3.0)
+        self._climb_region_ttl_ns = int(float(self.get_parameter('climb_region_ttl_s').value) * 1e9)
+        # 0.2 keeps a ~0.15m riser reading as a step while a 0.2m+ obstacle survives.
+        self.declare_parameter('climb_min_wall_span_m', 0.2)
+        self._climb_min_wall_span_m = float(self.get_parameter('climb_min_wall_span_m').value)
+        self._climb_points = np.empty((0, 2))
+        self._climb_stamp_ns = None
+        self.create_subscription(PointCloud, '/planning/climb_region',
+                                 self.climb_region_callback, 10)
+
+        # Capture-speed prior from map_node's /planning/speed_cap: the operator's
+        # local speed (m/s) near the robot. It IS the open-space target speed (scaled
+        # by capture_speed_gain), clamped to [vx_min, vx_hard_max] -- so it may raise
+        # the target above vx_max where the operator went fast, never past the hardware
+        # ceiling. NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
+        # The gain is shared with map_node's carrot horizon -- see path_speed.
+        self.declare_parameter('capture_speed_gain', CAPTURE_SPEED_GAIN)
+        self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
+        self.declare_parameter('speed_cap_ttl_s', 2.0)
+        self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)
+        self._speed_cap = None
+        self._speed_cap_stamp_ns = None
+        self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
+
+    # --- callbacks ---------------------------------------------------------
+    def climb_region_callback(self, msg):
+        # An empty cloud is a real answer ("no region here"), not a missed message:
+        # only the stamp decides freshness.
+        self._climb_points = np.array(
+            [[p.x, p.y] for p in msg.points], dtype=np.float64).reshape(-1, 2)
+        self._climb_stamp_ns = self.get_clock().now().nanoseconds
+
+    def _min_span_map(self, origin, resolution, shape):
+        """Per-cell min_wall_span_m for build_obstacle_map, or None for the strict
+        default everywhere -- which is also what a missing or stale region gives.
+
+        Cells within climb_region_radius_m of a climb point get the relaxed
+        threshold. That radius is the whole of the look-ahead: the labelling window
+        already extends the region ~1m back along the path."""
+        if not self._signal_fresh(self._climb_stamp_ns, self._climb_region_ttl_ns):
+            return None
+        pts = self._climb_points
+        if not len(pts):
+            return None
+        seeds = np.zeros(shape, dtype=bool)
+        idx = np.floor((pts - origin[:2]) / resolution).astype(np.int64)
+        inside = np.all((idx >= 0) & (idx < np.array(shape)), axis=1)
+        seeds[idx[inside, 0], idx[inside, 1]] = True
+        if not seeds.any():
+            return None
+        # Grow each seed into a square of the radius. Cost is independent of how
+        # many points came in, unlike a per-point distance test.
+        region = maximum_filter(seeds, size=2 * self._climb_region_cells + 1,
+                                mode='constant')
+        return np.where(region, self._climb_min_wall_span_m,
+                        self.obstacle_config.min_wall_span_m)
+
+    def speed_cap_callback(self, msg):
+        self._speed_cap = float(msg.data)
+        self._speed_cap_stamp_ns = self.get_clock().now().nanoseconds
+
+    def _open_target_speed(self):
+        """Open-space target forward speed: the capture-speed prior (scaled by
+        capture_speed_gain) when a fresh, finite value is available, else vx_max
+        (the no-capture fallback). Clamped to [vx_min, vx_hard_max] -- the prior may
+        raise the target above vx_max but never past the hardware ceiling."""
+        # _signal_fresh short-circuits on a never-received (None) stamp, so a fresh
+        # stamp implies _speed_cap was set -> the isfinite guard is safe.
+        if (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
+                and np.isfinite(self._speed_cap)):
+            return float(np.clip(self._speed_cap * self._capture_speed_gain,
+                                 self._vx_min, self._vx_hard_max))
+        return self._vx_max
+
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self._global_route_map_xy = None  # the cached route led to the old target
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+
+    def _signal_fresh(self, stamp_ns, window_ns):
+        """True if a signal last stamped at stamp_ns is still within window_ns of
+        now. Never-received (stamp_ns None) -> stale, the safe default."""
+        if stamp_ns is None:
+            return False
+        return self.get_clock().now().nanoseconds - stamp_ns <= window_ns
+
+    def _speed_from_clearance(self, clearance_m, v_prev, v_open):
+        """Linear peak-speed schedule from forward clearance, discounted for reaction
+        latency (the robot travels ~v_prev*t_react before a new command takes effect).
+        net clearance <= clear_c0_m -> vx_min; >= clear_open_m -> v_open; linear between.
+        v_open is the open-space target (capture-speed prior or vx_max fallback)."""
+        c_eff = max(0.0, clearance_m - v_prev * self._t_react_s)
+        # np.interp saturates to the endpoints outside [clear_c0_m, clear_open_m].
+        return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
+                               [self._vx_min, v_open]))
+
+    def _on_global_route(self, msg: Path):
+        self._global_route_map_xy = (
+            np.array([[p.pose.position.x, p.pose.position.y] for p in msg.poses])
+            if len(msg.poses) >= 2 else None
+        )
+
+    # Decimation is load-bearing: cmd_vel_control reads speed and turn rate off this
+    # Path, and its dt is planner_dt * path_pose_stride * step_idx -- publishing at a
+    # different stride would scale both by that ratio.
+    PATH_POSE_STRIDE = 10
+
+    def publish_selected_path(self, trajectories, indices, header):
+        path = Path()
+        path.header = header
+        path.header.frame_id = "world"
+        for i in indices:
+            for j in range(0, len(trajectories[i]), self.PATH_POSE_STRIDE):
+                x, y, z, qx, qy, qz, qw = trajectories[i][j]
+                pose = PoseStamped()
+                pose.header = header
+                pose.pose.position.x = x
+                pose.pose.position.y = y
+                pose.pose.position.z = z
+                pose.pose.orientation.x = qx
+                pose.pose.orientation.y = qy
+                pose.pose.orientation.z = qz
+                pose.pose.orientation.w = qw
+                path.poses.append(pose)
+        self.path_pub.publish(path)
+
+    def _route_in_world(self):
+        """The cached global route (map frame) transformed into this node's world/odom
+        frame via TF, or None if there is no route yet or the transform isn't up."""
+        if self._global_route_map_xy is None:
+            return None
+        try:
+            t = self._tf_buffer.lookup_transform('world', 'map', rclpy.time.Time())
+        except Exception:
+            return None
+        tr = t.transform.translation
+        rot = t.transform.rotation
+        R = quat_to_matrix([rot.x, rot.y, rot.z, rot.w])
+        return self._global_route_map_xy @ R[:2, :2].T + np.array([tr.x, tr.y])
 
     def info_callback(self, msg):
         if self.K is None:
@@ -411,6 +913,47 @@ class PlanningNode(Node):
         msg.header.frame_id = "world"
         msg.points = points
         self.footprint_pub.publish(msg)
+
+    def _footprint_hits(self, T, obstacle_mask):
+        """Which footprint samples are standing on obstacle cells, as body-frame
+        (forward, left) offsets. Sampled on the same lattice
+        `score_trajectories_by_ESDF` scores with, so the decision below and the
+        scores it is reacting to cannot disagree about where the robot is.
+
+        **This is what tells a wedged robot from an uninformative score.** When a
+        cell under the body is an obstacle, EVERY trajectory is inf -- forward,
+        reverse and standing still alike -- so the scores say nothing about which
+        way is out. When the body is clear, "everything collides" really does mean
+        the blockage is ahead along the rollouts.
+        """
+        center = self.camera_to_robot_center(T)
+        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
+        fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
+        lx, ly = -fy, fx
+        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+        off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
+        rows, cols = obstacle_mask.shape
+        hits = []
+        for k in range(len(off_fwd)):
+            x = center[0] + fx * off_fwd[k] + lx * off_lat[k]
+            y = center[1] + fy * off_fwd[k] + ly * off_lat[k]
+            xi = int((x - self.origin[0]) / self.resolution)
+            yi = int((y - self.origin[1]) / self.resolution)
+            if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
+                hits.append((float(off_fwd[k]), float(off_lat[k])))
+        return hits, len(off_fwd)
+
+    @staticmethod
+    def _hits_report(hits, n_samples):
+        """The hits as a log fragment. A real obstacle is a blob against one part
+        of the body; the phantom cells odometry drift smears in are scattered
+        singles, so where they are is the reading that matters."""
+        if not hits:
+            return f'body_hits=0/{n_samples}'
+        where = ' '.join(f'({f:+.2f},{l:+.2f})' for f, l in hits[:8])
+        return (f'body_hits={len(hits)}/{n_samples} at {where}'
+                + (' ...' if len(hits) > 8 else ''))
 
     def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
         """Distance from the robot's front face to the nearest obstacle in the forward corridor.
@@ -516,21 +1059,13 @@ class PlanningNode(Node):
         ]
         self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
-    def update_velocity_estimate(self, T, stamp):
-        if self.last_T is None:
-            self.last_T = T.copy()
-            self.smoothed_velocity = 0.0
-            self.last_stamp = 0
-            self.smoothed_velocity = 0.0
-        velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
-        self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
-
     def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
         center = self.origin + np.array(self.grid_shape) * self.resolution / 2
         robot_pos = T[:3, 3]
-        delta = robot_pos - center
+        target_center = robot_pos - np.array([0.0, 0.0, self.z_grid_drop])
+        delta = target_center - center
         if np.linalg.norm(delta) > .1:
-            new_center = robot_pos
+            new_center = target_center
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
@@ -538,51 +1073,59 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-    def trajectory_cost(self, traj, param, score, target_pose, should_reverse):
-        # predefined backward trajectory penalty
-        is_backward_traj = param[0] < 0.0
-        reverse_gate_penalty = 0.0
-        if should_reverse and not is_backward_traj:
-                reverse_gate_penalty = 1e9
-        elif not should_reverse and is_backward_traj:
-                reverse_gate_penalty = 1e9
-
-        # regular trajectory penalty
-        traj_end = np.array(traj[-1,:3])
-        target_end = target_pose if target_pose is not None else traj_end
-        dist = np.linalg.norm(traj_end - target_end)
-        # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
-        # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
-        heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
-
-        return (
-            score * 2000
-            + 1000 * dist
-            + 100 * heading
-            + 10 * abs(self.last_param[0] - param[0])
-            + 10 * abs(self.last_param[1] - param[1])
-            + reverse_gate_penalty
+    def build_obstacle_and_esdf(self, T):
+        min_span_map = self._min_span_map(self.origin, self.resolution,
+                                          self.occupancy_grid.shape[:2])
+        obstacle_mask = build_obstacle_map(
+            self.occupancy_grid, self.origin, self.resolution,
+            robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
         )
+        if obstacle_mask.any():
+            ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
+        else:
+            # An all-true input to distance_transform_edt reads as all-zero
+            # distance -- an empty world would score as solid collision. Free
+            # space everywhere instead (the gz sim's first frames).
+            ESDF_map = np.full(obstacle_mask.shape, self.free_space_esdf, dtype=np.float32)
+        return min_span_map, obstacle_mask, ESDF_map
 
-    def publish_selected_path(self, trajectories, top_indices, header):
-        path = Path()
-        path.header = header
-        path.header.frame_id = "world"
+    def generate_trajectories(self, init_p, init_q, v_allow):
+        trajectories, params = generate_trajectory_library_3d(
+            init_p=init_p, init_q=init_q,
+            max_linear_vel=v_allow,
+            max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+            max_path_len_m=self._traj_max_len_m,
+            max_lat_acc=self._traj_max_lat_acc,
+        )
+        vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+        trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
+        params = np.concatenate([params, vocab_params], axis=0)
+        return trajectories, params
 
-        for i in top_indices:
-            for j in range(0, len(trajectories[i]), 10):
-                x,y,z,qx,qy,qz,qw = trajectories[i][j]
-                pose = PoseStamped()
-                pose.header = header
-                pose.pose.position.x = x
-                pose.pose.position.y = y
-                pose.pose.position.z = z
-                pose.pose.orientation.x = qx
-                pose.pose.orientation.y = qy
-                pose.pose.orientation.z = qz
-                pose.pose.orientation.w = qw
-                path.poses.append(pose)
-        self.path_pub.publish(path)
+    def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
+                           route_heading_map):
+        front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+
+        def score(trajs):
+            return score_trajectories_by_ESDF(
+                np.ascontiguousarray(trajs), ESDF_map, path_dist_map, remaining_map,
+                route_heading_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
+                front_len, rear_len, half_w,
+            )
+
+        scores, occ_points, path_costs, end_remainings, end_heading_errs = score(trajectories)
+        # **The pose every candidate starts from is not a choice any of them made.** One
+        # footprint sample on an obstacle cell there makes every row inf, reverse included,
+        # so the scores stop saying which way is out exactly when that is the question. The
+        # reverse rows are scored on the trajectory minus that first pose; steps 1.. are
+        # checked as ever, so a rear that really is blocked is still inf and still refused.
+        back = np.flatnonzero(params[:, 0] < 0.0)
+        if len(back) and trajectories.shape[1] > 1:
+            moved = score(trajectories[back][:, 1:])
+            for j, i in enumerate(back):
+                (scores[i], occ_points[i], path_costs[i],
+                 end_remainings[i], end_heading_errs[i]) = (col[j] for col in moved)
+        return scores, occ_points, path_costs, end_remainings, end_heading_errs
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -590,26 +1133,20 @@ class PlanningNode(Node):
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
-            stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
             T,_ = msg2np(odom_msg)
-            self.update_velocity_estimate(T, stamp)
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            # Building the cloud costs more than the raycasting that produced it,
+            # and its only consumer is a view that is usually closed.
+            if self.occupancy_cloud_pub.get_subscription_count() > 0:
+                self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            obstacle_mask = build_obstacle_map(
-                self.occupancy_grid, self.origin, self.resolution,
-                robot_z=T[2, 3], config=self.obstacle_config,
-            )
-            if obstacle_mask.any():
-                ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
-            else:
-                ESDF_map = np.full(obstacle_mask.shape, self.free_space_esdf, dtype=np.float32)
+            min_span_map, obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
@@ -621,32 +1158,185 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            trajectories, params = generate_trajectories(init_p, init_q)
-            self.last_T = T
-            self.last_stamp = stamp
-
-        with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
-
-        with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            threshold = self.reverse_exit_threshold if self.reverse_engaged else self.reverse_enter_threshold
-            should_reverse = front_clearance <= threshold
-            self.reverse_engaged = should_reverse
-
-            top_k = 1
-            top_indices = np.argsort(np.array([self.trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, should_reverse) for i in range(len(trajectories))]), kind='stable')[:top_k]
-            self.last_param = params[top_indices[0]]
-
+            # Forward clearance drives both the peak-speed schedule and the reverse gate.
+            front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
+            v_open = self._open_target_speed()
+            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
+            # The library exists only to pick a trajectory toward a goal, so without
+            # one there is nothing to generate or score. The occupancy grid, the ESDF
+            # and the speed cap above are maintained either way.
             if self.target_pose is None:
                 return
+            trajectories, params = self.generate_trajectories(init_p, init_q, v_allow)
+
+        with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            route_xy = self._route_in_world()
+            path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
+                route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
+            )
+
+        with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            scores, occ_points, path_costs, end_remainings, end_heading_errs = self.score_trajectories(
+                trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map)
+
+        with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            # **The reverse family is armed by there being no way forward.** The
+            # clearance reading is a proxy for that and it was the only judge, so a
+            # robot with every forward trajectory in collision at 0.60-0.75 m read
+            # `should_reverse=False`, and standing still -- which is neither
+            # colliding nor gated -- was the cost minimum. 21 s of that on 122 on
+            # 2026-09-09, with nothing published at all.
+            enter_threshold = 0.30
+            n_fwd_ok = sum(1 for i in range(len(trajectories))
+                           if params[i][0] > 1e-3 and scores[i] != float('inf'))
+            should_reverse = front_clearance <= enter_threshold or n_fwd_ok == 0
+
+            target = self.target_pose
+
+            _world_heading = heading_of_pose7
+
+            def _end_heading_error(pose7, goal):
+                """|wrapped angle| between the pose's heading and the bearing from that
+                pose to the goal."""
+                return angle_between(
+                    np.arctan2(goal[1] - pose7[1], goal[0] - pose7[0]),
+                    heading_of_pose7(pose7))
 
             if all(s == float('inf') for s in scores):
-                self.get_logger().info('All trajectories in collision, stopping path.')
+                center = self.camera_to_robot_center(T)
+                cxi = int((center[0] - self.origin[0]) / self.resolution)
+                cyi = int((center[1] - self.origin[1]) / self.resolution)
+                rows, cols = obstacle_mask.shape
+                hits, n_samples = self._footprint_hits(T, obstacle_mask)
+                self.get_logger().warn(
+                    f'All trajectories in collision. obst_cells={int(obstacle_mask.sum())} '
+                    f'front_clearance={front_clearance:.2f} '
+                    f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
+                    f'should_reverse={should_reverse} '
+                    f'{self._hits_report(hits, n_samples)}'
+                )
+                # **Nothing is published, and that is the honest answer here.**
+                # Reaching this branch now means the reverse row is inf too, and it
+                # is scored from the pose after the current one (score_trajectories)
+                # -- so this is no longer a footprint sample underfoot vetoing every
+                # candidate alike, it is the way out being blocked as well. The
+                # report above names which part of the body is on an obstacle cell.
+                #
+                # It is also where odometry drift lands: a stationary pose churning
+                # metres of phantom path smears the occupancy grid into cells under
+                # the robot (measured on 122: 3.28 m of odom path for 0.05 m of
+                # relocalized motion). The fix for that is upstream of here.
                 return
 
+            # Single cost: clearance + route adherence/progress + smoothness, with the
+            # reverse gate as a large additive penalty rather than a hard filter. The
+            # penalty degrades gracefully on its own -- a colliding trajectory costs
+            # scores[i]*w_clearance == inf, which loses to any non-colliding gate violator --
+            # so it already gives the "never stall outright" fallback that a two-stage
+            # filter had to spell out, in one term. Clearance stays soft on purpose:
+            # safety_radius is a margin, not a collision boundary, and a corridor
+            # narrower than the band forces every forward trajectory to intrude into it.
+            # The heading term exists because no positional term can rank a heading.
+            # Two cases share that:
+            #
+            #   the vx=0 rows all END where they started, so smoothness picked whichever
+            #   rotation matched last cycle -- omega=0 from a standstill -- and with a
+            #   goal further behind than one arc can swing around, standing still was
+            #   the cost minimum and stayed it: a permanent freeze;
+            #
+            #   a MOVING arc through a corner ends within centimetres of where turning
+            #   into the corner ends, so remaining_map and path_dist cannot separate
+            #   them either, and the choice fell to smoothness and dithered. Measured on
+            #   118 (2026-08-31): goal_err sat at 61-65 degrees for tens of frames while
+            #   the selected omega alternated -0.21 / +0.43 frame to frame, and the
+            #   robot drove straight through a right turn it should have taken.
+            #
+            # What differs is WHICH heading is right, and that is the route's own
+            # direction wherever there is a route: pointing at the goal, at a corner, is
+            # what cutting the corner is. Without a route there is only the goal bearing,
+            # which is what this planner had before the route existed.
+            def cost_function(i):
+                traj, param = trajectories[i], params[i]
+                reverse_gate_penalty = 0.0 if (param[0] < 0.0) == should_reverse else 1e9
+                traj_end = np.array(traj[-1, :3])
+                target_end = target if target is not None else traj_end
+                dist = np.linalg.norm(traj_end - target_end)
+                smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
+                # Skipped within 0.3 m of the goal, where the bearing is noise and
+                # turning achieves nothing.
+                heading_penalty = 0.0
+                if dist > 0.3:
+                    # The two references hand over across the terminal band: the route's
+                    # direction while there is route left, the goal's bearing once there
+                    # is not. A hard switch would leave the vx=0 rows unranked in the
+                    # band -- which is the freeze this term was written to prevent.
+                    to_goal = self.w_route_heading * _end_heading_error(traj[-1], target_end)
+                    if has_route:
+                        fade = route_band_fade(end_remainings[i], self.route_terminal_band)
+                        heading_penalty = (
+                            route_heading_penalty(self.w_route_heading, end_heading_errs[i],
+                                                  end_remainings[i], self.route_terminal_band)
+                            + (1.0 - fade) * to_goal)
+                    else:
+                        heading_penalty = to_goal
+                if not has_route:
+                    # No route this cycle: both route maps are flat, so rank on the raw
+                    # target the way this planner did before the route existed.
+                    positional = 100 * dist
+                else:
+                    # The terminal term arms inside the last route_terminal_band metres,
+                    # where remaining_map has saturated at 0 and can no longer rank
+                    # anything -- without it smoothness picks the slowest of the tied
+                    # trajectories and the robot crawls the last stretch.
+                    terminal = 0.0
+                    if target is not None:
+                        terminal = (self.w_goal_terminal
+                                    * (1.0 - route_band_fade(end_remainings[i],
+                                                             self.route_terminal_band))
+                                    * float(np.linalg.norm(traj[-1, :2] - target[:2])))
+                    positional = (self.w_route_progress * end_remainings[i]
+                                  + self.w_path_follow * path_costs[i]
+                                  + terminal)
+                return (scores[i] * self.w_clearance
+                        + positional
+                        + 10 * smooth
+                        + heading_penalty
+                        + reverse_gate_penalty)
+
+            top_indices = [min(range(len(trajectories)), key=cost_function)]
+
+            self.last_param = params[top_indices[0]]
+
+            # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
+            # anything else means stuck by cost with somewhere to go.
+            self.get_logger().info(
+                f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
+                f'fwd_ok={n_fwd_ok} '
+                f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
+                f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '
+                f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
+                f'should_reverse={should_reverse} '
+                f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
+            )
+
+            # velocity feedforward for cmd_vel_control: (vx, omega) of the selected
+            # trajectory. vx is the commanded body-forward speed (lattice param; its
+            # sign flags the fixed-speed reverse vocabulary via angular.x). omega is
+            # NOT taken from the lattice param -- that omega is about the camera optical
+            # axis and would need a hand-maintained sign/frame correction. Instead we
+            # derive the yaw rate straight from the trajectory's own world poses, using
+            # the same body-+z-forward convention as score_trajectories_by_ESDF and the
+            # published Path: angular.z = d(world heading)/dt over the first step. This
+            # stays consistent with the path by construction and is correct even if the
+            # camera pitches (where -omega_y would be subtly wrong).
+            sel_traj = trajectories[top_indices[0]]
+            sel_vx = float(params[top_indices[0]][0])
+
+            dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
+            sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
+
             self.publish_selected_path(trajectories, top_indices, depth_msg.header)
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -658,6 +1348,7 @@ def main(args=None):
         rclpy.shutdown()
     except KeyboardInterrupt:
         pass
+
 
 if __name__ == '__main__':
     main()

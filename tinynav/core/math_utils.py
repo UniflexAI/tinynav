@@ -149,6 +149,24 @@ def tf2np(tf_msg:TransformStamped):
     T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
     return tf_msg.header.frame_id, tf_msg.child_frame_id, T
 
+def wrap_angle(a):
+    """Angle folded into (-pi, pi] — the shorter way round to a heading."""
+    return np.arctan2(np.sin(a), np.cos(a))
+
+
+def heading_of(rot):
+    """World heading (rad) of a rotation: its forward axis projected onto world XY.
+
+    THE yaw convention of this stack. Poses here are camera-convention (body +z is
+    forward), and the textbook quaternion-to-yaw formula is both wrong for that and
+    erratic under the pitch wobble of a walking gait — see the note in
+    app/backend/node_manager._odom_to_dict, which computes this same projection
+    straight from quaternion components. Anything comparing a heading to a stored one
+    has to use this or the robot faces a wall, so it lives in one place."""
+    fwd = np.asarray(rot)[:3, :3] @ np.array([0.0, 0.0, 1.0])
+    return float(np.arctan2(fwd[1], fwd[0]))
+
+
 def msg2np(msg):
     T = np.eye(4)
     position = msg.pose.pose.position
