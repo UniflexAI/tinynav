@@ -175,7 +175,7 @@ def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    max_path_len_m=1e9, max_lat_acc=1e9,
+    max_path_len_m=1e9, max_lat_acc=1e9, min_linear_vel=0.0,
 ):
     """Regular sampled lattice (forward-only).
 
@@ -200,7 +200,15 @@ def generate_trajectory_library_3d(
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
     n_omega = num_samples
-    vx_samples = np.linspace(0.0, vx_max, n_vx)
+    # Forward speeds the robot will actually hold, plus the standstill rows.
+    # Sampling from 0 offered a creep band under the floor -- at vx_max 0.20 the
+    # speeds were 0, 0.033, 0.067, ... and the cost minimum sat on 0.033, which
+    # cmd_vel_control reads as a stop while `n_fwd_ok` counted it a way forward.
+    # vx=0 stays: the turn-in-place vocabulary the heading term ranks is built on it.
+    vx_lo = min_linear_vel if min_linear_vel < vx_max else vx_max
+    vx_samples = np.empty(n_vx)
+    vx_samples[0] = 0.0
+    vx_samples[1:] = np.linspace(vx_lo, vx_max, n_vx - 1)
 
     num_samples = n_vx * n_omega
 
@@ -1106,6 +1114,7 @@ class PlanningNode(Node):
             max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             max_path_len_m=self._traj_max_len_m,
             max_lat_acc=self._traj_max_lat_acc,
+            min_linear_vel=self._vx_min,
         )
         vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
         trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)

@@ -13,7 +13,8 @@ from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
                            route_heading_penalty, score_trajectories_by_ESDF,
                            footprint_lattice, PlanningNode, ROBOT_CONFIG,
-                           reverse_armed, REVERSE_ENTER_M)
+                           reverse_armed, REVERSE_ENTER_M,
+                           generate_trajectory_library_3d)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -773,3 +774,39 @@ def test_and_no_way_forward_arms_it_however_far_the_wall_is():
     every forward trajectory in collision at 0.60-0.75 m read False and the robot
     stood still -- 21 s of that on 122 on 2026-09-09, nothing published at all."""
     assert reverse_armed(3.0, 0, 0.05)
+
+
+def _lattice_speeds(v_allow, floor):
+    _, params = generate_trajectory_library_3d(
+        max_linear_vel=v_allow, min_linear_vel=floor)
+    return sorted({round(float(vx), 9) for vx, _ in params})
+
+
+def test_the_lattice_offers_no_speed_between_a_standstill_and_the_floor():
+    """Sampling from 0 put three of seven speeds under the floor at v_allow 0.20 --
+    0, 0.033, 0.067 -- and the cost minimum sat on 0.033, which cmd_vel_control reads
+    as a stop. 122 stood still for five minutes while `n_fwd_ok` counted 73 ways
+    forward, most of a speed it would never execute."""
+    for v_allow in (0.2, 0.43, 0.6, 1.0):
+        floor = 0.2
+        for vx in _lattice_speeds(v_allow, floor):
+            assert vx == 0.0 or vx >= min(floor, v_allow) - 1e-9, \
+                f'v_allow {v_allow} offered {vx}, under the floor and over a standstill'
+
+
+def test_but_the_standstill_rows_are_still_offered():
+    """The other half. The heading term ranks turning against them, and a goal the
+    robot has to swing around to has nothing else to rank -- dropping them is the
+    freeze the heading term was written to prevent."""
+    for v_allow in (0.2, 0.6):
+        _, params = generate_trajectory_library_3d(
+            max_linear_vel=v_allow, min_linear_vel=0.2)
+        turning = [w for vx, w in params if vx == 0.0 and abs(w) > 1e-6]
+        assert len(turning) >= 2, f'v_allow {v_allow} left no turn-in-place rows'
+
+
+def test_and_the_top_speed_is_still_offered():
+    """The floor must not eat the ceiling: whatever the clearance schedule allows has
+    to still be in the lattice, or the robot never reaches it."""
+    for v_allow in (0.2, 0.43, 0.6):
+        assert max(_lattice_speeds(v_allow, 0.2)) == round(v_allow, 9)
