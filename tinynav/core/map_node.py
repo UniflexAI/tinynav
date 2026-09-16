@@ -532,7 +532,7 @@ class MapNode(Node):
 
         self.relocalization_threshold = 0.70
         self.relocalization_loop_top_k = 3
-        self.relocalization_min_inlier_count = 50
+        self.relocalization_min_inlier_count = 40
         self.night_relocalization_min_match_count = 30
         self.night_relocalization_min_landmark_count = 50
         self.night_relocalization_min_inlier_count = 30
@@ -560,6 +560,15 @@ class MapNode(Node):
         )
         self.planning_trajectory_smooth_weight = self._load_planning_float(
             tinynav_map_path, "trajectory_smooth_weight", None, minimum=0.0, maximum=100.0
+        )
+        self.planning_min_wall_span_m = self._load_planning_float(
+            tinynav_map_path, "min_wall_span_m", None, minimum=0.0, maximum=3.0
+        )
+        self.planning_robot_z_bottom = self._load_planning_float(
+            tinynav_map_path, "robot_z_bottom", None, minimum=-3.0, maximum=3.0
+        )
+        self.planning_robot_z_top = self._load_planning_float(
+            tinynav_map_path, "robot_z_top", None, minimum=-3.0, maximum=3.0
         )
         self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
@@ -1199,6 +1208,12 @@ class MapNode(Node):
             config["lidar_collision_tolerance"] = self.planning_lidar_collision_tolerance
         if self.planning_trajectory_smooth_weight is not None:
             config["trajectory_smooth_weight"] = self.planning_trajectory_smooth_weight
+        if self.planning_min_wall_span_m is not None:
+            config["min_wall_span_m"] = self.planning_min_wall_span_m
+        if self.planning_robot_z_bottom is not None:
+            config["robot_z_bottom"] = self.planning_robot_z_bottom
+        if self.planning_robot_z_top is not None:
+            config["robot_z_top"] = self.planning_robot_z_top
         msg.data = json.dumps(config)
         self.planning_config_pub.publish(msg)
         self.get_logger().info(f"Published /planning/config: {msg.data}")
@@ -2012,14 +2027,18 @@ class MapNode(Node):
                     self.night_relocalization_min_landmark_count,
                     self.night_relocalization_min_inlier_count,
                 )
-            return 60, 90, max(70, self.relocalization_min_inlier_count)
+            return (
+                self.night_relocalization_min_match_count,
+                self.night_relocalization_min_landmark_count,
+                self.night_relocalization_min_inlier_count,
+            )
         if is_night:
             return (
                 self.night_relocalization_min_match_count,
                 self.night_relocalization_min_landmark_count,
                 self.night_relocalization_min_inlier_count,
             )
-        return 50, 80, self.relocalization_min_inlier_count
+        return 40, 60, self.relocalization_min_inlier_count
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
         point_in_camera = []

@@ -1,4 +1,5 @@
 import os
+import math
 import rclpy
 import json
 import threading
@@ -340,6 +341,76 @@ def generate_trajectory_library_3d(
             trajectories[k] = traj
             params[k, 0] = vx
             params[k, 1] = omega_y
+    return trajectories, params
+
+
+@njit(cache=True)
+def generate_two_stage_trajectory_library_3d(
+    num_samples=15, duration=3.0, dt=0.1,
+    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
+    vx_max=0.5, first_duration=0.8,
+):
+    """Two-stage motion-lattice samples with the same count as the old grid."""
+    num_steps = int(duration / dt) + 1
+    first_steps = max(1, min(num_steps - 1, int(first_duration / dt)))
+
+    first_vx_samples = np.array([
+        0.0,
+        0.0,
+        0.0,
+        0.2 * vx_max,
+        0.2 * vx_max,
+        0.6 * vx_max,
+        vx_max,
+    ])
+    first_omega_samples = np.array([
+        0.0,
+        -0.7,
+        0.7,
+        -0.5,
+        0.5,
+        0.0,
+        0.0,
+    ])
+
+    n_second_vx = max(3, int(num_samples / 3))
+    second_vx_samples = np.linspace(0.0, vx_max, n_second_vx)
+    second_omega_samples = np.linspace(-np.pi / 3, np.pi / 3, 3)
+    total_samples = len(first_vx_samples) * len(second_vx_samples) * len(second_omega_samples)
+
+    trajectories = np.empty((total_samples, num_steps, 7))
+    params = np.empty((total_samples, 2))
+
+    k = -1
+    for i_first in range(len(first_vx_samples)):
+        for i_vx in range(len(second_vx_samples)):
+            for i_omega in range(len(second_omega_samples)):
+                k += 1
+                first_vx = first_vx_samples[i_first]
+                first_omega = first_omega_samples[i_first]
+                second_vx = second_vx_samples[i_vx]
+                second_omega = second_omega_samples[i_omega]
+                p = init_p.copy()
+                q = quat_to_matrix(init_q)
+                traj = np.empty((num_steps, 7))
+                for i in range(num_steps):
+                    if i < first_steps:
+                        vx = first_vx
+                        omega_y = first_omega
+                    else:
+                        vx = second_vx
+                        omega_y = second_omega
+                    dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
+                    q = q @ dq
+                    v_world = q @ np.array([0.0, 0.0, vx])
+                    p += v_world * dt
+                    traj[i, :3] = p
+                    traj[i, 3:] = matrix_to_quat(q)
+                for i in range(num_steps):
+                    traj[i, 2] = traj[0, 2]
+                trajectories[k] = traj
+                params[k, 0] = first_vx
+                params[k, 1] = first_omega
     return trajectories, params
 
 
@@ -719,12 +790,19 @@ class PlanningNode(Node):
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
         self.reverse_enter_threshold = 0.30
+        self.reverse_exit_threshold = 0.45
+        self._reverse_active = False
+        self.staged_reverse_duration = 1.0
+        self._staged_reverse_until_time = 0.0
         self.terrain_mode = "normal"
         self.max_linear_speed = 0.5
         self.only_straight_back = False
         self.reverse_speed = 0.3
         self.reverse_omegas = (0.0, -0.5, 0.5)
         self.trajectory_smooth_weight = 10.0
+        self.heading_cost_weight = 0.0
+        self.pivot_recovery_score_threshold = 0.2
+        self.pivot_omega_min = 0.2
 
         self.smoothed_velocity = 0.0
         self._last_avoidance_debug_log_time = 0.0
@@ -980,6 +1058,55 @@ class PlanningNode(Node):
                 if old != dilation_cells:
                     self.get_logger().info(f"Updated planning dilation_cells: {old} -> {dilation_cells}")
 
+        if "min_wall_span_m" in config:
+            try:
+                min_wall_span_m = float(config["min_wall_span_m"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning min_wall_span_m: {config.get('min_wall_span_m')!r}")
+            else:
+                min_wall_span_m = max(0.0, min(3.0, min_wall_span_m))
+                old = self.obstacle_config.min_wall_span_m
+                self.obstacle_config.min_wall_span_m = min_wall_span_m
+                if abs(old - min_wall_span_m) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning min_wall_span_m: {old:.2f} -> {min_wall_span_m:.2f}"
+                    )
+
+        robot_z_updated = False
+        if "robot_z_bottom" in config:
+            try:
+                robot_z_bottom = float(config["robot_z_bottom"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning robot_z_bottom: {config.get('robot_z_bottom')!r}")
+            else:
+                robot_z_bottom = max(-3.0, min(3.0, robot_z_bottom))
+                if abs(self.obstacle_config.robot_z_bottom - robot_z_bottom) > 1e-6:
+                    self.obstacle_config.robot_z_bottom = robot_z_bottom
+                    robot_z_updated = True
+
+        if "robot_z_top" in config:
+            try:
+                robot_z_top = float(config["robot_z_top"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning robot_z_top: {config.get('robot_z_top')!r}")
+            else:
+                robot_z_top = max(-3.0, min(3.0, robot_z_top))
+                if abs(self.obstacle_config.robot_z_top - robot_z_top) > 1e-6:
+                    self.obstacle_config.robot_z_top = robot_z_top
+                    robot_z_updated = True
+
+        if self.obstacle_config.robot_z_bottom > self.obstacle_config.robot_z_top:
+            self.obstacle_config.robot_z_bottom, self.obstacle_config.robot_z_top = (
+                self.obstacle_config.robot_z_top,
+                self.obstacle_config.robot_z_bottom,
+            )
+            robot_z_updated = True
+        if robot_z_updated:
+            self.get_logger().info(
+                "Updated planning robot_z range: "
+                f"{self.obstacle_config.robot_z_bottom:.2f} -> {self.obstacle_config.robot_z_top:.2f}"
+            )
+
         # ros2 topic pub --once /planning/config std_msgs/msg/String "data: '{\"occupancy_source\": \"lidar\"}'"
         if "occupancy_source" in config:
             occupancy_source = config["occupancy_source"]
@@ -1015,9 +1142,43 @@ class PlanningNode(Node):
                 reverse_enter_threshold = max(0.0, min(2.0, reverse_enter_threshold))
                 old = self.reverse_enter_threshold
                 self.reverse_enter_threshold = reverse_enter_threshold
+                self.reverse_exit_threshold = max(self.reverse_exit_threshold, self.reverse_enter_threshold)
                 if abs(old - reverse_enter_threshold) > 1e-6:
                     self.get_logger().info(
                         f"Updated planning reverse_enter_threshold: {old:.2f} -> {reverse_enter_threshold:.2f}"
+                    )
+
+        if "reverse_exit_threshold" in config:
+            try:
+                reverse_exit_threshold = float(config["reverse_exit_threshold"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning reverse_exit_threshold: {config.get('reverse_exit_threshold')!r}"
+                )
+            else:
+                reverse_exit_threshold = max(0.0, min(3.0, reverse_exit_threshold))
+                reverse_exit_threshold = max(reverse_exit_threshold, self.reverse_enter_threshold)
+                old = self.reverse_exit_threshold
+                self.reverse_exit_threshold = reverse_exit_threshold
+                if abs(old - reverse_exit_threshold) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning reverse_exit_threshold: {old:.2f} -> {reverse_exit_threshold:.2f}"
+                    )
+
+        if "staged_reverse_duration" in config:
+            try:
+                staged_reverse_duration = float(config["staged_reverse_duration"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning staged_reverse_duration: {config.get('staged_reverse_duration')!r}"
+                )
+            else:
+                staged_reverse_duration = max(0.0, min(5.0, staged_reverse_duration))
+                old = self.staged_reverse_duration
+                self.staged_reverse_duration = staged_reverse_duration
+                if abs(old - staged_reverse_duration) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning staged_reverse_duration: {old:.2f} -> {staged_reverse_duration:.2f}"
                     )
 
         if "terrain_mode" in config:
@@ -1212,6 +1373,38 @@ class PlanningNode(Node):
                 if abs(old - smooth_weight) > 1e-6:
                     self.get_logger().info(
                         f"Updated planning trajectory_smooth_weight: {old:.1f} -> {smooth_weight:.1f}"
+                    )
+
+        if "heading_cost_weight" in config:
+            try:
+                heading_cost_weight = float(config["heading_cost_weight"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning heading_cost_weight: {config.get('heading_cost_weight')!r}"
+                )
+            else:
+                heading_cost_weight = max(0.0, min(300.0, heading_cost_weight))
+                old = self.heading_cost_weight
+                self.heading_cost_weight = heading_cost_weight
+                if abs(old - heading_cost_weight) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning heading_cost_weight: {old:.1f} -> {heading_cost_weight:.1f}"
+                    )
+
+        if "pivot_recovery_score_threshold" in config:
+            try:
+                threshold = float(config["pivot_recovery_score_threshold"])
+            except (TypeError, ValueError):
+                self.get_logger().warning(
+                    f"Invalid planning pivot_recovery_score_threshold: {config.get('pivot_recovery_score_threshold')!r}"
+                )
+            else:
+                threshold = max(0.0, min(10.0, threshold))
+                old = self.pivot_recovery_score_threshold
+                self.pivot_recovery_score_threshold = threshold
+                if abs(old - threshold) > 1e-6:
+                    self.get_logger().info(
+                        f"Updated planning pivot_recovery_score_threshold: {old:.2f} -> {threshold:.2f}"
                     )
 
     def _update_reverse_behavior(self):
@@ -1592,11 +1785,11 @@ class PlanningNode(Node):
         publish_header = odom_msg.header if self.odom_source == 'ekf' else depth_msg.header
         self._plan_and_publish(T, init_q, publish_header)
 
-    @Timer(name="Lidar Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def rear_depth_callback(self, depth_msg):
         # Kept for compatibility; camera1 depth is handled in planning_rear_depth process.
         return
 
+    @Timer(name="Lidar Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def lidar_sync_callback(self, lidar_msg, pose_msg):
         if self.occupancy_source != 'lidar':
             return
@@ -1697,20 +1890,84 @@ class PlanningNode(Node):
             self.front_clearance_pub.publish(Float32(data=float(front_clearance)))
             effective_target_pose = self._resolve_effective_target_pose(T, ESDF_map, header.stamp)
             enter_threshold = self.reverse_enter_threshold
-            should_reverse = front_clearance <= enter_threshold
+            exit_threshold = max(self.reverse_exit_threshold, enter_threshold)
+            now_cc = time.monotonic()
+            if self._reverse_active:
+                should_reverse = front_clearance < exit_threshold
+            else:
+                should_reverse = front_clearance <= enter_threshold
+
+            if self.only_straight_back and should_reverse:
+                self._staged_reverse_until_time = max(
+                    self._staged_reverse_until_time,
+                    now_cc + self.staged_reverse_duration,
+                )
+            if self.only_straight_back and now_cc < self._staged_reverse_until_time:
+                should_reverse = True
+            elif not should_reverse:
+                self._staged_reverse_until_time = 0.0
+            self._reverse_active = should_reverse
+
             valid_traj_count = int(np.sum(np.isfinite(scores)))
             all_collision = valid_traj_count == 0
             recovery_indices = np.flatnonzero(params[:, 0] < 0.0)
+            pivot_indices = np.flatnonzero((np.abs(params[:, 0]) < 1e-6) & (np.abs(params[:, 1]) >= self.pivot_omega_min))
+
+            def target_side_in_robot_frame(target_pose):
+                if target_pose is None:
+                    return float("nan")
+                center = self.camera_to_robot_center(T)
+                delta = np.array(target_pose[:3], dtype=np.float64) - center
+                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                forward_norm = float(np.linalg.norm(forward[:2]))
+                if forward_norm < 1e-6:
+                    return float("nan")
+                fwd_xy = forward[:2] / forward_norm
+                left_xy = np.array([-fwd_xy[1], fwd_xy[0]], dtype=np.float64)
+                return float(np.dot(delta[:2], left_xy))
+
+            target_side_y = target_side_in_robot_frame(effective_target_pose)
+
+            def choose_pivot_index():
+                if len(pivot_indices) == 0:
+                    return None, "none"
+                pivot_scores = scores[pivot_indices]
+                finite_mask = np.isfinite(pivot_scores)
+                if not np.any(finite_mask):
+                    return None, "none"
+                finite_indices = pivot_indices[finite_mask]
+                finite_scores = pivot_scores[finite_mask]
+                pivot_costs = finite_scores.astype(np.float64) * 100.0
+                if np.isfinite(target_side_y) and abs(target_side_y) > 0.05:
+                    preferred_sign = np.sign(target_side_y)
+                    wrong_side = params[finite_indices, 1] * preferred_sign < 0.0
+                    pivot_costs = pivot_costs + wrong_side.astype(np.float64) * 20.0
+                best = int(np.argmin(pivot_costs))
+                return int(finite_indices[best]), "pivot"
 
             def choose_recovery_index():
+                best_reverse_score = float("inf")
+                best_reverse_index = None
+                if len(recovery_indices) > 0:
+                    recovery_scores = scores[recovery_indices]
+                    finite_mask = np.isfinite(recovery_scores)
+                    if np.any(finite_mask):
+                        finite_indices = recovery_indices[finite_mask]
+                        finite_scores = recovery_scores[finite_mask]
+                        best_pos = int(np.argmin(finite_scores))
+                        best_reverse_score = float(finite_scores[best_pos])
+                        best_reverse_index = int(finite_indices[best_pos])
+                        if best_reverse_score <= self.pivot_recovery_score_threshold:
+                            return best_reverse_index, "finite"
+
+                pivot_index, pivot_reason = choose_pivot_index()
+                if pivot_index is not None:
+                    return pivot_index, pivot_reason
+
+                if best_reverse_index is not None:
+                    return best_reverse_index, "finite_poor"
                 if len(recovery_indices) == 0:
                     return 0, "none"
-                recovery_scores = scores[recovery_indices]
-                finite_mask = np.isfinite(recovery_scores)
-                if np.any(finite_mask):
-                    finite_indices = recovery_indices[finite_mask]
-                    finite_scores = recovery_scores[finite_mask]
-                    return int(finite_indices[int(np.argmin(finite_scores))]), "finite"
 
                 ignore_steps = min(3, trajectories.shape[1] - 1)
                 delayed_scores, _ = score_trajectories_by_ESDF(
@@ -1736,27 +1993,80 @@ class PlanningNode(Node):
                 straight_reverse = recovery_indices[int(np.argmin(np.abs(params[recovery_indices, 1])))]
                 return int(straight_reverse), "fallback_straight"
 
-            def cost_function(traj, param, score, target_pose):
+            def _wrap_angle(angle: float) -> float:
+                return math.atan2(math.sin(angle), math.cos(angle))
+
+            def trajectory_heading_debug(traj, target_pose):
+                if target_pose is None:
+                    return float("nan"), float("nan"), float("nan")
+                traj_end = np.array(traj[-1, :3], dtype=np.float64)
+                to_target = np.array(target_pose[:3], dtype=np.float64) - traj_end
+                if np.linalg.norm(to_target[:2]) < 1e-6:
+                    return 0.0, float("nan"), float("nan")
+                target_yaw = math.atan2(float(to_target[1]), float(to_target[0]))
+                q = np.array(traj[-1, 3:7], dtype=np.float64)
+                forward = quat_to_matrix(q) @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                if np.linalg.norm(forward[:2]) < 1e-6:
+                    return float("nan"), target_yaw, float("nan")
+                traj_yaw = math.atan2(float(forward[1]), float(forward[0]))
+                return abs(_wrap_angle(target_yaw - traj_yaw)), target_yaw, traj_yaw
+
+            def target_in_robot_frame(target_pose):
+                if target_pose is None:
+                    return float("nan"), float("nan")
+                center = self.camera_to_robot_center(T)
+                delta = np.array(target_pose[:3], dtype=np.float64) - center
+                forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                forward_norm = float(np.linalg.norm(forward[:2]))
+                if forward_norm < 1e-6:
+                    return float("nan"), float("nan")
+                fwd_xy = forward[:2] / forward_norm
+                left_xy = np.array([-fwd_xy[1], fwd_xy[0]], dtype=np.float64)
+                target_robot_x = float(np.dot(delta[:2], fwd_xy))
+                target_robot_y = float(np.dot(delta[:2], left_xy))
+                return target_robot_x, target_robot_y
+
+            target_robot_x, target_robot_y = target_in_robot_frame(effective_target_pose)
+
+            def cost_breakdown(traj, param, score, target_pose):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
+                is_pivot_traj = abs(param[0]) < 1e-6 and abs(param[1]) >= self.pivot_omega_min
                 reverse_gate_penalty = 0.0
-                if should_reverse and not is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                if should_reverse and not is_backward_traj and not is_pivot_traj:
+                    reverse_gate_penalty = 1e9
                 elif not should_reverse and is_backward_traj:
-                        reverse_gate_penalty = 1e9
+                    reverse_gate_penalty = 1e9
 
                 # regular trajectory penalty
-                traj_end = np.array(traj[-1,:3])
+                traj_end = np.array(traj[-1, :3])
                 target_end = target_pose if target_pose is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
+                dist = float(np.linalg.norm(traj_end - target_end))
+                esdf_cost = float(score * 100)
+                target_cost = float(100 * dist)
+                smooth_vx_cost = float(self.trajectory_smooth_weight * abs(self.last_param[0] - param[0]))
+                smooth_omega_cost = float(self.trajectory_smooth_weight * abs(self.last_param[1] - param[1]))
+                heading_error, target_yaw, traj_yaw = trajectory_heading_debug(traj, target_pose)
+                heading_cost = 0.0
+                if self.heading_cost_weight > 0.0 and not is_backward_traj and np.isfinite(heading_error):
+                    heading_cost = float(self.heading_cost_weight * heading_error)
+                total = esdf_cost + target_cost + heading_cost + smooth_vx_cost + smooth_omega_cost + reverse_gate_penalty
+                return {
+                    "total": total,
+                    "dist": dist,
+                    "esdf_cost": esdf_cost,
+                    "target_cost": target_cost,
+                    "heading_cost": heading_cost,
+                    "smooth_vx_cost": smooth_vx_cost,
+                    "smooth_omega_cost": smooth_omega_cost,
+                    "reverse_gate_penalty": float(reverse_gate_penalty),
+                    "heading_error": float(heading_error),
+                    "target_yaw": float(target_yaw),
+                    "traj_yaw": float(traj_yaw),
+                }
 
-                return (
-                    score * 100
-                    + 100 * dist
-                    + self.trajectory_smooth_weight * abs(self.last_param[0] - param[0])
-                    + self.trajectory_smooth_weight * abs(self.last_param[1] - param[1])
-                    + reverse_gate_penalty
-                )
+            def cost_function(traj, param, score, target_pose):
+                return cost_breakdown(traj, param, score, target_pose)["total"]
 
             top_k = 1
             recovery_reason = "normal"
@@ -1773,35 +2083,67 @@ class PlanningNode(Node):
             selected_score = float(scores[selected_index])
             selected_cost = float(costs[selected_index])
             selected_is_reverse = bool(selected_param[0] < 0.0)
-            target_dist = float("nan")
-            if effective_target_pose is not None:
-                target_dist = float(np.linalg.norm(trajectories[selected_index][-1, :3] - effective_target_pose))
+            selected_is_pivot = bool(abs(selected_param[0]) < 1e-6 and abs(selected_param[1]) >= self.pivot_omega_min)
+            selected_breakdown = cost_breakdown(
+                trajectories[selected_index],
+                selected_param,
+                selected_score,
+                effective_target_pose,
+            )
+            target_dist = selected_breakdown["dist"]
             now_debug = time.monotonic()
             should_log_debug = (
                 now_debug - self._last_avoidance_debug_log_time > 0.5
                 or all_collision
                 or should_reverse
                 or selected_is_reverse
+                or selected_is_pivot
             )
             if should_log_debug:
                 self._last_avoidance_debug_log_time = now_debug
+                reverse_debug = ""
+                if should_reverse or selected_is_reverse:
+                    reverse_parts = []
+                    for idx in recovery_indices:
+                        reverse_parts.append(
+                            f"{int(idx)}:om={params[idx, 1]:.2f},score={scores[idx]:.2f},cost={costs[idx]:.1f}"
+                        )
+                    reverse_debug = " reverse_candidates=[" + ";".join(reverse_parts) + "]"
                 self.get_logger().info(
                     "planning_avoidance_debug "
                     f"front_clearance={front_clearance:.2f} enter_threshold={enter_threshold:.2f} "
-                    f"should_reverse={should_reverse} all_collision={all_collision} "
+                    f"exit_threshold={exit_threshold:.2f} "
+                    f"should_reverse={should_reverse} reverse_active={self._reverse_active} "
+                    f"staged_reverse_left={max(0.0, self._staged_reverse_until_time - now_cc):.2f} "
+                    f"all_collision={all_collision} "
                     f"valid_traj_count={valid_traj_count}/{len(trajectories)} "
                     f"recovery_reason={recovery_reason} "
                     f"selected_idx={selected_index} selected_vx={selected_param[0]:.2f} "
-                    f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} "
+                    f"selected_omega={selected_param[1]:.2f} selected_reverse={selected_is_reverse} selected_pivot={selected_is_pivot} "
                     f"selected_score={selected_score:.3f} selected_cost={selected_cost:.1f} "
-                    f"target_dist={target_dist:.2f} last_vx={self.last_param[0]:.2f} "
+                    f"target_robot_x={target_robot_x:.2f} target_robot_y={target_robot_y:.2f} "
+                    f"target_dist={target_dist:.2f} heading_error={selected_breakdown['heading_error']:.2f} "
+                    f"target_yaw={selected_breakdown['target_yaw']:.2f} traj_yaw={selected_breakdown['traj_yaw']:.2f} "
+                    f"esdf_cost={selected_breakdown['esdf_cost']:.1f} "
+                    f"target_cost={selected_breakdown['target_cost']:.1f} "
+                    f"heading_cost={selected_breakdown['heading_cost']:.1f} "
+                    f"smooth_vx_cost={selected_breakdown['smooth_vx_cost']:.1f} "
+                    f"smooth_omega_cost={selected_breakdown['smooth_omega_cost']:.1f} "
+                    f"reverse_gate_penalty={selected_breakdown['reverse_gate_penalty']:.1f} "
+                    f"last_vx={self.last_param[0]:.2f} "
                     f"last_omega={self.last_param[1]:.2f} source={self.occupancy_source} "
                     f"dilation_cells={self.obstacle_config.dilation_cells} "
                     f"lidar_min_votes={self.lidar_min_votes} "
                     f"lidar_min_obstacle_area_cells={self.lidar_min_obstacle_area_cells} "
                     f"lidar_score_percentile={self.lidar_score_percentile:.1f} "
                     f"lidar_collision_tolerance={self.lidar_collision_tolerance} "
-                    f"trajectory_smooth_weight={self.trajectory_smooth_weight:.1f}"
+                    f"trajectory_smooth_weight={self.trajectory_smooth_weight:.1f} "
+                    f"heading_cost_weight={self.heading_cost_weight:.1f} "
+                    f"pivot_recovery_score_threshold={self.pivot_recovery_score_threshold:.2f} "
+                    f"target_side_y={target_side_y:.2f} "
+                    f"only_straight_back={self.only_straight_back} "
+                    f"staged_reverse_duration={self.staged_reverse_duration:.2f}"
+                    f"{reverse_debug}"
                 )
             self.last_param = selected_param
 
