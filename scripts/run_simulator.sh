@@ -1,35 +1,50 @@
 #!/bin/bash
 # TinyNav gz-sim launcher: one named tmux window per component.
 #
-# Usage:  bash /tinynav/scripts/run_simulator.sh [--map] [--world <sdf>] [--auto <scene>]
+# Usage:  bash /tinynav/scripts/run_simulator.sh [--stack full|sensor] [--map] [--world <sdf>] [--auto <scene>]
 #
-# Default: sim (empty world) + perception + planning + teleop; --map also starts
-#          map_node and the rviz goal relay (localization + arrow goals).
-#          --world: base world SDF (default tool/simulator/worlds/robot_scene_empty.sdf;
-#                   use tool/simulator/worlds/robot_scene.sdf for the depot factory).
+# Default (--stack full): sim (depot factory) + perception + planning + teleop;
+#          --map also starts map_node and the rviz goal relay (localization +
+#          arrow goals).
+#          --world: base world SDF (default tool/simulator/worlds/robot_scene.sdf,
+#                   the depot factory — rich features for VIO/relocalization;
+#                   use robot_scene_empty.sdf for a bare ground plane).
 #          --auto:  scripted scene (tool/simulator/gazebo_scene, e.g. l_corridor):
 #                   spawns obstacles, resets robot to origin, publishes targets.
 #
-# Ground-truth relocalization: without --map, sim_gt_reloc corrects
-# /slam/odometry_visual into the gazebo world frame using the chassis ground
-# truth from /pose/info, so scene runs start exactly at the origin without
-# respawning perception. With --map, map_node's own relocalization is used
-# and sim_gt_reloc is off.
+# --stack sensor: only the sensor face (gz/gui/bridge/caminfo/percept/control),
+#          for when pilot owns the rest — pilot spawns planning itself, and its
+#          map_node is the localization authority, so neither planning nor
+#          sim_gt_reloc may run here (double planner / double reloc). Conflicts
+#          with --map and --auto for the same reason.
+#
+# Ground-truth relocalization: in the full stack without --map, sim_gt_reloc
+# corrects /slam/odometry_visual into the gazebo world frame using the chassis
+# ground truth from /pose/info, so scene runs start exactly at the origin
+# without respawning perception. With --map, map_node's own relocalization is
+# used and sim_gt_reloc is off. (In the sensor stack the raw stream is left
+# alone — pilot's map_node consumes it.)
 #
 # Attach:  tmux attach -t tinynav_sim
 
 SESSION=tinynav_sim
 WITH_MAP=0
-WORLD_SDF=tool/simulator/worlds/robot_scene_empty.sdf
+WORLD_SDF=tool/simulator/worlds/robot_scene.sdf
 AUTO_SCENE=""
+STACK=full
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --stack) STACK="$2"; shift 2 ;;
     --map) WITH_MAP=1; shift ;;
     --world) WORLD_SDF="$2"; shift 2 ;;
     --auto) AUTO_SCENE="$2"; shift 2 ;;
-    *) echo "usage: bash $0 [--map] [--world <sdf>] [--auto <scene>]"; exit 1 ;;
+    *) echo "usage: bash $0 [--stack full|sensor] [--map] [--world <sdf>] [--auto <scene>]"; exit 1 ;;
   esac
 done
+[[ $STACK != full && $STACK != sensor ]] && { echo "--stack must be 'full' or 'sensor'"; exit 1; }
+if [[ $STACK == sensor ]] && { [[ $WITH_MAP == 1 ]] || [[ -n $AUTO_SCENE ]]; }; then
+  echo "--stack sensor conflicts with --map/--auto: pilot owns map_node and localization"; exit 1
+fi
 cd /tinynav
 mkdir -p logs
 
@@ -81,26 +96,28 @@ win gui "ign gazebo -g -v 3 2>&1 | tee logs/gzgui.log"
 win bridge "ros2 run ros_gz_bridge parameter_bridge $msg_bridge_args 2>&1 | tee logs/bridge.log"
 win caminfo "uv run python tool/simulator/gazebo_scene/camera_info_publisher.py 2>&1 | tee logs/caminfo.log"
 PERCEPT_ARGS=""
-if [[ $WITH_MAP == 0 ]]; then
+if [[ $STACK == full && $WITH_MAP == 0 ]]; then
   # sim_gt_reloc republishes the SLAM odometry corrected into the gazebo
   # world frame; perception emits its raw stream on ..._odometry_visual_raw.
   PERCEPT_ARGS="--ros-args -r /slam/odometry_visual:=/slam/odometry_visual_raw"
   win reloc "uv run python tool/simulator/gazebo_scene/sim_gt_reloc.py 2>&1 | tee logs/reloc.log"
 fi
 win percept "uv run python tinynav/core/perception_node.py $PERCEPT_ARGS 2>&1 | tee logs/perception.log"
-win planning "uv run python tinynav/core/planning_node.py 2>&1 | tee logs/planning.log"
 win control "uv run python tinynav/platforms/simulator_control.py 2>&1 | tee logs/control.log"
-win teleop "uv run python tinynav/platforms/keyboard_teleop.py 2>&1 | tee logs/teleop.log"
-win rviz "rviz2 -d /tinynav/docs/vis.rviz 2>&1 | tee logs/rviz.log"
-if [[ $WITH_MAP == 1 ]]; then
-  win map "uv run python tinynav/core/map_node.py --tinynav_map_path $MAP_DIR --tinynav_db_path $NAV_DB_DIR 2>&1 | tee logs/map.log"
-fi
-if [[ -n $AUTO_SCENE ]]; then
-  AUTO_ARGS=""
-  [[ $WITH_MAP == 1 ]] && AUTO_ARGS="--no-reloc"  # map_node is the authority
-  win gz_scene "uv run python tool/simulator/gazebo_scene/scene_runner.py $AUTO_SCENE $AUTO_ARGS 2>&1 | tee logs/gz_scene.log"
+if [[ $STACK == full ]]; then
+  win planning "uv run python tinynav/core/planning_node.py 2>&1 | tee logs/planning.log"
+  win teleop "uv run python tinynav/platforms/keyboard_teleop.py 2>&1 | tee logs/teleop.log"
+  win rviz "rviz2 -d /tinynav/docs/vis.rviz 2>&1 | tee logs/rviz.log"
+  if [[ $WITH_MAP == 1 ]]; then
+    win map "uv run python tinynav/core/map_node.py --tinynav_map_path $MAP_DIR --tinynav_db_path $NAV_DB_DIR 2>&1 | tee logs/map.log"
+  fi
+  if [[ -n $AUTO_SCENE ]]; then
+    AUTO_ARGS=""
+    [[ $WITH_MAP == 1 ]] && AUTO_ARGS="--no-reloc"  # map_node is the authority
+    win gz_scene "uv run python tool/simulator/gazebo_scene/scene_runner.py $AUTO_SCENE $AUTO_ARGS 2>&1 | tee logs/gz_scene.log"
+  fi
 fi
 
-echo "session '$SESSION' up (WITH_MAP=$WITH_MAP, WORLD=$WORLD_SDF, AUTO=${AUTO_SCENE:-none}):"
+echo "session '$SESSION' up (STACK=$STACK, WITH_MAP=$WITH_MAP, WORLD=$WORLD_SDF, AUTO=${AUTO_SCENE:-none}):"
 tmux list-windows -t "$SESSION" -F '  #{window_index}:#{window_name}'
 echo "attach: docker exec -t tinynav tmux attach -t $SESSION   (Ctrl+B D detach)"
