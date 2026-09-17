@@ -186,7 +186,7 @@ def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    max_path_len_m=1e9, max_lat_acc=1e9,
+    max_path_len_m=1e9, max_lat_acc=1e9, min_linear_vel=0.0,
 ):
     """Regular sampled lattice (forward-only).
 
@@ -211,7 +211,15 @@ def generate_trajectory_library_3d(
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
     n_omega = num_samples
-    vx_samples = np.linspace(0.0, vx_max, n_vx)
+    # Forward speeds the robot will actually hold, plus the standstill rows.
+    # Sampling from 0 offered a creep band under the floor -- at vx_max 0.20 the
+    # speeds were 0, 0.033, 0.067, ... and the cost minimum sat on 0.033, which
+    # cmd_vel_control reads as a stop while `n_fwd_ok` counted it a way forward.
+    # vx=0 stays: the turn-in-place vocabulary the heading term ranks is built on it.
+    vx_lo = min_linear_vel if min_linear_vel < vx_max else vx_max
+    vx_samples = np.empty(n_vx)
+    vx_samples[0] = 0.0
+    vx_samples[1:] = np.linspace(vx_lo, vx_max, n_vx - 1)
 
     num_samples = n_vx * n_omega
 
@@ -303,6 +311,26 @@ def angle_between(a, b):
     """|a - b| folded into [0, pi]. `math_utils.wrap_angle` in njit form."""
     d = a - b
     return abs(np.arctan2(np.sin(d), np.cos(d)))
+
+
+#: How short the way forward has to be for the reverse family to be armed.
+REVERSE_ENTER_M = 0.30
+
+
+def reverse_armed(front_clearance, n_fwd_ok, resolution):
+    """**The reverse family is armed by there being no way forward.** Clearance is a
+    proxy for that and was once the only judge, so a robot with every forward
+    trajectory in collision at 0.60-0.75 m read False and stood still -- 21 s of that
+    on 122 on 2026-09-09, with nothing published at all.
+
+    Half a cell of slack because `front_clearance` counts grid steps: it lands on
+    multiples of `resolution` and so never exactly on a threshold in metres. 6 * 0.05
+    is 0.30000000000000004, above 0.30, which shut this gate at its own number -- 720
+    frames of `front_clr=0.30 should_reverse=False` on 122 on 2026-09-16, the robot
+    stationary in front of something 0.30 m away for five minutes. The slack is under
+    one step, so it admits the step nearest the threshold and no further one.
+    """
+    return front_clearance <= REVERSE_ENTER_M + resolution / 2 or n_fwd_ok == 0
 
 
 @njit(cache=True)
@@ -1109,6 +1137,7 @@ class PlanningNode(Node):
             max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             max_path_len_m=self._traj_max_len_m,
             max_lat_acc=self._traj_max_lat_acc,
+            min_linear_vel=self._vx_min,
         )
         vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
         trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
@@ -1207,16 +1236,9 @@ class PlanningNode(Node):
                 trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            # **The reverse family is armed by there being no way forward.** The
-            # clearance reading is a proxy for that and it was the only judge, so a
-            # robot with every forward trajectory in collision at 0.60-0.75 m read
-            # `should_reverse=False`, and standing still -- which is neither
-            # colliding nor gated -- was the cost minimum. 21 s of that on 122 on
-            # 2026-09-09, with nothing published at all.
-            enter_threshold = 0.30
             n_fwd_ok = sum(1 for i in range(len(trajectories))
                            if params[i][0] > 1e-3 and scores[i] != float('inf'))
-            should_reverse = front_clearance <= enter_threshold or n_fwd_ok == 0
+            should_reverse = reverse_armed(front_clearance, n_fwd_ok, self.resolution)
 
             target = self.target_pose
 
