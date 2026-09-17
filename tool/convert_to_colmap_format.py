@@ -20,6 +20,7 @@ from typing import Dict, List, Tuple
 import shelve
 from tqdm import tqdm
 from convert_to_nerf_format import convert_nerf_format
+from video_db import VideoDB
 
 
 
@@ -46,8 +47,18 @@ class TinynavToColmapConverter:
         self.depths = shelve.open(f"{self.input_dir}/depths")
 
         self.rgb_camera_K = np.load(self.input_dir / "rgb_camera_intrinsics.npy", allow_pickle=True)
-        self.rgb_images = shelve.open(f"{self.input_dir}/rgb_images")
+        # RGB moved to VideoDB in #126 and the old shelve has had no writer since.
+        # shelve.open defaults to flag='c', so reading it created an empty db and
+        # extracted zero images, leaving rgb_image_size None.
+        self.rgb_images = VideoDB(dir_path=f"{self.input_dir}/rgb_images_db", mode="read")
         self.T_rgb_to_infra1 = np.load(self.input_dir / "T_rgb_to_infra1.npy", allow_pickle=True)
+        if self.T_rgb_to_infra1.ndim == 0:
+            # build_map_node saves None when the rig publishes no rgb->infra1
+            # extrinsic. Say so here rather than dying inside a matmul after
+            # having already extracted every frame.
+            raise SystemExit(
+                f"{self.input_dir}/T_rgb_to_infra1.npy is None: this map was built "
+                "without an rgb->infra1 extrinsic, so RGB poses cannot be computed")
         self.rgb_image_size = None
    
     def _get_image_list(self) -> List[Tuple[int, str, np.ndarray]]:
@@ -108,7 +119,7 @@ class TinynavToColmapConverter:
         # Generate PLY file from 3D points
         self._write_ply_file(points3d_data)
         
-        print(f"Created COLMAP text files with {len(self.rgb_images)} images and {len(points3d_data)} 3D points")
+        print(f"Created COLMAP text files with {len(self.rgb_images.ts_to_idx)} images and {len(points3d_data)} 3D points")
     
     def _write_cameras_txt(self, camera_data, sparse_dir):
         """Write cameras.txt file for COLMAP"""
@@ -281,16 +292,16 @@ class TinynavToColmapConverter:
         return color
     
     def _extract_images_from_db(self):
-        """Extract images from tinynav database using shelve"""
-        
+        """Extract every RGB frame to images/. Returns the (h, w) of the last one."""
+
         images_dir = self.output_dir / "images"
         images_dir.mkdir(exist_ok=True)
-        # Extract images from shelve database
         image_size = None
-        for timestamp, image in tqdm(self.rgb_images.items(), desc="Extracting images"):
-            # Convert key to string if needed
-            key_str = str(timestamp)
-            image_path = images_dir / f"image_{key_str}.png"
+        for timestamp in tqdm(sorted(self.rgb_images.ts_to_idx), desc="Extracting images"):
+            image = self.rgb_images.read(timestamp)
+            if image is None:
+                continue
+            image_path = images_dir / f"image_{timestamp}.png"
             cv2.imwrite(str(image_path), image)
             image_size = image.shape[:2]
         print("Image extraction completed")
