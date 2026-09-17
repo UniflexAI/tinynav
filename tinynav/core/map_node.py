@@ -570,6 +570,27 @@ class MapNode(Node):
         self.planning_robot_z_top = self._load_planning_float(
             tinynav_map_path, "robot_z_top", None, minimum=-3.0, maximum=3.0
         )
+        self.planning_goal_project_to_free_space = self._load_planning_bool_or_none(
+            tinynav_map_path, "goal_project_to_free_space"
+        )
+        self.planning_goal_require_reachable = self._load_planning_bool_or_none(
+            tinynav_map_path, "goal_require_reachable"
+        )
+        self.planning_goal_project_radius_m = self._load_planning_float(
+            tinynav_map_path, "goal_project_radius_m", None, minimum=0.05, maximum=3.0
+        )
+        self.planning_goal_project_step_m = self._load_planning_float(
+            tinynav_map_path, "goal_project_step_m", None, minimum=0.02, maximum=0.25
+        )
+        self.planning_goal_project_trigger_distance_m = self._load_planning_float(
+            tinynav_map_path, "goal_project_trigger_distance_m", None, minimum=0.1, maximum=10.0
+        )
+        self.planning_goal_min_wall_clearance_m = self._load_planning_float(
+            tinynav_map_path, "goal_min_wall_clearance_m", None, minimum=0.0, maximum=2.0
+        )
+        self.planning_goal_project_path_tolerance_m = self._load_planning_float(
+            tinynav_map_path, "goal_project_path_tolerance_m", None, minimum=0.05, maximum=2.0
+        )
         self.rtk_mode = self._load_rtk_mode(tinynav_map_path)
 
         # VLAD: load vocabulary and descriptors if available.
@@ -1086,6 +1107,28 @@ class MapNode(Node):
         self.get_logger().info(f"Using planning.{key}={parsed}")
         return parsed
 
+    def _load_planning_bool_or_none(self, tinynav_map_path: str, key: str) -> bool | None:
+        planning_config = self._load_planning_config(tinynav_map_path)
+        if key not in planning_config:
+            return None
+        value = planning_config.get(key)
+        if isinstance(value, bool):
+            parsed = value
+        elif isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                parsed = True
+            elif normalized in {"false", "0", "no", "off"}:
+                parsed = False
+            else:
+                self.get_logger().warning(f"Invalid planning.{key}={value!r}; not overriding")
+                return None
+        else:
+            self.get_logger().warning(f"Invalid planning.{key}={value!r}; not overriding")
+            return None
+        self.get_logger().info(f"Using planning.{key}={parsed}")
+        return parsed
+
     def _setup_relocalization_mask(self, tinynav_map_path: str) -> None:
         try:
             nav_flow = load_nav_flow_dict(tinynav_map_path)
@@ -1214,6 +1257,20 @@ class MapNode(Node):
             config["robot_z_bottom"] = self.planning_robot_z_bottom
         if self.planning_robot_z_top is not None:
             config["robot_z_top"] = self.planning_robot_z_top
+        if self.planning_goal_project_to_free_space is not None:
+            config["goal_project_to_free_space"] = self.planning_goal_project_to_free_space
+        if self.planning_goal_require_reachable is not None:
+            config["goal_require_reachable"] = self.planning_goal_require_reachable
+        if self.planning_goal_project_radius_m is not None:
+            config["goal_project_radius_m"] = self.planning_goal_project_radius_m
+        if self.planning_goal_project_step_m is not None:
+            config["goal_project_step_m"] = self.planning_goal_project_step_m
+        if self.planning_goal_project_trigger_distance_m is not None:
+            config["goal_project_trigger_distance_m"] = self.planning_goal_project_trigger_distance_m
+        if self.planning_goal_min_wall_clearance_m is not None:
+            config["goal_min_wall_clearance_m"] = self.planning_goal_min_wall_clearance_m
+        if self.planning_goal_project_path_tolerance_m is not None:
+            config["goal_project_path_tolerance_m"] = self.planning_goal_project_path_tolerance_m
         msg.data = json.dumps(config)
         self.planning_config_pub.publish(msg)
         self.get_logger().info(f"Published /planning/config: {msg.data}")

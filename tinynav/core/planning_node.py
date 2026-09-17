@@ -827,6 +827,14 @@ class PlanningNode(Node):
         self._fallback_min_clearance_m = max(self.robot.safety_radius + 0.05, self.robot.comfort_radius + 0.05)
         # Match map_node target lookahead: max_linear_speed * target_pose_dist_factor (~2.0).
         self._fallback_lookahead_factor = 2.0
+        self.goal_project_to_free_space = False
+        self.goal_project_radius_m = 0.8
+        self.goal_project_step_m = 0.05
+        self.goal_project_trigger_distance_m = 1.5
+        self.goal_min_wall_clearance_m = 0.25
+        self.goal_require_reachable = True
+        self.goal_project_path_tolerance_m = 0.35
+        self._last_goal_projection_log_time = 0.0
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
@@ -1225,6 +1233,64 @@ class PlanningNode(Node):
                     f"Updated planning target_pose_avoid_obstable: {old} -> {enabled}"
                 )
 
+        def parse_bool_config(key, old_value):
+            if key not in config:
+                return old_value
+            value = config[key]
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in ("true", "1", "yes", "on"):
+                    return True
+                if normalized in ("false", "0", "no", "off"):
+                    return False
+            self.get_logger().warning(f"Invalid planning {key}: {value!r}")
+            return old_value
+
+        def parse_float_config(key, old_value, minimum, maximum):
+            if key not in config:
+                return old_value
+            value = config[key]
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                self.get_logger().warning(f"Invalid planning {key}: {value!r}")
+                return old_value
+            return max(minimum, min(maximum, parsed))
+
+        old_goal_project = self.goal_project_to_free_space
+        self.goal_project_to_free_space = parse_bool_config(
+            "goal_project_to_free_space", self.goal_project_to_free_space
+        )
+        if old_goal_project != self.goal_project_to_free_space:
+            self.get_logger().info(
+                f"Updated planning goal_project_to_free_space: {old_goal_project} -> {self.goal_project_to_free_space}"
+            )
+
+        old_goal_require = self.goal_require_reachable
+        self.goal_require_reachable = parse_bool_config(
+            "goal_require_reachable", self.goal_require_reachable
+        )
+        if old_goal_require != self.goal_require_reachable:
+            self.get_logger().info(
+                f"Updated planning goal_require_reachable: {old_goal_require} -> {self.goal_require_reachable}"
+            )
+
+        goal_float_fields = (
+            ("goal_project_radius_m", 0.05, 3.0),
+            ("goal_project_step_m", 0.02, 0.25),
+            ("goal_project_trigger_distance_m", 0.1, 10.0),
+            ("goal_min_wall_clearance_m", 0.0, 2.0),
+            ("goal_project_path_tolerance_m", 0.05, 2.0),
+        )
+        for key, minimum, maximum in goal_float_fields:
+            old_value = getattr(self, key)
+            new_value = parse_float_config(key, old_value, minimum, maximum)
+            setattr(self, key, new_value)
+            if abs(old_value - new_value) > 1e-6:
+                self.get_logger().info(f"Updated planning {key}: {old_value:.2f} -> {new_value:.2f}")
+
         if "only_straight_back" in config:
             value = config["only_straight_back"]
             if isinstance(value, bool):
@@ -1531,6 +1597,107 @@ class PlanningNode(Node):
         lookahead = max(0.5, float(self.max_linear_speed) * float(self._fallback_lookahead_factor))
         return self._point_ahead_on_path(path_world, robot_position, lookahead)
 
+    def _path_remaining_distance(self, path, position):
+        if path is None or len(path) == 0:
+            return None
+        closest_index, current, _ = self._closest_point_on_path_xy(path, position)
+        remaining = 0.0
+        for i in range(closest_index + 1, len(path)):
+            nxt = path[i]
+            remaining += float(np.linalg.norm(nxt[:2] - current[:2]))
+            current = nxt
+        return remaining
+
+    def _is_goal_candidate_valid(self, candidate, esdf_map, path_world):
+        clearance = self._esdf_clearance_at(candidate, esdf_map)
+        if clearance < float(self.goal_min_wall_clearance_m):
+            return False, clearance, float("inf")
+        path_distance = 0.0
+        if self.goal_require_reachable:
+            if path_world is None or len(path_world) == 0:
+                return False, clearance, float("inf")
+            _, _, path_distance = self._closest_point_on_path_xy(path_world, candidate)
+            if path_distance > float(self.goal_project_path_tolerance_m):
+                return False, clearance, path_distance
+        return True, clearance, path_distance
+
+    def _iter_goal_projection_candidates(self, target_pose, path_world):
+        yielded = set()
+
+        def add_candidate(candidate):
+            candidate = np.asarray(candidate, dtype=np.float64).copy()
+            candidate[2] = target_pose[2]
+            key = (round(float(candidate[0]), 3), round(float(candidate[1]), 3))
+            if key in yielded:
+                return None
+            yielded.add(key)
+            return candidate
+
+        if path_world is not None and len(path_world) > 0:
+            _, closest_on_path, _ = self._closest_point_on_path_xy(path_world, target_pose)
+            candidate = add_candidate(closest_on_path)
+            if candidate is not None:
+                yield candidate
+            for point in path_world:
+                if float(np.linalg.norm(point[:2] - target_pose[:2])) <= float(self.goal_project_radius_m):
+                    candidate = add_candidate(point)
+                    if candidate is not None:
+                        yield candidate
+
+        radius = float(self.goal_project_radius_m)
+        step = float(self.goal_project_step_m)
+        rings = max(1, int(math.ceil(radius / step)))
+        for ring in range(1, rings + 1):
+            r = min(radius, ring * step)
+            samples = max(8, int(math.ceil(2.0 * math.pi * r / step)))
+            for i in range(samples):
+                angle = 2.0 * math.pi * float(i) / float(samples)
+                candidate = target_pose.copy()
+                candidate[0] += r * math.cos(angle)
+                candidate[1] += r * math.sin(angle)
+                candidate = add_candidate(candidate)
+                if candidate is not None:
+                    yield candidate
+
+    def _select_projected_goal(self, robot_position, esdf_map):
+        if self.target_pose is None or not self.goal_project_to_free_space:
+            return None, "disabled"
+
+        direct_distance = float(np.linalg.norm(self.target_pose[:2] - robot_position[:2]))
+        path_world = self._lookup_global_plan_in_world()
+        remaining = self._path_remaining_distance(path_world, robot_position)
+        trigger_distance = float(self.goal_project_trigger_distance_m)
+        if direct_distance > trigger_distance and (remaining is None or remaining > trigger_distance):
+            return None, "far"
+
+        target_clearance = self._esdf_clearance_at(self.target_pose, esdf_map)
+        if target_clearance >= float(self.goal_min_wall_clearance_m):
+            return None, "clear"
+
+        best = None
+        best_score = float("inf")
+        best_clearance = -1.0
+        best_path_distance = float("inf")
+        for candidate in self._iter_goal_projection_candidates(self.target_pose, path_world):
+            valid, clearance, path_distance = self._is_goal_candidate_valid(candidate, esdf_map, path_world)
+            if not valid:
+                continue
+            target_dist = float(np.linalg.norm(candidate[:2] - self.target_pose[:2]))
+            robot_dist = float(np.linalg.norm(candidate[:2] - robot_position[:2]))
+            score = target_dist + 0.05 * robot_dist + 0.2 * path_distance - 0.05 * clearance
+            if score < best_score:
+                best = candidate.copy()
+                best_score = score
+                best_clearance = clearance
+                best_path_distance = path_distance
+
+        if best is None:
+            return None, f"blocked_clearance={target_clearance:.2f}"
+        return best, (
+            f"projected_clearance={best_clearance:.2f} target_clearance={target_clearance:.2f} "
+            f"path_dist={best_path_distance:.2f}"
+        )
+
     def _publish_override_target_pose(self, target_pose, stamp):
         msg = Odometry()
         msg.header.stamp = stamp
@@ -1547,15 +1714,43 @@ class PlanningNode(Node):
     def _resolve_effective_target_pose(self, T, esdf_map, stamp):
         if self.target_pose is None:
             return None
+
+        robot_position = T[:3, 3]
+        projected_goal, project_reason = self._select_projected_goal(robot_position, esdf_map)
+        if projected_goal is not None:
+            now = time.monotonic()
+            should_publish = (
+                self._last_override_target_pose is None
+                or float(np.linalg.norm(projected_goal[:2] - self._last_override_target_pose[:2])) > 0.05
+                or now - self._last_override_publish_time > 1.0
+            )
+            if should_publish:
+                self._publish_override_target_pose(projected_goal, stamp)
+            if now - self._last_goal_projection_log_time > 0.5:
+                self._last_goal_projection_log_time = now
+                self.get_logger().warning(
+                    f"Projected target_pose to reachable free space: {project_reason} "
+                    f"target={self.target_pose.tolist()} projected={projected_goal.tolist()}"
+                )
+            self._fallback_target_pose = projected_goal
+            return projected_goal
+        elif self.goal_project_to_free_space and project_reason.startswith("blocked"):
+            now = time.monotonic()
+            if now - self._last_goal_projection_log_time > 1.0:
+                self._last_goal_projection_log_time = now
+                self.get_logger().warning(
+                    f"Goal projection found no reachable free pose ({project_reason}); keeping original target_pose"
+                )
+
         if not self.target_pose_avoid_obstable:
             return self.target_pose
         target_clearance = self._esdf_clearance_at(self.target_pose, esdf_map)
-        stuck = self._is_stuck(T[:3, 3])
+        stuck = self._is_stuck(robot_position)
         need_fallback = (target_clearance >= 0.0 and target_clearance < self._fallback_min_clearance_m) or stuck
         if not need_fallback:
             self._fallback_target_pose = None
             return self.target_pose
-        fallback = self._select_fallback_target(T[:3, 3], esdf_map, stuck=stuck)
+        fallback = self._select_fallback_target(robot_position, esdf_map, stuck=stuck)
         if fallback is None:
             return self.target_pose
         self._fallback_target_pose = fallback
