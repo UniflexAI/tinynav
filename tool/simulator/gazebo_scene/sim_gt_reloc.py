@@ -1,52 +1,41 @@
 #!/usr/bin/env python3
-"""Ground-truth relocalization correction for the tinynav gz (Fortress) sim.
+"""gz ground-truth goal transformer for the tinynav gz (Fortress) sim.
 
-Without map_node there is no visual relocalization, and perception_node has no
-pose-reset interface: its SLAM world anchors to identity at perception startup
-(A) and drifts over time (E), so /slam/odometry_visual lives in a frame that
-only coincides with the gazebo world by luck. The old workaround respawned the
-perception tmux window per scene run so SLAM re-anchored at the origin -- slow
-(TRT reload) and racy. This node replaces that hack.
+planning lives in perception's raw SLAM world frame ("world", the TF root) and
+its odometry input is perception's raw stream (the launcher remaps
+/slam/odometry_visual to it). Scene goals, however, are authored in gazebo
+world coordinates (scene JSON), a frame that only coincides with the SLAM
+frame by luck. This node keeps the two glued at goal-publishing time:
 
-It consumes the raw SLAM odometry (perception is launched with
--r /slam/odometry_visual:=/slam/odometry_visual_raw), compares it against the
-gazebo ground truth of the robot chassis (bridged from /world/$WORLD/
-pose_info as gz.msgs.Pose_V -> tf2_msgs/TFMessage), and republishes the
-odometry corrected into the gazebo world frame on the original topic name:
+    g_slam(t) = P(t) . E^-1 . T_gt(t)^-1 . g_gz
 
-    P(t) = A . X(t) . E(t)        raw SLAM output
-    Q(t) = T_gt(t) . C_hat        published correction
+P(t) is perception's raw odometry (/slam/odometry_visual_raw), T_gt(t) the
+robot ground truth (bridged /world/$WORLD/pose/info), E the static camera
+extrinsic from the lekiwi model origin to the perception camera frame (from
+tool/simulator/worlds/factory_scene.sdf: chassis sits (0,0,0.083) above the
+model origin, infra1_link (0.09,0.0255,0.017) in chassis; the rotation is the
+camera axes -- x right, y down, z fwd -- expressed in the chassis frame).
 
-where X(t) is the true camera pose. C_hat (chassis -> SLAM output frame) is a
-physical constant (camera extrinsics in the SLAM output convention), so Q is
-exact ground truth up to that constant frame -- same convention the raw SLAM
-establishes at its anchor, minus anchor instability and drift: E(t) is divided
-out because Q never depends on the quality of P, only on its existence, which
-makes mid-run teleports (set_pose back to the origin) harmless.
+Everything is computed from the current samples -- no sliding window. With E
+in place, P.E^-1.T_gt^-1 is the SLAM<->gz frame offset D(t), which moves only
+with VIO drift, so per-frame noise and re-anchoring merely bend the goal
+through the rate limiter below; a window would only blend poses that belong
+to different anchors across teleports and turns. The odometry stream itself
+is left untouched.
 
-Calibration: perception anchors its first keyframe at a zero-translation pose
-([R_anchor | 0]), so the earliest odometry samples satisfy
-C_hat = T_gt(t)^-1 . P(t) with translation(P) == 0. Calibration must happen
-in that early window, before graph optimization wanders the anchor (observed
-to reach >0.1m / 120deg while the robot stares at a textureless floor during
-the ~1min TRT engine load). This node therefore tracks, over the first
-CALIB_WINDOW_S of raw odometry, the sample whose translation is closest to
-zero, requires the robot to be stationary (checked against ground truth), and
--- since the anchor rotation R_anchor varies between runs (gravity-align
-degeneracy) -- checks translation only, never rotation.
+map_node substitute: the gz world plays the role of the built map, and this
+node publishes the same contract map_node does -- the TF world->map (C(t))
+plus /map/relocalization (the camera pose in gz world, here exact from
+ground truth) -- so map-frame consumers (planning's global route, the app
+backend, editors) work unchanged against the sim.
 
-If the window ends with no sample close enough to the anchor (robot moved
-during perception init, or the graph already wandered), calibration is
-refused, retried, and scene_runner eventually times out with a clear message;
-respawning the perception window restores a fresh anchor.
+The transformed goal is rate-limited and republished on /control/target_pose.
+Readiness is latched on /sim/gt_reloc/status (Bool) once both streams have
+been seen fresh; scene_runner waits for it before touching the robot.
 
-If /map/relocalization gains a publisher (map_node running), the node falls
-back to pass-through so map_node's own relocalization stays the sole authority
-(run_simulator.sh --map does not even start this node; this is the belt for
-manually started map_nodes).
-
-Calibration readiness is published latched on /sim/gt_reloc/status (Bool);
-scene_runner waits for it before touching the robot.
+The gz->SLAM transform only exists in the sim: on a real robot there is no
+ground truth, this node does not run, and map_node remains the localization
+authority (if /map/relocalization appears, goals pass through untouched).
 """
 
 import argparse
@@ -61,13 +50,27 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
 from tf2_msgs.msg import TFMessage
 
-from tinynav.core.math_utils import msg2np, np2msg, tf2np
+from tinynav.core.math_utils import msg2np, np2msg, np2tf, tf2np
+from tf2_ros import TransformBroadcaster
 
-CALIB_WINDOW_S = 30.0       # track the best (min |translation|) sample this long
-CALIB_OK_TOL = 0.01         # calibrate immediately below this |translation|
-CALIB_ACCEPT_TOL = 0.05     # accept the window's best sample below this
-GT_STATIONARY_TOL = 0.003   # max GT translation spread while calibrating
-GT_STALE_S = 0.5            # passthrough if the ground truth is older than this
+GT_STALE_S = 0.5            # ground truth older than this is not used
+P_STALE_S = 1.0             # odometry older than this is not used
+MAX_GOAL_SPEED = 1.5        # m/s cap on goal translation updates
+MAX_GOAL_YAW_RATE = 1.5     # rad/s cap on goal heading updates
+
+# Static camera extrinsic: lekiwi model origin -> perception camera frame.
+# Translation: factory_scene.sdf puts the chassis 0.083 above the model
+# origin and infra1_link at (0.09, 0.0255, 0.017) in the chassis frame.
+# Rotation: camera axes (x right, y down, z fwd) expressed in the chassis
+# frame (x fwd, y left, z up): right -> -y, down -> -z, fwd -> +x. This is
+# the transpose of the intuitive "chassis axes in camera coords" matrix --
+# as a pose rotation it maps camera-frame points into chassis frame.
+E = np.eye(4)
+E[:3, :3] = np.array([[0.0, 0.0, 1.0],
+                      [-1.0, 0.0, 0.0],
+                      [0.0, -1.0, 0.0]])
+E[:3, 3] = (0.09, 0.0255, 0.100)
+E_INV = np.linalg.inv(E)
 
 
 def discover_world(timeout=180.0):
@@ -82,46 +85,45 @@ def discover_world(timeout=180.0):
     return None
 
 
-class SimGtReloc(Node):
+def yaw_of(T):
+    return float(np.arctan2(T[1, 0], T[0, 0]))
+
+
+class SimGtGoalRelocator(Node):
     def __init__(self, world, robot_name):
         super().__init__("sim_gt_reloc")
         self.robot_name = robot_name
-        self.bypass = False
-        self.calibrated = False
-        self.C_hat = None
         self.gt_T = None
         self.gt_wall = 0.0
-        self.gt_hist = []  # (monotonic, translation) for stationarity checks
-        self.raw_msg = None
-        self._logged_names = False
-        self._last_stale_warn = 0.0
-        self._last_refuse_warn = 0.0
-        self._first_raw_wall = None
-        self._best = None  # (|translation|, gt_T, P) of best sample in window
+        self.P = None          # latest perception raw odometry, world->camera 4x4
+        self.P_wall = 0.0
+        self.goal_gz = None    # latest gz-frame goal (Odometry)
+        self.last_out = None   # (monotonic, x, y, yaw) of the last published goal
+        self.ready = False
 
         self.create_subscription(
             TFMessage, f"/world/{world}/pose/info", self.gt_cb,
             QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
         self.create_subscription(Odometry, "/slam/odometry_visual_raw", self.raw_cb, 50)
-        self.pub = self.create_publisher(Odometry, "/slam/odometry_visual", 50)
+        self.create_subscription(Odometry, "/sim/target_pose_gz", self.goal_gz_cb, 10)
+        self.pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        self.tf_broadcaster = TransformBroadcaster(self)
+        self.reloc_pub = self.create_publisher(Odometry, "/map/relocalization", 5)
         self.status_pub = self.create_publisher(
             Bool, "/sim/gt_reloc/status",
             QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                        durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        self.create_timer(0.2, self.calib_tick)
-        self.create_timer(2.0, self.guard_tick)
+        self.create_timer(0.1, self.tick)
+        self.create_timer(1.0, self.reloc_tick)
+        self.create_timer(2.0, self.diag_tick)
         self.publish_status(False)
         self.get_logger().info(
-            f"sim_gt_reloc up (world={world}, robot={robot_name}); waiting for "
-            "perception's first odometry to calibrate")
+            f"sim_gt_reloc up (world={world}, robot={robot_name}); gz goals on "
+            "/sim/target_pose_gz -> SLAM frame on /control/target_pose")
 
     # ---- subscriptions ----
 
     def gt_cb(self, msg):
-        if not self._logged_names:
-            self._logged_names = True
-            self.get_logger().info(
-                "pose/info entities: " + ", ".join(t.child_frame_id for t in msg.transforms))
         now = time.monotonic()
         for t in msg.transforms:
             if t.child_frame_id.split("/")[-1] != self.robot_name:
@@ -129,97 +131,90 @@ class SimGtReloc(Node):
             _, _, T = tf2np(t)
             self.gt_T = T
             self.gt_wall = now
-            self.gt_hist.append((now, T[:3, 3].copy()))
-            if len(self.gt_hist) > 200:
-                self.gt_hist = self.gt_hist[-100:]
 
     def raw_cb(self, msg):
-        self.raw_msg = msg
-        if not self.calibrated and not self.bypass:
-            T, _ = msg2np(msg)
-            self.track_calibration_sample(T)
-        else:
-            self.publish_corrected()
+        self.P, _ = msg2np(msg)
+        self.P_wall = time.monotonic()
 
-    # ---- calibration ----
+    def goal_gz_cb(self, msg):
+        self.goal_gz = msg
 
-    def gt_stationary(self):
+    # ---- goal forwarding ----
+
+    def current_C(self):
+        return self.P @ E_INV @ np.linalg.inv(self.gt_T)
+
+    def streams_ok(self):
         now = time.monotonic()
-        recent = [p for w, p in self.gt_hist if now - w < 1.0]
-        if len(recent) < 5:
-            return False
-        return max(np.linalg.norm(p - recent[0]) for p in recent) < GT_STATIONARY_TOL
+        return (self.P is not None and now - self.P_wall < P_STALE_S
+                and self.gt_T is not None and now - self.gt_wall < GT_STALE_S)
 
-    def track_calibration_sample(self, P):
+    def diag_tick(self):
         now = time.monotonic()
-        if self._first_raw_wall is None:
-            self._first_raw_wall = now
-        if self.gt_T is None or not self.gt_stationary():
-            return
-        t_norm = float(np.linalg.norm(P[:3, 3]))
-        if self._best is None or t_norm < self._best[0]:
-            self._best = (t_norm, self.gt_T.copy(), P.copy())
-        if t_norm < CALIB_OK_TOL:
-            self.calibrate(*self._best)
-        elif now - self._first_raw_wall > CALIB_WINDOW_S:
-            if self._best[0] < CALIB_ACCEPT_TOL:
-                self.calibrate(*self._best)
-            elif now - self._last_refuse_warn > 10.0:
-                self._last_refuse_warn = now
-                self.get_logger().warn(
-                    f"calibration refused: best |translation| in window was "
-                    f"{self._best[0]:.3f}m (> {CALIB_ACCEPT_TOL}m) -- the SLAM "
-                    "anchor already wandered or the robot moved during "
-                    "perception init; respawn the perception window to restore "
-                    "a fresh anchor (retrying meanwhile)")
-
-    def calib_tick(self):
-        # close the window even if no further samples arrive
-        if self.calibrated or self.bypass or self._first_raw_wall is None or self._best is None:
-            return
-        if time.monotonic() - self._first_raw_wall > CALIB_WINDOW_S and self._best[0] < CALIB_ACCEPT_TOL:
-            self.calibrate(*self._best)
-
-    def calibrate(self, t_norm, gt_T, P):
-        self.C_hat = np.linalg.inv(gt_T) @ P
-        self.calibrated = True
+        p_age = f"{now - self.P_wall:.2f}" if self.P is not None else "never"
+        c = "-"
+        if self.P is not None and self.gt_T is not None:
+            C = self.current_C()
+            c = f"({C[0, 3]:.3f},{C[1, 3]:.3f},{C[2, 3]:.3f}) yaw={yaw_of(C):.3f}"
         self.get_logger().info(
-            f"calibrated: |P translation| = {t_norm:.4f}m, C_hat t = "
-            f"{np.round(self.C_hat[:3, 3], 4)}; publishing corrected odometry")
-        self.publish_status(True)
+            f"diag: P_age={p_age}s gt_age={now - self.gt_wall:.2f}s C={c} "
+            f"goal_gz={'yes' if self.goal_gz is not None else 'no'} ready={self.ready}")
 
-    def guard_tick(self):
-        if self.bypass:
+    def reloc_tick(self):
+        # the "relocalization" a map_node would produce, here exact: the camera
+        # pose in the gz (map) world. map_node's convention labels the pose
+        # frame "world" -- follow it so consumers parse it identically.
+        if self.gt_T is None or time.monotonic() - self.gt_wall > GT_STALE_S:
             return
-        if self.count_publishers("/map/relocalization") > 0:
-            self.bypass = True
-            self.calibrated = True  # passthrough counts as ready
-            self.get_logger().warn(
-                "/map/relocalization is published (map_node running) -- passing "
-                "raw odometry through untouched")
+        cam_in_gz = self.gt_T @ E
+        self.reloc_pub.publish(np2msg(cam_in_gz, self.get_clock().now().to_msg(),
+                                      "world", "camera"))
+
+    def tick(self):
+        # readiness must not depend on a goal having arrived: scene_runner
+        # waits for the status latch before publishing anything
+        if self.streams_ok() and not self.ready:
+            self.ready = True
             self.publish_status(True)
-
-    # ---- output ----
-
-    def publish_corrected(self):
-        if self.bypass:
-            self.pub.publish(self.raw_msg)
+            self.get_logger().info("both streams live; forwarding goals in SLAM frame")
+        if not self.streams_ok():
             return
         now = time.monotonic()
-        if self.gt_T is None or now - self.gt_wall > GT_STALE_S:
-            if now - self._last_stale_warn > 5.0:
-                self._last_stale_warn = now
-                self.get_logger().warn("ground truth stale; passing raw odometry through")
-            self.pub.publish(self.raw_msg)
+        stamp = self.get_clock().now().to_msg()
+        # world->map, gz world standing in for the built map: same contract as
+        # map_node's broadcast (planning and the app backend look this up)
+        self.tf_broadcaster.sendTransform(
+            np2tf(self.current_C(), stamp, "world", "map"))
+        if self.goal_gz is None:
             return
-        Q = self.gt_T @ self.C_hat
-        out = np2msg(Q, self.raw_msg.header.stamp,
-                     self.raw_msg.header.frame_id or "world",
-                     self.raw_msg.child_frame_id or "camera")
-        # twist is body-frame velocity; the world-frame correction leaves it valid
-        out.twist = self.raw_msg.twist
-        out.pose.covariance = self.raw_msg.pose.covariance
+        g = self.goal_gz
+        C = self.current_C()
+        g_slam = C @ np.array([g.pose.pose.position.x,
+                               g.pose.pose.position.y,
+                               g.pose.pose.position.z, 1.0])
+        goal_yaw = yaw_of(C)  # hold-target orientation carries no heading; keep frame yaw
+        x, y = g_slam[0], g_slam[1]
+        if self.last_out is not None:
+            dt = max(now - self.last_out[0], 1e-3)
+            dx = np.array([x - self.last_out[1], y - self.last_out[2]])
+            step = float(np.linalg.norm(dx))
+            cap = MAX_GOAL_SPEED * dt
+            if step > cap:
+                x, y = (self.last_out[1], self.last_out[2]) + dx / step * cap
+            dyaw = (goal_yaw - self.last_out[3] + np.pi) % (2 * np.pi) - np.pi
+            goal_yaw = self.last_out[3] + float(np.clip(dyaw, -MAX_GOAL_YAW_RATE * dt,
+                                                        MAX_GOAL_YAW_RATE * dt))
+        out = Odometry()
+        out.header.stamp = self.get_clock().now().to_msg()
+        out.header.frame_id = "world"
+        out.child_frame_id = "camera"
+        out.pose.pose.position.x = float(x)
+        out.pose.pose.position.y = float(y)
+        out.pose.pose.position.z = float(g_slam[2])
+        out.pose.pose.orientation.w = 1.0
+        out.twist = g.twist
         self.pub.publish(out)
+        self.last_out = (now, float(x), float(y), float(goal_yaw))
 
     def publish_status(self, ready):
         m = Bool()
@@ -238,7 +233,7 @@ def main():
     if world is None:
         raise SystemExit("no gz world found (is the sim running?)")
     rclpy.init(args=[])
-    node = SimGtReloc(world, args.robot_name)
+    node = SimGtGoalRelocator(world, args.robot_name)
     try:
         rclpy.spin(node)
     finally:

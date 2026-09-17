@@ -21,21 +21,24 @@ Scene JSON (see config/scenes/l_corridor.json):
               single /create call; set "batch": false on an entry to spawn it
               individually (required if it must move independently later)
     targets : [{name, pose[x,y,z], tolerance, timeout}]  -- published in order
-              to /control/target_pose; sequencing only, no pass/fail evaluation
+              to /sim/target_pose_gz (gazebo world coords); sim_gt_reloc
+              transforms them into the SLAM frame on /control/target_pose.
+              sequencing only, no pass/fail evaluation
     path    : {points: [[x,y],...], lookahead, tolerance, timeout, rate}
               alternative to targets: like map_node's nav_target_timer, the
               goal is re-published every cycle as the point `lookahead` meters
               ahead of the robot's projection along the polyline (map_node uses
               max_speed*5 = 2.5m), until the robot reaches the last point
 
-Coordinate convention: scene coordinates == gazebo world frame. Without
---no-reloc, /slam/odometry_visual is corrected into the gazebo world frame by
-gazebo_scene/sim_gt_reloc.py (ground truth from /world/$WORLD/pose/info), so
-every run only needs to set_pose the robot back to the scene origin; zeros are
-published on /cmd_vel during the reset so a stale diff-drive twist cannot
-coast, then the start pose is burst-published once as a hold target. With
---no-reloc (map_node mode) the raw SLAM frame is used instead, and the caller
-is responsible for a consistent anchor.
+Coordinate convention: scene coordinates == gazebo world frame. With reloc
+(default), progress/reached checks run against the gz ground truth
+(/world/$WORLD/pose/info) and sim_gt_reloc keeps the published goal glued to
+the SLAM frame as it drifts; zeros are published on /cmd_vel during the reset
+so a stale diff-drive twist cannot coast, then the start pose is
+burst-published once as a hold target. With --no-reloc (map_node mode) goals
+go straight to /control/target_pose in the caller's frame -- the raw SLAM
+frame -- and progress falls back to /slam/odometry_visual; the caller is
+responsible for a consistent anchor.
 """
 
 import argparse
@@ -53,6 +56,9 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool
+from tf2_msgs.msg import TFMessage
+
+from tinynav.core.math_utils import tf2np
 
 SCENE_ROOT = pathlib.Path(__file__).resolve().parent
 MODEL_DB = json.load(open(SCENE_ROOT / "config/obstacles.json"))
@@ -194,10 +200,18 @@ class AutoNavSim(Node):
     def __init__(self, args):
         super().__init__("scene_runner")
         self.args = args
-        self.pub_target = self.create_publisher(Odometry, "/control/target_pose", 10)
+        self.robot_name = "lekiwi"
+        # reloc mode: goals are authored in gz coords and sim_gt_reloc
+        # transforms them into the SLAM frame; without reloc the caller's
+        # coordinates go to /control/target_pose unchanged.
+        target_topic = "/sim/target_pose_gz" if not args.no_reloc else "/control/target_pose"
+        self.pub_target = self.create_publisher(Odometry, target_topic, 10)
         self.pub_cmd = self.create_publisher(Twist, "/cmd_vel", 10)
-        self.latest_center = None  # robot center xy in gazebo world frame
-        self.create_subscription(Odometry, "/slam/odometry_visual", self.odom_cb, 10)
+        self.latest_out = None  # reloc-transformed goal echoed back from /control/target_pose
+        if not args.no_reloc:
+            self.create_subscription(Odometry, "/control/target_pose", self.out_cb, 10)
+        self.latest_center = None  # robot center xy in the goal frame
+        self.latest_yaw = None     # robot yaw in the goal frame (gt)
         self._zero_cmd_stop = threading.Event()
         self._zero_cmd_thread = None
         self.world = None
@@ -206,9 +220,21 @@ class AutoNavSim(Node):
         p = msg.pose.pose.position
         # Only translation is needed; robot center = R * t_r2c + p, and
         # T_ROBOT_TO_CAMERA has zero translation, so center == p here. Keep the
-        # same convention as simulator_control for future offset changes. With
-        # sim_gt_reloc active this is the gazebo-world (corrected) position.
+        # same convention as simulator_control for future offset changes.
+        # Used only in --no-reloc mode; reloc mode tracks the gz truth instead.
         self.latest_center = np.array([p.x, p.y, p.z])
+
+    def out_cb(self, msg):
+        p = msg.pose.pose.position
+        self.latest_out = (p.x, p.y, p.z)
+
+    def gt_cb(self, msg):
+        for t in msg.transforms:
+            if t.child_frame_id.split("/")[-1] != self.robot_name:
+                continue
+            _, _, T = tf2np(t)
+            self.latest_center = T[:3, 3].copy()
+            self.latest_yaw = float(np.arctan2(T[1, 0], T[0, 0]))
 
     # ---- gz entity control (ign service CLI) ----
 
@@ -310,7 +336,7 @@ class AutoNavSim(Node):
         if self.args.no_reloc:
             print("sim_gt_reloc wait skipped (--no-reloc)")
             return
-        print("waiting for sim_gt_reloc calibration...")
+        print("waiting for sim_gt_reloc (goal transform ready)...")
         state = {"ready": None}
         self.create_subscription(
             Bool, "/sim/gt_reloc/status",
@@ -376,7 +402,23 @@ class AutoNavSim(Node):
             idx = min(int(np.searchsorted(cum, s_goal, side="right")) - 1, len(seg_len) - 1)
             ratio = (s_goal - cum[idx]) / max(seg_len[idx], 1e-9)
             goal = pts[idx] + ratio * seg[idx]
-            self.publish_target_once([goal[0], goal[1], 0.0])
+            # ride at the robot's own height: 2D polyline points carry no z,
+            # and a hardcoded 0 buries the goal under a raised deck (the
+            # factory floor sits at z~0.26) where the ESDF reads it as an
+            # obstacle
+            self.publish_target_once([goal[0], goal[1], float(self.latest_center[2])])
+            # debug: full transform chain per cycle -- authored goal (world),
+            # robot (world), and the reloc-transformed goal (SLAM frame)
+            o = self.latest_out
+            if o is not None and self.latest_yaw is not None:
+                route_yaw = math.degrees(math.atan2(seg[idx][1], seg[idx][0]))
+                c = self.latest_center
+                print(f"  [goalchain] goal_gz=({goal[0]:.2f},{goal[1]:.2f},{c[2]:.2f}) "
+                      f"route_yaw={route_yaw:.0f}deg "
+                      f"robot_gz=({c[0]:.2f},{c[1]:.2f},{c[2]:.2f},{math.degrees(self.latest_yaw):.0f}) "
+                      f"out_slam=({o[0]:.2f},{o[1]:.2f},{o[2]:.2f})")
+            else:
+                print("  [goalchain] robot/out not ready yet")
             end_dist = float(np.hypot(*(p - pts[-1])))
             if end_dist < tol:
                 print(f"reached path end in {time.monotonic() - t0:.1f}s "
@@ -431,6 +473,16 @@ class AutoNavSim(Node):
         if self.world is None:
             raise RuntimeError("no gz world found (is the sim running?)")
         print(f"world: {self.world}")
+
+        self.robot_name = scene.get("robot", {}).get("name", "lekiwi")
+        if not self.args.no_reloc:
+            # progress/reached checks against the gz ground truth; the goals
+            # themselves are transformed into the SLAM frame by sim_gt_reloc.
+            self.create_subscription(
+                TFMessage, f"/world/{self.world}/pose/info", self.gt_cb,
+                QoSProfile(depth=20, reliability=ReliabilityPolicy.RELIABLE))
+        else:
+            self.create_subscription(Odometry, "/slam/odometry_visual", self.odom_cb, 10)
 
         self.wait_reloc()
         self.cleanup_previous()

@@ -20,12 +20,16 @@
 #          sim_gt_reloc may run here (double planner / double reloc). Conflicts
 #          with --map and --auto for the same reason.
 #
-# Ground-truth relocalization: in the full stack without --map, sim_gt_reloc
-# corrects /slam/odometry_visual into the gazebo world frame using the chassis
-# ground truth from /pose/info, so scene runs start exactly at the origin
-# without respawning perception. With --map, map_node's own relocalization is
-# used and sim_gt_reloc is off. (In the sensor stack the raw stream is left
-# alone — pilot's map_node consumes it.)
+# Ground-truth goal transformation: in the full stack without --map,
+# sim_gt_reloc substitutes for map_node's localization authority: it
+# broadcasts TF world->map (gz world standing in for the built map) and
+# /map/relocalization (exact, from ground truth), and continuously transforms
+# scene goals from gz world coordinates into perception's raw SLAM frame
+# (scene_runner publishes them gz-authored on /sim/target_pose_gz). planning
+# stays entirely in the raw SLAM frame: its odometry input is remapped to the
+# raw stream below. With --map, map_node's own relocalization is used and
+# sim_gt_reloc is off. (In the sensor stack the raw stream is left alone --
+# pilot's map_node consumes it.)
 #
 # Attach:  tmux attach -t tinynav_sim
 
@@ -55,6 +59,14 @@ fi
 cd /tinynav
 mkdir -p logs
 
+# model:// resources shipped OUTSIDE the repo (factory_01 plant, kept in
+# metaverse-source): parent dir resolves model://, model dir resolves the mesh
+# URIs inside model.sdf. Override the root if the model moves elsewhere.
+FACTORY_MODEL_ROOT=${FACTORY_MODEL_ROOT:-/workspace/dm/metaverse-source/converted}
+if [[ -d $FACTORY_MODEL_ROOT/gz_model ]]; then
+  export IGN_GAZEBO_RESOURCE_PATH="$FACTORY_MODEL_ROOT:$FACTORY_MODEL_ROOT/gz_model${IGN_GAZEBO_RESOURCE_PATH:+:$IGN_GAZEBO_RESOURCE_PATH}"
+fi
+
 WORLD_NAME=$(grep -oP '(?<=<world name=")[^"]+' "$WORLD_SDF" | head -1)
 [[ -z $WORLD_NAME ]] && { echo "no <world name> in $WORLD_SDF"; exit 1; }
 
@@ -69,6 +81,12 @@ else
   echo "WARN: no NVIDIA GPU detected; sensor rendering may fail on old Mesa"
 fi
 export GDK_SCALE=1
+
+# The gz robot is the lekiwi base (0.2m cylinder, worlds/*.sdf). Planning's
+# footprint must match it: the default go2 rectangle (0.6x0.3+0.1m safety)
+# reads side obstacles within ~0.25m as footprint hits and stalls the planner
+# in these aisles. Pre-set ROBOT_TYPE in the environment to override.
+export ROBOT_TYPE=${ROBOT_TYPE:-lekiwi}
 
 msg_bridge_args="\
 /camera/camera/infra1/image_rect_raw@sensor_msgs/msg/Image@ignition.msgs.Image \
@@ -104,15 +122,23 @@ win bridge "ros2 run ros_gz_bridge parameter_bridge $msg_bridge_args 2>&1 | tee 
 win caminfo "uv run python tool/simulator/gazebo_scene/camera_info_publisher.py 2>&1 | tee logs/caminfo.log"
 PERCEPT_ARGS=""
 if [[ $STACK == full && $WITH_MAP == 0 ]]; then
-  # sim_gt_reloc republishes the SLAM odometry corrected into the gazebo
-  # world frame; perception emits its raw stream on ..._odometry_visual_raw.
+  # sim_gt_reloc maps goals (and the map frame) between the gz world and the
+  # raw SLAM frame; perception emits its raw stream on ..._odometry_visual_raw.
   PERCEPT_ARGS="--ros-args -r /slam/odometry_visual:=/slam/odometry_visual_raw"
   win reloc "uv run python tool/simulator/gazebo_scene/sim_gt_reloc.py 2>&1 | tee logs/reloc.log"
 fi
 win percept "uv run python tinynav/core/perception_node.py $PERCEPT_ARGS 2>&1"
 win control "uv run python tinynav/platforms/simulator_control.py 2>&1 | tee logs/control.log"
 if [[ $STACK == full ]]; then
-  win planning "uv run python tinynav/core/planning_node.py 2>&1 | tee logs/planning.log"
+PLAN_ARGS=""
+if [[ $WITH_MAP == 0 ]]; then
+  # no reloc-corrected odometry anymore: planning plans in perception's raw
+  # SLAM frame and sim_gt_reloc only transforms gz-authored goals into it.
+  # The sync input must be the per-frame visual odometry -- its stamps match
+  # /slam/depth exactly; /slam/odometry (imu propagator) would starve the pair.
+  PLAN_ARGS="--ros-args -r /slam/odometry_visual:=/slam/odometry_visual_raw"
+fi
+win planning "uv run python tinynav/core/planning_node.py $PLAN_ARGS 2>&1 | tee logs/planning.log"
   win teleop "uv run python tinynav/platforms/keyboard_teleop.py 2>&1 | tee logs/teleop.log"
   win rviz "rviz2 -d /tinynav/docs/vis.rviz 2>&1 | tee logs/rviz.log"
   if [[ $WITH_MAP == 1 ]]; then
@@ -121,7 +147,7 @@ if [[ $STACK == full ]]; then
   if [[ -n $AUTO_SCENE ]]; then
     AUTO_ARGS=""
     [[ $WITH_MAP == 1 ]] && AUTO_ARGS="--no-reloc"  # map_node is the authority
-    win gz_scene "uv run python tool/simulator/gazebo_scene/scene_runner.py $AUTO_SCENE $AUTO_ARGS 2>&1 | tee logs/gz_scene.log"
+    win gz_scene "uv run python -u tool/simulator/gazebo_scene/scene_runner.py $AUTO_SCENE $AUTO_ARGS 2>&1 | tee logs/gz_scene.log"
   fi
 fi
 

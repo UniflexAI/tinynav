@@ -721,7 +721,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.009999999776482582
       Pitch: 1.289795994758606
-      Target Frame: camera
+      Target Frame: world
       Value: ThirdPersonFollower (rviz_default_plugins)
       Yaw: 4.973613262176514
     Saved: ~

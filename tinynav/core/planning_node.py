@@ -718,6 +718,7 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
+        self._stuck_cycles = 0  # consecutive goal-holding standstill selections
         self._status_due = every(1.0)
         self._no_k_due = every(1.0)
 
@@ -1355,6 +1356,28 @@ class PlanningNode(Node):
             top_indices = [min(range(len(trajectories)), key=cost_function)]
 
             self.last_param = params[top_indices[0]]
+
+            # A goal-holding standstill is legal output (fwd_ok>0 means every
+            # moving arc simply cost more), but when it persists it reads as a
+            # silent freeze -- name the losing arcs and the numbers that beat
+            # them, so a stall can be told apart from a deadlock in the log.
+            if target is not None and abs(params[top_indices[0]][0]) < 1e-3 and abs(params[top_indices[0]][1]) < 1e-3:
+                self._stuck_cycles += 1
+                if self._stuck_cycles == 1 or self._stuck_cycles % 25 == 0:
+                    moving = [(cost_function(i), i) for i in range(len(trajectories))
+                              if params[i][0] > 1e-3 and scores[i] != float('inf')]
+                    if moving:
+                        best_cost, best_i = min(moving)
+                        detail = (f'best moving vx={params[best_i][0]:.2f} '
+                                  f'omega={params[best_i][1]:.2f} cost={best_cost:.1f} '
+                                  f'vs standstill cost={cost_function(top_indices[0]):.1f}')
+                    else:
+                        detail = 'no collision-free moving arc'
+                    log.warning(
+                        f'stuck by cost ({self._stuck_cycles} cycles): goal={target[:2]} '
+                        f'fwd_ok={n_fwd_ok} front_clr={front_clearance:.2f} {detail}')
+            else:
+                self._stuck_cycles = 0
 
             # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
             # anything else means stuck by cost with somewhere to go.
