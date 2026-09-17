@@ -32,6 +32,11 @@ fi
 # Stable serial symlink survives ttyUSB renumbering (CH340 RTK receiver).
 SERIAL="${RTK_SERIAL_PORT:-/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0}"
 
+# Real per-epoch sigmas and the solution type the receiver actually computed,
+# instead of the table guessed from GGA quality. RTKSTATUSA/BESTNAVA are not in
+# R4.10Build13495; BESTPOSA is. ~200 B/s on a link measured at 44% of 115200.
+INIT_CMDS="${RTK_INIT_COMMANDS:-LOG BESTPOSA ONTIME 1}"
+
 # systemd starts this with `docker exec -itd`, which discards stdout, so every
 # restart used to be invisible. Tee to a file that survives the container.
 LOG_FILE="${RTK_LOG_FILE:-/tinynav/rtk_bridge.log}"
@@ -42,6 +47,7 @@ while true; do
   say "launching rtk_bridge_node"
   uv run python /tinynav/rtk/rtk_bridge_node.py --ros-args \
     -p serial_port:="$SERIAL" \
+    -p serial_init_commands:="$INIT_CMDS" \
     "$@" 2>&1 | tee -a "$LOG_FILE"
   code=${PIPESTATUS[0]}
   # 9 is the node's NMEA watchdog (NMEA_WATCHDOG_EXIT_CODE), i.e. the serial

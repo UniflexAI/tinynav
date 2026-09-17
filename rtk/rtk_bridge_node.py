@@ -166,6 +166,10 @@ def parse_int_or_none(value: str):
         return None
 
 
+def _fmt_age(v):
+    return "n/a" if v is None else f"{v:.1f}"
+
+
 def gga_quality_name(quality: int) -> str:
     return GGA_QUALITY_NAMES.get(int(quality), f"QUALITY_{int(quality)}")
 
@@ -317,6 +321,7 @@ class RtkBridgeNode(Node):
         self.latest_sentence_type = ""
         self.last_gga_time = None
         self.last_fix_time = None
+        self._last_logged_stage = None
         self.nmea_checksum_fail_count = 0
         self.nmea_parse_error_count = 0
         self.nmea_sentence_count = 0
@@ -480,7 +485,6 @@ class RtkBridgeNode(Node):
         set_serial_raw(self.nmea_fd, self.baud)
         self.serial_fd = self.nmea_fd
         self.get_logger().info(f"Opened RTK serial {self.serial_port} at {self.baud}")
-        self._send_serial_init_commands(self.nmea_fd, "serial_init_commands", self.serial_port)
         if self.rtcm_serial_port == self.serial_port:
             if split_same_port:
                 self.rtcm_fd = os.open(self.rtcm_serial_port, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
@@ -488,11 +492,15 @@ class RtkBridgeNode(Node):
                 self.get_logger().info(f"Opened RTCM writer on {self.rtcm_serial_port} at {self.rtcm_baud}")
             else:
                 self.rtcm_fd = self.nmea_fd
+            # nmea_fd is O_RDONLY under split_same_serial_fd, so commands have to
+            # go out on the writer or they fail silently.
+            self._send_serial_init_commands(self.rtcm_fd, "serial_init_commands", self.serial_port)
         else:
             self.rtcm_fd = os.open(self.rtcm_serial_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
             set_serial_raw(self.rtcm_fd, self.rtcm_baud)
             self.get_logger().info(f"Opened RTCM serial {self.rtcm_serial_port} at {self.rtcm_baud}")
             self._send_serial_init_commands(self.rtcm_fd, "rtcm_serial_init_commands", self.rtcm_serial_port)
+            self._send_serial_init_commands(self.nmea_fd, "serial_init_commands", self.serial_port)
 
     def _send_serial_init_commands(self, fd: int, param_name: str, port: str):
         commands = str(self.get_parameter(param_name).value or "")
@@ -833,7 +841,7 @@ class RtkBridgeNode(Node):
         fields = payload.split(",") if payload else []
         self.latest_unicore_log = line
         self.latest_unicore_log_type = log_type
-        if log_type.startswith("BESTNAV"):
+        if log_type.startswith("BESTNAV") or log_type.startswith("BESTPOS"):
             self._parse_bestnav_log(fields)
         elif log_type.startswith("RTKSTATUS"):
             self._parse_rtkstatus_log(fields)
@@ -1148,6 +1156,21 @@ class RtkBridgeNode(Node):
         fix_age = None if self.last_fix_time is None else now - self.last_fix_time
         rtcm_age = None if self.last_rtcm_time is None else now - self.last_rtcm_time
         quality, stage, position_type = self._reported_fix_state()
+        if stage != self._last_logged_stage:
+            # The one line that says which way a drop went. Correction-side
+            # trouble moves diff_age/rtcm_age; sky-side trouble moves sats/hdop.
+            self.get_logger().warning(
+                f"RTK stage {self._last_logged_stage} -> {stage}  q={quality} "
+                f"sats={self.latest_num_satellites} hdop={self.latest_hdop:.1f} "
+                f"diff_age={self.latest_gga_differential_age} "
+                f"fix_age={_fmt_age(fix_age)} rtcm_age={_fmt_age(rtcm_age)} "
+                f"nmea_age={_fmt_age(nmea_age)} ntrip={self.ntrip_connected} "
+                f"rtcm_dropped={self.rtcm_dropped_bytes} "
+                f"sol={self.latest_bestnav_solution_status}/{self.latest_bestnav_position_type} "
+                f"std={None if not self.latest_bestnav_std else round(self.latest_bestnav_std['lat_std_m'], 3)} "
+                f"station={self.latest_gga_station_id or None}"
+            )
+            self._last_logged_stage = stage
         io_status = {
             "seq": self.status_seq,
             "ntrip_connected": self.ntrip_connected,
