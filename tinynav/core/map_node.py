@@ -18,7 +18,6 @@ import cv2
 from codetiming import Timer
 import argparse
 
-from tinynav.core.fusion_window import FUSE_WINDOW, select_fusion_constraints
 from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
@@ -242,6 +241,10 @@ CLIMB_REGION_CULL_M = 3.5
 CLIMB_PRIOR_DEFAULT = True
 
 
+def select_fusion_constraints(constraints):
+    return constraints[-100:]
+
+
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):
         """Initialization
@@ -352,11 +355,6 @@ class MapNode(Node):
             f"vocab={self.vlad_centres.shape}, "
             f"descriptors={self.map_vlad_descriptors.shape}, "
             f"keyframes={len(self.vlad_timestamps)}"
-        )
-        # Said out loud because it is the one behaviour that changes silently with the
-        # tinynav pin: on upstream the solve keeps the newest 100 constraints instead.
-        self.get_logger().info(
-            f"[fusion] solving over the newest {FUSE_WINDOW} relocalizations"
         )
         self.occupancy_map = np.load(f"{tinynav_map_path}/occupancy_grid.npy")
         self.occupancy_map_meta = np.load(f"{tinynav_map_path}/occupancy_meta.npy")
@@ -790,15 +788,9 @@ class MapNode(Node):
 
         Each constraint is one observation's implied map->odom, `camera_in_odom @
         inv(camera_in_map)` -- true at the moment that observation was taken, and only
-        still true while odom has not drifted since. Which of them are still worth
-        solving over is `fusion_window.select_fusion_constraints`, which keeps the
-        newest few where upstream keeps the newest 100.
+        still true while odom has not drifted since. The solve keeps the newest 100.
         """
         relative_pose_constraint = []
-        # The odom pose each constraint was taken at, kept beside them rather than
-        # inside them: the solver's tuple shape is upstream's contract, and widening it
-        # for one consumer means every reader has two shapes to know about.
-        constraint_odom = []
         optimized_parameters = {
             0 : np.eye(4) if self.T_from_map_to_odom is None else self.T_from_map_to_odom,
             1 : np.eye(4),
@@ -812,9 +804,7 @@ class MapNode(Node):
                 weight = self.relocalization_pose_weights[timestamp]
 
                 relative_pose_constraint.append((0, 1, observation_T_from_map_to_odom, weight * np.array([10.0, 10.0, 10.0]), weight * np.array([10.0, 10.0, 10.0])))
-                constraint_odom.append(camera_in_odom_world)
-        relative_pose_constraint = select_fusion_constraints(
-            relative_pose_constraint, constraint_odom)
+        relative_pose_constraint = select_fusion_constraints(relative_pose_constraint)
         if not relative_pose_constraint:
             # Nothing observed yet, so there is nothing to solve and the pose must not
             # move. Returning here rather than solving over an empty set, because the
