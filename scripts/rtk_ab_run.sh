@@ -57,7 +57,7 @@ NETPID=$!
 # Motion + power. Small topics only: /lf/lowstate carries the IMU, which is how
 # we test "vibration rattles the antenna connector".
 docker exec tinynav-dev bash -lc \
-  "source /opt/ros/humble/setup.bash; cd $CONT_OUT && ros2 bag record -o ctx \
+  "source /opt/ros/humble/setup.bash; ros2 bag record -o $CONT_OUT/ctx \
    /cmd_vel /battery /nav/active /fix /rtk/odom /rtk/map_pose /lf/lowstate \
    /mapping/current_pose_in_map /rtk/io_status" > "$OUT/bag.log" 2>&1 &
 
@@ -65,7 +65,9 @@ cleanup() {
   echo
   echo "[rtk_ab] stopping..."
   kill "$NETPID" 2>/dev/null
-  docker exec tinynav-dev pkill -INT -f "ros2 bag record -o ctx" 2>/dev/null
+  # Match this run's own output path. A bare "-o ctx" also matches a
+  # concurrent capture and silently truncates someone else's bag.
+  docker exec tinynav-dev pkill -INT -f "ros2 bag record -o $CONT_OUT/ctx" 2>/dev/null
   sleep 3
   tail -c "+$((BRIDGE_OFF + 1))" "$BRIDGE_LOG" > "$OUT/rtk_bridge.log" 2>/dev/null
   if [ "$SIGNAL_OFF" -gt 0 ]; then
