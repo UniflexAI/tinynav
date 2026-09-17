@@ -18,6 +18,23 @@ from sensor_msgs.msg import CameraInfo, Image
 from tf2_msgs.msg import TFMessage
 
 from tinynav.core.math_utils import np2msg, pose_msg2np
+from tinynav.core.logsetup import setup_logging
+
+#: Node log; the console copy goes to stdout (docker logs / console.log).
+log = setup_logging('looper_bridge')
+
+#: Messages that must print once, not per arrival. stdlib logging has no
+#: `once` kwarg -- passing one raises TypeError inside the callback.
+_seen_once: set = set()
+
+
+def log_once(message: str) -> None:
+    if message in _seen_once:
+        return
+    _seen_once.add(message)
+    log.info(message)
+
+
 
 
 class LooperBridgeNode(Node):
@@ -72,10 +89,10 @@ class LooperBridgeNode(Node):
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
 
-        self.get_logger().info(
+        log.info(
             "Bridging /camera/camera/vio_image + /camera/camera/depth/image_rect_raw + /camera/camera/infra1/image_rect_raw into TinyNav /slam topics."
         )
-        self.get_logger().info(
+        log.info(
             "Bridging /camera/camera/vio_100hz into /slam/odometry."
         )
 
@@ -84,28 +101,26 @@ class LooperBridgeNode(Node):
         T_world_camera = pose_msg2np(pose_msg)
         odom_msg = np2msg(T_world_camera, pose_msg.header.stamp, "world", "camera")
         self.odom_pub.publish(odom_msg)
-        self.get_logger().info(
+        log_once(
             f"Bridged first /camera/camera/vio_100hz message at "
-            f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry.",
-            once=True,
+            f"{pose_msg.header.stamp.sec}.{pose_msg.header.stamp.nanosec:09d} to /slam/odometry."
         )
 
     def camera_info_callback(self, msg: CameraInfo):
         self.cached_camera_info = msg
-        self.get_logger().info(
-            f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}.",
-            once=True,
+        log_once(
+            f"Received camera info from /camera/camera/infra1/camera_info with frame {msg.header.frame_id}."
         )
 
     def tf_callback(self, msg: TFMessage):
-        self.get_logger().info("Received TF_STATIC for Looper bridge.", once=True)
+        log_once("Received TF_STATIC for Looper bridge.")
 
     def log_missing_inputs(self):
         self._missing_input_counter += 1
         if self._missing_input_counter % 30 != 1:
             return
         if self.cached_camera_info is None:
-            self.get_logger().info("Waiting for Looper bridge inputs: /camera/camera/infra1/camera_info")
+            log.info("Waiting for Looper bridge inputs: /camera/camera/infra1/camera_info")
 
     @staticmethod
     def stamp_to_sec(stamp) -> float:
@@ -178,7 +193,7 @@ class LooperBridgeNode(Node):
         depth_m = self.decode_depth_meters(depth_msg)
         depth_out = self.build_depth_msg(depth_m, stamp)
 
-        self.get_logger().info(
+        log.info(
             "sync_callback: "
             f"t={self.stamp_to_sec(stamp):.3f}, "
             f"depth={depth_m.shape}, image={image_msg.height}x{image_msg.width}"

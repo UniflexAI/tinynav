@@ -1,7 +1,9 @@
 #!/bin/bash
 # TinyNav gz-sim launcher: one named tmux window per component.
 #
-# Usage:  bash /tinynav/scripts/run_simulator.sh [--stack full|sensor] [--map] [--world <sdf>] [--auto <scene>]
+# Usage:  bash /tinynav/scripts/run_simulator.sh [--stack full|sensor] [--map] [--world <sdf>] [--auto <scene>] [--db <path>]
+#          --db: exported as TINYNAV_DB_PATH to every window, so nodes that log
+#          via tinynav.core.logsetup land in the same data root as pilot's.
 #
 # Default (--stack full): sim (depot factory) + perception + planning + teleop;
 #          --map also starts map_node and the rviz goal relay (localization +
@@ -38,10 +40,15 @@ while [[ $# -gt 0 ]]; do
     --map) WITH_MAP=1; shift ;;
     --world) WORLD_SDF="$2"; shift 2 ;;
     --auto) AUTO_SCENE="$2"; shift 2 ;;
-    *) echo "usage: bash $0 [--stack full|sensor] [--map] [--world <sdf>] [--auto <scene>]"; exit 1 ;;
+    --db) DB_PATH="$2"; shift 2 ;;
+    *) echo "usage: bash $0 [--stack full|sensor] [--map] [--world <sdf>] [--auto <scene>] [--db <path>]"; exit 1 ;;
   esac
 done
 [[ $STACK != full && $STACK != sensor ]] && { echo "--stack must be 'full' or 'sensor'"; exit 1; }
+# One data root for every window: nodes reached through logsetup resolve
+# TINYNAV_DB_PATH at import, and without it they fall to /tinynav/tinynav_db --
+# inside the checkout -- instead of the rig's data directory.
+[[ -n $DB_PATH ]] && export TINYNAV_DB_PATH="$DB_PATH"
 if [[ $STACK == sensor ]] && { [[ $WITH_MAP == 1 ]] || [[ -n $AUTO_SCENE ]]; }; then
   echo "--stack sensor conflicts with --map/--auto: pilot owns map_node and localization"; exit 1
 fi
@@ -102,7 +109,7 @@ if [[ $STACK == full && $WITH_MAP == 0 ]]; then
   PERCEPT_ARGS="--ros-args -r /slam/odometry_visual:=/slam/odometry_visual_raw"
   win reloc "uv run python tool/simulator/gazebo_scene/sim_gt_reloc.py 2>&1 | tee logs/reloc.log"
 fi
-win percept "uv run python tinynav/core/perception_node.py $PERCEPT_ARGS 2>&1 | tee logs/perception.log"
+win percept "uv run python tinynav/core/perception_node.py $PERCEPT_ARGS 2>&1"
 win control "uv run python tinynav/platforms/simulator_control.py 2>&1 | tee logs/control.log"
 if [[ $STACK == full ]]; then
   win planning "uv run python tinynav/core/planning_node.py 2>&1 | tee logs/planning.log"

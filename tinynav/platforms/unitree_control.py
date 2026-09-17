@@ -4,6 +4,11 @@ import os
 import rclpy
 import threading
 from rclpy.node import Node
+from tinynav.core.logsetup import setup_logging
+
+#: Node log; the console copy goes to stdout (docker logs / console.log).
+log = setup_logging('unitree')
+
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
@@ -213,7 +218,7 @@ class Ros2UnitreeManagerNode(Node):
         self._robot_status = RobotStatus.SITTING
         self.battery = 0.0
         self.last_twist_time = None
-        self.logger = self.get_logger()
+        self.logger = log
         # The last command was non-zero (so the next non-zero is not a start).
         self._walking = False
         # The next Move re-asserts ClassicWalk first: set at every motion start.

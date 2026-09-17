@@ -10,15 +10,20 @@ import numpy as np
 import logging
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
+from tinynav.core.logsetup import every, setup_logging
 
-# Module-level logger for cases where self.get_logger() is not available
-logger = logging.getLogger(__name__)
+#: Node log; the console copy goes to stdout (docker logs / console.log).
+log = setup_logging('cmd_vel')
+
+
+#: Same logger under the historical name; self.logger binds to it too.
+logger = log
 
 class CmdVelControlNode(Node):
     def __init__(self):
         super().__init__('cmd_vel_control_node')
         self.robot = ROBOT_CONFIG
-        self.logger = self.get_logger()  # Use ROS2 logger
+        self.logger = log
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
@@ -70,6 +75,7 @@ class CmdVelControlNode(Node):
         self.last_path_update_time = None
         self._paused = False
         self._nav_active = False
+        self._status_due = every(1.0)
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
@@ -117,6 +123,28 @@ class CmdVelControlNode(Node):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
+
+        # 1 Hz, before the early returns: every branch reports, not only the driving one.
+        if self._status_due():
+            age = None if self.last_path_update_time is None else now - self.last_path_update_time
+            stale_slow_s = max(self.path_stale_slow_s, self.path_period_ema * self.path_stale_slow_factor)
+            stale_stop_s = max(self.path_stale_stop_s, self.path_period_ema * self.path_stale_stop_factor)
+            if not self._nav_active:
+                stale = '-'
+            elif age is None or age > stale_stop_s:
+                stale = 'stop'
+            elif age > stale_slow_s:
+                stale = 'slow'
+            else:
+                stale = 'ok'
+            self.logger.info(
+                '[cmd] active=%c paused=%c age=%s stale=%s in=(%.2f,%.2f) out=(%.2f,%.2f) rev=%c',
+                'y' if self._nav_active else 'n', 'y' if self._paused else 'n',
+                '-' if age is None else f'{age:.2f}s', stale,
+                self.latest_cmd.linear.x, self.latest_cmd.angular.z,
+                self.prev_cmd.linear.x, self.prev_cmd.angular.z,
+                'y' if self.prev_cmd.linear.x < 0.0 else 'n',
+            )
 
         if not self._nav_active:
             return

@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -18,6 +19,14 @@ from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
 from std_msgs.msg import String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from tinynav.core.logsetup import setup_logging
+
+#: Node log; the console copy goes to stdout (docker logs / console.log).
+#: A second role -- pilot's build transducer -- runs this same script in the
+#: isolated build domain and tags itself build_percept, so the two never
+#: share a file.
+log = setup_logging(os.environ.get('TINYNAV_LOG_TAG', 'perception'))
+
 from rclpy.duration import Duration
 from tinynav.core.math_utils import rot_from_two_vector, np2msg, np2tf, estimate_pose
 from tinynav.core.math_utils import uf_init, uf_union, uf_all_sets_list
@@ -90,7 +99,7 @@ class PerceptionNode(Node):
     def __init__(self, verbose_timer: bool = True):
         super().__init__("perception_node")
         self.verbose_timer = verbose_timer
-        self.logger = logging.getLogger(__name__)
+        self.logger = log
         # self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         # model
         self.superpoint = SuperPointTRT()
@@ -395,7 +404,7 @@ class PerceptionNode(Node):
                 self.K,
                 idx_valid
             )
-            self.logger.debug("Estimated T_kf_curr:\n", T_kf_curr)
+            self.logger.debug("Estimated T_kf_curr:\n%s", T_kf_curr)
         # for new frame, we first add it as keyframe, if not, we pop it later
         self.keyframe_queue.append(
             Keyframe(
@@ -480,8 +489,8 @@ class PerceptionNode(Node):
                         kf_prev = self.keyframe_queue[i]
                         kf_curr = self.keyframe_queue[j]
 
-                    self.logger.debug("timestamp prev: ", kf_prev.timestamp)
-                    self.logger.debug("timestamp curr: ", kf_curr.timestamp)
+                    self.logger.debug("timestamp prev: %s", kf_prev.timestamp)
+                    self.logger.debug("timestamp curr: %s", kf_curr.timestamp)
                     with Timer(name="[cached result[1.1/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):
                         prev_left_extract_result = await self.superpoint.infer(kf_prev.image)
                     with Timer(name="[cached result[1.2/3]]", text="[{name}] Elapsed time: {milliseconds:.03f} ms", logger=self.logger.debug):

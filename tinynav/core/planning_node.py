@@ -33,6 +33,17 @@ from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
+from tinynav.core.logsetup import every, setup_logging
+
+#: Node log; the console copy goes to stdout (docker logs / console.log).
+log = setup_logging('planning')
+
+from functools import partial
+
+#: The cycle timers ([vis] / [traj gen] / ...) default to print at ~9 Hz --
+#: debug keeps them in the file and off the console.
+Timer = partial(Timer, logger=log.debug)
+
 
 # === Helper functions ===
 @njit(cache=True)
@@ -571,7 +582,7 @@ class PlanningNode(Node):
 
     def __init__(self, node_name='planning_node'):
         super().__init__(node_name)
-        self.get_logger().info(
+        log.info(
             f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
             f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
             f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
@@ -679,6 +690,8 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
+        self._status_due = every(1.0)
+        self._no_k_due = every(1.0)
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -881,7 +894,7 @@ class PlanningNode(Node):
             fx = self.K[0, 0]
             Tx = msg.p[3] # From the right camera's projection matrix
             self.baseline = -Tx / fx
-            self.get_logger().info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
+            log.info(f"Camera intrinsics and baseline received. Baseline: {self.baseline:.4f}m")
             self.destroy_subscription(self.camerainfo_sub)
 
     def camera_to_robot_center(self, T):
@@ -1130,6 +1143,8 @@ class PlanningNode(Node):
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
+            if self._no_k_due():
+                log.warning('[planning] K is None: no /camera/camera/infra2/camera_info yet, planner idle')
             return
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
@@ -1162,6 +1177,18 @@ class PlanningNode(Node):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
             v_open = self._open_target_speed()
             v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
+            # 1 Hz, before the no-goal early return: idle must speak too.
+            if self._status_due():
+                goal = 'none' if self.target_pose is None else \
+                    f'({self.target_pose[0]:.2f},{self.target_pose[1]:.2f})'
+                log.info(
+                    '[planning] goal=%s pose=(%.2f,%.2f) v_allow=%.2f front_clr=%.2f '
+                    'obs=%d route=%c sel=(%.2f,%.2f)',
+                    goal, init_p[0], init_p[1], v_allow, front_clearance,
+                    int(obstacle_mask.sum()),
+                    'y' if self._global_route_map_xy is not None else 'n',
+                    float(self.last_param[0]), float(self.last_param[1]),
+                )
             # The library exists only to pick a trajectory toward a goal, so without
             # one there is nothing to generate or score. The occupancy grid, the ESDF
             # and the speed cap above are maintained either way.
@@ -1208,7 +1235,7 @@ class PlanningNode(Node):
                 cyi = int((center[1] - self.origin[1]) / self.resolution)
                 rows, cols = obstacle_mask.shape
                 hits, n_samples = self._footprint_hits(T, obstacle_mask)
-                self.get_logger().warn(
+                log.warning(
                     f'All trajectories in collision. obst_cells={int(obstacle_mask.sum())} '
                     f'front_clearance={front_clearance:.2f} '
                     f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
@@ -1309,7 +1336,7 @@ class PlanningNode(Node):
 
             # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
             # anything else means stuck by cost with somewhere to go.
-            self.get_logger().info(
+            log.info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '

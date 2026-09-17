@@ -42,6 +42,11 @@ from tinynav.core.path_climb import compute_path_climb, n_climbing
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
 from tinynav.tinynav_cpp_bind import pose_graph_solve
+from tinynav.core.logsetup import setup_logging
+
+#: Node log; the console copy goes to stdout (docker logs / console.log).
+log = setup_logging('build_map')
+
 from tool.video_db import VideoDB
 
 logger = logging.getLogger(__name__)
@@ -213,7 +218,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
     global_grid_shape = np.ceil(
         (odom_pose_max_position - odom_pose_min_position) / resolution + np.array(raycast_shape)
     ).astype(np.int32)
-    print(f"global_grid_shape : {global_grid_shape}")
+    log.info(f"global_grid_shape : {global_grid_shape}")
     global_origin = odom_pose_min_position - 0.5 * np.array(raycast_shape) * resolution
     global_grid = np.zeros(global_grid_shape, dtype=np.float32)
 
@@ -236,7 +241,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
         _raycast_all_poses()
 
     voxels = int(np.prod(global_grid_shape))
-    print(
+    log.info(
         "[generate_occupancy_map] SDF stage params: "
         f"resolution={resolution}, step={step}, "
         f"num_poses={len(odom_positions)}, global_grid_shape={tuple(global_grid_shape.tolist())}, "
@@ -492,15 +497,15 @@ class BagPlayer(Node):
             pub = self.create_publisher(msg_type, topic_info.name, 10)
             self._topic_publishers[topic_info.name] = (pub, msg_type)
 
-        self.get_logger().info("Bag topics and message types:")
+        log.info("Bag topics and message types:")
         for topic_info in sorted(topic_infos, key=lambda t: t.name):
-            self.get_logger().info(f"  {topic_info.name} -> {topic_info.type}")
+            log.info(f"  {topic_info.name} -> {topic_info.type}")
 
         # /clock publisher (for use_sim_time)
         self._clock_pub = self.create_publisher(Clock, "/clock", 10)
         self._mapping_percent_pub = self.create_publisher(Float32, "/mapping/percent", 10)
 
-        self.get_logger().info(f"BagPlayer opened bag: {bag_uri}, play_rate={play_rate}")
+        log.info(f"BagPlayer opened bag: {bag_uri}, play_rate={play_rate}")
 
     def _scan_bag_time_range(self, bag_uri: str, storage_id: str, serialization_format: str) -> tuple[int, int]:
         # We have not found a rosbag2_py API that exposes the bag time range directly,
@@ -541,7 +546,7 @@ class BagPlayer(Node):
         elapsed = ((now - self._last_percent_log_time).nanoseconds / 1e9
                    if hasattr(self, '_last_percent_log_time') else float('inf'))
         if percent >= 100.0 or elapsed >= self._PERCENT_LOG_INTERVAL_S:
-            self.get_logger().info(f"MAPPING_PERCENT:{percent:.1f}")
+            log.info(f"MAPPING_PERCENT:{percent:.1f}")
             self._last_percent_log_time = now
 
     def _publish_percent_from_timestamp(self, timestamp_ns: int) -> None:
@@ -577,7 +582,7 @@ class BagPlayer(Node):
         pub_and_type = self._topic_publishers.get(topic)
         if pub_and_type is None:
             # No publisher (should not really happen, but don't crash playback)
-            self.get_logger().warn(f"No publisher for topic '{topic}'")
+            log.warning(f"No publisher for topic '{topic}'")
             return True
 
         pub, msg_type = pub_and_type
@@ -706,7 +711,7 @@ class BuildMapNode(Node):
             if self.tf_static_sub is not None:
                 self.destroy_subscription(self.tf_static_sub.sub)
                 self.tf_static_sub = None
-            self.get_logger().info("Saved tf_messages.npy and unsubscribed from /tf and /tf_static")
+            log.info("Saved tf_messages.npy and unsubscribed from /tf and /tf_static")
 
     def rgb_camera_info_callback(self, msg:CameraInfo):
         if self.rgb_camera_K is None:
@@ -714,7 +719,7 @@ class BuildMapNode(Node):
 
     def info_callback(self, msg:CameraInfo):
         if self.K is None:
-            self.get_logger().info("Camera intrinsics received.")
+            log.info("Camera intrinsics received.")
             self.K = np.array(msg.k).reshape(3, 3)
             fx = self.K[0, 0]
             Tx = msg.p[3]
@@ -726,19 +731,19 @@ class BuildMapNode(Node):
 
     def mapping_stop_callback(self, msg: Bool):
         if msg.data:
-            self.get_logger().info("Received benchmark stop signal, starting save process...")
+            log.info("Received benchmark stop signal, starting save process...")
             try:
                 self.save_mapping()
-                self.get_logger().info("Mapping save completed successfully")
+                log.info("Mapping save completed successfully")
 
                 # Publish save finished signal
                 save_finished_msg = Bool()
                 save_finished_msg.data = True
                 self.mapping_save_finished_pub.publish(save_finished_msg)
-                self.get_logger().info("Published data save finished signal")
+                log.info("Published data save finished signal")
 
             except Exception as e:
-                self.get_logger().error(f"Error during mapping save: {e}")
+                log.error(f"Error during mapping save: {e}")
                 # Still publish completion signal even if there was an error
                 save_finished_msg = Bool()
                 save_finished_msg.data = False
@@ -756,7 +761,7 @@ class BuildMapNode(Node):
             keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
             keyframe_depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
             if keyframe_image_timestamp != keyframe_odom_timestamp or keyframe_image_timestamp != keyframe_depth_timestamp:
-                self.get_logger().error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
+                log.error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
 
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
@@ -820,7 +825,7 @@ class BuildMapNode(Node):
                 success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                 if success and len(inliers) >= 100:
                     self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                    print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
+                    log.info(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
 
     def maybe_run_global_refinement(self) -> None:
         """Run pose-graph optimization and full TF publish when the map has grown enough.
@@ -875,14 +880,14 @@ class BuildMapNode(Node):
 
     def save_mapping(self):
         if self._save_completed:
-            self.get_logger().info("Mapping data already saved, skipping duplicate save")
+            log.info("Mapping data already saved, skipping duplicate save")
             return
 
         if self.K is None:
-            self.get_logger().info("No camera intrinsics available, skipping save")
+            log.info("No camera intrinsics available, skipping save")
             return
 
-        self.get_logger().info("Saving mapping data...")
+        log.info("Saving mapping data...")
 
         # Save continuous poses
         self.continuous_odom_recorder.save_to_disk()
@@ -904,9 +909,9 @@ class BuildMapNode(Node):
             np.save(f"{self.map_save_path}/path_speed.npy", path_speed)
             finite = np.isfinite(path_speed[:, 3])
             med = float(np.median(path_speed[finite, 3])) if finite.any() else float('nan')
-            self.get_logger().info(f"Saved path_speed.npy (median capture speed {med:.2f} m/s)")
+            log.info(f"Saved path_speed.npy (median capture speed {med:.2f} m/s)")
         except Exception as e:
-            self.get_logger().error(f"Failed to compute path_speed: {e}")
+            log.error(f"Failed to compute path_speed: {e}")
 
         # Climb prior: where the capture path went up or down, so the planner can treat
         # a riser there as a step rather than a wall. Same poses, same failure policy --
@@ -914,15 +919,15 @@ class BuildMapNode(Node):
         try:
             path_climb = compute_path_climb(self.pose_graph_used_pose)
             np.save(f"{self.map_save_path}/path_climb.npy", path_climb)
-            self.get_logger().info(
+            log.info(
                 f"Saved path_climb.npy ({n_climbing(path_climb)}/{len(path_climb)} "
                 "samples climbing)")
         except Exception as e:
-            self.get_logger().error(f"Failed to compute path_climb: {e}")
+            log.error(f"Failed to compute path_climb: {e}")
 
         np.save(f"{self.map_save_path}/intrinsics.npy", self.K)
         np.save(f"{self.map_save_path}/baseline.npy", self.baseline)
-        print(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
+        log.info(f"T_rgb_to_infra1: {self.T_rgb_to_infra1}")
         np.save(f"{self.map_save_path}/T_rgb_to_infra1.npy", self.T_rgb_to_infra1, allow_pickle = True)
         np.save(f"{self.map_save_path}/rgb_camera_intrinsics.npy", self.rgb_camera_K, allow_pickle = True)
 
@@ -966,8 +971,8 @@ class BuildMapNode(Node):
             cv2.imwrite(f"{self.map_save_path}/occupancy_2d_image.png", occupancy_2d_image)
 
         self._save_completed = True
-        self.get_logger().info("Full mapping data saved successfully")
-        self.stage_timer.log_summary(self.get_logger().info)
+        log.info("Full mapping data saved successfully")
+        self.stage_timer.log_summary(log.info)
 
     def pointcloud_to_marker_array(self, points, frame_id='camera',colors=None):
         marker_array = MarkerArray()
