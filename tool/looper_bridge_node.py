@@ -21,7 +21,7 @@ from rclpy.qos import (
 )
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from tf2_msgs.msg import TFMessage
 
 from tinynav.core.math_utils import np2msg, pose_msg2np
@@ -150,6 +150,83 @@ class StreamHealth:
         return self.alive(now_mono) and not self.frozen(now_mono)
 
 
+class FrontVisualHealth:
+    """Detect front-camera cover from direct image/depth taps."""
+
+    def __init__(self, enabled: bool, bad_after_s: float, recover_after_s: float, sample_timeout_s: float = 0.7):
+        self.enabled = bool(enabled)
+        self.bad_after_s = float(bad_after_s)
+        self.recover_after_s = float(recover_after_s)
+        self.sample_timeout_s = float(sample_timeout_s)
+        self._image_bad = False
+        self._image_reason = "image:no_data"
+        self._image_mono: float | None = None
+        self._depth_bad = False
+        self._depth_reason = "depth:no_data"
+        self._depth_mono: float | None = None
+        self._bad_since: float | None = None
+        self._good_since: float | None = None
+        self._covered = False
+        self.reason = "disabled" if not self.enabled else "no_data"
+
+    def update_image(self, bad: bool, reason: str, now_mono: float) -> None:
+        self._image_bad = bool(bad)
+        self._image_reason = reason
+        self._image_mono = now_mono
+        self._update(now_mono)
+
+    def update_depth(self, bad: bool, reason: str, now_mono: float) -> None:
+        self._depth_bad = bool(bad)
+        self._depth_reason = reason
+        self._depth_mono = now_mono
+        self._update(now_mono)
+
+    def covered(self, now_mono: float) -> bool:
+        self._update(now_mono)
+        return self._covered
+
+    def _recent(self, stamp: float | None, now_mono: float) -> bool:
+        return stamp is not None and (now_mono - stamp) <= self.sample_timeout_s
+
+    def _update(self, now_mono: float) -> None:
+        if not self.enabled:
+            self._covered = False
+            self.reason = "disabled"
+            return
+
+        image_recent = self._recent(self._image_mono, now_mono)
+        depth_recent = self._recent(self._depth_mono, now_mono)
+        if not image_recent and not depth_recent:
+            self.reason = "no_recent_visual_sample"
+            self._bad_since = None
+            self._good_since = None
+            return
+
+        # Image handles dark/washed/low-texture covers; depth handles a hand or
+        # object held very close to the camera even when the infra image has texture.
+        bad = (image_recent and self._image_bad) or (depth_recent and self._depth_bad)
+        if image_recent and depth_recent:
+            signal_reason = f"{self._image_reason};{self._depth_reason}"
+        else:
+            signal_reason = self._image_reason if image_recent else self._depth_reason
+
+        if bad:
+            self._good_since = None
+            if self._bad_since is None:
+                self._bad_since = now_mono
+            if (now_mono - self._bad_since) >= self.bad_after_s:
+                self._covered = True
+            self.reason = f"{signal_reason} bad_for={now_mono - self._bad_since:.2f}s"
+            return
+
+        self._bad_since = None
+        if self._good_since is None:
+            self._good_since = now_mono
+        if not self._covered or (now_mono - self._good_since) >= self.recover_after_s:
+            self._covered = False
+        self.reason = f"{signal_reason} good_for={now_mono - self._good_since:.2f}s"
+
+
 class LooperBridgeNode(Node):
     def __init__(self, args):
         super().__init__("looper_bridge_node")
@@ -219,6 +296,11 @@ class LooperBridgeNode(Node):
         self._rear_100 = StreamHealth(dropout_s=0.40)
         self._front_img = StreamHealth(dropout_s=0.40)
         self._rear_img = StreamHealth(dropout_s=0.40)
+        self._front_visual = FrontVisualHealth(
+            enabled=bool(args.front_cover_fallback),
+            bad_after_s=float(args.front_cover_bad_s),
+            recover_after_s=float(args.front_cover_recover_s),
+        )
         self._vio_source = "front"
         self._failed_since_mono: float | None = None
         self._T_front_lock: np.ndarray | None = None
@@ -292,6 +374,7 @@ class LooperBridgeNode(Node):
         self.keyframe_image_pub = self.create_publisher(Image, "/slam/keyframe_image", 10)
         self.keyframe_depth_pub = self.create_publisher(Image, "/slam/keyframe_depth", 10)
         self.vio_source_pub = self.create_publisher(String, "/slam/vio_source", self._latched_qos)
+        self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", self._latched_qos)
         self._health_timer = self.create_timer(0.05, self._health_tick)
 
         self.get_logger().info(
@@ -306,6 +389,12 @@ class LooperBridgeNode(Node):
                 f"conjugated through 180deg optical extrinsic, baseline={self._rear_baseline_m:.3f}m. "
                 "Downstream still consumes /slam/odometry in the front world."
             )
+            if self._front_visual.enabled:
+                self.get_logger().info(
+                    "Front cover fallback enabled: rear may take /slam/odometry when "
+                    f"front image/depth looks covered for {self._front_visual.bad_after_s:.2f}s; "
+                    f"front recovers after {self._front_visual.recover_after_s:.2f}s stable."
+                )
         sync_mode = (
             f"approximate slop={args.sync_slop:.3f}s"
             if args.sync_slop > 0.0
@@ -316,6 +405,7 @@ class LooperBridgeNode(Node):
             f"sync={sync_mode}, queue={sync_queue}"
         )
         self._publish_vio_source(self._vio_source)
+        self._publish_nav_paused(self._vio_source)
 
     def _assert_rear_extrinsic(self) -> None:
         # Robot moves +1m in body forward: rear optical sees -Z, front must see +Z.
@@ -330,6 +420,9 @@ class LooperBridgeNode(Node):
         msg = String()
         msg.data = source
         self.vio_source_pub.publish(msg)
+
+    def _publish_nav_paused(self, source: str) -> None:
+        self.nav_paused_pub.publish(Bool(data=(source != "front")))
 
     def _set_source(self, source: str, now_mono: float) -> None:
         prev = self._vio_source
@@ -364,9 +457,11 @@ class LooperBridgeNode(Node):
 
         self._vio_source = source
         self._publish_vio_source(source)
+        self._publish_nav_paused(source)
         self.get_logger().warn(
             f"VIO source {prev} -> {source} "
-            f"front({self._front_100.reason}) rear({self._rear_100.reason})"
+            f"front({self._front_100.reason}) rear({self._rear_100.reason}) "
+            f"visual({self._front_visual.reason})"
         )
 
     def _evaluate_source(self, now_mono: float) -> str:
@@ -384,9 +479,17 @@ class LooperBridgeNode(Node):
         )
         front_alive = self._front_100.alive(now_mono) or self._front_img.alive(now_mono)
         rear_moving = self._rear_100.moving(now_mono) or self._rear_img.moving(now_mono)
+        front_covered = self._front_visual.covered(now_mono)
 
-        # Stay on front while it is still producing poses. Switch to rear only when
-        # front is dead/jumping, or front is frozen while rear is clearly moving.
+        # A covered front camera can still produce numerically plausible VIO.
+        # Treat a sustained visual cover as stronger than front pose health.
+        if front_covered:
+            desired = "rear" if rear_good else "failed"
+            self._set_source(desired, now_mono)
+            return self._vio_source
+
+        # Stay on front while it is still producing poses. Otherwise switch to
+        # rear when front is dead/jumping, or frozen while rear is clearly moving.
         # A standing robot must not count as fallback or failed.
         if front_good:
             desired = "front"
@@ -489,9 +592,61 @@ class LooperBridgeNode(Node):
             return
         self._publish_fallback_visual(self._latest_depth, self._latest_image)
 
+    def _sample_front_image_health(self, msg: Image, now_mono: float) -> None:
+        if not self._front_visual.enabled:
+            return
+        try:
+            img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+            arr = np.asarray(img)
+            if arr.ndim == 3:
+                arr = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+            arr = arr[::4, ::4]
+            if arr.size == 0:
+                self._front_visual.update_image(True, "image:empty", now_mono)
+                return
+            if np.issubdtype(arr.dtype, np.integer) and np.iinfo(arr.dtype).max > 255:
+                arr = arr.astype(np.float32) * (255.0 / float(np.iinfo(arr.dtype).max))
+            else:
+                arr = arr.astype(np.float32)
+            mean = float(np.mean(arr))
+            std = float(np.std(arr))
+            bad = (
+                mean <= float(self.args.front_cover_image_mean_low)
+                or mean >= float(self.args.front_cover_image_mean_high)
+                or std <= float(self.args.front_cover_image_std)
+            )
+            reason = f"image:mean={mean:.1f},std={std:.1f}"
+            self._front_visual.update_image(bad, reason, now_mono)
+        except Exception as exc:
+            self._front_visual.update_image(True, f"image:error:{type(exc).__name__}", now_mono)
+
+    def _sample_front_depth_health(self, msg: Image, now_mono: float) -> None:
+        if not self._front_visual.enabled:
+            return
+        try:
+            depth = self.decode_depth_meters(msg)
+            depth = depth[::4, ::4]
+            valid = np.isfinite(depth) & (depth >= 0.05) & (depth <= 8.0)
+            valid_count = int(np.count_nonzero(valid))
+            valid_ratio = float(valid_count) / max(1, int(valid.size))
+            near = valid & (depth <= float(self.args.front_cover_depth_near_m))
+            near_ratio = float(np.count_nonzero(near)) / max(1, valid_count)
+            bad = (
+                valid_ratio <= float(self.args.front_cover_depth_min_valid_ratio)
+                or (
+                    valid_count >= int(self.args.front_cover_depth_min_valid_pixels)
+                    and near_ratio >= float(self.args.front_cover_depth_near_ratio)
+                )
+            )
+            reason = f"depth:valid={valid_ratio:.3f},near={near_ratio:.3f}"
+            self._front_visual.update_depth(bad, reason, now_mono)
+        except Exception as exc:
+            self._front_visual.update_depth(True, f"depth:error:{type(exc).__name__}", now_mono)
+
     def _on_front_depth(self, msg: Image):
         self._latest_depth = msg
         now_mono = time.monotonic()
+        self._sample_front_depth_health(msg, now_mono)
         if self._evaluate_source(now_mono) != "rear":
             return
         if self._last_sync_at_mono is not None and (now_mono - self._last_sync_at_mono) < 0.20:
@@ -500,6 +655,7 @@ class LooperBridgeNode(Node):
 
     def _on_front_image(self, msg: Image):
         self._latest_image = msg
+        self._sample_front_image_health(msg, time.monotonic())
 
     def _publish_fallback_visual(self, depth_msg: Image, image_msg: Image | None):
         if self.cached_camera_info is None:
@@ -783,6 +939,66 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=os.environ.get("TINYNAV_REAR_VIO_FALLBACK", "1") not in ("0", "false", "False"),
         help="Use camera1 VIO relative motion as front-world fallback.",
+    )
+    parser.add_argument(
+        "--front-cover-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("TINYNAV_FRONT_COVER_FALLBACK", "1") not in ("0", "false", "False"),
+        help="Allow rear VIO fallback when the front camera image/depth looks covered.",
+    )
+    parser.add_argument(
+        "--front-cover-bad-s",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_BAD_S", "0.4")),
+        help="Seconds of covered-looking front visual input before switching to rear.",
+    )
+    parser.add_argument(
+        "--front-cover-recover-s",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_RECOVER_S", "1.2")),
+        help="Seconds of healthy front visual input before allowing switch back to front.",
+    )
+    parser.add_argument(
+        "--front-cover-image-std",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_IMAGE_STD", "3.0")),
+        help="Front infra stddev threshold below which the image is treated as covered.",
+    )
+    parser.add_argument(
+        "--front-cover-image-mean-low",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_IMAGE_MEAN_LOW", "8.0")),
+        help="Front infra mean threshold below which the image is treated as covered.",
+    )
+    parser.add_argument(
+        "--front-cover-image-mean-high",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_IMAGE_MEAN_HIGH", "248.0")),
+        help="Front infra mean threshold above which the image is treated as covered.",
+    )
+    parser.add_argument(
+        "--front-cover-depth-min-valid-ratio",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_DEPTH_MIN_VALID_RATIO", "0.01")),
+        help="Depth-only fallback cover threshold when front infra images are not recent.",
+    )
+    parser.add_argument(
+        "--front-cover-depth-near-m",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_DEPTH_NEAR_M", "0.35")),
+        help="Depth points no farther than this are counted as close-cover candidates.",
+    )
+    parser.add_argument(
+        "--front-cover-depth-near-ratio",
+        type=float,
+        default=float(os.environ.get("TINYNAV_FRONT_COVER_DEPTH_NEAR_RATIO", "0.35")),
+        help="Covered if this fraction of valid front depth points is very close.",
+    )
+    parser.add_argument(
+        "--front-cover-depth-min-valid-pixels",
+        type=int,
+        default=int(os.environ.get("TINYNAV_FRONT_COVER_DEPTH_MIN_VALID_PIXELS", "50")),
+        help="Minimum sampled valid depth pixels before close-cover ratio is trusted.",
     )
     return parser.parse_args()
 
