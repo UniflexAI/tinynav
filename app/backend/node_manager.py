@@ -228,7 +228,8 @@ class BackendNode(Ros2NodeManager):
 
         self._nav_active_pub.publish(Bool(data=False))
 
-        self.create_subscription(Float32, '/battery', self._on_battery, 10)
+        # Latched by unitree_control, which sends it only when it changes.
+        self.create_subscription(Float32, '/battery', self._on_battery, _latched_qos)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
         self._detect_and_init_sensor()
