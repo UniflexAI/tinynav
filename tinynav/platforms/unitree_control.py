@@ -4,6 +4,7 @@ import os
 import rclpy
 import threading
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
@@ -211,7 +212,7 @@ class Ros2UnitreeManagerNode(Node):
         if self.is_quadruped:
             self.sport_client.ClassicWalk(True)
         self._robot_status = RobotStatus.SITTING
-        self.battery = 0.0
+        self.battery = None
         self.last_twist_time = None
         self.logger = self.get_logger()
         # The last command was non-zero (so the next non-zero is not a start).
@@ -236,7 +237,11 @@ class Ros2UnitreeManagerNode(Node):
         lowstate_subscriber = ChannelSubscriber(lowstate_topic, lowstate_type)
         lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
 
-        self.publisher_battery = self.create_publisher(Float32, '/battery', 10)
+        # Latched and sent only on change: lowstate arrives at ~500Hz, and every
+        # message costs the backend's Python executor whatever the callback does.
+        self.publisher_battery = self.create_publisher(
+            Float32, '/battery',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         # Chassis odometry, republished onto the ROS bus. rt/utlidar/robot_odom
@@ -401,10 +406,11 @@ class Ros2UnitreeManagerNode(Node):
             # g1's lowstate has no battery field; skip battery reporting.
             return
         try:
-            self.battery = float(msg.bms_state.soc)
-            battery_msg = Float32()
-            battery_msg.data = float(self.battery)
-            self.publisher_battery.publish(battery_msg)
+            soc = float(msg.bms_state.soc)
+            if soc == self.battery:
+                return
+            self.battery = soc
+            self.publisher_battery.publish(Float32(data=soc))
         except Exception as e:
             self.logger.error(f"Error in LowStateMessageHandler: {e}")
             import traceback
