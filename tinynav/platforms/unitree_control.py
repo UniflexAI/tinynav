@@ -409,8 +409,10 @@ class Ros2UnitreeManagerNode(Node):
             soc = float(msg.bms_state.soc)
             if soc == self.battery:
                 return
-            self.battery = soc
+            # Recorded only once sent: lowstate starts before the publisher exists,
+            # and a value marked sent but never published would stay unsent.
             self.publisher_battery.publish(Float32(data=soc))
+            self.battery = soc
         except Exception as e:
             self.logger.error(f"Error in LowStateMessageHandler: {e}")
             import traceback
