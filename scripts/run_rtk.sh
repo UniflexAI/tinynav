@@ -40,14 +40,19 @@ INIT_CMDS="${RTK_INIT_COMMANDS:-LOG BESTPOSA ONTIME 1}"
 # systemd starts this with `docker exec -itd`, which discards stdout, so every
 # restart used to be invisible. Tee to a file that survives the container.
 LOG_FILE="${RTK_LOG_FILE:-/tinynav/rtk_bridge.log}"
+
+# Per-band C/N0 once a second. Interference is narrowband, so the band that
+# sags is what tells RFI apart from an antenna fault; ~1 MB/h, append-only.
+SIGNAL_CSV="${RTK_SIGNAL_CSV:-/tinynav/rtk_signal.csv}"
 say() { echo "[RTK] $(date -Is) $*" | tee -a "$LOG_FILE"; }
 
-say "start_rtk_bridge, serial=$SERIAL, log=$LOG_FILE"
+say "start_rtk_bridge, serial=$SERIAL, log=$LOG_FILE, signal_csv=$SIGNAL_CSV"
 while true; do
   say "launching rtk_bridge_node"
   uv run python /tinynav/rtk/rtk_bridge_node.py --ros-args \
     -p serial_port:="$SERIAL" \
     -p serial_init_commands:="$INIT_CMDS" \
+    -p signal_csv_path:="$SIGNAL_CSV" \
     "$@" 2>&1 | tee -a "$LOG_FILE"
   code=${PIPESTATUS[0]}
   # 9 is the node's NMEA watchdog (NMEA_WATCHDOG_EXIT_CODE), i.e. the serial

@@ -166,6 +166,19 @@ def parse_int_or_none(value: str):
         return None
 
 
+# NMEA 4.11 talker + signal id -> carrier MHz. Interference is narrowband, so
+# which band sags is the diagnosis: one band = RFI, all bands = antenna/cable.
+_GNSS_BAND_MHZ = {
+    "GP1": 1575.42, "GP2": 1575.42, "GP4": 1227.60, "GP5": 1227.60,
+    "GP6": 1227.60, "GP7": 1176.45, "GP8": 1176.45,
+    "GL1": 1602.00, "GL2": 1602.00, "GL3": 1246.00, "GL4": 1246.00,
+    "GB1": 1561.10, "GB2": 1561.10, "GB3": 1575.42, "GB5": 1176.45,
+    "GB8": 1268.52, "GB9": 1268.52, "GBB": 1207.14, "GBC": 1207.14,
+    "GA1": 1176.45, "GA2": 1207.14, "GA7": 1575.42,
+    "GQ1": 1575.42, "GQ5": 1227.60,
+}
+
+
 def _fmt_age(v):
     return "n/a" if v is None else f"{v:.1f}"
 
@@ -328,6 +341,10 @@ class RtkBridgeNode(Node):
         self.nmea_gga_count = 0
         self.nmea_rmc_count = 0
         self.nmea_heading_count = 0
+        self.nmea_gsv_count = 0
+        self._gsv_pending = {}   # band -> C/N0 of the group being assembled
+        self._gsv_bands = {}     # band -> (monotonic, [C/N0...]) last full group
+        self._signal_csv = None
         self.raw_sentence_publish_count = 0
         self.status_seq = 0
         self.latest_heading_yaw = 0.0
@@ -429,6 +446,8 @@ class RtkBridgeNode(Node):
         self.declare_parameter("raw_pty_enabled", True)
         self.declare_parameter("raw_pty_path", "/tmp/rtk_nmea")
         self.declare_parameter("raw_sentence_types", "GGA")
+        # Empty disables. One row per status tick; this is what the A/B run compares.
+        self.declare_parameter("signal_csv_path", "")
         self.declare_parameter("ntrip_enabled", True)
         self.declare_parameter("ntrip_host", os.environ.get("TINYNAV_NTRIP_HOST", "120.253.239.161"))
         self.declare_parameter("ntrip_port", int(os.environ.get("TINYNAV_NTRIP_PORT", "8002")))
@@ -825,6 +844,9 @@ class RtkBridgeNode(Node):
         elif msg_type == "RMC":
             self.nmea_rmc_count += 1
             self._parse_rmc(parts)
+        elif msg_type == "GSV":
+            self.nmea_gsv_count += 1
+            self._parse_gsv(parts)
         elif msg_type in ("HDT", "THS"):
             self.nmea_heading_count += 1
             self._parse_heading(msg_type, parts)
@@ -911,6 +933,43 @@ class RtkBridgeNode(Node):
 
     def _should_publish_raw_sentence(self, msg_type: str) -> bool:
         return not self.raw_sentence_types or msg_type in self.raw_sentence_types
+
+    def _parse_gsv(self, p: list[str]):
+        # The trailing NMEA 4.11 signal id shifts every named field by one, so
+        # derive the satellite count from the length or you count it as a satellite.
+        n = (len(p) - 5) // 4
+        if n < 0 or 4 + 4 * n + 1 != len(p):
+            return
+        band = p[0][:2] + p[-1].upper()
+        vals = []
+        for i in range(n):
+            v = p[7 + 4 * i]
+            if v.strip():
+                try:
+                    vals.append(float(v))
+                except ValueError:
+                    pass
+        self._gsv_pending.setdefault(band, []).extend(vals)
+        if p[1] == p[2]:   # last sentence of this band's group
+            self._gsv_bands[band] = (time.monotonic(), self._gsv_pending.pop(band, []))
+
+    def _cn0_summary(self, max_age_s: float = 10.0):
+        now = time.monotonic()
+        out = {}
+        for band, (ts, vals) in self._gsv_bands.items():
+            if not vals or now - ts > max_age_s:
+                continue
+            s = sorted(vals)
+            # Keep every value: RFI lifts the noise floor so the weak tail moves
+            # first, and a median alone would hide that.
+            out[band] = {"mhz": _GNSS_BAND_MHZ.get(band), "n": len(s),
+                         "med": s[len(s) // 2], "min": s[0], "max": s[-1], "v": s}
+        return out
+
+    def _cn0_brief(self, summary):
+        # Descending frequency: the 1575 cluster, the usual RFI victim, reads first.
+        items = sorted(summary.items(), key=lambda kv: -(kv[1]["mhz"] or 0))
+        return " ".join(f"{b}:{v['n']}@{v['med']:.0f}/{v['min']:.0f}" for b, v in items)
 
     def _parse_gga(self, p: list[str]):
         # Fields 0..9 (through altitude) are all we require. Some receivers omit
@@ -1156,6 +1215,7 @@ class RtkBridgeNode(Node):
         fix_age = None if self.last_fix_time is None else now - self.last_fix_time
         rtcm_age = None if self.last_rtcm_time is None else now - self.last_rtcm_time
         quality, stage, position_type = self._reported_fix_state()
+        cn0 = self._cn0_summary()
         if stage != self._last_logged_stage:
             # The one line that says which way a drop went. Correction-side
             # trouble moves diff_age/rtcm_age; sky-side trouble moves sats/hdop.
@@ -1168,9 +1228,11 @@ class RtkBridgeNode(Node):
                 f"rtcm_dropped={self.rtcm_dropped_bytes} "
                 f"sol={self.latest_bestnav_solution_status}/{self.latest_bestnav_position_type} "
                 f"std={None if not self.latest_bestnav_std else round(self.latest_bestnav_std['lat_std_m'], 3)} "
-                f"station={self.latest_gga_station_id or None}"
+                f"station={self.latest_gga_station_id or None} "
+                f"cn0=[{self._cn0_brief(cn0)}]"
             )
             self._last_logged_stage = stage
+        self._log_signal_csv(quality, stage, fix_age, rtcm_age, cn0)
         io_status = {
             "seq": self.status_seq,
             "ntrip_connected": self.ntrip_connected,
@@ -1197,6 +1259,8 @@ class RtkBridgeNode(Node):
             "receiver_position_type": position_type,
             "unicore_log_count": self.unicore_log_count,
             "fix_stale": self._fix_is_stale(),
+            "nmea_gsv_count": self.nmea_gsv_count,
+            "cn0": cn0,
         }
         navsat_status = None if msg is None else int(msg.status.status)
         status = {
@@ -1238,6 +1302,28 @@ class RtkBridgeNode(Node):
         self.status_pub.publish(String(data=json.dumps(status, separators=(",", ":"))))
         self.io_status_pub.publish(String(data=json.dumps(io_status, separators=(",", ":"))))
         self.receiver_status_pub.publish(String(data=json.dumps(receiver_status, separators=(",", ":"))))
+
+    def _log_signal_csv(self, quality, stage, fix_age, rtcm_age, cn0):
+        path = str(self.get_parameter("signal_csv_path").value or "")
+        if not path:
+            return
+        if self._signal_csv is None:
+            fresh = not os.path.exists(path)
+            self._signal_csv = open(path, "a", buffering=1)
+            if fresh:
+                self._signal_csv.write(
+                    "wall,quality,stage,sats,hdop,diff_age,fix_age,rtcm_age,"
+                    "ntrip,rtcm_dropped,sol,postype,lat_std,cn0_json" + chr(10))
+        std = None if not self.latest_bestnav_std else round(self.latest_bestnav_std["lat_std_m"], 4)
+        self._signal_csv.write(
+            f"{time.time():.3f},{quality},{stage},{self.latest_num_satellites},"
+            f"{self.latest_hdop:.2f},{self.latest_gga_differential_age},"
+            f"{_fmt_age(fix_age)},{_fmt_age(rtcm_age)},{int(self.ntrip_connected)},"
+            f"{self.rtcm_dropped_bytes},{self.latest_bestnav_solution_status},"
+            f"{self.latest_bestnav_position_type},{std},"
+            # ";" not "," so the blob survives as one CSV cell; readers
+            # swap it back. Nothing else in the payload contains one.
+            + json.dumps(cn0, separators=(";", ":")) + chr(10))
 
     def _odom_to_tf(self, odom: Odometry):
         from geometry_msgs.msg import TransformStamped
