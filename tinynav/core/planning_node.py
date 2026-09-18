@@ -303,7 +303,7 @@ def angle_between(a, b):
 
 
 #: How short the way forward has to be for the reverse family to be armed.
-REVERSE_ENTER_M = 0.30
+REVERSE_ENTER_M = 0.10
 
 
 def reverse_armed(front_clearance, n_fwd_ok, resolution):
