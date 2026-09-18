@@ -60,6 +60,13 @@ class CmdVelControlNode(Node):
         # (request below the executable minimum reads as a stop).
         self.angular_engage_threshold = self.min_effective_angular_speed
         self.fixed_reverse_speed = 0.3
+        # How far back the differenced path has to point before it reads as reverse.
+        # A turn-in-place rollout barely translates, so the sign of `raw_vx` there is
+        # noise -- and answering it took the robot backwards at full speed with the
+        # planner asking for no such thing: 37 of 38 reverses on 122 2026-09-18, and
+        # 9 more in one leg it never got through. The reverse vocabulary drives 0.3,
+        # so anything between separates them; this sits well clear of both.
+        self.reverse_min_vx = 0.05
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
@@ -212,13 +219,13 @@ class CmdVelControlNode(Node):
         angular_velocity_vec = r.as_rotvec() / dt
 
         raw_vx = float(linear_velocity_vec[0])
-        if raw_vx < 0.0:
+        is_backward_segment = raw_vx < -self.reverse_min_vx
+        if is_backward_segment:
             vx = -self.fixed_reverse_speed
         else:
             vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
         vy = 0.0
         vyaw = np.clip(angular_velocity_vec[2], -self.max_angular_speed, self.max_angular_speed)
-        is_backward_segment = raw_vx < 0.0
         if is_backward_segment:
             vyaw = 0.0
 
