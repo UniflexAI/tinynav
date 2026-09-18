@@ -285,11 +285,14 @@ def angle_between(a, b):
     return abs(np.arctan2(np.sin(d), np.cos(d)))
 
 
-#: How short the way forward has to be for the reverse family to be armed.
+#: How short the way forward has to be for the reverse family to be armed, and how
+#: far it has to open back up before it disengages. Upstream's pair is 0.30/0.45;
+#: the entry is 0.10 here, and the exit keeps upstream's 1.5x so the band is a band.
 REVERSE_ENTER_M = 0.10
+REVERSE_EXIT_M = 0.15
 
 
-def reverse_armed(front_clearance, resolution):
+def reverse_armed(front_clearance, resolution, engaged=False):
     """The reverse family is armed by the wall being close enough to back off.
 
     It also used to arm on `n_fwd_ok == 0` -- no forward trajectory clear of
@@ -307,21 +310,18 @@ def reverse_armed(front_clearance, resolution):
     stationary in front of something 0.30 m away for five minutes. The slack is under
     one step, so it admits the step nearest the threshold and no further one.
     """
-    return front_clearance <= REVERSE_ENTER_M + resolution / 2
+    threshold = REVERSE_EXIT_M if engaged else REVERSE_ENTER_M
+    return front_clearance <= threshold + resolution / 2
 
 
 def reverse_gate_penalty(vx, should_reverse):
-    """Keeps the armed family and bans the other one -- but never the vx=0 rows.
+    """Keeps the armed family and bans the other one, as upstream's gate does.
 
-    Those are the turn-in-place vocabulary the heading term ranks, and `n_fwd_ok`
-    does not count them. Banning them whenever reverse was armed left a boxed-in
-    robot with only straight-back rows, and `cmd_vel_control` zeroes yaw on those:
-    it reversed out without ever fixing the heading that boxed it in, then drove
-    back into the same geometry. Measured on 122 2026-09-18: 19 reverses and a 0.61
-    path efficiency in one 262 s leg.
+    The vx=0 rows are banned with the rest while reverse is armed. A fork-only
+    exemption for them was tried on 2026-09-18 and taken back out with this return
+    to upstream's shape; arming is rare enough at a 0.10 m entry (3.2% of frames
+    measured on 122) that the rows are available almost whenever they are wanted.
     """
-    if abs(vx) <= 1e-3:
-        return 0.0
     return 0.0 if (vx < 0.0) == should_reverse else 1e9
 
 
@@ -625,6 +625,10 @@ class PlanningNode(Node):
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
+        #: Upstream's hysteresis state: once reverse engages it stays engaged until the
+        #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
+        #: subject says it brings in #247's reverse gate.
+        self.reverse_engaged = False
         latest_depth_only = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE
         )
@@ -1202,7 +1206,9 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
                            if params[i][0] > 1e-3 and scores[i] != float('inf'))
-            should_reverse = reverse_armed(front_clearance, self.resolution)
+            should_reverse = reverse_armed(front_clearance, self.resolution,
+                                           self.reverse_engaged)
+            self.reverse_engaged = should_reverse
 
             target = self.target_pose
 
