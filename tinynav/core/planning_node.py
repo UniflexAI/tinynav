@@ -743,11 +743,11 @@ class PlanningNode(Node):
         # direction in the heading term (route_band_fade).
         self.route_terminal_band = 0.5
         # Per radian the trajectory's end heading is off the route's own direction.
-        # Comparable to w_path_follow on purpose: half a radian off the route weighs
-        # about as much as being 0.37 m beside it, so a turn is chosen for the reason a
-        # human would give -- it points the right way -- and not by a few centimetres of
-        # end position that the smoothness term can outvote.
-        self.w_route_heading = 60.0
+        # Held to half the progress term's reach: at 60 a standstill row that rotates
+        # a radian saved as much as a forward row advancing 0.6 m earned, so the two
+        # tied and noise picked the winner -- 4.5 m of path for 0.02 m of progress on
+        # 122 2026-09-18, standing still with a median 36 clear forward rows.
+        self.w_route_heading = 30.0
 
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
