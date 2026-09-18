@@ -4,7 +4,7 @@ The planner builds a rolling 3D occupancy grid from depth, derives a 2D
 obstacle map + ESDF, samples a trajectory library, and selects the trajectory
 that minimizes a cost of clearance + route adherence/progress (+ smoothness,
 + goal heading for turn-in-place candidates), subject to a hard collision filter
-and a reverse gate. With no route available it falls back to distance-to-goal.
+and a hard collision filter. With no route available it falls back to distance-to-goal.
 """
 
 
@@ -189,15 +189,16 @@ def generate_trajectory_library_3d(
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
     n_omega = num_samples
-    # Forward speeds the robot will actually hold, plus the standstill rows.
-    # Sampling from 0 offered a creep band under the floor -- at vx_max 0.20 the
-    # speeds were 0, 0.033, 0.067, ... and the cost minimum sat on 0.033, which
-    # cmd_vel_control reads as a stop while `n_fwd_ok` counted it a way forward.
-    # vx=0 stays: the turn-in-place vocabulary the heading term ranks is built on it.
+    # Forward speeds the robot will actually hold. Sampling from 0 offered a creep
+    # band under the floor -- at vx_max 0.20 the speeds were 0, 0.033, 0.067, ... and
+    # the cost minimum sat on 0.033, which cmd_vel_control reads as a stop.
+    #
+    # There is no vx=0 row. Such a rollout barely translates, so the sign of that
+    # translation is noise, and cmd_vel_control answers `raw_vx < 0` with a full
+    # -0.3 reverse: 37 of 38 reverses on 122 2026-09-18 came from rows the planner
+    # had picked to turn on the spot, in places nothing called for backing up.
     vx_lo = min_linear_vel if min_linear_vel < vx_max else vx_max
-    vx_samples = np.empty(n_vx)
-    vx_samples[0] = 0.0
-    vx_samples[1:] = np.linspace(vx_lo, vx_max, n_vx - 1)
+    vx_samples = np.linspace(vx_lo, vx_max, n_vx)
 
     num_samples = n_vx * n_omega
 
@@ -235,36 +236,6 @@ def generate_trajectory_library_3d(
     return trajectories, params
 
 
-def generate_predefined_trajectory_vocabularies(
-    duration=3.0, dt=0.1,
-    init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
-):
-    """
-    Predefined trajectory vocabularies.
-    """
-    num_steps = int(duration / dt) + 1
-    trajectories = []
-    params = []
-
-    # constant reverse trajectory
-    # vx = -0.3 m/s, omega = 0
-    reverse_speed = 0.3
-    p = init_p.copy()
-    q = quat_to_matrix(init_q)
-    traj = np.empty((num_steps, 7), dtype=np.float64)
-    for i in range(num_steps):
-        v_world = q @ np.array([0.0, 0.0, -reverse_speed])
-        p += v_world * dt
-        traj[i, :3] = p
-        traj[i, 3:] = matrix_to_quat(q)
-    for i in range(num_steps):
-        traj[i, 2] = traj[0, 2]
-    trajectories.append(traj)
-    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
-
-    return np.asarray(trajectories), np.asarray(params)
-
-
 @njit(cache=True)
 def heading_of_pose7(pose7):
     """World heading (rad) of a trajectory pose: its body +Z axis -- this stack's
@@ -283,46 +254,6 @@ def angle_between(a, b):
     """|a - b| folded into [0, pi]. `math_utils.wrap_angle` in njit form."""
     d = a - b
     return abs(np.arctan2(np.sin(d), np.cos(d)))
-
-
-#: How short the way forward has to be for the reverse family to be armed, and how
-#: far it has to open back up before it disengages. Upstream's pair is 0.30/0.45;
-#: the entry is 0.10 here, and the exit keeps upstream's 1.5x so the band is a band.
-REVERSE_ENTER_M = 0.10
-REVERSE_EXIT_M = 0.15
-
-
-def reverse_armed(front_clearance, resolution, engaged=False):
-    """The reverse family is armed by the wall being close enough to back off.
-
-    It also used to arm on `n_fwd_ok == 0` -- no forward trajectory clear of
-    collision -- added for 21 s of standstill on 122 on 2026-09-09. That arm is gone:
-    the standstill it answered came from the gate banning EVERY non-reverse row, vx=0
-    included, so backing out was the only motion left. `reverse_gate_penalty` now
-    leaves the vx=0 rows alone, and on 122 2026-09-18 eight of the ten `fwd_ok == 0`
-    readings had turn-in-place rows clear -- the robot can turn out instead of
-    reversing out.
-
-    Half a cell of slack because `front_clearance` counts grid steps: it lands on
-    multiples of `resolution` and so never exactly on a threshold in metres. 6 * 0.05
-    is 0.30000000000000004, above 0.30, which shut this gate at its own number -- 720
-    frames of `front_clr=0.30 should_reverse=False` on 122 on 2026-09-16, the robot
-    stationary in front of something 0.30 m away for five minutes. The slack is under
-    one step, so it admits the step nearest the threshold and no further one.
-    """
-    threshold = REVERSE_EXIT_M if engaged else REVERSE_ENTER_M
-    return front_clearance <= threshold + resolution / 2
-
-
-def reverse_gate_penalty(vx, should_reverse):
-    """Keeps the armed family and bans the other one, as upstream's gate does.
-
-    The vx=0 rows are banned with the rest while reverse is armed. A fork-only
-    exemption for them was tried on 2026-09-18 and taken back out with this return
-    to upstream's shape; arming is rare enough at a 0.10 m entry (3.2% of frames
-    measured on 122) that the rows are available almost whenever they are wanted.
-    """
-    return 0.0 if (vx < 0.0) == should_reverse else 1e9
 
 
 @njit(cache=True)
@@ -597,7 +528,7 @@ class PlanningNode(Node):
     """Occupancy-grid + ESDF + trajectory-library planner.
 
     Cost = clearance + distance-to-goal + smoothness + goal heading (stationary
-    candidates only), subject to a hard collision filter and a reverse gate.
+    candidates only), subject to a hard collision filter.
     """
 
     def __init__(self, node_name='planning_node'):
@@ -611,9 +542,6 @@ class PlanningNode(Node):
         )
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
-        # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
-        # consumes this directly instead of reverse-engineering it from path poses.
-        # angular.x is a backward-segment flag (fixed-speed reverse vocabulary).
         # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
         # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
@@ -622,13 +550,9 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
-        # What the reverse gate decided, and what it cost. Published rather than only
+        # What the planner saw and chose. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
-        #: Upstream's hysteresis state: once reverse engages it stays engaged until the
-        #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
-        #: subject says it brings in #247's reverse gate.
-        self.reverse_engaged = False
         latest_depth_only = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE
         )
@@ -667,7 +591,7 @@ class PlanningNode(Node):
 
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 4
-        self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
+        self._traj_dt = 0.1  # matches generate_trajectory_library_3d
 
         # --- Speed scaling by forward clearance (with reaction-latency compensation) ---
         # Peak forward speed is modulated per cycle by the free space ahead: the open-space
@@ -701,9 +625,6 @@ class PlanningNode(Node):
         # so a distant wall could not veto a trajectory whose near segment is clear --
         # but it let the planner commit to trajectories it had not fully vetted, and the
         # freeze it was meant to prevent turned out to have other causes.
-
-        # Fixed-speed reverse fallback: driven when every trajectory is in collision
-        # but the blockage is ahead (not already under the footprint).
 
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
@@ -1121,9 +1042,6 @@ class PlanningNode(Node):
             max_lat_acc=self._traj_max_lat_acc,
             min_linear_vel=self._vx_min,
         )
-        vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-        trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-        params = np.concatenate([params, vocab_params], axis=0)
         return trajectories, params
 
     def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
@@ -1182,7 +1100,7 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            # Forward clearance drives both the peak-speed schedule and the reverse gate.
+            # Forward clearance drives the peak-speed schedule.
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
             v_open = self._open_target_speed()
             v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
@@ -1206,9 +1124,6 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
                            if params[i][0] > 1e-3 and scores[i] != float('inf'))
-            should_reverse = reverse_armed(front_clearance, self.resolution,
-                                           self.reverse_engaged)
-            self.reverse_engaged = should_reverse
 
             target = self.target_pose
 
@@ -1231,7 +1146,6 @@ class PlanningNode(Node):
                     f'All trajectories in collision. obst_cells={int(obstacle_mask.sum())} '
                     f'front_clearance={front_clearance:.2f} '
                     f'ESDF@center={ESDF_map[cxi, cyi] if (0<=cxi<rows and 0<=cyi<cols) else -1:.2f} '
-                    f'should_reverse={should_reverse} '
                     f'{self._hits_report(hits, n_samples)}'
                 )
                 # **Nothing is published, and that is the honest answer here.**
@@ -1276,7 +1190,6 @@ class PlanningNode(Node):
             # which is what this planner had before the route existed.
             def cost_function(i):
                 traj, param = trajectories[i], params[i]
-                gate_penalty = reverse_gate_penalty(param[0], should_reverse)
                 traj_end = np.array(traj[-1, :3])
                 target_end = target if target is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
@@ -1319,8 +1232,7 @@ class PlanningNode(Node):
                 return (scores[i] * self.w_clearance
                         + positional
                         + 10 * smooth
-                        + heading_penalty
-                        + gate_penalty)
+                        + heading_penalty)
 
             top_indices = [min(range(len(trajectories)), key=cost_function)]
 
@@ -1334,13 +1246,12 @@ class PlanningNode(Node):
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
             )
 
             # velocity feedforward for cmd_vel_control: (vx, omega) of the selected
-            # trajectory. vx is the commanded body-forward speed (lattice param; its
-            # sign flags the fixed-speed reverse vocabulary via angular.x). omega is
+            # trajectory. vx is the commanded body-forward speed (lattice param).
+            # omega is
             # NOT taken from the lattice param -- that omega is about the camera optical
             # axis and would need a hand-maintained sign/frame correction. Instead we
             # derive the yaw rate straight from the trajectory's own world poses, using
@@ -1358,11 +1269,8 @@ class PlanningNode(Node):
             # were collision-free when the gate banned every non-reverse row.
             _finite = [i for i in range(len(trajectories)) if scores[i] != float('inf')]
             self.gate_pub.publish(String(data=json.dumps({
-                'should_reverse': bool(should_reverse),
                 'front_clr': round(float(front_clearance), 3),
                 'fwd_ok': int(n_fwd_ok),
-                'turn_ok': int(sum(1 for i in _finite if abs(params[i][0]) <= 1e-3)),
-                'rev_ok': int(sum(1 for i in _finite if params[i][0] < 0.0)),
                 'n_traj': int(len(trajectories)),
                 'sel_vx': round(sel_vx, 3),
                 'sel_omega': round(sel_omega, 3),

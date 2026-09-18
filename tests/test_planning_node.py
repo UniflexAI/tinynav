@@ -13,7 +13,6 @@ from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
                            route_heading_penalty, score_trajectories_by_ESDF,
                            footprint_lattice, PlanningNode, ROBOT_CONFIG,
-                           reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M, reverse_gate_penalty,
                            generate_trajectory_library_3d)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -730,41 +729,6 @@ def _steps_to(metres, res):
     return [step * res for step in range(int(round(metres / res)) + 1)]
 
 
-def test_the_reverse_gate_fires_at_the_distance_it_is_written_for():
-    """`front_clearance` counts grid steps, so it never lands exactly on a threshold
-    in metres: 6 * 0.05 is 0.30000000000000004. Compared against 0.30 the gate was
-    shut at its own number -- 720 frames of `front_clr=0.30 should_reverse=False` on
-    122 on 2026-09-16, the robot stationary in front of something 0.30 m away."""
-    for res in (0.05, 0.1):
-        for d in _steps_to(REVERSE_ENTER_M, res):
-            assert reverse_armed(d, res), \
-                f'{d:.2f} m ahead at res {res} did not arm reverse'
-
-
-def test_but_a_reading_a_step_further_out_does_not():
-    """The other half. The slack is under one step, so it admits the reading nearest
-    the threshold and no further one -- otherwise it is just a wider threshold that
-    nobody chose."""
-    for res in (0.05, 0.1):
-        beyond = int(round(REVERSE_ENTER_M / res)) + 1
-        for step in range(beyond, beyond + 20):
-            d = step * res
-            assert not reverse_armed(d, res), \
-                f'{d:.2f} m ahead at res {res} armed reverse'
-
-
-def test_a_clear_corridor_does_not_arm_reverse_however_blocked_the_rollouts_are():
-    """The `n_fwd_ok == 0` arm is gone, so arming is the clearance reading alone.
-
-    That arm answered a standstill the gate itself caused: banning every non-reverse
-    row, vx=0 included, left backing out as the only motion. `reverse_gate_penalty`
-    no longer bans the turn-in-place rows, and on 122 2026-09-18 eight of the ten
-    `fwd_ok == 0` readings still had those rows clear -- turning out beats reversing
-    out, and reversing from three metres of clear corridor was never the intent.
-    """
-    assert not reverse_armed(3.0, 0.05)
-
-
 def _lattice_speeds(v_allow, floor):
     _, params = generate_trajectory_library_3d(
         max_linear_vel=v_allow, min_linear_vel=floor)
@@ -783,15 +747,26 @@ def test_the_lattice_offers_no_speed_between_a_standstill_and_the_floor():
                 f'v_allow {v_allow} offered {vx}, under the floor and over a standstill'
 
 
-def test_but_the_standstill_rows_are_still_offered():
-    """The other half. The heading term ranks turning against them, and a goal the
-    robot has to swing around to has nothing else to rank -- dropping them is the
-    freeze the heading term was written to prevent."""
+def test_and_no_standstill_row_is_offered():
+    """A vx=0 rollout barely translates, so the sign of that translation is noise --
+    and cmd_vel_control answers `raw_vx < 0` with a full -0.3 reverse. 37 of the 38
+    reverses on 122 2026-09-18 came from rows the planner had picked to turn on the
+    spot, in places nothing called for backing up."""
     for v_allow in (0.2, 0.6):
         _, params = generate_trajectory_library_3d(
             max_linear_vel=v_allow, min_linear_vel=0.2)
-        turning = [w for vx, w in params if vx == 0.0 and abs(w) > 1e-6]
-        assert len(turning) >= 2, f'v_allow {v_allow} left no turn-in-place rows'
+        assert params[:, 0].min() > 1e-3, \
+            f'v_allow {v_allow} still offers vx={params[:, 0].min():.3f}'
+
+
+def test_and_the_lattice_still_turns_while_it_drives():
+    """The counter-case: the test above also passes on a library with no turns in it
+    at all, which would leave the robot unable to correct heading by any means."""
+    for v_allow in (0.2, 0.6):
+        _, params = generate_trajectory_library_3d(
+            max_linear_vel=v_allow, min_linear_vel=0.2)
+        assert params[:, 1].min() < -1e-6 < 1e-6 < params[:, 1].max(), \
+            f'v_allow {v_allow} left no turning rows'
 
 
 def test_and_the_top_speed_is_still_offered():
@@ -801,32 +776,3 @@ def test_and_the_top_speed_is_still_offered():
         assert max(_lattice_speeds(v_allow, 0.2)) == round(v_allow, 9)
 
 
-def test_the_reverse_gate_still_separates_the_two_moving_families():
-    """The counter-case: without this the test above passes on a gate that banned
-    nothing at all, which would let reverse rows win while driving forward."""
-    assert reverse_gate_penalty(0.4, True) == 1e9, 'forward allowed while reversing'
-    assert reverse_gate_penalty(-0.3, False) == 1e9, 'reverse allowed while driving'
-    assert reverse_gate_penalty(-0.3, True) == 0.0
-    assert reverse_gate_penalty(0.4, False) == 0.0
-
-
-def test_reverse_stays_engaged_until_the_corridor_opens_past_the_exit():
-    """Upstream's hysteresis, lost in merge `3a69dbc`. Without the band the gate
-    flips on a single grid step and the robot chatters in and out of reverse."""
-    res = 0.05
-    # Against the EFFECTIVE thresholds: `reverse_armed` carries a half-cell of slack,
-    # and at res 0.05 that slack is 0.025 against a 0.05 band -- pick a reading the
-    # band actually holds, or this pins the slack rather than the hysteresis.
-    lo, hi = REVERSE_ENTER_M + res / 2, REVERSE_EXIT_M + res / 2
-    assert hi > lo, f'the exit {REVERSE_EXIT_M} leaves no band above the entry'
-    between = (lo + hi) / 2
-    assert not reverse_armed(between, res, engaged=False), \
-        f'{between:.3f} m armed reverse from disengaged'
-    assert reverse_armed(between, res, engaged=True), \
-        f'{between:.3f} m dropped reverse while engaged'
-
-
-def test_but_the_band_still_ends():
-    """The counter-case: hysteresis that never releases is just a latch."""
-    assert not reverse_armed(REVERSE_EXIT_M + 5 * 0.05, 0.05, engaged=True)
-    assert reverse_armed(REVERSE_ENTER_M / 2, 0.05, engaged=False)
