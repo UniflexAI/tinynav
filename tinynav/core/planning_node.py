@@ -8,6 +8,7 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 """
 
 
+import json
 import rclpy
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
@@ -26,7 +27,7 @@ from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped, Point32
-from std_msgs.msg import Header, Float32
+from std_msgs.msg import Header, Float32, String
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
@@ -302,6 +303,21 @@ def reverse_armed(front_clearance, n_fwd_ok, resolution):
     one step, so it admits the step nearest the threshold and no further one.
     """
     return front_clearance <= REVERSE_ENTER_M + resolution / 2 or n_fwd_ok == 0
+
+
+def reverse_gate_penalty(vx, should_reverse):
+    """Keeps the armed family and bans the other one -- but never the vx=0 rows.
+
+    Those are the turn-in-place vocabulary the heading term ranks, and `n_fwd_ok`
+    does not count them. Banning them whenever reverse was armed left a boxed-in
+    robot with only straight-back rows, and `cmd_vel_control` zeroes yaw on those:
+    it reversed out without ever fixing the heading that boxed it in, then drove
+    back into the same geometry. Measured on 122 2026-09-18: 19 reverses and a 0.61
+    path efficiency in one 262 s leg.
+    """
+    if abs(vx) <= 1e-3:
+        return 0.0
+    return 0.0 if (vx < 0.0) == should_reverse else 1e9
 
 
 @njit(cache=True)
@@ -601,6 +617,9 @@ class PlanningNode(Node):
         self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
         self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
+        # What the reverse gate decided, and what it cost. Published rather than only
+        # logged so a tracer can keep it: container logs do not survive the round.
+        self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
         latest_depth_only = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE
         )
@@ -1246,7 +1265,7 @@ class PlanningNode(Node):
             # which is what this planner had before the route existed.
             def cost_function(i):
                 traj, param = trajectories[i], params[i]
-                reverse_gate_penalty = 0.0 if (param[0] < 0.0) == should_reverse else 1e9
+                gate_penalty = reverse_gate_penalty(param[0], should_reverse)
                 traj_end = np.array(traj[-1, :3])
                 target_end = target if target is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
@@ -1290,7 +1309,7 @@ class PlanningNode(Node):
                         + positional
                         + 10 * smooth
                         + heading_penalty
-                        + reverse_gate_penalty)
+                        + gate_penalty)
 
             top_indices = [min(range(len(trajectories)), key=cost_function)]
 
@@ -1323,6 +1342,20 @@ class PlanningNode(Node):
 
             dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
             sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
+
+            # `turn_ok` is the one the log line could not answer: how many vx=0 rows
+            # were collision-free when the gate banned every non-reverse row.
+            _finite = [i for i in range(len(trajectories)) if scores[i] != float('inf')]
+            self.gate_pub.publish(String(data=json.dumps({
+                'should_reverse': bool(should_reverse),
+                'front_clr': round(float(front_clearance), 3),
+                'fwd_ok': int(n_fwd_ok),
+                'turn_ok': int(sum(1 for i in _finite if abs(params[i][0]) <= 1e-3)),
+                'rev_ok': int(sum(1 for i in _finite if params[i][0] < 0.0)),
+                'n_traj': int(len(trajectories)),
+                'sel_vx': round(sel_vx, 3),
+                'sel_omega': round(sel_omega, 3),
+            })))
 
             self.publish_selected_path(trajectories, top_indices, depth_msg.header)
 

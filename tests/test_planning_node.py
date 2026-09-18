@@ -13,7 +13,7 @@ from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
                            route_heading_penalty, score_trajectories_by_ESDF,
                            footprint_lattice, PlanningNode, ROBOT_CONFIG,
-                           reverse_armed, REVERSE_ENTER_M,
+                           reverse_armed, REVERSE_ENTER_M, reverse_gate_penalty,
                            generate_trajectory_library_3d)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -810,3 +810,26 @@ def test_and_the_top_speed_is_still_offered():
     to still be in the lattice, or the robot never reaches it."""
     for v_allow in (0.2, 0.43, 0.6):
         assert max(_lattice_speeds(v_allow, 0.2)) == round(v_allow, 9)
+
+
+def test_the_reverse_gate_never_bans_turning_in_place():
+    """Arming reverse must not take away the heading tool.
+
+    `n_fwd_ok` counts only vx > 1e-3, so a robot whose sole clear rows are vx=0
+    reads "no way forward" and arms reverse. The gate then used to ban every
+    non-reverse row, those vx=0 rows included, leaving only straight-back
+    trajectories -- and cmd_vel_control zeroes yaw on those. It backed out without
+    ever turning, drove into the same geometry, and paced.
+    """
+    for should_reverse in (True, False):
+        assert reverse_gate_penalty(0.0, should_reverse) == 0.0, \
+            f'turn-in-place banned with should_reverse={should_reverse}'
+
+
+def test_the_reverse_gate_still_separates_the_two_moving_families():
+    """The counter-case: without this the test above passes on a gate that banned
+    nothing at all, which would let reverse rows win while driving forward."""
+    assert reverse_gate_penalty(0.4, True) == 1e9, 'forward allowed while reversing'
+    assert reverse_gate_penalty(-0.3, False) == 1e9, 'reverse allowed while driving'
+    assert reverse_gate_penalty(-0.3, True) == 0.0
+    assert reverse_gate_penalty(0.4, False) == 0.0
