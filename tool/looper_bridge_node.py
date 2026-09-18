@@ -75,17 +75,20 @@ class StreamHealth:
         self._jump = False
         self._samples = 0
         self._jump_streak = 0
+        self._jump_bad_until_mono = 0.0
+        self._poses = deque(maxlen=256)
 
     def update(self, T: np.ndarray, stamp_sec: float, now_mono: float) -> None:
         self.reason = "ok"
-        self._jump = False
         if not is_finite_pose(T):
             self.reason = "nan"
             self.recv_mono = now_mono
             return
 
         self._samples += 1
-        jumped = False
+        hard_jump = False
+        rate_bad = False
+        jump_reason = ""
         if self.T is not None and self.stamp_sec is not None and self._samples > 5:
             dt = stamp_sec - self.stamp_sec
             if 1e-4 < dt <= self.dropout_s * 2.0:
@@ -93,27 +96,34 @@ class StreamHealth:
                 dist = float(np.linalg.norm(dp))
                 speed = dist / max(dt, 1e-6)
                 dR = self.T[:3, :3].T @ T[:3, :3]
-                yaw_rate = rot_angle(dR) / max(dt, 1e-6)
-                # Tiny dt makes speed/yaw_rate explode even for VIO noise; only
-                # use rate gates when the gap is at least one 100 Hz period.
-                rate_bad = dt >= 0.015 and (speed > 2.5 or yaw_rate > 4.0)
-                if dist > 0.3 or float(np.max(np.abs(dp))) > 0.5 or rate_bad:
-                    jumped = True
-                    self.reason = (
-                        f"jump dist={dist:.3f}m dt={dt:.4f}s speed={speed:.2f}m/s yaw_rate={yaw_rate:.2f}rad/s"
-                    )
-        if jumped:
+                angle = rot_angle(dR)
+                angular_rate = angle / max(dt, 1e-6)
+                hard_jump = dist > 0.3 or angle > np.deg2rad(25.0)
+                rate_bad = dt >= 0.005 and (speed > 2.5 or angular_rate > 4.0)
+                jump_reason = (
+                    f"jump dist={dist:.3f}m angle={np.rad2deg(angle):.1f}deg "
+                    f"dt={dt:.4f}s speed={speed:.2f}m/s "
+                    f"angular_rate={angular_rate:.2f}rad/s"
+                )
+        if hard_jump:
+            self._jump_streak = 0
+            self._jump_bad_until_mono = max(self._jump_bad_until_mono, now_mono + 1.0)
+        elif rate_bad:
             self._jump_streak += 1
-            self._jump = self._jump_streak >= 3
-            if not self._jump:
-                self.reason = "ok"
+            if self._jump_streak >= 3:
+                self._jump_bad_until_mono = max(self._jump_bad_until_mono, now_mono + 1.0)
         else:
             self._jump_streak = 0
+        self._jump = now_mono < self._jump_bad_until_mono
+        if hard_jump or rate_bad or self._jump:
+            remaining = max(0.0, self._jump_bad_until_mono - now_mono)
+            self.reason = f"{jump_reason or 'jump latched'} hold={remaining:.2f}s"
 
         self.T = T.copy()
         self.stamp_sec = stamp_sec
         self.recv_mono = now_mono
         self._xyz.append((now_mono, T[:3, 3].copy()))
+        self._poses.append((now_mono, T.copy()))
         cutoff = now_mono - self.freeze_s
         while self._xyz and self._xyz[0][0] < cutoff:
             self._xyz.popleft()
@@ -148,6 +158,19 @@ class StreamHealth:
 
     def good(self, now_mono: float) -> bool:
         return self.alive(now_mono) and not self.frozen(now_mono)
+
+    def motion_delta(self, now_mono: float, window_s: float = 0.5) -> np.ndarray | None:
+        if self.T is None or len(self._poses) < 2:
+            return None
+        target = now_mono - window_s
+        anchor = None
+        for sample_mono, sample_T in self._poses:
+            anchor = sample_T
+            if sample_mono >= target:
+                break
+        if anchor is None:
+            return None
+        return inv_T(anchor) @ self.T
 
 
 class FrontVisualHealth:
@@ -305,8 +328,13 @@ class LooperBridgeNode(Node):
         self._failed_since_mono: float | None = None
         self._T_front_lock: np.ndarray | None = None
         self._T_rear_lock: np.ndarray | None = None
+        self._rear_alignment_history = deque(maxlen=400)
+        self._rear_alignment_guard_s = 0.8
+        self._front_recovery_good_since: float | None = None
+        self._front_recovery_confirm_s = 1.0
         self._recover_T_pub_lock: np.ndarray | None = None
-        self._recover_T_front_raw_lock: np.ndarray | None = None
+        self._recover_T_front_100_raw_lock: np.ndarray | None = None
+        self._recover_T_front_img_raw_lock: np.ndarray | None = None
         self._last_pub_T: np.ndarray | None = None
         self._last_odom_stamp = None
         self._last_odom_mono: float | None = None
@@ -389,12 +417,6 @@ class LooperBridgeNode(Node):
                 f"conjugated through 180deg optical extrinsic, baseline={self._rear_baseline_m:.3f}m. "
                 "Downstream still consumes /slam/odometry in the front world."
             )
-            if self._front_visual.enabled:
-                self.get_logger().info(
-                    "Front cover fallback enabled: rear may take /slam/odometry when "
-                    f"front image/depth looks covered for {self._front_visual.bad_after_s:.2f}s; "
-                    f"front recovers after {self._front_visual.recover_after_s:.2f}s stable."
-                )
         sync_mode = (
             f"approximate slop={args.sync_slop:.3f}s"
             if args.sync_slop > 0.0
@@ -436,24 +458,22 @@ class LooperBridgeNode(Node):
         if source == prev:
             return
 
-        if prev == "front" and source == "rear":
-            if self._last_pub_T is not None:
-                self._T_front_lock = self._last_pub_T.copy()
-            elif self._front_100.T is not None:
-                self._T_front_lock = self._front_100.T.copy()
-            else:
-                self._T_front_lock = None
-            self._T_rear_lock = None if self._rear_100.T is None else self._rear_100.T.copy()
-            if self._T_rear_lock is None and self._rear_img.T is not None:
-                self._T_rear_lock = self._rear_img.T.copy()
+        if source == "rear":
+            self._activate_rear_alignment(now_mono)
             self._recover_T_pub_lock = None
-            self._recover_T_front_raw_lock = None
-        elif prev == "rear" and source == "front":
+            self._recover_T_front_100_raw_lock = None
+            self._recover_T_front_img_raw_lock = None
+            self._front_recovery_good_since = None
+        elif prev in ("rear", "failed") and source == "front":
             if self._last_pub_T is not None and self._front_100.T is not None:
                 self._recover_T_pub_lock = self._last_pub_T.copy()
-                self._recover_T_front_raw_lock = self._front_100.T.copy()
+                self._recover_T_front_100_raw_lock = self._front_100.T.copy()
+                self._recover_T_front_img_raw_lock = (
+                    None if self._front_img.T is None else self._front_img.T.copy()
+                )
             self._T_front_lock = None
             self._T_rear_lock = None
+            self._front_recovery_good_since = None
 
         self._vio_source = source
         self._publish_vio_source(source)
@@ -464,6 +484,60 @@ class LooperBridgeNode(Node):
             f"visual({self._front_visual.reason})"
         )
 
+    def _record_rear_alignment(self, now_mono: float) -> None:
+        if (
+            self._vio_source != "front"
+            or self._front_100.T is None
+            or self._rear_100.T is None
+            or not self._front_100.alive(now_mono)
+            or not self._rear_100.alive(now_mono)
+        ):
+            return
+        front_common = self._compose_from_front_raw(self._front_100.T, "100hz")
+        self._rear_alignment_history.append(
+            (now_mono, front_common.copy(), self._rear_100.T.copy())
+        )
+
+    def _activate_rear_alignment(self, now_mono: float) -> None:
+        cutoff = now_mono - self._rear_alignment_guard_s
+        anchor = None
+        for candidate in reversed(self._rear_alignment_history):
+            if candidate[0] <= cutoff:
+                anchor = candidate
+                break
+        if anchor is None and self._rear_alignment_history:
+            anchor = self._rear_alignment_history[0]
+        if anchor is not None:
+            anchor_mono, front_common, rear_raw = anchor
+            self._T_front_lock = front_common.copy()
+            self._T_rear_lock = rear_raw.copy()
+            self.get_logger().warn(
+                "Rear takeover using trusted dual-VIO alignment "
+                f"from {now_mono - anchor_mono:.2f}s before switch"
+            )
+            return
+        self._T_front_lock = None if self._last_pub_T is None else self._last_pub_T.copy()
+        self._T_rear_lock = None if self._rear_100.T is None else self._rear_100.T.copy()
+        if self._T_rear_lock is None and self._rear_img.T is not None:
+            self._T_rear_lock = self._rear_img.T.copy()
+        self.get_logger().warn("Rear takeover has no dual-VIO alignment history; using current pose")
+
+    def _front_rear_motion_agree(self, now_mono: float) -> bool:
+        delta_front = self._front_100.motion_delta(now_mono)
+        delta_rear = self._rear_100.motion_delta(now_mono)
+        if delta_front is None or delta_rear is None:
+            return False
+        delta_rear_front = (
+            self._T_front_from_rear @ delta_rear @ inv_T(self._T_front_from_rear)
+        )
+        translation_error = float(
+            np.linalg.norm(delta_front[:3, 3] - delta_rear_front[:3, 3])
+        )
+        rotation_error = rot_angle(
+            delta_front[:3, :3].T @ delta_rear_front[:3, :3]
+        )
+        return translation_error <= 0.15 and rotation_error <= np.deg2rad(10.0)
+
     def _evaluate_source(self, now_mono: float) -> str:
         if not self._rear_fallback_enabled:
             if not self._front_100.has_data() and not self._front_img.has_data():
@@ -473,18 +547,36 @@ class LooperBridgeNode(Node):
         if not any(s.has_data() for s in (self._front_100, self._rear_100, self._front_img, self._rear_img)):
             return self._vio_source
 
-        front_good = self._front_100.good(now_mono)
-        rear_good = self._rear_100.good(now_mono) or (
-            self._rear_100.dropout(now_mono) and self._rear_img.good(now_mono)
+        front_100_unavailable = (
+            not self._front_100.has_data() or self._front_100.dropout(now_mono)
         )
-        front_alive = self._front_100.alive(now_mono) or self._front_img.alive(now_mono)
+        rear_100_unavailable = (
+            not self._rear_100.has_data() or self._rear_100.dropout(now_mono)
+        )
+        front_good = self._front_100.good(now_mono) or (
+            front_100_unavailable and self._front_img.good(now_mono)
+        )
+        front_alive = self._front_100.alive(now_mono) or (
+            front_100_unavailable and self._front_img.alive(now_mono)
+        )
+        rear_alive = self._rear_100.alive(now_mono) or (
+            rear_100_unavailable and self._rear_img.alive(now_mono)
+        )
         rear_moving = self._rear_100.moving(now_mono) or self._rear_img.moving(now_mono)
-        front_covered = self._front_visual.covered(now_mono)
 
-        # A covered front camera can still produce numerically plausible VIO.
-        # Treat a sustained visual cover as stronger than front pose health.
-        if front_covered:
-            desired = "rear" if rear_good else "failed"
+        # While rear owns odometry, keep the robot paused until front has been
+        # numerically healthy and agrees with rear relative motion for a full
+        # confirmation interval. Image/depth appearance never changes VIO source.
+        if self._vio_source == "rear":
+            front_recovered = self._front_100.alive(now_mono) and self._front_rear_motion_agree(now_mono)
+            if front_recovered:
+                if self._front_recovery_good_since is None:
+                    self._front_recovery_good_since = now_mono
+                recovered_for = now_mono - self._front_recovery_good_since
+                desired = "front" if recovered_for >= self._front_recovery_confirm_s else "rear"
+            else:
+                self._front_recovery_good_since = None
+                desired = "rear" if rear_alive else "failed"
             self._set_source(desired, now_mono)
             return self._vio_source
 
@@ -494,8 +586,8 @@ class LooperBridgeNode(Node):
         if front_good:
             desired = "front"
         elif front_alive:
-            desired = "rear" if (rear_good and rear_moving) else "front"
-        elif rear_good:
+            desired = "rear" if (rear_alive and rear_moving) else "front"
+        elif rear_alive:
             desired = "rear"
         else:
             desired = "failed"
@@ -512,19 +604,29 @@ class LooperBridgeNode(Node):
         delta_f = self._T_front_from_rear @ delta_r @ inv_T(self._T_front_from_rear)
         return self._T_front_lock @ delta_f
 
-    def _compose_from_front_raw(self, T_front_raw: np.ndarray) -> np.ndarray:
-        if self._recover_T_pub_lock is None or self._recover_T_front_raw_lock is None:
+    def _compose_from_front_raw(self, T_front_raw: np.ndarray, front_stream: str) -> np.ndarray:
+        raw_lock = (
+            self._recover_T_front_img_raw_lock
+            if front_stream == "image"
+            else self._recover_T_front_100_raw_lock
+        )
+        if self._recover_T_pub_lock is None or raw_lock is None:
             return T_front_raw
-        return self._recover_T_pub_lock @ inv_T(self._recover_T_front_raw_lock) @ T_front_raw
+        return self._recover_T_pub_lock @ inv_T(raw_lock) @ T_front_raw
 
-    def _resolved_T(self, T_front_raw: np.ndarray | None, now_mono: float) -> np.ndarray | None:
+    def _resolved_T(
+        self,
+        T_front_raw: np.ndarray | None,
+        now_mono: float,
+        front_stream: str = "100hz",
+    ) -> np.ndarray | None:
         source = self._evaluate_source(now_mono)
         if source == "front":
             if T_front_raw is None:
                 T_front_raw = self._front_100.T
             if T_front_raw is None:
                 return self._last_pub_T
-            return self._compose_from_front_raw(T_front_raw)
+            return self._compose_from_front_raw(T_front_raw, front_stream)
         if source == "rear":
             return self._compose_from_rear()
         return None
@@ -561,6 +663,7 @@ class LooperBridgeNode(Node):
         now_mono = time.monotonic()
         T_raw = pose_msg2np(pose_msg)
         self._rear_100.update(T_raw, self.stamp_to_sec(pose_msg.header.stamp), now_mono)
+        self._record_rear_alignment(now_mono)
         T_out = self._resolved_T(None, now_mono)
         if T_out is None or self._vio_source != "rear":
             return
@@ -646,7 +749,6 @@ class LooperBridgeNode(Node):
     def _on_front_depth(self, msg: Image):
         self._latest_depth = msg
         now_mono = time.monotonic()
-        self._sample_front_depth_health(msg, now_mono)
         if self._evaluate_source(now_mono) != "rear":
             return
         if self._last_sync_at_mono is not None and (now_mono - self._last_sync_at_mono) < 0.20:
@@ -655,7 +757,6 @@ class LooperBridgeNode(Node):
 
     def _on_front_image(self, msg: Image):
         self._latest_image = msg
-        self._sample_front_image_health(msg, time.monotonic())
 
     def _publish_fallback_visual(self, depth_msg: Image, image_msg: Image | None):
         if self.cached_camera_info is None:
@@ -822,7 +923,7 @@ class LooperBridgeNode(Node):
         now_mono = time.monotonic()
         T_raw = pose_msg2np(pose_msg)
         self._front_img.update(T_raw, self.stamp_to_sec(pose_msg.header.stamp), now_mono)
-        T_world_camera = self._resolved_T(T_raw, now_mono)
+        T_world_camera = self._resolved_T(T_raw, now_mono, front_stream="image")
         if T_world_camera is None:
             return
 

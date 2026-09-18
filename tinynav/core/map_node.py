@@ -1273,6 +1273,25 @@ class MapNode(Node):
             if int(ts) in allowed_timestamps
         ]
 
+    def _relocalization_pose_inside_window(
+        self,
+        pose_in_map: np.ndarray,
+        current_odom_pose: np.ndarray | None,
+    ) -> bool:
+        center_xyz = self._window_center_xyz(current_odom_pose)
+        if center_xyz is None:
+            return True
+        pose_xyz = np.asarray(pose_in_map, dtype=np.float64)[:3, 3]
+        distance = float(np.linalg.norm(pose_xyz - center_xyz))
+        if np.isfinite(distance) and distance <= self.window_relocation_radius_m:
+            return True
+        self.get_logger().warning(
+            "Rejected relocalization pose outside active window: "
+            f"pose={pose_xyz.tolist()} center={center_xyz.tolist()} "
+            f"distance={distance:.2f}m radius={self.window_relocation_radius_m:.2f}m"
+        )
+        return False
+
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
         config_path = os.path.join(tinynav_map_path, "nav_flow.json")
         if not os.path.exists(config_path):
@@ -1818,7 +1837,12 @@ class MapNode(Node):
             return
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        if self.window_relocation_enabled or not (self.enable_first_done and self.first_done):
+        # With first_done enabled, visual relocalization is only used for the
+        # initial fix (including a guarded recovery startup). Once locked, keep
+        # T_from_map_to_odom stable throughout normal navigation. Window mode
+        # constrains where that fix may search; it must not re-enable continuous
+        # single-frame corrections while the robot is driving.
+        if not (self.enable_first_done and self.first_done):
             locking_first = self.enable_first_done and not self.first_done
             success, pose_in_world = self.keyframe_relocalization(
                 keyframe_image_msg.header.stamp,
@@ -1826,6 +1850,17 @@ class MapNode(Node):
                 publish_reloc=not self.enable_first_done,
             )
             if success:
+                timestamp_ns = (
+                    int(keyframe_image_msg.header.stamp.sec * 1e9)
+                    + int(keyframe_image_msg.header.stamp.nanosec)
+                )
+                current_odom_pose = self.pose_graph_used_pose.get(timestamp_ns)
+                if not self._relocalization_pose_inside_window(
+                    pose_in_world, current_odom_pose
+                ):
+                    self.relocalization_poses.pop(timestamp_ns, None)
+                    self.relocalization_pose_weights.pop(timestamp_ns, None)
+                    return
                 if (
                     locking_first
                     and not self._accept_first_lock_observation(

@@ -1929,7 +1929,7 @@ class PlanningNode(Node):
 
     def _integrate_occupancy(self, new_occ):
         with self._occ_lock:
-            self.occupancy_grid *= 0.994
+            self.occupancy_grid *= 0.996
             self.occupancy_grid += new_occ
             self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
             # Debug-only and expensive; keep disabled during navigation.
