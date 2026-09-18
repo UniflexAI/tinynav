@@ -441,6 +441,7 @@ class MapNode(Node):
         verbose_timer: bool = True,
         enable_first_done: bool = False,
         initial_map_to_odom_transform_path: str | None = None,
+        recovery_relocalization_center_xyz: tuple[float, float, float] | None = None,
     ):
         """Initialization
 
@@ -459,6 +460,46 @@ class MapNode(Node):
         self.logger = logging.getLogger(__name__)
         self.timer_logger = self.logger.info if verbose_timer else self.logger.debug
         self.enable_first_done = enable_first_done
+        try:
+            nav_flow = load_nav_flow_dict(tinynav_map_path) or {}
+        except (OSError, ValueError) as exc:
+            nav_flow = {}
+            self.get_logger().warning(
+                f"Failed to read window relocalization config: {exc}; disabled"
+            )
+        self.window_relocation_enabled = self._parse_bool_config(
+            nav_flow.get("window_relocation", False), False
+        )
+        try:
+            self.window_relocation_radius_m = float(
+                nav_flow.get("window_relocation_radius_m", 2.0)
+            )
+        except (TypeError, ValueError):
+            self.window_relocation_radius_m = 2.0
+            self.get_logger().warning(
+                "Invalid window_relocation_radius_m; using 2.0m"
+            )
+        if not np.isfinite(self.window_relocation_radius_m):
+            self.window_relocation_radius_m = 2.0
+            self.get_logger().warning(
+                "Non-finite window_relocation_radius_m; using 2.0m"
+            )
+        self.window_relocation_radius_m = max(0.1, self.window_relocation_radius_m)
+        self._recovery_relocalization_center_xyz = (
+            None
+            if recovery_relocalization_center_xyz is None
+            else np.asarray(recovery_relocalization_center_xyz, dtype=np.float64)
+        )
+        if self.window_relocation_enabled:
+            center_text = (
+                "none"
+                if self._recovery_relocalization_center_xyz is None
+                else self._recovery_relocalization_center_xyz.tolist()
+            )
+            self.get_logger().info(
+                f"Window relocalization enabled: radius={self.window_relocation_radius_m:.2f}m "
+                f"recovery_center={center_text}"
+            )
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
@@ -1154,7 +1195,24 @@ class MapNode(Node):
         )
         if len(allowed) == 0:
             self.get_logger().warning("Relocalization mask excludes all keyframes")
-        self._apply_relocalization_mask_to_retrieval_indices()
+        # Window mode needs map keyframes outside the first-fix mask later, so
+        # keep complete retrieval indices and filter each query dynamically.
+        if not self.window_relocation_enabled:
+            self._apply_relocalization_mask_to_retrieval_indices()
+
+    @staticmethod
+    def _parse_bool_config(value, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return default
 
     def _apply_relocalization_mask_to_retrieval_indices(self) -> None:
         allowed = self.relocalization_allowed_timestamps
@@ -1182,12 +1240,37 @@ class MapNode(Node):
                 self.map_vlad_descriptors = self.map_vlad_descriptors[:0]
                 self.vlad_timestamps = self.vlad_timestamps[:0]
 
-    def _filter_relocalization_candidates(self, candidate_timestamps: list) -> list[int]:
-        if self.relocalization_allowed_timestamps is None:
+    def _window_center_xyz(self, current_odom_pose: np.ndarray | None) -> np.ndarray | None:
+        if not self.window_relocation_enabled:
+            return None
+        if self.T_from_map_to_odom is not None and current_odom_pose is not None:
+            pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ current_odom_pose
+            return pose_in_map[:3, 3]
+        return self._recovery_relocalization_center_xyz
+
+    def _candidate_timestamp_set(
+        self, current_odom_pose: np.ndarray | None
+    ) -> set[int] | None:
+        center_xyz = self._window_center_xyz(current_odom_pose)
+        if center_xyz is not None:
+            radius = self.window_relocation_radius_m
+            return {
+                int(timestamp)
+                for timestamp, pose in self.map_poses.items()
+                if np.linalg.norm(np.asarray(pose)[:3, 3] - center_xyz) <= radius
+            }
+        return self.relocalization_allowed_timestamps
+
+    def _filter_relocalization_candidates(
+        self,
+        candidate_timestamps: list,
+        allowed_timestamps: set[int] | None,
+    ) -> list[int]:
+        if allowed_timestamps is None:
             return [int(ts) for ts in candidate_timestamps]
         return [
             int(ts) for ts in candidate_timestamps
-            if int(ts) in self.relocalization_allowed_timestamps
+            if int(ts) in allowed_timestamps
         ]
 
     def _load_rtk_mode(self, tinynav_map_path: str) -> str:
@@ -1735,21 +1818,26 @@ class MapNode(Node):
             return
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        if not (self.enable_first_done and self.first_done):
+        if self.window_relocation_enabled or not (self.enable_first_done and self.first_done):
+            locking_first = self.enable_first_done and not self.first_done
             success, pose_in_world = self.keyframe_relocalization(
                 keyframe_image_msg.header.stamp,
                 image,
                 publish_reloc=not self.enable_first_done,
             )
             if success:
-                if self.enable_first_done and not self._accept_first_lock_observation(
-                    keyframe_image_msg.header.stamp, pose_in_world
+                if (
+                    locking_first
+                    and not self._accept_first_lock_observation(
+                        keyframe_image_msg.header.stamp, pose_in_world
+                    )
                 ):
                     return
                 self.compute_transform_from_map_to_odom()
                 self.first_done = True
+                self._recovery_relocalization_center_xyz = None
                 if (
-                    self.enable_first_done
+                    locking_first
                     and self.T_from_map_to_odom is not None
                     and self.latest_odom_pose is not None
                 ):
@@ -1970,6 +2058,12 @@ class MapNode(Node):
         min_match_count, min_landmark_count, min_inlier_count = self._get_relocalization_pnp_thresholds()
         strict_first = self.enable_first_done and not self.first_done
         reloc_top_k = max(self.relocalization_loop_top_k, 5) if strict_first else self.relocalization_loop_top_k
+        allowed_timestamps = self._candidate_timestamp_set(current_odom_pose)
+        if allowed_timestamps is not None and len(allowed_timestamps) == 0:
+            self.get_logger().warning(
+                "No map keyframes inside the active relocalization window/mask"
+            )
+            return False, np.eye(4), -np.inf
 
         # Prefer DINOv2 patch VLAD if the map has a VLAD vocabulary/index.
         # Fall back to SuperPoint BoW if available, then finally to DINO global embedding.
@@ -1977,9 +2071,13 @@ class MapNode(Node):
             query_vlad = self.get_vlad_descriptor(keyframe)
             if query_vlad is None:
                 return False, np.eye(4), -np.inf
+            allowed_indices = np.asarray([
+                i for i, ts in enumerate(self.vlad_timestamps)
+                if allowed_timestamps is None or int(ts) in allowed_timestamps
+            ], dtype=np.int64)
             idx_and_similarity_array = find_loop_vlad(
                 query_vlad,
-                self.map_vlad_descriptors,
+                self.map_vlad_descriptors[allowed_indices],
                 -1.0,
                 reloc_top_k,
             )
@@ -1988,29 +2086,38 @@ class MapNode(Node):
                 print(f"VLAD: not enough similar embeddings, max_similarity: {max_similarity}")
                 return False, np.eye(4), -np.inf
             candidate_timestamps = self._filter_relocalization_candidates([
-                int(self.vlad_timestamps[idx_in_map])
+                int(self.vlad_timestamps[allowed_indices[idx_in_map]])
                 for idx_in_map, _similarity in idx_and_similarity_array
-            ])
+            ], allowed_timestamps)
             if len(candidate_timestamps) == 0:
                 print("VLAD: no candidates inside relocalization mask")
                 return False, np.eye(4), -np.inf
         elif self.relocalization_bow is not None:
+            bow_allowed_indices = np.asarray([
+                i for i, ts in enumerate(self.relocalization_bow.timestamps)
+                if allowed_timestamps is None or int(ts) in allowed_timestamps
+            ], dtype=np.int64)
             candidate_timestamps = self._filter_relocalization_candidates([
                 self.relocalization_bow.timestamps[idx_in_map]
                 for idx_in_map, _bow_score in self.relocalization_bow.query(
                     keyframe_features,
                     reloc_top_k,
+                    allowed_indices=bow_allowed_indices,
                 )
-            ])
+            ], allowed_timestamps)
             if len(candidate_timestamps) == 0:
                 print("not enough SuperPoint BoW candidates to relocalize (or all masked out)")
                 return False, np.eye(4), -np.inf
         else:
             query_embedding = self.get_embeddings(keyframe)
             query_embedding_normed = query_embedding / np.linalg.norm(query_embedding)
+            allowed_indices = np.asarray([
+                i for i, ts in self.map_embeddings_idx_to_timestamp.items()
+                if allowed_timestamps is None or int(ts) in allowed_timestamps
+            ], dtype=np.int64)
             idx_and_similarity_array = find_loop(
                 query_embedding_normed,
-                self.map_embeddings,
+                self.map_embeddings[allowed_indices],
                 self.relocalization_threshold,
                 reloc_top_k,
             )
@@ -2019,9 +2126,9 @@ class MapNode(Node):
                 print(f"not enough similar embeddings to relocalize, {len(idx_and_similarity_array)}, max_similarity : {max_similarity}")
                 return False, np.eye(4), -np.inf
             candidate_timestamps = self._filter_relocalization_candidates([
-                self.map_embeddings_idx_to_timestamp[idx_in_map]
+                self.map_embeddings_idx_to_timestamp[int(allowed_indices[idx_in_map])]
                 for idx_in_map, _similarity in idx_and_similarity_array
-            ])
+            ], allowed_timestamps)
             if len(candidate_timestamps) == 0:
                 print("no DINO relocalization candidates inside relocalization mask")
                 return False, np.eye(4), -np.inf
@@ -2890,12 +2997,21 @@ def main(args=None):
             "_maybe_seed_map_handoff."
         ),
     )
+    parser.add_argument(
+        "--recovery_relocalization_center_xyz",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Last trusted map XYZ used as the local relocalization window after VIO recovery",
+    )
     parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
                    verbose_timer=parsed_args.verbose_timer,
                    enable_first_done=parsed_args.enable_first_done,
-                   initial_map_to_odom_transform_path=parsed_args.initial_map_to_odom_transform)
+                   initial_map_to_odom_transform_path=parsed_args.initial_map_to_odom_transform,
+                   recovery_relocalization_center_xyz=parsed_args.recovery_relocalization_center_xyz)
 
     rclpy.spin(node)
     node.destroy_node()

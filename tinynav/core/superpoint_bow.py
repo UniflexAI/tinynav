@@ -175,7 +175,12 @@ class SuperPointBoWRetriever:
     def _l2_normalize(x: np.ndarray) -> np.ndarray:
         return x / np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-6)
 
-    def query(self, features: dict, top_k: int) -> list[tuple[int, float]]:
+    def query(
+        self,
+        features: dict,
+        top_k: int,
+        allowed_indices: np.ndarray | None = None,
+    ) -> list[tuple[int, float]]:
         if self.histograms is None or self.vocab is None:
             return []
         descriptors = self.descriptors_from_features(features)
@@ -186,5 +191,12 @@ class SuperPointBoWRetriever:
             query_hist = query_hist * self.idf
         query_hist = self._l2_normalize(query_hist[None, :])[0]
         scores = self.histograms @ query_hist
-        top_indices = np.argsort(scores)[-top_k:][::-1]
+        if allowed_indices is None:
+            candidate_indices = np.arange(len(scores), dtype=np.int64)
+        else:
+            candidate_indices = np.asarray(allowed_indices, dtype=np.int64)
+            if candidate_indices.size == 0:
+                return []
+        candidate_scores = scores[candidate_indices]
+        top_indices = candidate_indices[np.argsort(candidate_scores)[-top_k:][::-1]]
         return [(int(idx), float(scores[idx])) for idx in top_indices]

@@ -188,6 +188,7 @@ class BackendNode(Ros2NodeManager):
         self._vio_guard_stopped: bool = False
         self._vio_guard_recovering: bool = False
         self._vio_resume_poi_ids: list[int | str] = []
+        self._vio_recovery_map_xyz: tuple[float, float, float] | None = None
         self._active_nav_poi_ids: list[int | str] = []
         self._active_nav_pois: list[dict] = []
 
@@ -1414,6 +1415,16 @@ class BackendNode(Ros2NodeManager):
     def _stop_for_vio_guard(self, status: str, previous_status: str | None):
         resume_ids = self._remaining_nav_poi_ids_for_resume()
         with self._lock:
+            map_pose = self._map_pose
+            self._vio_recovery_map_xyz = (
+                None
+                if map_pose is None
+                else (
+                    float(map_pose['x']),
+                    float(map_pose['y']),
+                    float(map_pose['z']),
+                )
+            )
             self._vio_guard_stopped = True
             self._vio_guard_recovering = False
             self._vio_resume_poi_ids = resume_ids
@@ -1421,7 +1432,8 @@ class BackendNode(Ros2NodeManager):
 
         self.get_logger().warn(
             f'Insight VIO abnormal ({previous_status!r} -> {status!r}); '
-            f'stopping nav nodes, remaining_pois={resume_ids!r}'
+            f'stopping nav nodes, remaining_pois={resume_ids!r}, '
+            f'recovery_map_xyz={self._vio_recovery_map_xyz!r}'
         )
         self.cmd_stop_nav_nodes()
         with self._lock:
@@ -1432,14 +1444,16 @@ class BackendNode(Ros2NodeManager):
     def _recover_from_vio_guard_stop(self, status: str):
         with self._lock:
             resume_ids = list(self._vio_resume_poi_ids)
+            recovery_map_xyz = self._vio_recovery_map_xyz
             if not self._vio_guard_stopped or self._vio_guard_recovering:
                 return
             self._vio_guard_recovering = True
 
         self.get_logger().info(
-            f'Insight VIO recovered ({status!r}); starting nav nodes before resuming POIs={resume_ids!r}'
+            f'Insight VIO recovered ({status!r}); starting nav nodes before resuming '
+            f'POIs={resume_ids!r}, recovery_map_xyz={recovery_map_xyz!r}'
         )
-        self.cmd_start_nav_nodes()
+        self.cmd_start_nav_nodes(recovery_relocalization_center_xyz=recovery_map_xyz)
 
     def _remaining_nav_poi_ids_for_resume(self) -> list[int | str]:
         with self._lock:
@@ -1469,6 +1483,7 @@ class BackendNode(Ros2NodeManager):
             self._vio_guard_stopped = False
             self._vio_guard_recovering = False
             self._vio_resume_poi_ids = []
+            self._vio_recovery_map_xyz = None
 
         if resume_ids:
             self.get_logger().info(f'Resuming POIs after VIO recovery localization: {resume_ids!r}')
@@ -2156,7 +2171,11 @@ class BackendNode(Ros2NodeManager):
     # Nav nodes toggle                                                     #
     # ------------------------------------------------------------------ #
 
-    def cmd_start_nav_nodes(self, initial_map_to_odom_transform_path: str | None = None):
+    def cmd_start_nav_nodes(
+        self,
+        initial_map_to_odom_transform_path: str | None = None,
+        recovery_relocalization_center_xyz: tuple[float, float, float] | None = None,
+    ):
         self._set_nav_active(False)
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
@@ -2168,6 +2187,13 @@ class BackendNode(Ros2NodeManager):
             map_node_cmd.append('--enable_first_done')
         if initial_map_to_odom_transform_path is not None:
             map_node_cmd += ['--initial_map_to_odom_transform', initial_map_to_odom_transform_path]
+        if recovery_relocalization_center_xyz is not None:
+            map_node_cmd += [
+                '--recovery_relocalization_center_xyz',
+                str(recovery_relocalization_center_xyz[0]),
+                str(recovery_relocalization_center_xyz[1]),
+                str(recovery_relocalization_center_xyz[2]),
+            ]
         # Decide RTK mode once here, matching MapNode which also decides once at
         # its own startup -- neither side re-checks this while nav is running.
         self._nav_rtk_mode = self._load_nav_flow_rtk_mode()
