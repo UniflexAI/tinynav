@@ -289,11 +289,16 @@ def angle_between(a, b):
 REVERSE_ENTER_M = 0.10
 
 
-def reverse_armed(front_clearance, n_fwd_ok, resolution):
-    """**The reverse family is armed by there being no way forward.** Clearance is a
-    proxy for that and was once the only judge, so a robot with every forward
-    trajectory in collision at 0.60-0.75 m read False and stood still -- 21 s of that
-    on 122 on 2026-09-09, with nothing published at all.
+def reverse_armed(front_clearance, resolution):
+    """The reverse family is armed by the wall being close enough to back off.
+
+    It also used to arm on `n_fwd_ok == 0` -- no forward trajectory clear of
+    collision -- added for 21 s of standstill on 122 on 2026-09-09. That arm is gone:
+    the standstill it answered came from the gate banning EVERY non-reverse row, vx=0
+    included, so backing out was the only motion left. `reverse_gate_penalty` now
+    leaves the vx=0 rows alone, and on 122 2026-09-18 eight of the ten `fwd_ok == 0`
+    readings had turn-in-place rows clear -- the robot can turn out instead of
+    reversing out.
 
     Half a cell of slack because `front_clearance` counts grid steps: it lands on
     multiples of `resolution` and so never exactly on a threshold in metres. 6 * 0.05
@@ -302,7 +307,7 @@ def reverse_armed(front_clearance, n_fwd_ok, resolution):
     stationary in front of something 0.30 m away for five minutes. The slack is under
     one step, so it admits the step nearest the threshold and no further one.
     """
-    return front_clearance <= REVERSE_ENTER_M + resolution / 2 or n_fwd_ok == 0
+    return front_clearance <= REVERSE_ENTER_M + resolution / 2
 
 
 def reverse_gate_penalty(vx, should_reverse):
@@ -1197,7 +1202,7 @@ class PlanningNode(Node):
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
                            if params[i][0] > 1e-3 and scores[i] != float('inf'))
-            should_reverse = reverse_armed(front_clearance, n_fwd_ok, self.resolution)
+            should_reverse = reverse_armed(front_clearance, self.resolution)
 
             target = self.target_pose
 

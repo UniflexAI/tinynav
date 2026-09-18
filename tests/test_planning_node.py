@@ -642,22 +642,6 @@ def _sync_callback_src():
                 and n.name == 'sync_callback')
 
 
-def test_the_reverse_family_is_armed_by_having_no_way_forward():
-    """The freeze on 122 sat at front_clearance 0.60-0.75 with every forward
-    trajectory in collision, and the clearance proxy answered `should_reverse=False`
-    -- so standing still, which is neither colliding nor gated, stayed the cost
-    minimum for 21s. Whether there IS a way forward is measured, not proxied."""
-    fn = _sync_callback_src()
-    assign = next(n for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                  and any(getattr(t, 'id', None) == 'should_reverse' for t in n.targets))
-    names = {n.id for n in ast.walk(assign.value) if isinstance(n, ast.Name)}
-    assert 'n_fwd_ok' in names, (
-        'should_reverse is back to reading only the forward corridor: '
-        f'{sorted(names)}')
-    assert 'front_clearance' in names, (
-        'the close-obstacle case was dropped along with the proxy')
-
-
 def test_the_all_collision_branch_publishes_nothing():
     """Reaching it means the standing-still row is inf too, so a footprint sample
     is already on an obstacle cell and every trajectory is inf whichever way it
@@ -753,7 +737,7 @@ def test_the_reverse_gate_fires_at_the_distance_it_is_written_for():
     122 on 2026-09-16, the robot stationary in front of something 0.30 m away."""
     for res in (0.05, 0.1):
         for d in _steps_to(REVERSE_ENTER_M, res):
-            assert reverse_armed(d, 99, res), \
+            assert reverse_armed(d, res), \
                 f'{d:.2f} m ahead at res {res} did not arm reverse'
 
 
@@ -765,15 +749,20 @@ def test_but_a_reading_a_step_further_out_does_not():
         beyond = int(round(REVERSE_ENTER_M / res)) + 1
         for step in range(beyond, beyond + 20):
             d = step * res
-            assert not reverse_armed(d, 99, res), \
+            assert not reverse_armed(d, res), \
                 f'{d:.2f} m ahead at res {res} armed reverse'
 
 
-def test_and_no_way_forward_arms_it_however_far_the_wall_is():
-    """The clearance reading is a proxy for "can we go forward", not the question:
-    every forward trajectory in collision at 0.60-0.75 m read False and the robot
-    stood still -- 21 s of that on 122 on 2026-09-09, nothing published at all."""
-    assert reverse_armed(3.0, 0, 0.05)
+def test_a_clear_corridor_does_not_arm_reverse_however_blocked_the_rollouts_are():
+    """The `n_fwd_ok == 0` arm is gone, so arming is the clearance reading alone.
+
+    That arm answered a standstill the gate itself caused: banning every non-reverse
+    row, vx=0 included, left backing out as the only motion. `reverse_gate_penalty`
+    no longer bans the turn-in-place rows, and on 122 2026-09-18 eight of the ten
+    `fwd_ok == 0` readings still had those rows clear -- turning out beats reversing
+    out, and reversing from three metres of clear corridor was never the intent.
+    """
+    assert not reverse_armed(3.0, 0.05)
 
 
 def _lattice_speeds(v_allow, floor):
