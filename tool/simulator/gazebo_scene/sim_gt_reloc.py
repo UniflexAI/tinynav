@@ -11,10 +11,10 @@ frame by luck. This node keeps the two glued at goal-publishing time:
 
 P(t) is perception's raw odometry (/slam/odometry_visual_raw), T_gt(t) the
 robot ground truth (bridged /world/$WORLD/pose/info), E the static camera
-extrinsic from the lekiwi model origin to the perception camera frame (from
-tool/simulator/worlds/factory_scene.sdf: chassis sits (0,0,0.083) above the
-model origin, infra1_link (0.09,0.0255,0.017) in chassis; the rotation is the
-camera axes -- x right, y down, z fwd -- expressed in the chassis frame).
+extrinsic from the robot model origin to the perception camera frame, per
+robot from the EX_TR table (lekiwi's chassis sits (0,0,0.083) above its
+model origin with infra1_link (0.09,0.0255,0.017) in chassis; the rotation
+is the camera axes -- x right, y down, z fwd -- in the chassis frame).
 
 Everything is computed from the current samples -- no sliding window. With E
 in place, P.E^-1.T_gt^-1 is the SLAM<->gz frame offset D(t), which moves only
@@ -38,6 +38,7 @@ ground truth, this node does not run, and map_node remains the localization
 authority (if /map/relocalization appears, goals pass through untouched).
 """
 
+import os
 import argparse
 import subprocess
 import time
@@ -58,18 +59,25 @@ P_STALE_S = 1.0             # odometry older than this is not used
 MAX_GOAL_SPEED = 1.5        # m/s cap on goal translation updates
 MAX_GOAL_YAW_RATE = 1.5     # rad/s cap on goal heading updates
 
-# Static camera extrinsic: lekiwi model origin -> perception camera frame.
-# Translation: factory_scene.sdf puts the chassis 0.083 above the model
-# origin and infra1_link at (0.09, 0.0255, 0.017) in the chassis frame.
-# Rotation: camera axes (x right, y down, z fwd) expressed in the chassis
-# frame (x fwd, y left, z up): right -> -y, down -> -z, fwd -> +x. This is
-# the transpose of the intuitive "chassis axes in camera coords" matrix --
-# as a pose rotation it maps camera-frame points into chassis frame.
+# Static camera extrinsic: robot model origin -> perception camera frame.
+# Rotation: camera axes (x right, y down, z fwd) expressed in the body frame
+# (x fwd, y left, z up): right -> -y, down -> -z, fwd -> +x. This is the
+# transpose of the intuitive "body axes in camera coords" matrix -- as a
+# pose rotation it maps camera-frame points into the body frame.
+# Translation per robot (TINYNAV_ROBOT_MODEL): lekiwi's chassis sits 0.083
+# above the model origin with infra1 at (0.09, 0.0255, 0.017); the go2's
+# standing base height wobbles ~0.22-0.27 with the gait, so its value is
+# an average -- fine for goal framing, not for metrology.
 E = np.eye(4)
 E[:3, :3] = np.array([[0.0, 0.0, 1.0],
                       [-1.0, 0.0, 0.0],
                       [0.0, -1.0, 0.0]])
-E[:3, 3] = (0.09, 0.0255, 0.100)
+EX_TR = {
+    "lekiwi": (0.09, 0.0255, 0.100),
+    "go2": (0.19, 0.0255, 0.35),   # go2 head camera, standing avg
+}
+E[:3, 3] = EX_TR.get(os.environ.get("TINYNAV_ROBOT_MODEL", "lekiwi"),
+                     EX_TR["lekiwi"])
 E_INV = np.linalg.inv(E)
 
 
@@ -225,7 +233,8 @@ class SimGtGoalRelocator(Node):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--robot-name", default="lekiwi")
+    ap.add_argument("--robot-name",
+                    default=os.environ.get("TINYNAV_ROBOT_MODEL", "lekiwi"))
     ap.add_argument("--world", default=None, help="gz world name (default: auto-discover)")
     args = ap.parse_args()
 

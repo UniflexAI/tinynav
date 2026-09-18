@@ -6,8 +6,8 @@ for Ignition Fortress, which has no gz-transport Python bindings -- entity
 create/remove/set_pose go through the `ign service` CLI instead.
 
 Prereq: the sim stack is already up (bash scripts/run_simulator.sh), with the
-gz server running a world that loads gz-sim-user-commands-system (both
-worlds/robot_scene.sdf and worlds/robot_scene_empty.sdf do).
+gz server running a world that loads gz-sim-user-commands-system (every
+world under worlds/ does).
 
 Usage:
     uv run python tool/simulator/gazebo_scene/scene_runner.py l_corridor
@@ -41,6 +41,7 @@ frame -- and progress falls back to /slam/odometry_visual; the caller is
 responsible for a consistent anchor.
 """
 
+import os
 import argparse
 import json
 import math
@@ -55,7 +56,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Empty
 from tf2_msgs.msg import TFMessage
 
 from tinynav.core.math_utils import tf2np
@@ -200,13 +201,18 @@ class AutoNavSim(Node):
     def __init__(self, args):
         super().__init__("scene_runner")
         self.args = args
-        self.robot_name = "lekiwi"
+        # model name in gz (the launcher exports it; lekiwi is the default rig)
+        self.robot_name = os.environ.get("TINYNAV_ROBOT_MODEL", "lekiwi")
         # reloc mode: goals are authored in gz coords and sim_gt_reloc
         # transforms them into the SLAM frame; without reloc the caller's
         # coordinates go to /control/target_pose unchanged.
         target_topic = "/sim/target_pose_gz" if not args.no_reloc else "/control/target_pose"
         self.pub_target = self.create_publisher(Odometry, target_topic, 10)
         self.pub_cmd = self.create_publisher(Twist, "/cmd_vel", 10)
+        # VIO backend reset: reset_robot teleports the rig, which poisons the
+        # perception window unless it re-anchors (see /slam/reset in
+        # tinynav/core/perception_node.py)
+        self.pub_vio_reset = self.create_publisher(Empty, "/slam/reset", 10)
         self.latest_out = None  # reloc-transformed goal echoed back from /control/target_pose
         if not args.no_reloc:
             self.create_subscription(Odometry, "/control/target_pose", self.out_cb, 10)
@@ -267,11 +273,14 @@ class AutoNavSim(Node):
         return ok
 
     def set_model_pose(self, name, pose):
+        # set_pose_vector/Pose_V is the only teleport that can target a named
+        # model: /world/X/set_pose takes msgs::Pose which has no name field
+        # (the old call here failed request creation silently)
         qx, qy, qz, qw = euler_to_quaternion(*pose[3:6])
-        req = (f'name: "{name}" position {{ x: {pose[0]} y: {pose[1]} z: {pose[2]} }} '
-               f'orientation {{ x: {qx} y: {qy} z: {qz} w: {qw} }}')
-        ok, out = ign_service(f"/world/{self.world}/set_pose", "ignition.msgs.Pose", req)
-        print(f"set_pose {name} -> {pose[:3]}: {'ok' if ok else 'FAILED'}")
+        req = (f'pose {{ name: "{name}" position {{ x: {pose[0]} y: {pose[1]} z: {pose[2]} }} '
+               f'orientation {{ x: {qx} y: {qy} z: {qz} w: {qw} }} }}')
+        ok, out = ign_service(f"/world/{self.world}/set_pose_vector", "ignition.msgs.Pose_V", req)
+        print(f"set_pose {name} -> {pose[:3]}: {'ok' if ok else 'FAILED'} {out if not ok else ''}")
         return ok
 
     # ---- scene setup ----
@@ -322,9 +331,14 @@ class AutoNavSim(Node):
 
     def reset_robot(self, robot):
         pose = robot.get("pose", [0.0] * 6)
-        name = robot.get("name", "lekiwi")
+        name = robot.get("name", self.robot_name)
         self.start_zero_cmd()
-        self.set_model_pose(name, pose)
+        if self.set_model_pose(name, pose):
+            # re-anchor perception at the new pose: repeated publishes ride
+            # out the pub-matching race of a one-shot message
+            for _ in range(3):
+                self.pub_vio_reset.publish(Empty())
+                time.sleep(0.3)
         time.sleep(0.5)
         # Hold target overwrites planning's stale target_pose from the last run.
         self.publish_target(pose[:3])
@@ -474,7 +488,9 @@ class AutoNavSim(Node):
             raise RuntimeError("no gz world found (is the sim running?)")
         print(f"world: {self.world}")
 
-        self.robot_name = scene.get("robot", {}).get("name", "lekiwi")
+        # rig-agnostic scenes carry no robot name: the launcher's
+        # TINYNAV_ROBOT_MODEL is the single source of truth
+        self.robot_name = scene.get("robot", {}).get("name") or self.robot_name
         if not self.args.no_reloc:
             # progress/reached checks against the gz ground truth; the goals
             # themselves are transformed into the SLAM frame by sim_gt_reloc.

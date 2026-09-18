@@ -1,6 +1,5 @@
 {
   "desc": "U型弯道: 起点(0,0)朝+x直行5m, 左拐北行2m, 再左拐西行3m至(2,2), 净宽1.0m, 首尾朝向差180度",
-  "robot": {"name": "lekiwi", "pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
   "models": [
     {"line": {"name": "wall_s1", "type": "crate", "from": [-1.2, -1.211], "to": [6.211, -1.211], "spacing": 1.28, "yaw": 0.0}},
     {"line": {"name": "wall_n1", "type": "thin_wall", "from": [-1.2, 0.575], "to": [3.789, 0.575], "spacing": 1.28, "yaw": 0.0}},

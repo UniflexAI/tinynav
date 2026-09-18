@@ -1,0 +1,85 @@
+<?xml version="1.0" ?>
+<!-- Flat-ground scene (robot-free): infinite ground plane, no obstacles, no robot.
+     Robots spawn by type at run time (tool/simulator/robots/<type>/).
+     The textured floor keeps stereo SLAM alive on an otherwise empty ground;
+     this is the default world for every robot. -->
+<sdf version="1.9">
+  <world name="empty">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+    </physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>1 1 1 1</ambient>
+      <background>0.3 0.7 0.9 1</background>
+      <shadows>0</shadows>
+      <grid>1</grid>
+    </scene>
+
+    <light name="sun" type="directional">
+      <pose>0 0 10 0 0 0</pose>
+      <cast_shadows>false</cast_shadows>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.1 0.1 0.1 1</specular>
+      <direction>-0.3 0.3 -1</direction>
+    </light>
+
+    <!-- open-top sky would hand the stereo pair raw sky (invalid disparity,
+         NaN past perception's < 0.1 gate -> dead VIO optimizer); same
+         visual-only ceiling as the factory scene -->
+    <model name="sky_shell">
+      <static>1</static>
+      <link name="link">
+        <visual name="ceiling">
+          <pose>0 0 12 0 0 0</pose>
+          <geometry><plane><normal>0 0 -1</normal><size>220 160</size></plane></geometry>
+          <material>
+            <ambient>0.6 0.6 0.6 1</ambient>
+            <diffuse>0.6 0.6 0.6 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="ground_plane">
+      <static>1</static>
+      <pose>0 0 0.002 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <surface>
+            <friction><ode/></friction>
+            <bounce/>
+            <contact/>
+          </surface>
+        </collision>
+        <!-- Visual floor: depot FLOOR albedo stretched over 40m so stereo
+             SLAM finds texture on an otherwise empty ground (same trick as
+             robots/lekiwi/lekiwi.sdf). -->
+        <visual name="floor_visual">
+          <pose>0 0 -0.011 0 0 0</pose>
+          <geometry><box><size>40 40 0.02</size></box></geometry>
+          <material>
+            <diffuse>1 1 1 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+            <pbr>
+              <metal>
+                <albedo_map>file:///tinynav/tool/simulator/gazebo_scene/models/textures/FLOOR_Albedo.png</albedo_map>
+                <roughness>0.95</roughness>
+                <metalness>0.0</metalness>
+              </metal>
+            </pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

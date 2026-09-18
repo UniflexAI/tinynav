@@ -17,7 +17,7 @@ from tinynav.core.models_trt import LightGlueTRT, SuperPointTRT, StereoEngineTRT
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu, CameraInfo
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from tinynav.core.logsetup import setup_logging
 
@@ -115,6 +115,7 @@ class PerceptionNode(Node):
         self.image_shape = None
 
         self.T_body_last = None
+        self._T_align = None  # cold-start anchor; set with T_body_last
         self.V_last = None
         self.B_last = None
 
@@ -128,6 +129,10 @@ class PerceptionNode(Node):
 
 
         self.camerainfo_sub = self.create_subscription(CameraInfo, "/camera/camera/infra2/camera_info", self.info_callback, 10)
+        # VIO backend reset: latches here (executor thread), consumed at
+        # process() entry (stereo worker thread owns the keyframe window)
+        self._vio_reset = threading.Event()
+        self.reset_sub = self.create_subscription(Empty, "/slam/reset", self.reset_callback, 10)
         self.left_sub = Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw")
         self.right_sub = Subscriber(self, Image, "/camera/camera/infra2/image_rect_raw")
         self.ts = ApproximateTimeSynchronizer([self.left_sub, self.right_sub], queue_size=10, slop=0.02)
@@ -217,6 +222,10 @@ class PerceptionNode(Node):
 
             self.T_body_last = np.eye(4)
             self.T_body_last[:3, :3] = R_zero_yaw @ R_gravity_align
+            # cold-start anchor (rotation only): /slam/reset restores it, so a
+            # reset re-anchors exactly like a fresh boot instead of the last
+            # solved pose (which would silently continue the old trajectory)
+            self._T_align = self.T_body_last.copy()
             self.get_logger().info(f"Initial yaw removed: {np.degrees(initial_yaw):.2f} deg")
             self.get_logger().info("Initial pose set from accelerometer data.")
             self.get_logger().info(f"Initial rotation matrix:\n{self.T_body_last}")
@@ -235,6 +244,10 @@ class PerceptionNode(Node):
 
     def _aligned_imu_callback(self, imu_msg):
         self._process_imu_msg(imu_msg)
+
+    def reset_callback(self, _msg):
+        self._vio_reset.set()
+        self.logger.warning("VIO reset requested (/slam/reset): window clears on the next stereo frame")
 
     def _aligned_stereo_callback(self, stereo_pair_msg):
         image_timestamp = stamp2second(stereo_pair_msg.header.stamp)
@@ -323,6 +336,18 @@ class PerceptionNode(Node):
             "metrics": {"num_keyframes": 0, "num_tracks": 0, "num_factors": 0, "num_variables": 0, "initial_error": 0.0, "final_error": 0.0}
         }
         self.process_cnt += 1
+        if self._vio_reset.is_set():
+            # drop the poisoned window; the first-frame branch below
+            # re-anchors on the current frame (fresh graph next solve)
+            self._vio_reset.clear()
+            n = len(self.keyframe_queue)
+            self.keyframe_queue.clear()
+            # before the accelerometer ever ran, a fresh boot re-anchors on
+            # identity -- same thing here
+            self.T_body_last = (self._T_align if self._T_align is not None
+                                else np.eye(4))
+            self.V_last = np.zeros(3)
+            self.logger.warning(f"VIO backend reset: cleared {n} keyframes, re-anchoring on this frame")
         left_img = self.bridge.imgmsg_to_cv2(left_msg, "mono8")
         right_img = self.bridge.imgmsg_to_cv2(right_msg, "mono8")
         current_timestamp = stamp2second(left_msg.header.stamp)

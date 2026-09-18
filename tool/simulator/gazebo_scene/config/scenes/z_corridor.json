@@ -1,6 +1,5 @@
 {
   "desc": "Z型弯道(窄): 起点(0,0)朝+x直行5m, 左拐北行2m, 右拐东行3m至(8,2), 净宽1.0m",
-  "robot": {"name": "lekiwi", "pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
   "models": [
     {"line": {"name": "wall_s1", "type": "crate", "from": [-1.2, -1.211], "to": [6.211, -1.211], "spacing": 1.28, "yaw": 0.0}},
     {"line": {"name": "wall_n1", "type": "crate", "from": [-1.2, 1.211], "to": [3.789, 1.211], "spacing": 1.28, "yaw": 0.0}},

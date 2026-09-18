@@ -1,6 +1,5 @@
 {
   "desc": "L型弯道: 起点(0,0)朝+x, 直行5m后北拐3.6m, 净宽1.2m, 墙=depot纸箱",
-  "robot": {"name": "lekiwi", "pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]},
   "models": [
     {"line": {"name": "wall_south", "type": "crate", "from": [-1.2, -1.311], "to": [5.6, -1.311], "spacing": 1.28, "yaw": 0.0}},
     {"line": {"name": "wall_north", "type": "crate", "from": [-1.2, 1.311], "to": [3.689, 1.311], "spacing": 1.28, "yaw": 0.0}},

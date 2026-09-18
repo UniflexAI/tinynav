@@ -1,119 +1,11 @@
 <?xml version="1.0" ?>
+<!-- The lekiwi rig: diff-drive cylinder + D435i sensor suite, exactly
+     the model that used to be inlined in the world files. Spawn pose is
+     the spawner's decision (scripts/run_simulator.sh keeps the per-world
+     table): a teleport after VIO init poisons the ISAM graph, so the pose
+     must be right at create time. -->
 <sdf version="1.9">
-    <world name="tinynav_world">
-        <!-- Empty base world for scripted obstacle scenes (tool/simulator/gazebo_scene).
-             Ground + lekiwi only; walls/obstacles are spawned at runtime via
-             /world/tinynav_world/create (UserCommands system). Same physics,
-             plugins and sensor topics as robot_scene.sdf. -->
-        <physics name="1ms" type="ignored">
-            <max_step_size>0.001</max_step_size>
-            <real_time_factor>1</real_time_factor>
-        </physics>
-        <plugin
-            filename="gz-sim-physics-system"
-            name="gz::sim::systems::Physics">
-        </plugin>
-        <plugin
-            filename="gz-sim-user-commands-system"
-            name="gz::sim::systems::UserCommands">
-        </plugin>
-        <plugin
-            filename="gz-sim-scene-broadcaster-system"
-            name="gz::sim::systems::SceneBroadcaster">
-        </plugin>
-        <plugin filename="gz-sim-imu-system"
-            name="gz::sim::systems::Imu">
-        </plugin>
-
-        <plugin
-            filename="gz-sim-sensors-system"
-            name="gz::sim::systems::Sensors">
-            <render_engine>ogre2</render_engine>
-        </plugin>
-
-        <scene>
-            <ambient>1 1 1 1</ambient>
-            <background>0.3 0.7 0.9 1</background>
-            <shadows>0</shadows>
-            <grid>1</grid>
-        </scene>
-
-        <!-- Key + fill lights; pure-ambient lighting leaves the mono infra
-             cameras almost black (L8 pipeline gets little energy). -->
-        <light name='sun' type='directional'>
-            <cast_shadows>0</cast_shadows>
-            <pose>0 0 10 0 0 0</pose>
-            <diffuse>1.0 1.0 1.0 1</diffuse>
-            <specular>0.1 0.1 0.1 1</specular>
-            <attenuation>
-                <range>1000</range>
-                <constant>1.0</constant>
-                <linear>0.0</linear>
-                <quadratic>0.0</quadratic>
-            </attenuation>
-            <direction>-0.3 0.3 -0.85</direction>
-        </light>
-        <light name='fill' type='directional'>
-            <cast_shadows>0</cast_shadows>
-            <pose>0 0 10 0 0 0</pose>
-            <diffuse>0.7 0.7 0.7 1</diffuse>
-            <specular>0.1 0.1 0.1 1</specular>
-            <attenuation>
-                <range>1000</range>
-                <constant>1.0</constant>
-                <linear>0.0</linear>
-                <quadratic>0.0</quadratic>
-            </attenuation>
-            <direction>0.3 -0.3 -0.85</direction>
-        </light>
-
-        <model name='ground_plane'>
-            <static>1</static>
-            <link name='link'>
-                <collision name='collision'>
-                    <geometry>
-                        <plane>
-                            <normal>0 0 1</normal>
-                            <size>1 1</size>
-                        </plane>
-                    </geometry>
-                    <surface>
-                        <friction>
-                            <ode/>
-                        </friction>
-                        <bounce/>
-                        <contact/>
-                    </surface>
-                </collision>
-                <!-- Visual floor: depot FLOOR albedo stretched over 40m (~4cm/px)
-                     so stereo SLAM still finds texture on the ground. -->
-                <visual name='floor_visual'>
-                    <pose>0 0 -0.011 0 0 0</pose>
-                    <geometry>
-                        <box>
-                            <size>40 40 0.02</size>
-                        </box>
-                    </geometry>
-                    <material>
-                        <diffuse>1 1 1 1</diffuse>
-                        <specular>0.05 0.05 0.05 1</specular>
-                        <pbr>
-                            <metal>
-                                <albedo_map>file:///tinynav/tool/simulator/gazebo_scene/models/textures/FLOOR_Albedo.png</albedo_map>
-                                <roughness>0.95</roughness>
-                                <metalness>0.0</metalness>
-                            </metal>
-                        </pbr>
-                    </material>
-                </visual>
-            </link>
-            <pose>0 0 0.002 0 0 0</pose>
-        </model>
-
-        <!-- Robot Model: LeKiwi-like cylindrical base.
-             Dims from SIGRobotics-UIUC/LeKiwi URDF: wheel r=0.033, track 0.19,
-             base ~0.2m. Stereo baseline stays 0.051 (matches camera_info). -->
-        <model name='lekiwi' canonical_link='chassis'>
+<model name='lekiwi' canonical_link='chassis'>
             <plugin
                 filename="gz-sim-diff-drive-system"
                 name="gz::sim::systems::DiffDrive">
@@ -125,7 +17,7 @@
                 <topic>cmd_vel</topic>
             </plugin>
 
-            <pose relative_to='world'>0 0 0 0 0 0</pose>
+            <pose>0 0 0 0 0 0</pose>
             <link name='chassis'>
                 <pose relative_to='__model__'>0 0 0.083 0 0 0</pose>
                 <sensor name="imu_sensor" type="imu">
@@ -518,6 +410,4 @@
                 <child>color_link</child>
             </joint>
         </model>
-
-    </world>
 </sdf>

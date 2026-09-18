@@ -1,0 +1,114 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+    <world name="factory">
+        <!-- Keyboard teleop lives in tinynav/platforms/keyboard_teleop.py (global
+             X listener). The old gz-side TriggeredPublisher arrow plugins were
+             removed: they published /cmd_vel on keypress with no zero-on-release
+             counterpart, so a stale auto-repeat event after keyup kept the gz
+             diff-drive (which holds its last twist) rolling. -->
+        <physics name="1ms" type="ignored">
+            <max_step_size>0.001</max_step_size>
+            <real_time_factor>1</real_time_factor>
+        </physics>
+        <plugin
+            filename="gz-sim-physics-system"
+            name="gz::sim::systems::Physics">
+        </plugin>
+        <plugin
+            filename="gz-sim-user-commands-system"
+            name="gz::sim::systems::UserCommands">
+        </plugin>
+        <plugin
+            filename="gz-sim-scene-broadcaster-system"
+            name="gz::sim::systems::SceneBroadcaster">
+        </plugin>
+        <plugin filename="gz-sim-imu-system"
+            name="gz::sim::systems::Imu">
+        </plugin>
+
+        <plugin
+            filename="gz-sim-sensors-system"
+            name="gz::sim::systems::Sensors">
+            <render_engine>ogre2</render_engine>
+        </plugin>
+
+        <scene>
+            <ambient>1 1 1 1</ambient>
+            <background>0.3 0.7 0.9 1</background>
+            <shadows>0</shadows>
+            <grid>1</grid>
+        </scene>
+
+        <!-- OBJ/MTL materials render near-black under scene ambient alone;
+             a strong directional light makes the plant textures readable. -->
+        <light name="sun" type="directional">
+            <pose>0 0 10 0 0 0</pose>
+            <direction>-0.3 0.3 -1</direction>
+            <diffuse>1 1 1 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <attenuation>
+                <range>1000</range>
+            </attenuation>
+            <intensity>3</intensity>
+        </light>
+
+        <!-- Indoor-sky shell: the plant is open-top, so cameras see raw sky
+             whose invalid stereo disparity (NaN) slips past the `< 0.1` gate
+             in perception and kills the VIO optimizer. A visual-only ceiling
+             mirrors the depot's ROOF_visual; no collision on purpose. -->
+        <model name='sky_shell'>
+            <static>1</static>
+            <link name='link'>
+                <visual name='ceiling'>
+                    <pose>35 0 12 0 0 0</pose>
+                    <geometry>
+                        <plane>
+                            <normal>0 0 -1</normal>
+                            <size>220 160</size>
+                        </plane>
+                    </geometry>
+                    <material>
+                        <ambient>0.6 0.6 0.6 1</ambient>
+                        <diffuse>0.6 0.6 0.6 1</diffuse>
+                    </material>
+                </visual>
+            </link>
+        </model>
+
+        <model name='ground_plane'>
+            <static>1</static>
+            <link name='link'>
+                <collision name='collision'>
+                    <geometry>
+                        <plane>
+                            <normal>0 0 1</normal>
+                            <size>1 1</size>
+                        </plane>
+                    </geometry>
+                    <surface>
+                        <friction>
+                            <ode/>
+                        </friction>
+                        <bounce/>
+                        <contact/>
+                    </surface>
+                </collision>
+            </link>
+            <pose>0 0 0.002 0 0 0</pose>
+        </model>
+        <!-- Plant digital-twin (metaverse SCENE glb): textured visual mesh +
+             simplified collision mesh. The model package lives OUTSIDE the
+             repo; run_simulator.sh puts its parent dir on
+             IGN_GAZEBO_RESOURCE_PATH. Plant deck around the origin sits at
+             z~0.28, hence the raised spawn pose of the robot. -->
+        <include>
+            <uri>model://factory_01</uri>
+            <name>factory</name>
+            <pose>0 0 0 0 0 0</pose>
+            <static>true</static>
+        </include>
+
+        <!-- No robot here: robots spawn by type at run time
+         (tool/simulator/robots/<type>/), see scripts/run_simulator.sh. -->
+</world>
+</sdf>
