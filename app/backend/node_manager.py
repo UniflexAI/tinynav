@@ -2785,6 +2785,14 @@ class BackendNode(Ros2NodeManager):
         if not os.path.exists(bag_file):
             self.get_logger().warn(f'bag_0.db3 not found in {active}')
             return
+        # Remember the active map so a failed build does not leave the frontend
+        # pointing at a partial map directory.
+        self._map_before_build = None
+        if os.path.islink(self.map_path):
+            previous_map = os.path.realpath(self.map_path)
+            if os.path.isdir(previous_map):
+                self._map_before_build = previous_map
+
         # Remove existing map path so build_map_node creates a fresh real directory.
         # If map_path is a symlink, shutil.move would rename the symlink (not the target),
         # and build_map_node would write through the symlink into the old map directory.
@@ -2800,7 +2808,14 @@ class BackendNode(Ros2NodeManager):
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         if self._sensor_mode == 'looper':
             source_name = 'looper_bridge'
-            source_cmd = ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py']
+            # Recorded Looper streams are timestamp-aligned, but topic delivery
+            # order during replay can differ from live operation. A small slop and
+            # a larger queue prevent valid triplets from being discarded.
+            source_cmd = [
+                'uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py',
+                '--replay-sync',
+                '--sync-queue-size', '100',
+            ]
         else:
             source_name = 'perception'
             source_cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
@@ -2862,8 +2877,36 @@ class BackendNode(Ros2NodeManager):
         import shutil
         from datetime import datetime
         proc_build = self.processes.get('build_map')
+        returncode = -1
         if proc_build:
-            proc_build.wait()
+            returncode = proc_build.wait()
+
+        required_outputs = (
+            'poses.npy',
+            'occupancy_grid.npy',
+            'occupancy_meta.npy',
+            'sdf_map.npy',
+        )
+        missing_outputs = [
+            name for name in required_outputs
+            if not os.path.exists(os.path.join(self.map_path, name))
+        ]
+        if returncode != 0 or missing_outputs:
+            self.get_logger().error(
+                'Map build failed: '
+                f'returncode={returncode}, missing_outputs={missing_outputs}'
+            )
+            self._stop_all()
+            if os.path.isdir(self.map_path) and not os.path.islink(self.map_path):
+                shutil.rmtree(self.map_path)
+            previous_map = getattr(self, '_map_before_build', None)
+            if previous_map and os.path.isdir(previous_map):
+                os.symlink(previous_map, self.map_path)
+            self.state = 'idle'
+            self._pub_state()
+            self._restart_sensor_procs()
+            return
+
         subprocess.run([
             'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
             '--input_dir', self.map_path,

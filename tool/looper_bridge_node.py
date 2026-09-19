@@ -357,34 +357,63 @@ class LooperBridgeNode(Node):
                 PoseStamped, "/camera1/camera/vio_image", self.rear_vio_image_callback, 20
             )
 
-        self.depth_sub = message_filters.Subscriber(
-            self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.image_qos
-        )
-        self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
-        self.image_sub = message_filters.Subscriber(
-            self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.image_qos
-        )
         sync_queue = max(2, int(args.sync_queue_size))
-        if args.sync_slop > 0.0:
-            self.sync = message_filters.ApproximateTimeSynchronizer(
-                [self.depth_sub, self.pose_sub, self.image_sub],
-                queue_size=sync_queue,
-                slop=float(args.sync_slop),
+        self._replay_sync_enabled = bool(args.replay_sync)
+        self._replay_sync_queue_size = sync_queue
+        self._replay_depth = {}
+        self._replay_pose = {}
+        self._replay_image = {}
+        if self._replay_sync_enabled:
+            # Bag playback may deliver topics in bursts that defeat the online
+            # message_filters queues. Match recorded messages by their original
+            # header timestamp instead; live operation keeps the existing path.
+            self.depth_latest_sub = self.create_subscription(
+                Image,
+                "/camera/camera/depth/image_rect_raw",
+                self._on_replay_depth,
+                self.image_qos,
             )
+            self.pose_sub = self.create_subscription(
+                PoseStamped,
+                "/camera/camera/vio_image",
+                self._on_replay_pose,
+                10,
+            )
+            self.image_latest_sub = self.create_subscription(
+                Image,
+                "/camera/camera/infra1/image_rect_raw",
+                self._on_replay_image,
+                self.image_qos,
+            )
+            self.sync = None
         else:
-            self.sync = message_filters.TimeSynchronizer(
-                [self.depth_sub, self.pose_sub, self.image_sub], queue_size=sync_queue
+            self.depth_sub = message_filters.Subscriber(
+                self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.image_qos
             )
-        self.sync.registerCallback(self.sync_callback)
+            self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
+            self.image_sub = message_filters.Subscriber(
+                self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.image_qos
+            )
+            if args.sync_slop > 0.0:
+                self.sync = message_filters.ApproximateTimeSynchronizer(
+                    [self.depth_sub, self.pose_sub, self.image_sub],
+                    queue_size=sync_queue,
+                    slop=float(args.sync_slop),
+                )
+            else:
+                self.sync = message_filters.TimeSynchronizer(
+                    [self.depth_sub, self.pose_sub, self.image_sub], queue_size=sync_queue
+                )
+            self.sync.registerCallback(self.sync_callback)
 
-        # Direct depth/image taps so rear fallback can keep /slam/depth flowing
-        # after front vio_image (and therefore TimeSynchronizer) goes silent.
-        self.depth_latest_sub = self.create_subscription(
-            Image, "/camera/camera/depth/image_rect_raw", self._on_front_depth, self.image_qos
-        )
-        self.image_latest_sub = self.create_subscription(
-            Image, "/camera/camera/infra1/image_rect_raw", self._on_front_image, self.image_qos
-        )
+            # Direct depth/image taps so rear fallback can keep /slam/depth flowing
+            # after front vio_image (and therefore TimeSynchronizer) goes silent.
+            self.depth_latest_sub = self.create_subscription(
+                Image, "/camera/camera/depth/image_rect_raw", self._on_front_depth, self.image_qos
+            )
+            self.image_latest_sub = self.create_subscription(
+                Image, "/camera/camera/infra1/image_rect_raw", self._on_front_image, self.image_qos
+            )
 
         self.odom_pub = self.create_publisher(Odometry, "/slam/odometry", 10)
         self.odom_visual_pub = self.create_publisher(
@@ -417,7 +446,7 @@ class LooperBridgeNode(Node):
                 f"conjugated through 180deg optical extrinsic, baseline={self._rear_baseline_m:.3f}m. "
                 "Downstream still consumes /slam/odometry in the front world."
             )
-        sync_mode = (
+        sync_mode = "replay timestamp" if self._replay_sync_enabled else (
             f"approximate slop={args.sync_slop:.3f}s"
             if args.sync_slop > 0.0
             else "exact"
@@ -758,6 +787,43 @@ class LooperBridgeNode(Node):
     def _on_front_image(self, msg: Image):
         self._latest_image = msg
 
+    @staticmethod
+    def _stamp_ns(msg) -> int:
+        return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+
+    def _trim_replay_cache(self, cache: dict) -> None:
+        while len(cache) > self._replay_sync_queue_size:
+            cache.pop(next(iter(cache)))
+
+    def _try_replay_sync(self) -> None:
+        common = self._replay_depth.keys() & self._replay_pose.keys() & self._replay_image.keys()
+        for stamp_ns in sorted(common):
+            self.get_logger().info("Replay synchronizer matched its first triplet.", once=True)
+            depth_msg = self._replay_depth.pop(stamp_ns)
+            pose_msg = self._replay_pose.pop(stamp_ns)
+            image_msg = self._replay_image.pop(stamp_ns)
+            self.sync_callback(depth_msg, pose_msg, image_msg)
+
+    def _on_replay_depth(self, msg: Image) -> None:
+        self.get_logger().info("Replay synchronizer received depth.", once=True)
+        self._on_front_depth(msg)
+        self._replay_depth[self._stamp_ns(msg)] = msg
+        self._trim_replay_cache(self._replay_depth)
+        self._try_replay_sync()
+
+    def _on_replay_pose(self, msg: PoseStamped) -> None:
+        self.get_logger().info("Replay synchronizer received vio_image.", once=True)
+        self._replay_pose[self._stamp_ns(msg)] = msg
+        self._trim_replay_cache(self._replay_pose)
+        self._try_replay_sync()
+
+    def _on_replay_image(self, msg: Image) -> None:
+        self.get_logger().info("Replay synchronizer received infra1 image.", once=True)
+        self._on_front_image(msg)
+        self._replay_image[self._stamp_ns(msg)] = msg
+        self._trim_replay_cache(self._replay_image)
+        self._try_replay_sync()
+
     def _publish_fallback_visual(self, depth_msg: Image, image_msg: Image | None):
         if self.cached_camera_info is None:
             return
@@ -823,6 +889,12 @@ class LooperBridgeNode(Node):
         during warm-up; each sample also carries this callback's own reception latency
         as noise, so the median of several samples is used instead of a single reading.
         """
+        # RGB is decompressed inside build_map_node and keeps the recorded device
+        # timestamp. Preserve that timestamp during bag replay so its four-way
+        # synchronizer can join RGB with the bridged image, odom, and depth.
+        if self._replay_sync_enabled:
+            return copy.deepcopy(device_stamp)
+
         device_ns = device_stamp.sec * 1_000_000_000 + device_stamp.nanosec
         if self._device_clock_offset_ns is None:
             wall_ns = self.get_clock().now().nanoseconds
@@ -1028,6 +1100,11 @@ def parse_args():
         type=float,
         default=0.0,
         help="If >0, use ApproximateTimeSynchronizer with this slop (seconds).",
+    )
+    parser.add_argument(
+        "--replay-sync",
+        action="store_true",
+        help="Synchronize recorded depth, pose, and image messages by exact header timestamp.",
     )
     parser.add_argument(
         "--rear-baseline-m",

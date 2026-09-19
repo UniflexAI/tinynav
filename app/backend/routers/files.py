@@ -63,7 +63,16 @@ async def list_bags():
 
 @router.get('/maps')
 async def list_maps():
-    return {'files': _list_dir(_db_root() / 'maps')}
+    required = ('poses.npy', 'occupancy_grid.npy', 'occupancy_meta.npy', 'sdf_map.npy')
+    files = _list_dir(_db_root() / 'maps')
+    complete_maps = [
+        entry for entry in files
+        if entry['is_dir'] and all(
+            (_db_root() / 'maps' / entry['name'] / name).exists()
+            for name in required
+        )
+    ]
+    return {'files': complete_maps}
 
 
 @router.get('/debug-bags')
