@@ -36,7 +36,7 @@ import tyro
 from tinynav.core.build_map_node import TinyNavDB, find_loop, generate_occupancy_map
 from tinynav.core.math_utils import rerank_by_pnp_inliers
 from tinynav.core.models_trt import Dinov2TRT, LightGlueTRT
-from tinynav.core.vlad import compute_vlad_batch, train_vocabulary
+from tinynav.core.vlad import compute_vlad, train_vocabulary
 
 
 @dataclass(frozen=True)
@@ -94,6 +94,13 @@ class Args:
     vlad_iterations: int = 200
     vlad_batch_size: int = 1024
     vlad_seed: int = 42
+
+    vlad_max_training_tokens: int = 200_000
+    """Cap on how many DINOv2 patch tokens are pooled (via random per-image subsampling)
+    to train the VLAD vocabulary. Keeps training memory bounded regardless of merged
+    keyframe count; train_vocabulary's own minibatch k-means already draws at most
+    vlad_iterations * vlad_batch_size samples-with-replacement from this pool, so a
+    well-distributed 200k-token sample trains it about as well as the full set would."""
 
 
 def load_poses(map_path: Path) -> dict[int, np.ndarray]:
@@ -364,25 +371,54 @@ def _remux_images(map_a: Path, map_b: Path, poses_a: dict, poses_b: dict, db_c: 
 
 
 def _rebuild_vlad(db: TinyNavDB, poses: dict[int, np.ndarray], map_c: Path, args: Args) -> None:
-    """Recompute VLAD vocabulary/descriptors over the merged keyframe set, same
-    procedure as BuildMapNode._save_vlad (tinynav/core/build_map_node.py:948)."""
+    """Recompute VLAD vocabulary/descriptors over the merged keyframe set.
+
+    Two passes over the keyframes, re-running DINOv2 in each, instead of the
+    single-pass "extract every keyframe's patch tokens up front, then train+encode"
+    approach BuildMapNode._save_vlad uses (tinynav/core/build_map_node.py:948):
+    holding all keyframes' patch tokens (256 x 768 float32 each) in memory at once
+    is ~0.75MB/keyframe, which alone reached ~2GB+ RSS on a 2910-keyframe merge and
+    reliably OOM'd a Jetson Nano before it ever got to write vlad_*.npy -- silently,
+    since the occupancy grid/keyframe DBs were already saved by that point, so the
+    merge looked complete but map_node.py fell back to (weaker) DINO retrieval with
+    a warning easy to miss in the logs.
+
+    Pass 1 pools a bounded random per-image subsample of patch tokens (see
+    Args.vlad_max_training_tokens) to train the vocabulary -- train_vocabulary's own
+    minibatch k-means already only ever draws a bounded number of samples from
+    whatever pool it's given, so this changes training data size, not fundamentally
+    its statistical behavior. Pass 2 re-extracts each keyframe's tokens and encodes+
+    discards them immediately, so only the small per-image descriptor (not the raw
+    patch tokens) accumulates.
+    """
     dinov2 = Dinov2TRT()
     timestamps = sorted(poses.keys())
-    patch_tokens_by_ts: dict[int, np.ndarray] = {}
+    rng = np.random.default_rng(args.vlad_seed)
+
+    valid_ts: list[int] = []
+    training_pool: list[np.ndarray] = []
+    training_token_count = 0
     for i, ts in enumerate(timestamps):
         _, _, _, _, infra1_loader = db.get_depth_embedding_features_images(ts)
         image = infra1_loader()
         if image is None:
             continue
-        patch_tokens_by_ts[ts] = asyncio.run(dinov2.infer_patch_tokens(image))
+        valid_ts.append(ts)
+        if training_token_count < args.vlad_max_training_tokens:
+            tokens = asyncio.run(dinov2.infer_patch_tokens(image))
+            take = min(len(tokens), args.vlad_max_training_tokens - training_token_count)
+            sample = tokens if take >= len(tokens) else tokens[rng.choice(len(tokens), size=take, replace=False)]
+            training_pool.append(sample)
+            training_token_count += len(sample)
         if (i + 1) % 100 == 0:
             rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-            print(f"  VLAD patch tokens: {i + 1}/{len(timestamps)}, peak RSS={rss_mb:.0f} MB")
-    if not patch_tokens_by_ts:
+            print(f"  VLAD training-token pass: {i + 1}/{len(timestamps)}, peak RSS={rss_mb:.0f} MB")
+    if not valid_ts:
         print("warning: no images available to recompute VLAD; skipping.")
         return
-    kept_ts = sorted(patch_tokens_by_ts.keys())
-    all_tokens = np.concatenate([patch_tokens_by_ts[ts] for ts in kept_ts], axis=0)
+
+    all_tokens = np.concatenate(training_pool, axis=0)
+    training_pool.clear()
     centres = train_vocabulary(
         all_tokens,
         vocab_size=args.vlad_vocab_size,
@@ -390,11 +426,22 @@ def _rebuild_vlad(db: TinyNavDB, poses: dict[int, np.ndarray], map_c: Path, args
         batch_size=args.vlad_batch_size,
         seed=args.vlad_seed,
     )
-    descriptors = compute_vlad_batch([patch_tokens_by_ts[ts] for ts in kept_ts], centres)
+    del all_tokens
+
+    descriptors = np.zeros((len(valid_ts), args.vlad_vocab_size * centres.shape[1]), dtype=np.float32)
+    for i, ts in enumerate(valid_ts):
+        _, _, _, _, infra1_loader = db.get_depth_embedding_features_images(ts)
+        image = infra1_loader()
+        tokens = asyncio.run(dinov2.infer_patch_tokens(image))
+        descriptors[i] = compute_vlad(tokens, centres)
+        if (i + 1) % 100 == 0:
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f"  VLAD encode pass: {i + 1}/{len(valid_ts)}, peak RSS={rss_mb:.0f} MB")
+
     np.save(map_c / "vlad_vocab.npy", centres)
     np.save(map_c / "vlad_descriptors.npy", descriptors)
-    np.save(map_c / "vlad_timestamps.npy", np.array(kept_ts, dtype=np.int64))
-    print(f"VLAD saved: vocab={centres.shape}, descriptors={descriptors.shape}, keyframes={len(kept_ts)}")
+    np.save(map_c / "vlad_timestamps.npy", np.array(valid_ts, dtype=np.int64))
+    print(f"VLAD saved: vocab={centres.shape}, descriptors={descriptors.shape}, keyframes={len(valid_ts)}")
 
 
 def merge_maps(
