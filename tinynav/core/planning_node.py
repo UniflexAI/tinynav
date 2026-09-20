@@ -104,7 +104,12 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
 def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None):
     """Obstacle = cells where occupied voxels span >= min_wall_span_m in z.
-    Walls have large z-span; stair risers / ground bumps have small span."""
+    Walls have large z-span; stair risers / ground bumps have small span.
+
+    Also returns height_index: per-column full-grid z-index of the topmost
+    occupied-in-band voxel (-1 if none), reused by the app to render a cheap
+    top-surface "point cloud" instead of publishing every occupied voxel.
+    """
     config = config or ObstacleConfig()
     h, w, z_dim = occupancy_grid.shape
     z_world = origin[2] + (np.arange(z_dim) + 0.5) * resolution
@@ -112,19 +117,23 @@ def build_obstacle_map(occupancy_grid, origin, resolution, robot_z, config=None)
     z_mask = (z_rel >= config.robot_z_bottom) & (z_rel <= config.robot_z_top)
 
     obstacle = np.zeros((h, w), dtype=bool)
+    height_index = np.full((h, w), -1, dtype=np.int8)
     if np.any(z_mask):
         band_occ = occupancy_grid[:, :, z_mask] > config.occ_threshold
         has_occ = np.any(band_occ, axis=2)
         n_z = band_occ.shape[2]
         z_idx = np.arange(n_z, dtype=np.float32)
+        full_z_idx = np.arange(z_dim, dtype=np.float32)[z_mask]
         occ_high = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
         occ_low = np.where(band_occ, z_idx[np.newaxis, np.newaxis, :], n_z).min(axis=2)
         z_span = (occ_high - occ_low) * resolution
         obstacle = has_occ & (z_span >= config.min_wall_span_m)
+        occ_high_full_idx = np.where(band_occ, full_z_idx[np.newaxis, np.newaxis, :], -1).max(axis=2)
+        height_index = np.where(has_occ, occ_high_full_idx, -1).astype(np.int8)
 
     if config.dilation_cells > 0 and np.any(obstacle):
         obstacle = binary_dilation(obstacle, iterations=config.dilation_cells)
-    return obstacle
+    return obstacle, height_index
 
 @njit(cache=True)
 def generate_trajectory_library_3d(
@@ -327,8 +336,9 @@ class PlanningNode(Node):
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
-        self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
-        self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
+        # self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)  # replaced by cheap obstacle_height_index grid
+        self.obstacle_height_index_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_height_index', 10)
+        # self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)  # unused, expensive per-tick full-grid cloud
         self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
         self.depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
         self.pose_sub = message_filters.Subscriber(self, Odometry, '/slam/odometry_visual')
@@ -446,6 +456,28 @@ class PlanningNode(Node):
         msg.info.origin.orientation.w = 1.0
         msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
         self.obstacle_mask_pub.publish(msg)
+
+    def publish_obstacle_height_index(self, height_index, stamp):
+        """Per-column full-grid z-index of the topmost occupied voxel (-1 = none).
+
+        Cheap stand-in for the old per-voxel PointCloud2: same grid size as
+        obstacle_mask, just int8 indices instead of every occupied voxel, so
+        the app can rebuild a top-surface 3D scatter without the per-voxel
+        Python/PointCloud2 packing cost.
+        """
+        msg = OccupancyGrid()
+        msg.header = Header()
+        msg.header.stamp = stamp
+        msg.header.frame_id = "world"
+        msg.info.resolution = self.resolution
+        msg.info.width = height_index.shape[1]
+        msg.info.height = height_index.shape[0]
+        msg.info.origin.position.x = self.origin[0]
+        msg.info.origin.position.y = self.origin[1]
+        msg.info.origin.position.z = self.origin[2]
+        msg.info.origin.orientation.w = 1.0
+        msg.data = height_index.ravel(order="F").tolist()
+        self.obstacle_height_index_pub.publish(msg)
 
     def publish_height_map(self, origin, esdf_map, header):
         height_normalized = np.clip(esdf_map / 2.0 * 255, 0, 255).astype(np.uint8)
@@ -598,20 +630,21 @@ class PlanningNode(Node):
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            # self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)  # replaced by obstacle_height_index (see 'obstacle map'/'vis' below)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            obstacle_mask = build_obstacle_map(
+            obstacle_mask, obstacle_height_index = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
+            # self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)  # unused, expensive
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
+            self.publish_obstacle_height_index(obstacle_height_index, depth_msg.header.stamp)
             self.publish_footprint(T, depth_msg.header.stamp)
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):

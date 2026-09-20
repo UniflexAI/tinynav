@@ -26,7 +26,7 @@ import tf2_ros
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from geometry_msgs.msg import Point32, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
-from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
+from sensor_msgs.msg import CompressedImage, Image, PointCloud
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
@@ -175,7 +175,7 @@ class BackendNode(Ros2NodeManager):
             PointCloud, '/planning/footprint', self._on_footprint, 1
         )
         self.create_subscription(
-            PointCloud2, '/planning/occupied_voxels', self._on_occupied_voxels, 1
+            OccupancyGrid, '/planning/obstacle_height_index', self._on_obstacle_height_index, 1
         )
 
         self._tf_buffer = tf2_ros.Buffer()
@@ -390,18 +390,32 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._footprint = corners
 
-    def _on_occupied_voxels(self, msg: PointCloud2):
-        """Store a downsampled local 3D occupied voxel cloud for the web UI."""
+    def _on_obstacle_height_index(self, msg: OccupancyGrid):
+        """Rebuild a top-surface 3D point scatter for the web UI from the
+        per-column height-index grid (cheap stand-in for the old per-voxel
+        PointCloud2 the planning node used to publish on every tick).
+        """
         try:
-            step = max(1, len(msg.data) // max(1, msg.point_step) // 2500)
-            points = []
-            import sensor_msgs_py.point_cloud2 as pc2
-            for i, p in enumerate(pc2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)):
-                if i % step != 0:
-                    continue
-                points.append({'x': float(p[0]), 'y': float(p[1]), 'z': float(p[2])})
-                if len(points) >= 2500:
-                    break
+            resolution = msg.info.resolution
+            origin_x = msg.info.origin.position.x
+            origin_y = msg.info.origin.position.y
+            origin_z = msg.info.origin.position.z
+            grid = np.array(msg.data, dtype=np.int8).reshape(
+                msg.info.height, msg.info.width, order='F'
+            )
+            xi, yi = np.nonzero(grid >= 0)
+            if len(xi) > 2500:
+                step = len(xi) // 2500 + 1
+                xi, yi = xi[::step], yi[::step]
+            zi = grid[xi, yi].astype(np.float32)
+            points = [
+                {
+                    'x': float(origin_x + (x + 0.5) * resolution),
+                    'y': float(origin_y + (y + 0.5) * resolution),
+                    'z': float(origin_z + (z + 0.5) * resolution),
+                }
+                for x, y, z in zip(xi, yi, zi)
+            ]
             with self._lock:
                 self._voxel_points = points
         except Exception:

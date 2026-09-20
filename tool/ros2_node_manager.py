@@ -123,7 +123,7 @@ class Ros2NodeManager(Node):
         topics = [
             '/tf_static', '/cmd_vel', '/mapping/global_plan', '/mapping/poi',
             '/mapping/poi_change', '/planning/trajectory_path',
-            '/planning/occupied_voxels',
+            '/planning/obstacle_height_index',
             '/slam/odometry',
             '/mapping/pointcloud_markers'
         ]
