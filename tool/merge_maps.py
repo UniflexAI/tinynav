@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import resource
 import shutil
 import sys
 from dataclasses import dataclass
@@ -337,7 +338,9 @@ def fit_transform_b_to_a(
 
 
 def _copy_keyframe(ts: int, src_db: TinyNavDB, dst_db: TinyNavDB) -> None:
-    depth, embedding, features, rgb_loader, infra1_loader = src_db.get_depth_embedding_features_images(ts)
+    """Copy one keyframe's depth/embedding/features (not images: those are bulk
+    stream-copied ahead of time by _remux_images, see merge_maps())."""
+    depth, embedding, features, _rgb_loader, _infra1_loader = src_db.get_depth_embedding_features_images(ts)
     semantic_embedding = src_db.semantic_embeddings.get(ts)
     dst_db.set_entry(
         ts,
@@ -345,9 +348,19 @@ def _copy_keyframe(ts: int, src_db: TinyNavDB, dst_db: TinyNavDB) -> None:
         embedding=embedding,
         semantic_embedding=semantic_embedding,
         features=features,
-        infra1_image=infra1_loader(),
-        rgb_image=rgb_loader(),
     )
+
+
+def _remux_images(map_a: Path, map_b: Path, poses_a: dict, poses_b: dict, db_c: TinyNavDB) -> None:
+    """Bulk-copy map_a's and map_b's keyframe images into map_c's video via
+    packet-level stream copy (no decord decode / libx264 re-encode per frame).
+    This is what _copy_keyframe used to do per-timestamp; doing it as a stream
+    copy instead avoids decoding+re-encoding thousands of images, which is what
+    made this step slow and memory-heavy on constrained devices (Jetson Nano)."""
+    for db_name, dst_video_db in (("infra1_images_db", db_c.infra1_video_db), ("rgb_images_db", db_c.rgb_video_db)):
+        for src_map, poses in ((map_a, poses_a), (map_b, poses_b)):
+            n = dst_video_db.remux_from_dir(str(src_map / db_name))
+            print(f"  remuxed {n} frames from {src_map / db_name} ({len(poses)} keyframes in that map)")
 
 
 def _rebuild_vlad(db: TinyNavDB, poses: dict[int, np.ndarray], map_c: Path, args: Args) -> None:
@@ -363,7 +376,8 @@ def _rebuild_vlad(db: TinyNavDB, poses: dict[int, np.ndarray], map_c: Path, args
             continue
         patch_tokens_by_ts[ts] = asyncio.run(dinov2.infer_patch_tokens(image))
         if (i + 1) % 100 == 0:
-            print(f"  VLAD patch tokens: {i + 1}/{len(timestamps)}")
+            rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(f"  VLAD patch tokens: {i + 1}/{len(timestamps)}, peak RSS={rss_mb:.0f} MB")
     if not patch_tokens_by_ts:
         print("warning: no images available to recompute VLAD; skipping.")
         return
@@ -416,29 +430,43 @@ def merge_maps(
             "regenerated from raw keyframe depth and does NOT re-apply those edits. Re-run "
             "map_editor.py's Build/Replace on map_c if you need them back."
         )
-    if (map_a / "sdf_map.default.npy").exists():
-        shutil.copy2(map_a / "sdf_map.default.npy", map_c / "sdf_map.default.npy")
+    # Deliberately not copying map_a's sdf_map.default.npy forward: it was sized/aligned
+    # for map_a's own occupancy grid, which differs from map_c's freshly regenerated
+    # (larger, re-origined) grid below. path_editor.py already treats a missing
+    # sdf_map.default.npy as "this map has no path edits yet" and falls back to the
+    # freshly generated sdf_map.npy, which is exactly correct for a fresh merge.
 
     K_a = np.load(map_a / "intrinsics.npy")
     baseline_a = np.load(map_a / "baseline.npy")
 
-    print("Fusing keyframe databases (features/embeddings/depths/images)...")
     db_a = TinyNavDB(str(map_a), is_scratch=False)
     db_b = TinyNavDB(str(map_b), is_scratch=False)
     db_c = TinyNavDB(str(map_c), is_scratch=True)
-    for ts in sorted(poses_a.keys()):
-        _copy_keyframe(ts, db_a, db_c)
-    for ts in sorted(poses_b.keys()):
-        _copy_keyframe(ts, db_b, db_c)
+
+    print("Remuxing keyframe images (stream copy, no decode/re-encode)...")
+    _remux_images(map_a, map_b, poses_a, poses_b, db_c)
+
+    print("Fusing keyframe databases (features/embeddings/depths)...")
+    for label, poses, src_db in (("map_a", poses_a, db_a), ("map_b", poses_b, db_b)):
+        total = len(poses)
+        for i, ts in enumerate(sorted(poses.keys())):
+            _copy_keyframe(ts, src_db, db_c)
+            if (i + 1) % 100 == 0 or i + 1 == total:
+                rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                print(f"  [{label}] {i + 1}/{total} keyframes copied, peak RSS={rss_mb:.0f} MB")
     db_a.close()
     db_b.close()
     db_c.close()
 
     db_c_ro = TinyNavDB(str(map_c), is_scratch=False)
-    print("Regenerating occupancy grid / SDF map for the merged map...")
+    print(
+        f"Regenerating occupancy grid / SDF map for the merged map... "
+        f"(peak RSS={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MB before this stage)"
+    )
     occupancy_grid, occupancy_origin, occupancy_2d_image, sdf_map = generate_occupancy_map(
         merged_poses, db_c_ro, K_a, baseline_a, args.occupancy_resolution, args.occupancy_step,
     )
+    print(f"  occupancy/SDF regen done, peak RSS={resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MB")
     occupancy_meta = np.array(
         [occupancy_origin[0], occupancy_origin[1], occupancy_origin[2], args.occupancy_resolution],
         dtype=np.float32,
