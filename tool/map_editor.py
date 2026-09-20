@@ -21,9 +21,7 @@ from nav_msgs.msg import Odometry
 import nav_msgs
 from plyfile import PlyData
 from rclpy.node import Node
-from scipy.ndimage import distance_transform_edt
-
-from math_utils import msg2np, matrix_to_quat
+from math_utils import chunked_distance_transform_edt, msg2np, matrix_to_quat
 from map_node import search_close_to_sdf_map, search_within_sdf_map
 from tool.video_db import VideoDB
 
@@ -228,7 +226,9 @@ def build_sdf_from_paths(
         seed_count += len(indices)
     if seed_count == 0:
         return np.full(shape, np.inf, dtype=np.float32)
-    return distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
+    # 10.0 exactly matches map_node.py's SDF_BINS top bucket -- any true
+    # distance >= 10.0 lands in the same last bucket regardless of magnitude.
+    return chunked_distance_transform_edt(seed_mask, (resolution, resolution, resolution), max_distance=10.0)
 
 
 # ---------------------------------------------------------------------------

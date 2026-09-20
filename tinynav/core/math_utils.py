@@ -1,5 +1,8 @@
+import itertools
+
 import numpy as np
 from numba import njit
+from scipy.ndimage import distance_transform_edt
 from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
@@ -310,3 +313,71 @@ def uf_all_sets_list(uf, min_component_size=1):
         if part.size >= int(min_component_size):
             out.append(np.sort(part).tolist())
     return out
+
+
+def chunked_distance_transform_edt(
+    seed_mask: np.ndarray,
+    sampling,
+    max_distance: float,
+    target_chunk_voxels: int = 8_000_000,
+) -> np.ndarray:
+    """Memory-bounded stand-in for scipy.ndimage.distance_transform_edt on large
+    3D grids (map occupancy/SDF grids can be 100M+ voxels once a map covers a
+    sizeable area, e.g. after merging two maps).
+
+    scipy's exact EDT needs on the order of 6x the output array's size in
+    internal scratch (measured: a 1242x1314x91 float64 grid, 1.1GB, peaked
+    scipy's own RSS at ~7GB), which reliably OOMs memory-constrained devices
+    like a Jetson Nano. Every consumer of this map's SDF (search_close_to_sdf_map
+    / search_within_sdf_map's SDF_BINS in map_node.py, top out at 10m;
+    _segment_is_shortcut_safe's sdf_margin_m in map_editor.py) only ever cares
+    about distances up to a few meters, so this saturates the result at
+    max_distance and, given that cap, only needs to look `max_distance` beyond a
+    tile's boundary to stay exact within the cap. target_chunk_voxels=8M was
+    picked over a larger value by measurement on that same 1242x1314x91 grid:
+    it keeps peak RSS to ~1.2GB (vs ~2.4GB at 20M voxels/chunk) at the cost of
+    more, smaller scipy calls (~97s vs ~38s total) -- worth it on a device this
+    OOMs on, since this only runs during offline map building/editing.
+
+    Tiles along every axis except the single smallest one (typically height for
+    an occupancy grid, already modest) rather than just the largest axis: for an
+    X/Y-large, Z-thin grid, chunking only X still drags the whole of Y into every
+    chunk, so peak memory barely drops. Tiling both X and Y bounds each chunk's
+    voxel count independent of the grid's footprint aspect ratio.
+    """
+    seed_mask = np.asarray(seed_mask)
+    shape = seed_mask.shape
+    ndim = seed_mask.ndim
+    sampling_arr = np.broadcast_to(np.asarray(sampling, dtype=np.float64), (ndim,))
+    halo = np.ceil(max_distance / sampling_arr).astype(np.int64)
+
+    if ndim == 1:
+        tiled_axes = [0]
+    else:
+        smallest_axis = int(np.argmin(shape))
+        tiled_axes = [a for a in range(ndim) if a != smallest_axis]
+
+    fixed_voxels = int(np.prod(shape))
+    for a in tiled_axes:
+        fixed_voxels //= shape[a]
+    # Size each tiled axis's padded window so their product * fixed_voxels ~=
+    # target_chunk_voxels, assuming roughly square tiles across those axes.
+    padded_window = max(1.0, (target_chunk_voxels / max(fixed_voxels, 1)) ** (1.0 / len(tiled_axes)))
+    chunk_len = {a: max(1, int(padded_window) - 2 * int(halo[a])) for a in tiled_axes}
+
+    result = np.full(shape, max_distance, dtype=np.float32)
+    for starts in itertools.product(*(range(0, shape[a], chunk_len[a]) for a in tiled_axes)):
+        full_slice = [slice(None)] * ndim
+        interior_slice = [slice(None)] * ndim
+        out_slice = [slice(None)] * ndim
+        for a, start in zip(tiled_axes, starts):
+            end = min(start + chunk_len[a], shape[a])
+            pad_start = max(0, start - int(halo[a]))
+            pad_end = min(shape[a], end + int(halo[a]))
+            full_slice[a] = slice(pad_start, pad_end)
+            interior_slice[a] = slice(start - pad_start, start - pad_start + (end - start))
+            out_slice[a] = slice(start, end)
+        chunk_dist = distance_transform_edt(seed_mask[tuple(full_slice)], sampling=sampling_arr)
+        result[tuple(out_slice)] = np.minimum(chunk_dist[tuple(interior_slice)], max_distance).astype(np.float32)
+
+    return result

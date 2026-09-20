@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import shutil
 import time
@@ -117,6 +118,68 @@ def _sample_polyline_voxels(
     return np.unique(indices, axis=0)
 
 
+def _chunked_distance_transform_edt(
+    seed_mask: np.ndarray, sampling, max_distance: float, target_chunk_voxels: int = 8_000_000,
+) -> np.ndarray:
+    """Memory-bounded stand-in for scipy.ndimage.distance_transform_edt on large 3D
+    grids. Duplicated from tinynav.core.math_utils.chunked_distance_transform_edt
+    (kept import-free of tinynav.core here since that module pulls in ROS message
+    packages, and this tool is meant to run standalone without ROS sourced).
+
+    scipy's exact EDT needs on the order of 6x the output array's size in internal
+    scratch (measured: a 1242x1314x91 float64 grid, 1.1GB, peaked scipy's own RSS
+    at ~7GB), which reliably OOMs memory-constrained devices like a Jetson Nano.
+    The only consumer of this map's SDF (search_close_to_sdf_map /
+    search_within_sdf_map's SDF_BINS in map_node.py) tops out at 10m, so this
+    saturates the result at max_distance and, given that cap, only needs to look
+    max_distance beyond a tile's boundary to stay exact within the cap.
+    target_chunk_voxels=8M was picked over a larger value by measurement on that
+    same 1242x1314x91 grid: it keeps peak RSS to ~1.2GB (vs ~2.4GB at 20M
+    voxels/chunk) at the cost of more, smaller scipy calls (~97s vs ~38s total)
+    -- worth it on a device this OOMs on, since this only runs when editing a map.
+
+    Tiles along every axis except the single smallest one (typically height for
+    an occupancy grid, already modest) rather than just the largest axis: for an
+    X/Y-large, Z-thin grid, chunking only X still drags the whole of Y into every
+    chunk, so peak memory barely drops. Tiling both X and Y bounds each chunk's
+    voxel count independent of the grid's footprint aspect ratio.
+    """
+    seed_mask = np.asarray(seed_mask)
+    shape = seed_mask.shape
+    ndim = seed_mask.ndim
+    sampling_arr = np.broadcast_to(np.asarray(sampling, dtype=np.float64), (ndim,))
+    halo = np.ceil(max_distance / sampling_arr).astype(np.int64)
+
+    if ndim == 1:
+        tiled_axes = [0]
+    else:
+        smallest_axis = int(np.argmin(shape))
+        tiled_axes = [a for a in range(ndim) if a != smallest_axis]
+
+    fixed_voxels = int(np.prod(shape))
+    for a in tiled_axes:
+        fixed_voxels //= shape[a]
+    padded_window = max(1.0, (target_chunk_voxels / max(fixed_voxels, 1)) ** (1.0 / len(tiled_axes)))
+    chunk_len = {a: max(1, int(padded_window) - 2 * int(halo[a])) for a in tiled_axes}
+
+    result = np.full(shape, max_distance, dtype=np.float32)
+    for starts in itertools.product(*(range(0, shape[a], chunk_len[a]) for a in tiled_axes)):
+        full_slice = [slice(None)] * ndim
+        interior_slice = [slice(None)] * ndim
+        out_slice = [slice(None)] * ndim
+        for a, start in zip(tiled_axes, starts):
+            end = min(start + chunk_len[a], shape[a])
+            pad_start = max(0, start - int(halo[a]))
+            pad_end = min(shape[a], end + int(halo[a]))
+            full_slice[a] = slice(pad_start, pad_end)
+            interior_slice[a] = slice(start - pad_start, start - pad_start + (end - start))
+            out_slice[a] = slice(start, end)
+        chunk_dist = distance_transform_edt(seed_mask[tuple(full_slice)], sampling=sampling_arr)
+        result[tuple(out_slice)] = np.minimum(chunk_dist[tuple(interior_slice)], max_distance).astype(np.float32)
+
+    return result
+
+
 def build_sdf_from_paths(
     paths: dict[int, dict[str, Any]], origin: np.ndarray, resolution: float, shape: tuple[int, int, int]
 ) -> np.ndarray:
@@ -130,7 +193,9 @@ def build_sdf_from_paths(
         seed_count += len(indices)
     if seed_count == 0:
         return np.full(shape, np.inf, dtype=np.float32)
-    return distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
+    # 10.0 exactly matches map_node.py's SDF_BINS top bucket -- any true
+    # distance >= 10.0 lands in the same last bucket regardless of magnitude.
+    return _chunked_distance_transform_edt(seed_mask, (resolution, resolution, resolution), max_distance=10.0)
 
 
 def _load_pointcloud_ply(ply_file_path: Path) -> tuple[np.ndarray, np.ndarray]:

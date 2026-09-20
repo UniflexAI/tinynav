@@ -23,7 +23,6 @@ from rclpy.serialization import deserialize_message
 from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
 from rosgraph_msgs.msg import Clock
 from rosidl_runtime_py.utilities import get_message
-from scipy.ndimage import distance_transform_edt
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Image, CameraInfo, CompressedImage, PointCloud2
 from std_msgs.msg import Bool, Float32, Header, ColorRGBA
@@ -33,7 +32,7 @@ from tf2_ros import TransformBroadcaster
 from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
-from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
+from tinynav.core.math_utils import chunked_distance_transform_edt, matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
@@ -254,7 +253,9 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
         seed_indices = np.rint((odom_positions_np - global_origin) / resolution).astype(np.int32)
         seed_indices = np.clip(seed_indices, 0, global_grid_shape - 1)
         seed_mask[seed_indices[:, 0], seed_indices[:, 1], seed_indices[:, 2]] = 0
-        return distance_transform_edt(seed_mask, sampling=(resolution, resolution, resolution)).astype(np.float32)
+        # 10.0 exactly matches map_node.py's SDF_BINS top bucket -- any true
+        # distance >= 10.0 lands in the same last bucket regardless of magnitude.
+        return chunked_distance_transform_edt(seed_mask, (resolution, resolution, resolution), max_distance=10.0)
 
     if stage_timer is not None:
         with stage_timer.timed("occupancy_sdf"):
