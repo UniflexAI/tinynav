@@ -241,18 +241,8 @@ CLIMB_REGION_CULL_M = 3.5
 CLIMB_PRIOR_DEFAULT = True
 
 
-#: How many observations the fused transform averages over. At the ~1.3 Hz these land
-#: at, 100 is 75s of history: a pose that is wrong stays wrong for about that long,
-#: whatever the camera says meanwhile. Measured on navcore 2026-09-20: the estimate sat
-#: 0.4m to the right for 55% of a corridor, and 20 puts that at 7%.
-#:
-#: The cost is the other direction -- at 20 a single 5m-wrong observation moves the
-#: solve 0.25m instead of 0.05m, which is what the admission gates are for.
-FUSION_WINDOW = 20
-
-
 def select_fusion_constraints(constraints):
-    return constraints[-FUSION_WINDOW:]
+    return constraints[-20:]
 
 
 class MapNode(Node):
