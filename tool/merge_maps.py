@@ -17,11 +17,19 @@ Given map_a (base) and map_b (to be merged in), this:
 Runs offline (no ROS node/bag replay needed) inside the tinynav-dev container with
 ROS + the project venv sourced, e.g.:
   /opt/venv/bin/python tool/merge_maps.py --map-a <dir> --map-b <dir> --map-c <dir>
+
+To calibrate only a map handoff from map_b into map_a's coordinate frame:
+  /opt/venv/bin/python tool/merge_maps.py --map-a <target> --map-b <source> --fit-only
+
+That writes <target>/map_handoff_from_<source>.json. In handoff terminology,
+map_b is the source map and map_a is the target map; the fitted map_b -> map_a
+matrix is stored under the legacy JSON key ``mapA_to_mapB`` expected by the backend.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import resource
 import shutil
@@ -48,8 +56,18 @@ class Args:
     """Map to merge into map_a. Its keyframes are relocalized against map_a to fit
     the transform, then fused (transformed into map_a's frame) into the output."""
 
-    map_c: Path
-    """Output directory for the merged map (must not already exist)."""
+    map_c: Path | None = None
+    """Output directory for the merged map. Required unless --fit-only is set."""
+
+    fit_only: bool = False
+    """Only fit map_b -> map_a and write a map handoff JSON; do not build map_c."""
+
+    handoff_output: Path | None = None
+    """Handoff JSON path. With --fit-only, defaults to
+    <map_a>/map_handoff_from_<map_b.name>.json. May also be used while merging."""
+
+    overwrite_handoff: bool = False
+    """Allow replacing an existing handoff JSON."""
 
     query_stride: int = 5
     """Use every Nth map_b keyframe (by pose timestamp order) as a relocalization query."""
@@ -101,6 +119,16 @@ class Args:
     keyframe count; train_vocabulary's own minibatch k-means already draws at most
     vlad_iterations * vlad_batch_size samples-with-replacement from this pool, so a
     well-distributed 200k-token sample trains it about as well as the full set would."""
+
+
+@dataclass(frozen=True)
+class TransformFit:
+    T_b_to_a: np.ndarray
+    correspondence_count: int
+    inlier_count: int
+    inlier_residual_mean_m: float
+    inlier_residual_std_m: float
+    inlier_residual_max_m: float
 
 
 def load_poses(map_path: Path) -> dict[int, np.ndarray]:
@@ -278,7 +306,7 @@ def relocalize_keyframe_in_map_a(
 
 def fit_transform_b_to_a(
     map_a: Path, map_b: Path, poses_a: dict[int, np.ndarray], poses_b: dict[int, np.ndarray], args: Args,
-) -> np.ndarray:
+) -> TransformFit:
     K_a = np.load(map_a / "intrinsics.npy")
     K_b = np.load(map_b / "intrinsics.npy")
     if not np.allclose(np.diag(K_a)[:2], np.diag(K_b)[:2], rtol=0.05):
@@ -340,8 +368,83 @@ def fit_transform_b_to_a(
         )
         sys.exit(1)
 
-    print(f"Fitted map_b -> map_a transform with {inlier_count}/{len(points_src)} inliers:\n{T_b_to_a}")
-    return T_b_to_a
+    transformed = (T_b_to_a[:3, :3] @ points_src_arr.T).T + T_b_to_a[:3, 3]
+    residuals = np.linalg.norm(transformed - points_dst_arr, axis=1)
+    inlier_residuals = residuals[residuals < args.fit_inlier_threshold_m]
+    if len(inlier_residuals) < args.min_fit_inliers:
+        print(
+            "error: fitted transform fell below the required inlier count after refinement "
+            f"({len(inlier_residuals)} < {args.min_fit_inliers})."
+        )
+        sys.exit(1)
+
+    fit = TransformFit(
+        T_b_to_a=T_b_to_a,
+        correspondence_count=len(points_src),
+        inlier_count=len(inlier_residuals),
+        inlier_residual_mean_m=float(np.mean(inlier_residuals)),
+        inlier_residual_std_m=float(np.std(inlier_residuals)),
+        inlier_residual_max_m=float(np.max(inlier_residuals)),
+    )
+    print(
+        f"Fitted map_b -> map_a transform with "
+        f"{fit.inlier_count}/{fit.correspondence_count} inliers "
+        f"(residual mean/std/max={fit.inlier_residual_mean_m:.3f}/"
+        f"{fit.inlier_residual_std_m:.3f}/{fit.inlier_residual_max_m:.3f} m):\n"
+        f"{fit.T_b_to_a}"
+    )
+    return fit
+
+
+def default_handoff_output(map_a: Path, map_b: Path) -> Path:
+    return map_a / f"map_handoff_from_{map_b.name}.json"
+
+
+def write_handoff_json(
+    output: Path,
+    map_a: Path,
+    map_b: Path,
+    fit: TransformFit,
+    args: Args,
+) -> None:
+    """Write the backend's source-map -> target-map calibration edge.
+
+    merge_maps names the target/base map ``map_a`` and source map ``map_b``.
+    The backend's legacy JSON schema uses the opposite A/B labels, so map_a in
+    the JSON intentionally points at the source and map_b at the target.
+    """
+    if output.exists() and not args.overwrite_handoff:
+        print(f"error: handoff output already exists: {output} (use --overwrite-handoff to replace it)")
+        sys.exit(1)
+    if not output.parent.is_dir():
+        print(f"error: handoff output parent does not exist: {output.parent}")
+        sys.exit(1)
+
+    payload = {
+        "map_a": str(map_b.resolve()),
+        "map_b": str(map_a.resolve()),
+        "source_map": map_b.name,
+        "target_map": map_a.name,
+        "calibration_method": "cross_map_keyframe_relocalization_ransac",
+        "num_correspondences": fit.correspondence_count,
+        "num_inliers": fit.inlier_count,
+        "fit_inlier_threshold_m": args.fit_inlier_threshold_m,
+        "inlier_residual_mean_m": fit.inlier_residual_mean_m,
+        "inlier_residual_std_m": fit.inlier_residual_std_m,
+        "inlier_residual_max_m": fit.inlier_residual_max_m,
+        "mapA_to_mapB": fit.T_b_to_a.tolist(),
+    }
+    temp_output = output.with_name(f".{output.name}.tmp")
+    try:
+        temp_output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(temp_output, output)
+    finally:
+        if temp_output.exists():
+            temp_output.unlink()
+    print(
+        f"Map handoff saved: {map_b.name} -> {map_a.name}\n"
+        f"  {output}"
+    )
 
 
 def _copy_keyframe(ts: int, src_db: TinyNavDB, dst_db: TinyNavDB) -> None:
@@ -536,7 +639,13 @@ def main(args: Args) -> None:
         if not (p / "poses.npy").exists():
             print(f"error: {name} ({p}) does not look like a built tinynav map (missing poses.npy)")
             sys.exit(1)
-    if args.map_c.exists():
+    if not args.fit_only and args.map_c is None:
+        print("error: --map-c is required unless --fit-only is set")
+        sys.exit(1)
+    if args.fit_only and args.map_c is not None:
+        print("error: --map-c cannot be used with --fit-only")
+        sys.exit(1)
+    if args.map_c is not None and args.map_c.exists():
         print(f"error: map_c already exists: {args.map_c}")
         sys.exit(1)
     if args.map_a.resolve() == args.map_b.resolve():
@@ -546,8 +655,24 @@ def main(args: Args) -> None:
     poses_a = load_poses(args.map_a)
     poses_b = load_poses(args.map_b)
 
-    T_b_to_a = fit_transform_b_to_a(args.map_a, args.map_b, poses_a, poses_b, args)
-    merge_maps(args.map_a, args.map_b, args.map_c, poses_a, poses_b, T_b_to_a, args)
+    handoff_output = args.handoff_output
+    if args.fit_only and handoff_output is None:
+        handoff_output = default_handoff_output(args.map_a, args.map_b)
+    if handoff_output is not None and handoff_output.exists() and not args.overwrite_handoff:
+        print(
+            f"error: handoff output already exists: {handoff_output} "
+            "(use --overwrite-handoff to replace it)"
+        )
+        sys.exit(1)
+
+    fit = fit_transform_b_to_a(args.map_a, args.map_b, poses_a, poses_b, args)
+    if handoff_output is not None:
+        write_handoff_json(handoff_output, args.map_a, args.map_b, fit, args)
+    if args.fit_only:
+        return
+
+    assert args.map_c is not None
+    merge_maps(args.map_a, args.map_b, args.map_c, poses_a, poses_b, fit.T_b_to_a, args)
 
 
 if __name__ == "__main__":
