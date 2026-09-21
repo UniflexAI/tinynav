@@ -92,10 +92,10 @@ GO2W_CONFIG = RobotConfig(
 
 B2_CONFIG = RobotConfig(
     name='b2', shape='square',
-    length=0.8, width=0.3,
-    camera_x=0.5, camera_y=0.0,
-    control_x=0.2, control_y=0.0,
-    safety_radius=0.1,
+    length=0.88, width=0.3,
+    camera_x=0.44, camera_y=0.0,
+    control_x=0.0, control_y=0.0,
+    safety_radius=0.075,
     # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
     # robot could barely move: cmd_vel_control DROPS a target below this rather than
     # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
@@ -109,10 +109,10 @@ B2_CONFIG = RobotConfig(
 
 B2W_CONFIG = RobotConfig(
     name='b2w', shape='square',
-    length=0.8, width=0.3,
-    camera_x=0.5, camera_y=0.0,
+    length=0.88, width=0.3,
+    camera_x=0.44, camera_y=0.0,
     control_x=0.0, control_y=0.0,
-    safety_radius=0.1,
+    safety_radius=0.075,
 )
 
 G1_CONFIG = RobotConfig(
