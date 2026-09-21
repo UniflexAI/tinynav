@@ -298,6 +298,10 @@ class BackendNode(Ros2NodeManager):
         self._nav_nodes_running: bool = False
         self._map_node_proc: subprocess.Popen | None = None
         self._cmd_vel_proc: subprocess.Popen | None = None
+        # VIO recovery, map handoff, and HTTP commands run on different threads.
+        # Serialize nav-node process ownership so two callers cannot both observe
+        # "stopped" and launch duplicate map_node instances.
+        self._nav_nodes_lifecycle_lock = threading.RLock()
 
         # Auto-localization assist: sweep yaw while waiting for localization
         self._loc_assist_enabled: bool = False
@@ -1936,14 +1940,28 @@ class BackendNode(Ros2NodeManager):
 
     def _kill_proc(self, proc: subprocess.Popen | None):
         if proc and proc.poll() is None:
+            pgid = None
             try:
-                os.killpg(os.getpgid(proc.pid), 15)
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, 15)
                 proc.wait(timeout=2)
-            except Exception:
+            except subprocess.TimeoutExpired:
                 try:
-                    proc.kill()
-                except Exception:
+                    # ``uv run`` is only the process-group leader. Killing just
+                    # that wrapper can leave map_node.py running as an orphan.
+                    if pgid is not None:
+                        os.killpg(pgid, 9)
+                    else:
+                        proc.kill()
+                    proc.wait(timeout=2)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
                     pass
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                self.get_logger().warning(
+                    f'Failed to stop process group for pid={proc.pid}: {exc}'
+                )
 
     def _make_log(self, name: str):
         """Open a timestamped log file under tinynav_db/logs/. Safe to close in parent
@@ -2171,7 +2189,52 @@ class BackendNode(Ros2NodeManager):
     # Nav nodes toggle                                                     #
     # ------------------------------------------------------------------ #
 
+    def _start_navigation(self):
+        """Override the legacy Ros2NodeManager navigation launcher.
+
+        The parent implementation stores map_node in ``self.processes['map']``,
+        while VIO recovery owns ``self._map_node_proc``. Mixing the two paths
+        leaves the first map_node invisible to cmd_stop_nav_nodes(), then recovery
+        starts a second instance. Keep every navigation start on one ownership path.
+        """
+        self.cmd_start_nav_nodes()
+
     def cmd_start_nav_nodes(
+        self,
+        initial_map_to_odom_transform_path: str | None = None,
+        recovery_relocalization_center_xyz: tuple[float, float, float] | None = None,
+    ):
+        with self._nav_nodes_lifecycle_lock:
+            map_proc = self._map_node_proc
+            if map_proc is not None and map_proc.poll() is None:
+                with self._lock:
+                    self._nav_nodes_running = True
+                self.get_logger().warning(
+                    f'Nav nodes start ignored: map_node already running (pid={map_proc.pid})'
+                )
+                return
+
+            # Do not overwrite stale Popen handles from an interrupted start.
+            self._kill_proc(map_proc)
+            self._kill_proc(self._cmd_vel_proc)
+            self._map_node_proc = None
+            self._cmd_vel_proc = None
+
+            # Clean up a map process created by older code before this ownership
+            # model was unified. This also makes a live-upgrade recovery safe.
+            legacy_map_proc = self.processes.pop('map', None)
+            if legacy_map_proc is not None and legacy_map_proc.poll() is None:
+                self.get_logger().warning(
+                    f'Stopping legacy map_node before managed start (pid={legacy_map_proc.pid})'
+                )
+                self._kill_proc(legacy_map_proc)
+
+            self._start_nav_nodes_locked(
+                initial_map_to_odom_transform_path=initial_map_to_odom_transform_path,
+                recovery_relocalization_center_xyz=recovery_relocalization_center_xyz,
+            )
+
+    def _start_nav_nodes_locked(
         self,
         initial_map_to_odom_transform_path: str | None = None,
         recovery_relocalization_center_xyz: tuple[float, float, float] | None = None,
@@ -2225,12 +2288,20 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().info('Nav nodes started')
 
     def cmd_stop_nav_nodes(self):
+        with self._nav_nodes_lifecycle_lock:
+            self._stop_nav_nodes_locked()
+
+    def _stop_nav_nodes_locked(self):
         self._set_nav_active(False)
         self._stop_rtk_yaw_init()
         self._current_map_pub.publish(String(data=''))
         self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._cmd_vel_proc)
+        # Compatibility cleanup for map/control launched by the parent class's
+        # old _start_navigation implementation.
+        self._kill_proc(self.processes.pop('map', None))
+        self._kill_proc(self.processes.pop('control', None))
         self._map_node_proc = None
         self._cmd_vel_proc = None
         with self._lock:
@@ -2244,12 +2315,18 @@ class BackendNode(Ros2NodeManager):
         self.get_logger().info('Nav nodes stopped')
 
     def cmd_restart_nav_nodes(self):
+        with self._nav_nodes_lifecycle_lock:
+            self._restart_nav_nodes_locked()
+
+    def _restart_nav_nodes_locked(self):
         self._set_nav_active(False)
         self._stop_rtk_yaw_init()
         self._stop_loc_assist()
         self._kill_proc(self._map_node_proc)
         self._kill_proc(self._planning_proc)
         self._kill_proc(self._cmd_vel_proc)
+        self._kill_proc(self.processes.pop('map', None))
+        self._kill_proc(self.processes.pop('control', None))
         self._map_node_proc = None
         self._planning_proc = None
         self._cmd_vel_proc = None
