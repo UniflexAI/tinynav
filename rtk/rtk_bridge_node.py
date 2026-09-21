@@ -328,6 +328,8 @@ class RtkBridgeNode(Node):
         self.latest_unicore_log = ""
         self.latest_unicore_log_type = ""
         self.last_unicore_log_time = None
+        self.last_bestnav_time = None
+        self._last_relog_time = None
         self.unicore_log_count = 0
         self.unicore_status_count = 0
         self.latest_sentence = ""
@@ -443,6 +445,12 @@ class RtkBridgeNode(Node):
         # 0 disables. 50x the receiver's 10 Hz output, and a false trigger only
         # costs the 2.9 s measured for supervisor relaunch, so bias it short.
         self.declare_parameter("nmea_stale_restart_s", 5.0)
+        # BESTPOSA outranks GGA when picking the stage, so it must expire; it stops
+        # dead on any receiver RESET and the last value would otherwise report forever.
+        self.declare_parameter("bestnav_stale_after_s", 5.0)
+        # 0 disables. The NMEA watchdog only sees the whole stream stop; BESTPOSA
+        # alone can die (a RESET wipes the LOG config) with GGA still flowing.
+        self.declare_parameter("bestnav_relog_after_s", 20.0)
         self.declare_parameter("raw_pty_enabled", True)
         self.declare_parameter("raw_pty_path", "/tmp/rtk_nmea")
         self.declare_parameter("raw_sentence_types", "GGA")
@@ -880,6 +888,7 @@ class RtkBridgeNode(Node):
         lat_std = parse_float_or_none(fields[7])
         lon_std = parse_float_or_none(fields[8])
         hgt_std = parse_float_or_none(fields[9])
+        self.last_bestnav_time = time.monotonic()
         self.latest_bestnav_solution_status = solution_status or None
         self.latest_bestnav_position_type = position_type or None
         self.latest_receiver_position_type = position_type or self.latest_receiver_position_type
@@ -1006,7 +1015,7 @@ class RtkBridgeNode(Node):
         self.latest_gga_quality = quality
         self.latest_receiver_position_type = (
             self.latest_rtk_position_type
-            or self.latest_bestnav_position_type
+            or self._fresh_bestnav()[1]
             or position_type_from_gga_quality(quality)
         )
         self.latest_receiver_stage = self._select_receiver_stage()
@@ -1141,7 +1150,29 @@ class RtkBridgeNode(Node):
             self.path.poses = self.path.poses[-self.path_max_size:]
         self.path_pub.publish(self.path)
 
+    def _maybe_relog_bestnav(self):
+        """A RESET clears the receiver's log config; init commands only ran at open."""
+        after = float(self.get_parameter("bestnav_relog_after_s").value)
+        # Never seen one means the firmware does not honour the LOG at all --
+        # re-sending forever would just spam a receiver that already said no.
+        if after <= 0 or self.last_bestnav_time is None:
+            return
+        now = time.monotonic()
+        if now - self.last_bestnav_time <= after:
+            return
+        if self._last_relog_time is not None and now - self._last_relog_time < after:
+            return
+        self._last_relog_time = now
+        fd = self.rtcm_fd if self.rtcm_fd is not None else self.nmea_fd
+        if fd is None:
+            return
+        self.get_logger().warning(
+            f"No BESTPOS for {now - self.last_bestnav_time:.0f}s "
+            "(receiver reset?); re-sending serial_init_commands")
+        self._send_serial_init_commands(fd, "serial_init_commands", self.serial_port)
+
     def _publish_status_timer(self):
+        self._maybe_relog_bestnav()
         # Hold the lock across the whole snapshot so every field in the three
         # status messages comes from the same instant, never a torn mix of
         # values updated by the serial/NTRIP threads mid-build.
@@ -1167,10 +1198,25 @@ class RtkBridgeNode(Node):
             return 0, stage_from_gga_quality(0), None
         return self.latest_gga_quality, self.latest_receiver_stage, self.latest_receiver_position_type
 
+    def _bestnav_is_stale(self) -> bool:
+        if self.last_bestnav_time is None:
+            return True
+        return (time.monotonic() - self.last_bestnav_time
+                > float(self.get_parameter("bestnav_stale_after_s").value))
+
+    def _fresh_bestnav(self):
+        """(solution_status, position_type, std) or all None once BESTPOSA expires."""
+        if self._bestnav_is_stale():
+            return None, None, None
+        return (self.latest_bestnav_solution_status,
+                self.latest_bestnav_position_type,
+                self.latest_bestnav_std)
+
     def _select_receiver_stage(self) -> str:
+        _sol, bestnav_type, _std = self._fresh_bestnav()
         for position_type in (
             self.latest_rtk_position_type,
-            self.latest_bestnav_position_type,
+            bestnav_type,
             self.latest_receiver_position_type,
         ):
             stage = stage_from_position_type(position_type)
@@ -1179,6 +1225,7 @@ class RtkBridgeNode(Node):
         return stage_from_gga_quality(self.latest_gga_quality)
 
     def _receiver_status_payload(self, msg: NavSatFix | None, accepted: bool, position):
+        bestnav_sol, bestnav_type, bestnav_std = self._fresh_bestnav()
         navsat_status = None if msg is None else int(msg.status.status)
         quality, stage, position_type = self._reported_fix_state()
         return {
@@ -1190,9 +1237,9 @@ class RtkBridgeNode(Node):
             "ros_navsat_status": navsat_status,
             "ros_navsat_status_name": navsat_status_name(navsat_status),
             "receiver_position_type": position_type,
-            "bestnav_solution_status": self.latest_bestnav_solution_status,
-            "bestnav_position_type": self.latest_bestnav_position_type,
-            "bestnav_std": self.latest_bestnav_std,
+            "bestnav_solution_status": bestnav_sol,
+            "bestnav_position_type": bestnav_type,
+            "bestnav_std": bestnav_std,
             "bestnav_diff_age_s": self.latest_bestnav_diff_age,
             "bestnav_station_id": self.latest_bestnav_station_id or None,
             "rtk_position_type": self.latest_rtk_position_type,
@@ -1216,6 +1263,7 @@ class RtkBridgeNode(Node):
         rtcm_age = None if self.last_rtcm_time is None else now - self.last_rtcm_time
         quality, stage, position_type = self._reported_fix_state()
         cn0 = self._cn0_summary()
+        bestnav_sol, bestnav_type, bestnav_std = self._fresh_bestnav()
         if stage != self._last_logged_stage:
             # The one line that says which way a drop went. Correction-side
             # trouble moves diff_age/rtcm_age; sky-side trouble moves sats/hdop.
@@ -1226,8 +1274,8 @@ class RtkBridgeNode(Node):
                 f"fix_age={_fmt_age(fix_age)} rtcm_age={_fmt_age(rtcm_age)} "
                 f"nmea_age={_fmt_age(nmea_age)} ntrip={self.ntrip_connected} "
                 f"rtcm_dropped={self.rtcm_dropped_bytes} "
-                f"sol={self.latest_bestnav_solution_status}/{self.latest_bestnav_position_type} "
-                f"std={None if not self.latest_bestnav_std else round(self.latest_bestnav_std['lat_std_m'], 3)} "
+                f"sol={bestnav_sol}/{bestnav_type} "
+                f"std={None if not bestnav_std else round(bestnav_std['lat_std_m'], 3)} "
                 f"station={self.latest_gga_station_id or None} "
                 f"cn0=[{self._cn0_brief(cn0)}]"
             )
@@ -1278,9 +1326,9 @@ class RtkBridgeNode(Node):
             "gga_quality_name": gga_quality_name(quality),
             "receiver_stage": stage,
             "receiver_position_type": position_type,
-            "bestnav_solution_status": self.latest_bestnav_solution_status,
-            "bestnav_position_type": self.latest_bestnav_position_type,
-            "bestnav_std": self.latest_bestnav_std,
+            "bestnav_solution_status": bestnav_sol,
+            "bestnav_position_type": bestnav_type,
+            "bestnav_std": bestnav_std,
             "rtk_calculate_status": self.latest_rtk_calculate_status,
             "rtk_calculate_status_name": self.latest_rtk_calculate_status_name,
             "rtcm_status": self.latest_rtcm_status,
@@ -1314,13 +1362,14 @@ class RtkBridgeNode(Node):
                 self._signal_csv.write(
                     "wall,quality,stage,sats,hdop,diff_age,fix_age,rtcm_age,"
                     "ntrip,rtcm_dropped,sol,postype,lat_std,cn0_json" + chr(10))
-        std = None if not self.latest_bestnav_std else round(self.latest_bestnav_std["lat_std_m"], 4)
+        bestnav_sol, bestnav_type, bestnav_std = self._fresh_bestnav()
+        std = None if not bestnav_std else round(bestnav_std["lat_std_m"], 4)
         self._signal_csv.write(
             f"{time.time():.3f},{quality},{stage},{self.latest_num_satellites},"
             f"{self.latest_hdop:.2f},{self.latest_gga_differential_age},"
             f"{_fmt_age(fix_age)},{_fmt_age(rtcm_age)},{int(self.ntrip_connected)},"
-            f"{self.rtcm_dropped_bytes},{self.latest_bestnav_solution_status},"
-            f"{self.latest_bestnav_position_type},{std},"
+            f"{self.rtcm_dropped_bytes},{bestnav_sol},"
+            f"{bestnav_type},{std},"
             # ";" not "," so the blob survives as one CSV cell; readers
             # swap it back. Nothing else in the payload contains one.
             + json.dumps(cn0, separators=(";", ":")) + chr(10))
