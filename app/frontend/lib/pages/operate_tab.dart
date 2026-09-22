@@ -1990,11 +1990,10 @@ class _CameraPanelState extends ConsumerState<_CameraPanel> {
                           '/camera/camera/infra2/image_rect_raw': 'right',
                           '/camera/camera/color/image_rect_raw/compressed': 'color',
                           '/camera/camera/depth/image_rect_raw': 'depth',
+                          '/slam/image': 'image',
                           '/slam/depth': 'depth',
-                          '/camera1/camera/color/image_rect_raw/compressed': 'cam1 color',
-                          '/camera1/camera/infra1/image_rect_raw': 'cam1 left',
-                          '/camera1/camera/infra2/image_rect_raw': 'cam1 right',
-                          '/camera1/camera/depth/image_rect_raw': 'cam1 depth',
+                          '/slam/disparity_vis': 'disparity',
+                          '/slam/keyframe_image': 'keyframe',
                         };
                         final label = labels[t] ?? t.split('/').last;
                         return DropdownMenuItem<String?>(

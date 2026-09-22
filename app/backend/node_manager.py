@@ -41,8 +41,6 @@ _MAP_BUILD_DOMAIN_LOOPER = '231'  # isolated domain to avoid live looper topic c
 _MAPPING_PERCENT_PREFIX = 'MAPPING_PERCENT:'
 
 _COLOR_TOPIC_REALSENSE = '/camera/camera/color/image_raw'
-_COLOR_TOPIC_LOOPER = '/camera/camera/color/image_rect_raw/compressed'
-_DEPTH_TOPIC_LOOPER = '/camera/camera/depth/image_rect_raw'
 
 _IMAGE_TOPICS_REALSENSE = [
     _COLOR_TOPIC_REALSENSE,
@@ -50,19 +48,14 @@ _IMAGE_TOPICS_REALSENSE = [
     '/camera/camera/infra2/image_rect_raw',
     '/slam/depth',
 ]
-# Preview topics are listed separately. Backend subscribes to at most one
-# selected topic, and only while a /ws/preview client is connected.
+# Looper preview must NOT subscribe to /camera* or /camera1* — each extra
+# DataReader over USB-DDS can collapse the Insight streams. Preview only the
+# Jetson-local topics that looper_bridge already republishes.
 _IMAGE_TOPICS_LOOPER = [
-    _COLOR_TOPIC_LOOPER,
-    '/camera/camera/infra1/image_rect_raw',
-    '/camera/camera/infra2/image_rect_raw',
-    _DEPTH_TOPIC_LOOPER,
-]
-_IMAGE_TOPICS_LOOPER_CAM1 = [
-    '/camera1/camera/color/image_rect_raw/compressed',
-    '/camera1/camera/infra1/image_rect_raw',
-    '/camera1/camera/infra2/image_rect_raw',
-    '/camera1/camera/depth/image_rect_raw',
+    '/slam/image',
+    '/slam/depth',
+    '/slam/disparity_vis',
+    '/slam/keyframe_image',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
 _LOOPER_NODE_NAMES = {'/insight_full', '/insight_full1'}
@@ -1842,7 +1835,7 @@ class BackendNode(Ros2NodeManager):
 
     def get_image_topics(self) -> list[str]:
         if self._sensor_mode == 'looper':
-            return list(_IMAGE_TOPICS_LOOPER) + list(_IMAGE_TOPICS_LOOPER_CAM1)
+            return list(_IMAGE_TOPICS_LOOPER)
         return list(_IMAGE_TOPICS_REALSENSE)
 
     def get_preview_frame(self, topic: str) -> bytes:
