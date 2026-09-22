@@ -12,7 +12,7 @@ from math_utils import matrix_to_quat
 from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
                            route_heading_penalty, score_trajectories_by_ESDF,
-                           footprint_lattice, PlanningNode, ROBOT_CONFIG,
+                           footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M, reverse_gate_penalty,
                            generate_trajectory_library_3d)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
@@ -830,3 +830,14 @@ def test_but_the_band_still_ends():
     """The counter-case: hysteresis that never releases is just a latch."""
     assert not reverse_armed(REVERSE_EXIT_M + 5 * 0.05, 0.05, engaged=True)
     assert reverse_armed(REVERSE_ENTER_M / 2, 0.05, engaged=False)
+
+
+def test_footprint_cells_cover_the_body_along_its_heading():
+    """Rotated 90 deg: the body lies along +y, so a cell 0.25 m up is under it and
+    one 0.25 m to the side is not."""
+    origin, res = np.array([-2.5, -2.5]), 0.05
+    under = footprint_cells((100, 100), origin, res, (0.0, 0.0), (0.0, 1.0), 0.3, 0.3, 0.15)
+    cell = lambda x, y: (int((x - origin[0]) / res), int((y - origin[1]) / res))
+    assert under[cell(0.0, 0.25)] and under[cell(0.0, -0.25)]
+    assert not under[cell(0.25, 0.0)] and not under[cell(0.0, 0.4)]
+    assert under.sum() == 12 * 6

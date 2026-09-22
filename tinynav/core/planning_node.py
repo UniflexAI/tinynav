@@ -504,6 +504,16 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
+def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_len, rear_len, half_w):
+    """(x, y) bool mask of the grid cells whose centre lies inside the body rectangle."""
+    xs = origin[0] + (np.arange(grid_xy_shape[0]) + 0.5) * resolution - center_xy[0]
+    ys = origin[1] + (np.arange(grid_xy_shape[1]) + 0.5) * resolution - center_xy[1]
+    dx, dy = np.meshgrid(xs, ys, indexing='ij')
+    along = dx * fwd_xy[0] + dy * fwd_xy[1]
+    across = -dx * fwd_xy[1] + dy * fwd_xy[0]
+    return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
+
+
 def route_band_fade(end_remaining_m, terminal_band_m):
     """How much of the route is still ahead, as 0..1 over the last `terminal_band_m`.
 
@@ -687,6 +697,8 @@ class PlanningNode(Node):
         # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
         # max_lat_acc/max_angular_vel; below that the omega range is unchanged.
         self.declare_parameter('traj_max_lat_acc', 0.5)
+        # Extra per-frame decay on cells under the footprint, on top of the global 0.99.
+        self.declare_parameter('footprint_decay', 0.9)
         self._vx_max = float(self.get_parameter('vx_max').value)
         self._vx_hard_max = float(self.get_parameter('vx_hard_max').value)
         self._vx_min = float(self.get_parameter('vx_min').value)
@@ -695,6 +707,7 @@ class PlanningNode(Node):
         self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
         self._t_react_s = float(self.get_parameter('t_react_s').value)
         self._traj_max_lat_acc = float(self.get_parameter('traj_max_lat_acc').value)
+        self._footprint_decay = float(self.get_parameter('footprint_decay').value)
 
         # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
         # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
@@ -1100,6 +1113,15 @@ class PlanningNode(Node):
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
         self.occupancy_grid *= 0.99
+        # The camera cannot see under the body, so no ray ever clears those cells;
+        # decay them faster, but not to zero at once, so a real obstacle there still reads.
+        center = self.camera_to_robot_center(T)
+        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
+        n = np.hypot(fwd[0], fwd[1])
+        if n > 1e-6:
+            under = footprint_cells(self.grid_shape[:2], self.origin, self.resolution, center[:2],
+                                    fwd[:2] / n, *ROBOT_CONFIG.footprint_from_control())
+            self.occupancy_grid[under] *= self._footprint_decay
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
