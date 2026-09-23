@@ -1613,8 +1613,11 @@ class BackendNode(Ros2NodeManager):
                 _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
                 self._launch_sensor_procs(_env)
         except Exception as e:
-            self.get_logger().warn(f'Sensor detection failed: {e}')
-            self._sensor_mode = 'unknown'
+            # Keep detected mode so preview topic list stays correct (looper -> /slam/*,
+            # not RealSense color/left/right). Only mark unknown if we never matched.
+            self.get_logger().warn(f'Sensor init failed (mode stays {self._sensor_mode!r}): {e}')
+            if self._sensor_mode not in ('looper', 'realsense'):
+                self._sensor_mode = 'unknown'
 
         topics = self.get_image_topics()
         # logical_topic -> {'left': ndarray|None, 'right': ndarray|None}
@@ -1956,6 +1959,44 @@ class BackendNode(Ros2NodeManager):
                     f'Failed to stop process group for pid={proc.pid}: {exc}'
                 )
 
+    def _kill_orphan_map_nodes(self):
+        """Sweep map_node.py left behind when uv exits without its child.
+
+        Walking/VIO recovery restarts nav often; an orphan + a new launch shows
+        up as two concurrent map_node processes.
+        """
+        pattern = r'/tinynav/tinynav/core/map_node\.py'
+        try:
+            out = subprocess.check_output(['pgrep', '-f', pattern], text=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return
+        pids = [int(x) for x in out.split() if x.strip().isdigit()]
+        if not pids:
+            return
+        self.get_logger().warning(f'Killing orphan map_node pids={pids}')
+        for pid in pids:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            alive = []
+            for pid in pids:
+                try:
+                    os.kill(pid, 0)
+                    alive.append(pid)
+                except ProcessLookupError:
+                    pass
+            if not alive:
+                return
+            time.sleep(0.1)
+        for pid in pids:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+
     def _make_log(self, name: str):
         """Open a timestamped log file under tinynav_db/logs/. Safe to close in parent
         after Popen — the child process inherits its own fd copy at fork time."""
@@ -1966,13 +2007,23 @@ class BackendNode(Ros2NodeManager):
         path = os.path.join(logs_dir, f'{ts}_{name}.txt')
         return open(path, 'w')
 
+    @staticmethod
+    def _with_uv_no_sync(cmd: list[str]) -> list[str]:
+        """Avoid `uv run` re-resolving git deps (unitree/nerfstudio) on every launch."""
+        if len(cmd) >= 2 and cmd[0] == 'uv' and cmd[1] == 'run' and '--no-sync' not in cmd:
+            return ['uv', 'run', '--no-sync', *cmd[2:]]
+        return cmd
+
     def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
                       cwd: str = '/tinynav') -> subprocess.Popen:
         """Spawn a subprocess with standard logging and process-group setup."""
+        cmd = self._with_uv_no_sync(cmd)
+        run_env = (env or os.environ).copy()
+        run_env.setdefault('UV_NO_SYNC', '1')
         lf = self._make_log(name)
         proc = subprocess.Popen(
             cmd, preexec_fn=os.setsid, cwd=cwd,
-            env=env or os.environ.copy(),
+            env=run_env,
             stdout=lf, stderr=subprocess.STDOUT,
         )
         log_path = lf.name
@@ -2114,11 +2165,11 @@ class BackendNode(Ros2NodeManager):
             return cyclone_env
         return env
 
-    def _sync_looper_time(self):
+    def _sync_looper_time(self) -> bool:
         """Sync the Looper module clock before starting Looper-dependent nodes.
 
-        If this fails, do not continue to start looper_bridge/planning_node;
-        stale Looper timestamps can poison VIO/ROS message timing.
+        Returns True on success. On failure logs and returns False so callers can
+        still start bridge/planning (preview topics must stay on /slam/*).
         """
         max_attempts = 3
         last_error = None
@@ -2130,13 +2181,17 @@ class BackendNode(Ros2NodeManager):
                     check=True, timeout=30,
                 )
                 self.get_logger().info(f'Looper time sync completed on attempt {attempt}/{max_attempts}')
-                return
+                return True
             except Exception as e:
                 last_error = e
                 self.get_logger().error(f'Looper time sync attempt {attempt}/{max_attempts} failed: {e}')
                 if attempt < max_attempts:
                     time.sleep(1.0)
-        raise RuntimeError(f'Looper time sync failed after {max_attempts} attempts: {last_error}')
+        self.get_logger().error(
+            f'Looper time sync failed after {max_attempts} attempts: {last_error}; '
+            'continuing with looper_bridge/planning anyway'
+        )
+        return False
 
     def _launch_sensor_procs(self, env: dict):
         """Start sensor procs based on current _sensor_mode."""
@@ -2221,6 +2276,7 @@ class BackendNode(Ros2NodeManager):
                     f'Stopping legacy map_node before managed start (pid={legacy_map_proc.pid})'
                 )
                 self._kill_proc(legacy_map_proc)
+            self._kill_orphan_map_nodes()
 
             self._start_nav_nodes_locked(
                 initial_map_to_odom_transform_path=initial_map_to_odom_transform_path,
@@ -2295,6 +2351,7 @@ class BackendNode(Ros2NodeManager):
         # old _start_navigation implementation.
         self._kill_proc(self.processes.pop('map', None))
         self._kill_proc(self.processes.pop('control', None))
+        self._kill_orphan_map_nodes()
         self._map_node_proc = None
         self._cmd_vel_proc = None
         with self._lock:
@@ -2320,6 +2377,7 @@ class BackendNode(Ros2NodeManager):
         self._kill_proc(self._cmd_vel_proc)
         self._kill_proc(self.processes.pop('map', None))
         self._kill_proc(self.processes.pop('control', None))
+        self._kill_orphan_map_nodes()
         self._map_node_proc = None
         self._planning_proc = None
         self._cmd_vel_proc = None
@@ -2911,10 +2969,13 @@ class BackendNode(Ros2NodeManager):
                           cwd: str = '/tinynav') -> subprocess.Popen:
         """Like _launch_proc, but also tees stdout to a pipe so the caller can
         scan for MAPPING_PERCENT: lines while still logging everything to file."""
+        cmd = self._with_uv_no_sync(cmd)
+        run_env = (env or os.environ).copy()
+        run_env.setdefault('UV_NO_SYNC', '1')
         lf = self._make_log(name)
         proc = subprocess.Popen(
             cmd, preexec_fn=os.setsid, cwd=cwd,
-            env=env or os.environ.copy(),
+            env=run_env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         threading.Thread(

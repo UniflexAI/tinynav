@@ -49,7 +49,8 @@ lekiwi =[
     "lerobot[lekiwi]==0.3.3",
 ]
 unitree = [
-    "unitree-sdk2py @ git+https://github.com/junlinp/unitree_sdk2_python.git@800103eab7e045336b1c40186cda5023dbd05821",
+    # Need a2 SportClient for A2/A2W (older junlinp pin has no unitree_sdk2py.a2).
+    "unitree-sdk2py @ git+https://github.com/unitreerobotics/unitree_sdk2_python.git@814556d15970dd2ecf1c9984e845ca02ab07e206",
 ]
 3dgs = [
     "torch>=2.4,<2.11",

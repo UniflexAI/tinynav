@@ -49,7 +49,7 @@ say() { echo "[RTK] $(date -Is) $*" | tee -a "$LOG_FILE"; }
 say "start_rtk_bridge, serial=$SERIAL, log=$LOG_FILE, signal_csv=$SIGNAL_CSV"
 while true; do
   say "launching rtk_bridge_node"
-  uv run python /tinynav/rtk/rtk_bridge_node.py --ros-args \
+  UV_NO_SYNC=1 uv run --no-sync python /tinynav/rtk/rtk_bridge_node.py --ros-args \
     -p serial_port:="$SERIAL" \
     -p serial_init_commands:="$INIT_CMDS" \
     -p signal_csv_path:="$SIGNAL_CSV" \
