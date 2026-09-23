@@ -473,7 +473,12 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             else:
                 max_steps = len(traj)
                 decay_factor = (max_steps - closest_step_for_traj) / max_steps
-                base_score = 1.0 / (min_dist_for_traj + 1e-3)
+                # Zeroed at safety_radius so the term is CONTINUOUS across the margin.
+                # A bare 1/d steps from 0 to ~1/safety_radius there, and at w_clearance
+                # that step is larger than every other term in the cost combined -- so a
+                # single grid cell flickering at the margin decides the selection.
+                base_score = (1.0 / (min_dist_for_traj + 1e-3)
+                              - 1.0 / (safety_radius + 1e-3))
                 scores.append(decay_factor * base_score)
         else:
             scores.append(0.0)

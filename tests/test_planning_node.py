@@ -536,6 +536,36 @@ def test_open_space_still_scores_zero():
     assert _score_standing_at((0.0, 0.0), (5.0, 5.0)) == 0.0
 
 
+def _clearance_sweep():
+    """Clearance score against the gap between the robot's nose and one obstacle cell,
+    from grazing out to open space. Read off the sweep rather than a single gap: which
+    lattice sample is nearest the nose sets the offset between `gap` and the min ESDF,
+    so only the shape of the curve is a claim about the scoring."""
+    gaps = [0.005 * i for i in range(30)]
+    return [_score_standing_at((0.0, 0.0), (_B2['front_len'] + g, 0.0)) for g in gaps]
+
+
+def test_the_clearance_term_has_no_step_at_safety_radius():
+    """Among turn-in-place rows every positional term is identical by construction --
+    same end cell, zero arc -- so the selection is decided by this term at w_clearance
+    200 against a smoothness term whose whole range is 15. A step from 0 to
+    1/safety_radius here is one grid cell at the margin choosing the turn direction."""
+    scores = _clearance_sweep()
+    nonzero = [s for s in scores if s > 0.0]
+    assert nonzero, 'the sweep never entered the band -- the test would prove nothing'
+    assert scores[-1] == 0.0, 'the sweep never left the band'
+    assert min(nonzero) < 1.0, f'still a step at safety_radius: {min(nonzero)}'
+
+
+def test_the_clearance_term_still_bites_near_collision():
+    """The other half: continuity must not flatten the ramp. Closer stays worse, and
+    the near end stays far above every other term -- 5 here is ~1000 cost units at
+    w_clearance, against a smoothness range of 15."""
+    scores = _clearance_sweep()
+    assert scores == sorted(scores, reverse=True), 'closer is not monotonically worse'
+    assert scores[0] > 5.0, f'grazing barely costs anything: {scores[0]}'
+
+
 def test_no_point_of_the_footprint_is_further_than_safety_radius_from_a_sample():
     """The property the pitch is derived from, asserted against the lattice the
     scorer actually uses: every point of the footprint must sit within
