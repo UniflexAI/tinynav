@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 
 @dataclass
@@ -34,32 +34,24 @@ class ObstacleConfig:
 class RobotConfig:
     """Robot geometry + velocity limits. Body frame: +x forward, +y left, origin at
     the CONTROL CENTRE -- the point the chassis turns about, which is what planning
-    drives and what cmd_vel commands.
+    drives and what cmd_vel commands. Every geometry field is measured from it: the
+    camera offset by a spin fit about the yaw axis, the footprint bounds by a tape
+    measure from the turning point.
 
     Shared between planning_node (trajectory sampling/collision footprint) and
     cmd_vel_control (final cmd_vel clamping) so both nodes read the same numbers
     for a given ROBOT_TYPE instead of keeping separate copies.
-
-    **Every geometry field is separately measurable on a rig**, and that is the point
-    of the origin being the control centre: the camera offset comes off a spin bag
-    (`pilot/tools/camera_offset.py`), the four footprint bounds off a tape measure
-    from the turning point. A body centre expressed against nothing observable, with
-    the camera and the control point each carrying their own offset from it, admits
-    numbers that only their difference is defined by -- and a difference is not
-    something anyone can go and check.
     """
-    name: str = 'go2'
-    #: Footprint bounds from the control centre. front != rear is the normal case:
-    #: nothing makes a chassis turn about the middle of its own body.
-    front_len: float = 0.35
-    rear_len: float = 0.35
-    half_width: float = 0.15
-    #: Where the camera sits in the body frame, from hand-eye calibration. There is
-    #: deliberately no vertical term: a spin about the vertical axis cannot observe
-    #: one, and the z-band that would use it is already defined relative to camera
-    #: height (ObstacleConfig).
-    camera_fwd: float = 0.35
-    camera_left: float = 0.0
+    name: str
+    #: Footprint bounds from the control centre; front != rear is the normal case.
+    front_len: float
+    rear_len: float
+    half_width: float
+    #: Where the camera sits in the body frame. There is deliberately no vertical
+    #: term: a spin about the vertical axis cannot observe one, and the z-band that
+    #: would use it is defined relative to camera height (ObstacleConfig).
+    camera_fwd: float
+    camera_left: float
     safety_radius: float = 0.1
     # Bounds used to constrain trajectory-library velocity sampling and to clamp
     # the final published cmd_vel. Placeholder values, same for every robot until
@@ -77,25 +69,19 @@ class RobotConfig:
 
     def footprint_from_control(self):
         """Returns (front_len, rear_len, half_w) relative to control center."""
-        return float(self.front_len), float(self.rear_len), float(self.half_width)
+        return self.front_len, self.rear_len, self.half_width
 
 
 GO2_CONFIG = RobotConfig(
     name='go2',
+    #: Not yet measured from the yaw centre the spin below found.
     front_len=0.25, rear_len=0.35, half_width=0.15,
-    #: Hand-eye, off a spin bag on byd-navcore-02 (2026-09-24). The lateral term is
-    #: real: the camera is not on the centreline, and the 0.0 every robot carried
-    #: before was the only value the old fields could express.
+    #: Spin fit on byd-navcore-02, 2026-09-24.
     camera_fwd=0.254, camera_left=0.028,
     safety_radius=0.1,
 )
 
-GO2W_CONFIG = RobotConfig(
-    name='go2w',
-    front_len=0.25, rear_len=0.35, half_width=0.15,
-    camera_fwd=0.30, camera_left=0.0,
-    safety_radius=0.1,
-)
+GO2W_CONFIG = replace(GO2_CONFIG, name='go2w', camera_fwd=0.30, camera_left=0.0)
 
 B2_CONFIG = RobotConfig(
     name='b2',
@@ -113,12 +99,7 @@ B2_CONFIG = RobotConfig(
     obstacle=ObstacleConfig(robot_z_bottom=-0.6, robot_z_top=0.6),
 )
 
-B2W_CONFIG = RobotConfig(
-    name='b2w',
-    front_len=0.44, rear_len=0.44, half_width=0.15,
-    camera_fwd=0.44, camera_left=0.0,
-    safety_radius=0.075,
-)
+B2W_CONFIG = replace(B2_CONFIG, name='b2w', obstacle=ObstacleConfig())
 
 G1_CONFIG = RobotConfig(
     name='g1',
