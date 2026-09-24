@@ -618,9 +618,9 @@ class PlanningNode(Node):
     def __init__(self, node_name='planning_node'):
         super().__init__(node_name)
         self.get_logger().info(
-            f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
-            f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
-            f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
+            f"Robot: {ROBOT_CONFIG.name} (footprint fwd/rear/half-w "
+            f"{ROBOT_CONFIG.front_len}/{ROBOT_CONFIG.rear_len}/{ROBOT_CONFIG.half_width}m, "
+            f"cam=({ROBOT_CONFIG.camera_fwd},{ROBOT_CONFIG.camera_left}), "
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )

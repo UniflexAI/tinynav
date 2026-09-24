@@ -67,8 +67,8 @@ def make_camera_pose_from_config(
         control_xy,
         yaw_deg,
         mount_height=float(cam.get("mount_height", 0.45)),
-        forward_offset=float(robot.get("camera_x", 0.0)) - float(robot.get("control_x", 0.0)),
-        left_offset=float(robot.get("camera_y", 0.0)) - float(robot.get("control_y", 0.0)),
+        forward_offset=float(robot.get("camera_fwd", 0.0)),
+        left_offset=float(robot.get("camera_left", 0.0)),
     )
 
 
@@ -126,11 +126,9 @@ def footprint_polygon_xy(control_xy, yaw_rad, robot: dict[str, Any]) -> np.ndarr
     yaw = float(yaw_rad)
     fwd = np.array([np.cos(yaw), np.sin(yaw)], dtype=np.float64)
     left = np.array([-np.sin(yaw), np.cos(yaw)], dtype=np.float64)
-    length = float(robot.get("length", 0.4))
-    width = float(robot.get("width", 0.3))
-    cx = float(robot.get("control_x", 0.0))
-    hl, hw = 0.5 * length, 0.5 * width
-    front, rear = hl - cx, hl + cx
+    front = float(robot.get("front_len", 0.2))
+    rear = float(robot.get("rear_len", 0.2))
+    hw = float(robot.get("half_width", 0.15))
     return np.stack([
         xy + fwd * front + left * hw,
         xy + fwd * front - left * hw,

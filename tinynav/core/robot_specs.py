@@ -32,21 +32,34 @@ class ObstacleConfig:
 
 @dataclass
 class RobotConfig:
-    """Robot geometry + velocity limits. Body frame: +x forward, +y left.
+    """Robot geometry + velocity limits. Body frame: +x forward, +y left, origin at
+    the CONTROL CENTRE -- the point the chassis turns about, which is what planning
+    drives and what cmd_vel commands.
 
     Shared between planning_node (trajectory sampling/collision footprint) and
     cmd_vel_control (final cmd_vel clamping) so both nodes read the same numbers
     for a given ROBOT_TYPE instead of keeping separate copies.
+
+    **Every geometry field is separately measurable on a rig**, and that is the point
+    of the origin being the control centre: the camera offset comes off a spin bag
+    (`pilot/tools/camera_offset.py`), the four footprint bounds off a tape measure
+    from the turning point. A body centre expressed against nothing observable, with
+    the camera and the control point each carrying their own offset from it, admits
+    numbers that only their difference is defined by -- and a difference is not
+    something anyone can go and check.
     """
     name: str = 'go2'
-    shape: str = 'square'
-    length: float = 0.7
-    width: float = 0.3
-    radius: float = 0.3
-    camera_x: float = 0.35
-    camera_y: float = 0.0
-    control_x: float = 0.0
-    control_y: float = 0.0
+    #: Footprint bounds from the control centre. front != rear is the normal case:
+    #: nothing makes a chassis turn about the middle of its own body.
+    front_len: float = 0.35
+    rear_len: float = 0.35
+    half_width: float = 0.15
+    #: Where the camera sits in the body frame, from hand-eye calibration. There is
+    #: deliberately no vertical term: a spin about the vertical axis cannot observe
+    #: one, and the z-band that would use it is already defined relative to camera
+    #: height (ObstacleConfig).
+    camera_fwd: float = 0.35
+    camera_left: float = 0.0
     safety_radius: float = 0.1
     # Bounds used to constrain trajectory-library velocity sampling and to clamp
     # the final published cmd_vel. Placeholder values, same for every robot until
@@ -60,41 +73,31 @@ class RobotConfig:
     @property
     def cam_offset_3d(self):
         """Offset [left, up, forward] from control center to camera in body frame."""
-        return np.array([self.camera_y - self.control_y, 0.0, self.camera_x - self.control_x], dtype=np.float32)
-
-    @property
-    def half_size(self):
-        if self.shape == 'circle':
-            return (self.radius, self.radius)
-        return (self.length / 2.0, self.width / 2.0)
+        return np.array([self.camera_left, 0.0, self.camera_fwd], dtype=np.float32)
 
     def footprint_from_control(self):
         """Returns (front_len, rear_len, half_w) relative to control center."""
-        hl, hw = self.half_size
-        return float(hl - self.control_x), float(hl + self.control_x), float(hw)
+        return float(self.front_len), float(self.rear_len), float(self.half_width)
 
 
 GO2_CONFIG = RobotConfig(
-    name='go2', shape='square',
-    length=0.6, width=0.3,
-    camera_x=0.35, camera_y=0.0,
-    control_x=0.05, control_y=0.0,
+    name='go2',
+    front_len=0.25, rear_len=0.35, half_width=0.15,
+    camera_fwd=0.30, camera_left=0.0,
     safety_radius=0.1,
 )
 
 GO2W_CONFIG = RobotConfig(
-    name='go2w', shape='square',
-    length=0.6, width=0.3,
-    camera_x=0.35, camera_y=0.0,
-    control_x=0.05, control_y=0.0,
+    name='go2w',
+    front_len=0.25, rear_len=0.35, half_width=0.15,
+    camera_fwd=0.30, camera_left=0.0,
     safety_radius=0.1,
 )
 
 B2_CONFIG = RobotConfig(
-    name='b2', shape='square',
-    length=0.88, width=0.3,
-    camera_x=0.44, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
+    name='b2',
+    front_len=0.44, rear_len=0.44, half_width=0.15,
+    camera_fwd=0.44, camera_left=0.0,
     safety_radius=0.075,
     # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
     # robot could barely move: cmd_vel_control DROPS a target below this rather than
@@ -108,18 +111,16 @@ B2_CONFIG = RobotConfig(
 )
 
 B2W_CONFIG = RobotConfig(
-    name='b2w', shape='square',
-    length=0.88, width=0.3,
-    camera_x=0.44, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
+    name='b2w',
+    front_len=0.44, rear_len=0.44, half_width=0.15,
+    camera_fwd=0.44, camera_left=0.0,
     safety_radius=0.075,
 )
 
 G1_CONFIG = RobotConfig(
-    name='g1', shape='square',
-    length=0.3, width=0.5,
-    camera_x=0.1, camera_y=0.0,
-    control_x=0.0, control_y=0.0,
+    name='g1',
+    front_len=0.15, rear_len=0.15, half_width=0.25,
+    camera_fwd=0.10, camera_left=0.0,
     safety_radius=0.15,
     min_linear_vel=0.2, min_angular_vel=0.3,
 )

@@ -262,8 +262,8 @@ function objectCanvasRect(obj) {
 
 function cameraPose() {
   const yaw = (Number(config.start.yaw_deg || 0) * Math.PI) / 180;
-  const df = Number(config.robot.camera_x || 0) - Number(config.robot.control_x || 0);
-  const dl = Number(config.robot.camera_y || 0) - Number(config.robot.control_y || 0);
+  const df = Number(config.robot.camera_fwd || 0);
+  const dl = Number(config.robot.camera_left || 0);
   const forward = [Math.cos(yaw), Math.sin(yaw)];
   const left = [-Math.sin(yaw), Math.cos(yaw)];
   return {
@@ -289,10 +289,7 @@ function robotSummaryHtml() {
 }
 
 function footprintFromControl(r) {
-  const hl = r.shape === "circle" ? Number(r.radius || 0) : Number(r.length || 0) / 2;
-  const hw = r.shape === "circle" ? Number(r.radius || 0) : Number(r.width || 0) / 2;
-  const cx = Number(r.control_x || 0);
-  return [hl - cx, hl + cx, hw];
+  return [Number(r.front_len || 0), Number(r.rear_len || 0), Number(r.half_width || 0)];
 }
 
 function cameraSummaryHtml() {

@@ -47,19 +47,11 @@
         <label class="map-select-label">Preset
           <select id="robotPreset"></select>
         </label>
-        <label>Shape
-          <select data-bind="robot.shape">
-            <option value="square">square</option>
-            <option value="circle">circle</option>
-          </select>
-        </label>
-        <label>Length (m) <input data-bind="robot.length" type="number" step="0.05" min="0.05" /></label>
-        <label>Width (m) <input data-bind="robot.width" type="number" step="0.05" min="0.05" /></label>
-        <label>Radius (m) <input data-bind="robot.radius" type="number" step="0.05" min="0.05" /></label>
-        <label>Camera X (m) <input data-bind="robot.camera_x" type="number" step="0.01" /></label>
-        <label>Camera Y (m) <input data-bind="robot.camera_y" type="number" step="0.01" /></label>
-        <label>Control X (m) <input data-bind="robot.control_x" type="number" step="0.01" /></label>
-        <label>Control Y (m) <input data-bind="robot.control_y" type="number" step="0.01" /></label>
+        <label>Front (m) <input data-bind="robot.front_len" type="number" step="0.01" min="0" /></label>
+        <label>Rear (m) <input data-bind="robot.rear_len" type="number" step="0.01" min="0" /></label>
+        <label>Half width (m) <input data-bind="robot.half_width" type="number" step="0.01" min="0" /></label>
+        <label>Camera forward (m) <input data-bind="robot.camera_fwd" type="number" step="0.01" /></label>
+        <label>Camera left (m) <input data-bind="robot.camera_left" type="number" step="0.01" /></label>
         <label>Safety radius (m) <input data-bind="robot.safety_radius" type="number" step="0.01" min="0" /></label>
         <label>Max linear (m/s) <input data-bind="robot.max_linear_vel" type="number" step="0.05" min="0.05" /></label>
         <label>Max angular (rad/s) <input data-bind="robot.max_angular_vel" type="number" step="0.05" min="0.05" /></label>
