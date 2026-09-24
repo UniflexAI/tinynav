@@ -1,4 +1,6 @@
+import json
 import os
+import sys
 import numpy as np
 from dataclasses import dataclass, field, replace
 
@@ -74,14 +76,12 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2',
-    #: Not yet measured from the yaw centre the spin below found.
     front_len=0.25, rear_len=0.35, half_width=0.15,
-    #: Spin fit on byd-navcore-02, 2026-09-24.
-    camera_fwd=0.254, camera_left=0.028,
+    camera_fwd=0.30, camera_left=0.0,
     safety_radius=0.1,
 )
 
-GO2W_CONFIG = replace(GO2_CONFIG, name='go2w', camera_fwd=0.30, camera_left=0.0)
+GO2W_CONFIG = replace(GO2_CONFIG, name='go2w')
 
 B2_CONFIG = RobotConfig(
     name='b2',
@@ -109,8 +109,40 @@ G1_CONFIG = RobotConfig(
     min_linear_vel=0.2, min_angular_vel=0.3,
 )
 
+#: This rig's measured camera offset, over the robot type's. `forward_m` / `left_m`
+#: in metres, in the body frame above; any other key is the writer's own record.
+CAMERA_OFFSET_PATH = '/tinynav/tinynav_db/calib/camera_offset.json'
+
+
+def with_measured_camera(config, path=CAMERA_OFFSET_PATH):
+    """`config` with the camera offset from `path`, or `config` itself when there is
+    no file or it cannot be read. An unreadable one is said on stderr, because every
+    process that plans imports this and none of them should fail to start over it."""
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return config
+    try:
+        doc = json.loads(text)
+        return replace(config, camera_fwd=float(doc['forward_m']),
+                       camera_left=float(doc['left_m']))
+    except (KeyError, TypeError, ValueError) as e:
+        print(f"robot_specs: ignoring {path}, not a camera offset ({e!r})", file=sys.stderr)
+        return config
+
+
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
 try:
-    ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
+    _TYPE_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
 except KeyError:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
+
+
+def robot_config(path=CAMERA_OFFSET_PATH):
+    """This ROBOT_TYPE's config with the rig's measurement, read from disk now."""
+    return with_measured_camera(_TYPE_CONFIG, path)
+
+
+#: Read once, at import: a process picks up a new measurement at its next launch.
+ROBOT_CONFIG = robot_config()
