@@ -83,7 +83,10 @@ class RobotConfig:
 GO2_CONFIG = RobotConfig(
     name='go2',
     front_len=0.25, rear_len=0.35, half_width=0.15,
-    camera_fwd=0.30, camera_left=0.0,
+    #: Hand-eye, off a spin bag on byd-navcore-02 (2026-09-24). The lateral term is
+    #: real: the camera is not on the centreline, and the 0.0 every robot carried
+    #: before was the only value the old fields could express.
+    camera_fwd=0.254, camera_left=0.028,
     safety_radius=0.1,
 )
 
