@@ -12,6 +12,7 @@ import argparse
 import csv
 import os
 import sys
+import time
 
 import cv2
 import numpy as np
@@ -133,6 +134,8 @@ def main():
     ap.add_argument('--image-topic', default='/camera/camera/infra1/image_rect_raw')
     ap.add_argument('--info-topic', default='/camera/camera/infra1/camera_info')
     ap.add_argument('--memory', type=float, default=None, help='override StairConfig.memory_s')
+    ap.add_argument('--rate', type=float, default=None, help='target update rate in Hz (default: every depth frame); '
+                    'frames in between reuse the last target, odom_invalid is still immediate')
     ap.add_argument('--no-video', action='store_true')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -145,6 +148,7 @@ def main():
     img_t = np.array([t for t, _ in images])
     t0 = depth[0][0]
     writer, rows, next_pose = None, [], 0
+    res, last_compute, compute_times = None, -np.inf, []
     for t, d, depth_scale in depth:
         while next_pose < len(poses) and poses[next_pose, 0] <= t:
             gen.add_pose(poses[next_pose, 0], poses[next_pose, 1:4])
@@ -153,7 +157,12 @@ def main():
         if sync_err > 0.05:
             continue
         gen.add_depth(t, d.astype(np.float32) * depth_scale, K, T)
-        res = gen.compute(T, args.direction)
+        due = args.rate is None or t - last_compute >= 1.0 / args.rate
+        if res is None or due or not gen.odom_valid or res['status'] == 'odom_invalid':
+            tic = time.perf_counter()
+            res = gen.compute(T, args.direction)
+            compute_times.append(time.perf_counter() - tic)
+            last_compute = t
         fut = future_point(poses, j, GT_ARC)
         err = None
         if res['target'] is not None and fut is not None:
@@ -173,6 +182,9 @@ def main():
         w.writerows(rows)
 
     status = np.array([r['status'] for r in rows])
+    ct = np.array(compute_times[20:]) * 1000  # skip numba warmup
+    print(f"compute calls {len(compute_times)} ({len(compute_times) / (rows[-1]['t'] - rows[0]['t']):.1f}/s), "
+          f"median {np.median(ct):.1f} ms, p95 {np.percentile(ct, 95):.1f} ms")
     print(f"frames {len(rows)}: " + ", ".join(f"{s}={np.sum(status == s)}" for s in ('ok', 'search', 'no_seed', 'odom_invalid')))
     invalid_t = np.array([r['t'] for r in rows if r['status'] == 'odom_invalid'])
     if len(invalid_t):

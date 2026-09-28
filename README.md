@@ -341,6 +341,7 @@ source /opt/ros/humble/setup.bash
 | `--image-topic` | `/camera/camera/infra1/image_rect_raw` (only for the video) |
 | `--info-topic` | `/camera/camera/infra1/camera_info` |
 | `--memory` | override the height map memory in seconds (default 3.0) |
+| `--rate` | target update rate in Hz, e.g. `2` to match `map_node` (default: every depth frame); odometry jumps still stop immediately |
 | `--no-video` | skip writing the video |
 
 Outputs in `--out`:
