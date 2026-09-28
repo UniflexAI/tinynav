@@ -116,6 +116,9 @@ def render(res, cfg, T, poses, j, image, t_rel, err):
     cv2.arrowedLine(vis, c, to_px(T[:2, 3] + 0.5 * fwd), (0, 255, 255), 2, tipLength=0.3)
     txt = f"t={t_rel:5.1f}s  {res['status']}  well={res.get('well_side', 0):+.1f}" + (f"  err={err:4.0f}deg" if err is not None else "")
     cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    if res['status'] in ('odom_invalid', 'no_seed'):
+        cv2.rectangle(vis, (0, 0), (vis.shape[1] - 1, vis.shape[0] - 1), (0, 0, 255), 8)
+        cv2.putText(vis, 'STOP', (vis.shape[1] // 2 - 70, vis.shape[0] // 2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 5)
     img = cv2.cvtColor(cv2.resize(image, (int(image.shape[1] * n * scale / image.shape[0]), n * scale)), cv2.COLOR_GRAY2BGR)
     return np.hstack([img, vis])
 
