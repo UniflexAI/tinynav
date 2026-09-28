@@ -541,6 +541,24 @@ def route_heading_penalty(weight, heading_err_rad, end_remaining_m, terminal_ban
     return weight * heading_err_rad * route_band_fade(end_remaining_m, terminal_band_m)
 
 
+def turn_in_place_penalty(vx, yaw_rate, last_yaw_rate, w_turn, w_reversal):
+    """What a vx=0 row pays per rad/s of rotation, and more if it turns against the
+    last selected rotation. Moving rows pay nothing here.
+
+    Yaw rates are world-frame (rad/s), from the trajectory poses, not the lattice's
+    omega param -- the reverse vocabulary and the lattice do not share its sign.
+    `w_turn + w_reversal` has to stay under the heading term's reach per rad/s
+    (w_route_heading * rollout duration), or a standstill outranks the turn that
+    would clear a large heading error.
+    """
+    if abs(vx) > 1e-3:
+        return 0.0
+    cost = w_turn * abs(yaw_rate)
+    if yaw_rate * last_yaw_rate < 0.0:
+        cost += w_reversal * abs(yaw_rate)
+    return cost
+
+
 def build_route_fields(route_xy, shape, origin, resolution):
     """
     Rasterize a route into the lookup maps read by the DWA scoring, so scoring costs
@@ -766,6 +784,12 @@ class PlanningNode(Node):
         # tied and noise picked the winner -- 4.5 m of path for 0.02 m of progress on
         # 122 2026-09-18, standing still with a median 36 clear forward rows.
         self.w_route_heading = 30.0
+        # Per rad/s of a turn-in-place row, and on top of that per rad/s when it turns
+        # against the last selected rotation. The sum stays under w_route_heading's
+        # 90 per rad/s over a 3 s rollout (turn_in_place_penalty).
+        self.w_turn_in_place = 10.0
+        self.w_turn_reversal = 30.0
+        self.last_yaw_rate = 0.0  # world yaw rate (rad/s) of the last selected trajectory
 
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
@@ -1301,8 +1325,15 @@ class PlanningNode(Node):
             # direction wherever there is a route: pointing at the goal, at a corner, is
             # what cutting the corner is. Without a route there is only the goal bearing,
             # which is what this planner had before the route existed.
+            def _yaw_rate(traj):
+                dh = _world_heading(traj[1]) - _world_heading(traj[0])
+                return float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
+
             def cost_function(i):
                 traj, param = trajectories[i], params[i]
+                turn_penalty = turn_in_place_penalty(
+                    param[0], _yaw_rate(traj), self.last_yaw_rate,
+                    self.w_turn_in_place, self.w_turn_reversal)
                 gate_penalty = reverse_gate_penalty(param[0], should_reverse)
                 traj_end = np.array(traj[-1, :3])
                 target_end = target if target is not None else traj_end
@@ -1347,6 +1378,7 @@ class PlanningNode(Node):
                         + positional
                         + 10 * smooth
                         + heading_penalty
+                        + turn_penalty
                         + gate_penalty)
 
             top_indices = [min(range(len(trajectories)), key=cost_function)]
@@ -1378,8 +1410,8 @@ class PlanningNode(Node):
             sel_traj = trajectories[top_indices[0]]
             sel_vx = float(params[top_indices[0]][0])
 
-            dh = _world_heading(sel_traj[1]) - _world_heading(sel_traj[0])
-            sel_omega = float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
+            sel_omega = _yaw_rate(sel_traj)
+            self.last_yaw_rate = sel_omega
 
             # `turn_ok` is the one the log line could not answer: how many vx=0 rows
             # were collision-free when the gate banned every non-reverse row.

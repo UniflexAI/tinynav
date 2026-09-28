@@ -14,7 +14,8 @@ from planning_node import (run_raycasting_loopy, build_route_fields, route_band_
                            route_heading_penalty, score_trajectories_by_ESDF,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M, reverse_gate_penalty,
-                           generate_trajectory_library_3d)
+                           generate_trajectory_library_3d, turn_in_place_penalty,
+                           heading_of_pose7, angle_between)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -871,3 +872,50 @@ def test_footprint_cells_cover_the_body_along_its_heading():
     assert under[cell(0.0, 0.25)] and under[cell(0.0, -0.25)]
     assert not under[cell(0.25, 0.0)] and not under[cell(0.0, 0.4)]
     assert under.sum() == 12 * 6
+
+
+# --- turn-in-place penalty ------------------------------------------------------
+def _init_weights(*names):
+    """The planner's weights as __init__ assigns them, without building a node."""
+    cls = next(n for n in ast.walk(_planning_source())
+               if isinstance(n, ast.ClassDef) and n.name == 'PlanningNode')
+    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '__init__')
+    found = {t.attr: n.value.value for n in ast.walk(init) if isinstance(n, ast.Assign)
+             and isinstance(n.value, ast.Constant)
+             for t in n.targets if isinstance(t, ast.Attribute) and t.attr in names}
+    return [found[n] for n in names]
+
+
+def test_turning_back_against_the_last_rotation_costs_more_than_carrying_on():
+    w_turn, w_rev = 10.0, 30.0
+    carry_on = turn_in_place_penalty(0.0, 0.5, 0.4, w_turn, w_rev)
+    turn_back = turn_in_place_penalty(0.0, -0.5, 0.4, w_turn, w_rev)
+    assert turn_back > carry_on > 0.0
+    # From a standstill, or a straight line, there is no direction to turn back on.
+    assert (turn_in_place_penalty(0.0, -0.5, 0.0, w_turn, w_rev)
+            == turn_in_place_penalty(0.0, 0.5, 0.0, w_turn, w_rev) == carry_on)
+
+
+def test_only_turn_in_place_rows_pay_it():
+    """The counter-case: moving arcs and a standstill are untouched."""
+    assert turn_in_place_penalty(0.3, -0.5, 0.4, 10.0, 30.0) == 0.0
+    assert turn_in_place_penalty(-0.3, -0.5, 0.4, 10.0, 30.0) == 0.0
+    assert turn_in_place_penalty(0.0, 0.0, 0.4, 10.0, 30.0) == 0.0
+
+
+def test_a_reversed_turn_still_beats_standing_still_facing_the_wrong_way():
+    """The penalty must not bring back the freeze the heading term fixed: with the
+    goal far behind on the side opposite the last turn, the fastest turn-in-place row
+    has to save more heading cost than it pays, or standing still wins."""
+    w_heading, w_turn, w_rev = _init_weights(
+        'w_route_heading', 'w_turn_in_place', 'w_turn_reversal')
+    trajs, params = generate_trajectory_library_3d(
+        max_angular_vel=ROBOT_CONFIG.max_angular_vel, min_linear_vel=0.2)
+    spins = [i for i, (vx, w) in enumerate(params) if vx == 0.0 and abs(w) > 1e-6]
+    i = max(spins, key=lambda k: abs(params[k][1]))
+    traj = trajs[i]
+    turned = angle_between(heading_of_pose7(traj[-1]), heading_of_pose7(traj[0]))
+    dh = heading_of_pose7(traj[1]) - heading_of_pose7(traj[0])
+    yaw_rate = float(np.arctan2(np.sin(dh), np.cos(dh)) / 0.1)
+    paid = turn_in_place_penalty(0.0, yaw_rate, -yaw_rate, w_turn, w_rev)
+    assert w_heading * turned > paid, (w_heading * turned, paid)
