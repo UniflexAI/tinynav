@@ -344,6 +344,16 @@ ros2 topic pub --once /stair/cmd std_msgs/msg/String '{data: down}'   # or up / 
 
 `cmd_vel_control` only moves while `/nav/active` is true (normally set by the app). Set `--camera_height` to your robot's camera height above the ground.
 
+### Replay test with planning
+
+Replays a rosbag through `looper_bridge_node` + `planning_node` + `stair_node` in an isolated ROS domain (localhost only, so a robot on the network never sees these targets), records their outputs and renders a video:
+
+```bash
+bash scripts/run_stair_replay_test.sh tinynav_db/ros2bags/bag_downstairs down output/stair_replay
+```
+
+`stair_replay.mp4` shows the camera image and planning's obstacle map with the planning trajectory (green), stair target (red), stair path (orange), recorded motion (white) and robot (yellow); STOP marks frames where stair_node told planning to stop. The replay is open loop: the robot follows the recording, so the video shows what planning would choose at each moment. The console prints how well the planning trajectory matches the recorded motion per phase.
+
 ### Offline evaluation
 
 Evaluate the generator offline on a rosbag that contains depth, camera info and odometry:
