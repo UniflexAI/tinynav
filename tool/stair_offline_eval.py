@@ -1,0 +1,182 @@
+"""Offline evaluation of the stair mode target generator on a rosbag.
+
+Ground truth is where the robot actually went: for every depth frame we compare the
+direction to the generated target with the direction of the recorded trajectory 1 m ahead.
+
+usage:
+  source /opt/ros/humble/setup.bash
+  .venv/bin/python tool/stair_offline_eval.py --bag tinynav_db/ros2bags/bag_downstairs --direction down --out output/stair_eval
+"""
+import argparse
+import csv
+import os
+import sys
+
+import cv2
+import numpy as np
+import rosbag2_py
+from rclpy.serialization import deserialize_message
+from rosidl_runtime_py.utilities import get_message
+from scipy.spatial.transform import Rotation
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from tinynav.core.stair_target import StairConfig, StairTargetGenerator  # noqa: E402
+
+GT_ARC = 1.0
+JUMP_STEP = 0.3
+
+
+def read_bag(bag, depth_topic, pose_topic, image_topic, info_topic):
+    r = rosbag2_py.SequentialReader()
+    r.open(rosbag2_py.StorageOptions(uri=bag, storage_id='sqlite3'), rosbag2_py.ConverterOptions('cdr', 'cdr'))
+    types = {t.name: t.type for t in r.get_all_topics_and_types()}
+    r.set_filter(rosbag2_py.StorageFilter(topics=[depth_topic, pose_topic, image_topic, info_topic]))
+    def stamp(h):
+        return h.stamp.sec + h.stamp.nanosec * 1e-9
+    depth, images, poses, K = [], [], [], None
+    while r.has_next():
+        topic, data, _ = r.read_next()
+        msg = deserialize_message(data, get_message(types[topic]))
+        if topic == pose_topic:
+            pose = msg.pose.pose if hasattr(msg.pose, 'pose') else msg.pose
+            p, q = pose.position, pose.orientation
+            poses.append([stamp(msg.header), p.x, p.y, p.z, q.x, q.y, q.z, q.w])
+        elif topic == info_topic and K is None:
+            K = np.array(msg.k, dtype=np.float64).reshape(3, 3)
+        elif topic == depth_topic:
+            if msg.encoding in ('16UC1', 'mono16'):
+                depth.append((stamp(msg.header), np.frombuffer(msg.data, np.uint16).reshape(msg.height, msg.width), 1e-3))
+            else:
+                depth.append((stamp(msg.header), np.frombuffer(msg.data, np.float32).reshape(msg.height, msg.width), 1.0))
+        elif topic == image_topic:
+            images.append((stamp(msg.header), np.frombuffer(msg.data, np.uint8).reshape(msg.height, msg.width, -1)[..., 0]))
+    return depth, images, np.array(poses), K
+
+
+def pose_at(poses, t):
+    j = int(np.clip(np.searchsorted(poses[:, 0], t), 1, len(poses) - 1))
+    j = j if abs(poses[j, 0] - t) < abs(poses[j - 1, 0] - t) else j - 1
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_quat(poses[j, 4:8]).as_matrix()
+    T[:3, 3] = poses[j, 1:4]
+    return T, j, abs(poses[j, 0] - t)
+
+
+def future_point(poses, j, arc):
+    step = np.linalg.norm(np.diff(poses[j:, 1:3], axis=0), axis=1)
+    k = np.searchsorted(np.cumsum(step), arc)
+    return poses[j + k + 1, 1:4] if k < len(step) else None
+
+
+def phase_labeler(poses, window=1.0, min_dz=0.3):
+    """flight: recorded height changes within +-window s; landing: flat between the first and last flight."""
+    t, z = poses[:, 0], poses[:, 3]
+    lo = np.interp(t - window, t, z)
+    hi = np.interp(t + window, t, z)
+    flight_t = t[np.abs(hi - lo) > min_dz]
+    def phase_of(ts):
+        if len(flight_t) and np.min(np.abs(flight_t - ts)) < 0.05:
+            return 'flight'
+        return 'landing' if len(flight_t) and flight_t[0] < ts < flight_t[-1] else 'outside'
+    return phase_of
+
+
+def angle_deg(a, b):
+    c = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9)
+    return np.degrees(np.arccos(np.clip(c, -1, 1)))
+
+
+def render(res, cfg, T, poses, j, image, t_rel, err):
+    scale = 5
+    height = res['height']
+    n = height.shape[0]
+    ground_z = T[2, 3] - cfg.camera_height
+    rel = np.clip((np.nan_to_num(height, nan=ground_z) - ground_z) / 1.5, -1, 1)
+    vis = cv2.applyColorMap(((rel + 1) * 127.5).astype(np.uint8), cv2.COLORMAP_COOL)
+    vis[~np.isfinite(height)] = (35, 35, 35)
+    if 'reachable' in res:
+        vis[res['reachable']] = (0.55 * vis[res['reachable']] + 0.45 * np.array([90, 200, 90])).astype(np.uint8)
+    vis[res['obstacle']] = (200, 200, 200)
+    vis = cv2.resize(vis.transpose(1, 0, 2)[::-1], (n * scale, n * scale), interpolation=cv2.INTER_NEAREST)
+    def to_px(xy):
+        return int((xy[0] - res['origin'][0]) / cfg.resolution * scale), int(n * scale - (xy[1] - res['origin'][1]) / cfg.resolution * scale)
+    fut = poses[j:j + 400:10, 1:3]
+    for a, b in zip(fut[:-1], fut[1:]):
+        cv2.line(vis, to_px(a), to_px(b), (255, 255, 255), 2)
+    if res['path'] is not None:
+        pts = [to_px(p) for p in res['path'][:, :2]]
+        for a, b in zip(pts[:-1], pts[1:]):
+            cv2.line(vis, a, b, (0, 140, 255), 2)
+    if res['target'] is not None:
+        cv2.circle(vis, to_px(res['target']), 9, (0, 0, 255) if res['status'] == 'ok' else (0, 200, 255), -1)
+    c = to_px(T[:2, 3])
+    fwd = T[:2, :3] @ np.array([0, 0, 1.0])
+    fwd = fwd / (np.linalg.norm(fwd) + 1e-9)
+    cv2.circle(vis, c, 7, (0, 255, 255), -1)
+    cv2.arrowedLine(vis, c, to_px(T[:2, 3] + 0.5 * fwd), (0, 255, 255), 2, tipLength=0.3)
+    txt = f"t={t_rel:5.1f}s  {res['status']}  well={res.get('well_side', 0):+.1f}" + (f"  err={err:4.0f}deg" if err is not None else "")
+    cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    img = cv2.cvtColor(cv2.resize(image, (int(image.shape[1] * n * scale / image.shape[0]), n * scale)), cv2.COLOR_GRAY2BGR)
+    return np.hstack([img, vis])
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--bag', required=True)
+    ap.add_argument('--direction', choices=['up', 'down'], required=True)
+    ap.add_argument('--out', default='output/stair_eval')
+    ap.add_argument('--depth-topic', default='/camera/camera/depth/image_rect_raw')
+    ap.add_argument('--pose-topic', default='/camera/camera/vio_100hz')
+    ap.add_argument('--image-topic', default='/camera/camera/infra1/image_rect_raw')
+    ap.add_argument('--info-topic', default='/camera/camera/infra1/camera_info')
+    ap.add_argument('--memory', type=float, default=None, help='override StairConfig.memory_s')
+    ap.add_argument('--no-video', action='store_true')
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+
+    depth, images, poses, K = read_bag(args.bag, args.depth_topic, args.pose_topic, args.image_topic, args.info_topic)
+    print(f"depth {len(depth)}, images {len(images)}, poses {len(poses)}")
+    jumps = poses[1:, 0][np.linalg.norm(np.diff(poses[:, 1:4], axis=0), axis=1) > JUMP_STEP]
+    cfg = StairConfig() if args.memory is None else StairConfig(memory_s=args.memory)
+    phase_of = phase_labeler(poses)
+    gen = StairTargetGenerator(cfg)
+    img_t = np.array([t for t, _ in images])
+    t0 = depth[0][0]
+    writer, rows = None, []
+    for t, d, depth_scale in depth:
+        T, j, sync_err = pose_at(poses, t)
+        if sync_err > 0.05:
+            continue
+        gen.add_depth(t, d.astype(np.float32) * depth_scale, K, T)
+        res = gen.compute(T, args.direction)
+        fut = future_point(poses, j, GT_ARC)
+        after_jump = np.any((t - jumps >= 0) & (t - jumps < cfg.memory_s))
+        err = None
+        if res['target'] is not None and fut is not None:
+            err = angle_deg(res['target'][:2] - T[:2, 3], fut[:2] - T[:2, 3])
+        rows.append(dict(t=t - t0, phase=phase_of(t), status=res['status'], err_deg=err, after_odom_jump=bool(after_jump), cam_z=T[2, 3],
+                         target_z=None if res['target'] is None else res['target'][2]))
+        if not args.no_video:
+            frame = render(res, cfg, T, poses, j, images[int(np.argmin(np.abs(img_t - t)))][1], t - t0, err)
+            if writer is None:
+                writer = cv2.VideoWriter(os.path.join(args.out, 'stair_eval.mp4'), cv2.VideoWriter_fourcc(*'mp4v'), 10, (frame.shape[1], frame.shape[0]))
+            writer.write(frame)
+    if writer is not None:
+        writer.release()
+    with open(os.path.join(args.out, 'stair_eval.csv'), 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=rows[0].keys())
+        w.writeheader()
+        w.writerows(rows)
+
+    status = np.array([r['status'] for r in rows])
+    print(f"frames {len(rows)}: " + ", ".join(f"{s}={np.sum(status == s)}" for s in ('ok', 'search', 'no_seed')))
+    print(f"direction error vs recorded motion, excluding {cfg.memory_s}s after odom jumps:")
+    for ph in ('flight', 'landing', 'outside'):
+        sel = [r for r in rows if r['phase'] == ph and not r['after_odom_jump']]
+        errs = np.array([r['err_deg'] for r in sel if r['err_deg'] is not None])
+        if len(errs):
+            print(f"  {ph:8s} frames={len(sel):4d} with_target={len(errs) / len(sel) * 100:5.1f}%  median={np.median(errs):5.1f}deg  "
+                  f"p90={np.percentile(errs, 90):5.1f}deg  >45deg={np.mean(errs > 45) * 100:5.1f}%")
+
+if __name__ == '__main__':
+    main()
