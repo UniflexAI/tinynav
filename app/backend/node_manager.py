@@ -893,14 +893,14 @@ class BackendNode(Ros2NodeManager):
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
 
-    def cmd_stair_start(self, direction: str):
+    def cmd_stair_start(self, direction: str, turn: str = 'auto'):
         """Swap map_node for stair_node, which then publishes /control/target_pose."""
         self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
         self._map_node_proc = None
         self._kill_stair_node()
         self._clear_planning_target()
-        cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/stair_node.py', '--direction', direction]
+        cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/stair_node.py', '--direction', direction, '--turn', turn]
         if os.environ.get('STAIR_CAMERA_HEIGHT'):
             cmd += ['--camera_height', os.environ['STAIR_CAMERA_HEIGHT']]
         self._stair_proc = self._launch_proc('stair_node', cmd, env=self._nav_env())
@@ -918,7 +918,7 @@ class BackendNode(Ros2NodeManager):
         self._pub_state()
         # nothing moves until stair_node publishes a target and planning a path
         self._set_nav_active(True)
-        self.get_logger().info(f'Stair mode {direction}: map_node stopped, stair_node started')
+        self.get_logger().info(f'Stair mode {direction} (turn {turn}): map_node stopped, stair_node started')
 
     def cmd_stair_stop(self):
         """Leave stair mode: stair_node out, map_node back in (it relocalizes from scratch)."""

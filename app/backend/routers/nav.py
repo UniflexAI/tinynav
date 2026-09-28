@@ -24,6 +24,7 @@ class SendPoisRequest(BaseModel):
 
 class StairRequest(BaseModel):
     direction: Literal['up', 'down']
+    turn: Literal['auto', 'left', 'right'] = 'auto'  # U-turn side at landings
 
 
 class ManualTargetRequest(BaseModel):
@@ -125,8 +126,8 @@ def nav_stair_start(req: StairRequest):
     node = _require_node()
     if node.state not in ('idle', 'navigation', 'stair'):
         raise HTTPException(409, f'Cannot enter stair mode while in state: {node.state}')
-    node.cmd_stair_start(req.direction)
-    return {'ok': True, 'direction': req.direction}
+    node.cmd_stair_start(req.direction, req.turn)
+    return {'ok': True, 'direction': req.direction, 'turn': req.turn}
 
 
 @router.post('/stair/stop')

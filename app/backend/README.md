@@ -74,7 +74,7 @@ The interactive API docs are available at `http://<host>:8000/docs`.
 | `POST` | `/nav/go-to-poi` | Start navigation `{"poi_id": 0}` |
 | `POST` | `/nav/cancel` | Cancel active navigation |
 | `GET` | `/nav/status` | Navigation status |
-| `POST` | `/nav/stair/start` | Stair mode `{"direction": "up"}`: stops `map_node`, starts `stair_node` |
+| `POST` | `/nav/stair/start` | Stair mode `{"direction": "up", "turn": "left"}` (`turn`: U-turn side at landings, `auto` by default): stops `map_node`, starts `stair_node` |
 | `POST` | `/nav/stair/stop` | Leave stair mode: stops `stair_node`, restarts `map_node` (relocalizes) |
 
 ## WebSocket endpoints

@@ -1435,6 +1435,8 @@ class _StairButton extends ConsumerStatefulWidget {
 
 class _StairButtonState extends ConsumerState<_StairButton> {
   bool _loading = false;
+  // U-turn side at landings; kept between uses since a stairwell always turns the same way.
+  String _turn = 'auto';
 
   Future<void> _post(String path, [Map<String, dynamic>? data]) async {
     setState(() => _loading = true);
@@ -1455,19 +1457,39 @@ class _StairButtonState extends ConsumerState<_StairButton> {
   Future<void> _start() async {
     final direction = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Stair mode'),
-        content: const Text(
-            'Stops map navigation and follows the stairs. The robot starts moving right away.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'up'), child: const Text('Up')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'down'), child: const Text('Down')),
-        ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Stair mode'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                  'Stops map navigation and follows the stairs. The robot starts moving right away.'),
+              const SizedBox(height: 16),
+              const Text('Turn at landings'),
+              const SizedBox(height: 8),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'left', label: Text('Left')),
+                  ButtonSegment(value: 'right', label: Text('Right')),
+                  ButtonSegment(value: 'auto', label: Text('Auto')),
+                ],
+                selected: {_turn},
+                onSelectionChanged: (v) => setDialogState(() => _turn = v.first),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.pop(ctx, 'up'), child: const Text('Up')),
+            TextButton(onPressed: () => Navigator.pop(ctx, 'down'), child: const Text('Down')),
+          ],
+        ),
       ),
     );
     if (direction == null) return;
-    await _post('/nav/stair/start', {'direction': direction});
+    await _post('/nav/stair/start', {'direction': direction, 'turn': _turn});
   }
 
   @override

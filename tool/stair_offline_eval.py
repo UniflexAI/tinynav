@@ -136,6 +136,7 @@ def main():
     ap.add_argument('--memory', type=float, default=None, help='override StairConfig.memory_s')
     ap.add_argument('--rate', type=float, default=None, help='target update rate in Hz (default: every depth frame); '
                     'frames in between reuse the last target, odom_invalid is still immediate')
+    ap.add_argument('--turn', choices=['auto', 'left', 'right'], default='auto', help='U-turn side at landings (auto: estimate)')
     ap.add_argument('--no-video', action='store_true')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -145,6 +146,7 @@ def main():
     cfg = StairConfig() if args.memory is None else StairConfig(memory_s=args.memory)
     phase_of = phase_labeler(poses)
     gen = StairTargetGenerator(cfg)
+    gen.turn_side = {'auto': 0, 'left': 1, 'right': -1}[args.turn]
     img_t = np.array([t for t, _ in images])
     t0 = depth[0][0]
     writer, rows, next_pose = None, [], 0

@@ -1,6 +1,7 @@
 """Stair mode node: replaces map_node as the source of /control/target_pose inside a stairwell.
 
-Start with --direction up|down, or send "up" / "down" on /stair/cmd; "stop" leaves stair mode. No map or relocalization
+Start with --direction up|down, or send "up" / "down" on /stair/cmd; "stop" leaves stair mode.
+Add the U-turn side at landings if known ("up left", or --turn left); otherwise it is estimated. No map or relocalization
 is used; targets come from local geometry (see stair_target.py) at a low rate, like map_node.
 When there is no safe target (odometry jump, no ground under the feet) the planning target is
 cleared through /mapping/poi_change, so planning stops publishing paths and cmd_vel stops.
@@ -22,6 +23,7 @@ from tinynav.core.math_utils import msg2np, np2msg
 from tinynav.core.stair_target import StairConfig, StairTargetGenerator
 
 STOP_STATUSES = ('no_seed', 'odom_invalid')
+TURN_SIDES = {'auto': 0, 'left': 1, 'right': -1}
 
 
 def stamp_sec(stamp):
@@ -32,6 +34,7 @@ class StairNode(Node):
     def __init__(self, args):
         super().__init__('stair_node')
         self.gen = StairTargetGenerator(StairConfig(camera_height=args.camera_height))
+        self.gen.turn_side = TURN_SIDES[args.turn]
         self.bridge = CvBridge()
         self.K = None
         self.direction = args.direction  # None: stair mode inactive
@@ -58,17 +61,19 @@ class StairNode(Node):
             self.K = np.array(msg.k, dtype=np.float64).reshape(3, 3)
 
     def cmd_callback(self, msg):
-        cmd = msg.data.strip().lower()
-        if cmd in ('up', 'down'):
-            # keep the recent height map, only forget which side the stairwell was on
+        words = msg.data.strip().lower().split()
+        if words and words[0] in ('up', 'down') and (len(words) == 1 or (len(words) == 2 and words[1] in TURN_SIDES)):
+            # keep the recent height map, only forget the last flight and which side the stairwell was on
             self.gen.well_side = 0.0
-            self.direction = cmd
-            self.get_logger().info(f'stair mode on, going {cmd}')
-        elif cmd == 'stop':
+            self.gen.flight_dir = None
+            self.gen.turn_side = TURN_SIDES[words[1] if len(words) == 2 else 'auto']
+            self.direction = words[0]
+            self.get_logger().info(f'stair mode on, going {self.direction}, turn {words[1] if len(words) == 2 else "auto"}')
+        elif words == ['stop']:
             self.direction = None
             self.stop_robot('stair mode off')
         else:
-            self.get_logger().warning(f'unknown /stair/cmd {msg.data!r}, expected up / down / stop')
+            self.get_logger().warning(f'unknown /stair/cmd {msg.data!r}, expected "up|down [left|right|auto]" or "stop"')
 
     def odom_callback(self, msg):
         was_valid = self.gen.odom_valid
@@ -129,6 +134,7 @@ def main():
     parser.add_argument('--rate', type=float, default=2.0, help='target update rate in Hz (map_node uses 2 Hz)')
     parser.add_argument('--camera_height', type=float, default=0.66, help='camera height above the ground [m]')
     parser.add_argument('--direction', choices=['up', 'down'], default=None, help='start in stair mode right away')
+    parser.add_argument('--turn', choices=list(TURN_SIDES), default='auto', help='U-turn side at landings (auto: estimate)')
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
     node = StairNode(args)

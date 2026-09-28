@@ -92,6 +92,9 @@ def main():
     with open(args.rec, 'rb') as f:
         rec = pickle.load(f)
     depth, images, poses, _ = read_bag(args.bag, args.depth_topic, args.pose_topic, args.image_topic, args.info_topic)
+    if len(poses) == 0:  # some recordings only have the image-rate VIO
+        print(f"no {args.pose_topic} in the bag, using /camera/camera/vio_image")
+        depth, images, poses, _ = read_bag(args.bag, args.depth_topic, '/camera/camera/vio_image', args.image_topic, args.info_topic)
     img_t = np.array([t for t, _ in images])
     phase_of = phase_labeler(poses)
     t0 = depth[0][0]

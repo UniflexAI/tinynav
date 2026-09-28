@@ -34,13 +34,15 @@ class StairConfig:
     blind_radius: float = 0.8       # camera cannot see the ground this close; bridge it from the feet
     max_slope: float = 0.75         # steepest staircase rise/run allowed when bridging the blind zone
     seed_height_tol: float = 0.35
-    min_level_gain: float = 0.10    # target must be this much higher/lower than current ground
+    min_level_gain: float = 0.20    # target must be more than a step higher/lower than the feet (landings have small bumps)
     lookahead: float = 1.2          # lookahead distance along the geodesic path [m]
     clearance_weight: float = 0.5   # extra cost near obstacles, keeps the path centered
-    well_drop: float = 0.4          # cells this far beyond ground in the travel direction reveal the stairwell
+    well_drop: float = 0.4          # unreachable cells this far below the feet reveal the stairwell
     well_decay: float = 0.97        # memory of which side the stairwell is on
     turn_target_dist: float = 0.6   # in-place turn target distance when nothing is explored yet
     jump_dist: float = 0.10         # consecutive odometry poses further apart than this are a jump
+    flight_track_m: float = 1.0     # flight direction = horizontal displacement over this much recent travel
+    flight_min_dz: float = 0.15     # ... counted only if the height changed this much over it (on a flight)
     jump_hold_s: float = 2.0        # odometry stays invalid this long after the last jump
 
 
@@ -111,7 +113,10 @@ class StairTargetGenerator:
     def __init__(self, cfg: StairConfig | None = None):
         self.cfg = cfg or StairConfig()
         self.frames = deque()  # (stamp, points_world)
-        self.well_side = 0.0   # >0: stairwell on the robot's left, <0: right
+        self.well_side = 0.0   # >0: stairwell on the left of the last flight, <0: right
+        self.flight_dir = None  # horizontal travel direction on the last flight
+        self.turn_side = 0      # U-turn side at landings if known: +1 left, -1 right, 0 estimate from the stairwell
+        self.track = deque()    # recent odometry positions, for the flight direction
         self.last_position = None
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
@@ -122,8 +127,24 @@ class StairTargetGenerator:
         if self.last_position is not None and np.linalg.norm(position - self.last_position) > self.cfg.jump_dist:
             self.last_jump_stamp = stamp
             self.frames.clear()
+            self.track.clear()
         self.last_position = position
         self.latest_stamp = max(self.latest_stamp, stamp)
+        if not self.track or np.linalg.norm(position[:2] - self.track[-1][:2]) > 0.02:
+            self.track.append(position)
+            while len(self.track) > 200:
+                self.track.popleft()
+            self._update_flight_dir()
+
+    def _update_flight_dir(self):
+        now, arc = self.track[-1], 0.0
+        for i in range(len(self.track) - 2, -1, -1):
+            arc += np.linalg.norm(self.track[i + 1][:2] - self.track[i][:2])
+            if arc >= self.cfg.flight_track_m:
+                d = now[:2] - self.track[i][:2]
+                if abs(now[2] - self.track[i][2]) > self.cfg.flight_min_dz and np.linalg.norm(d) > 0.5 * arc:
+                    self.flight_dir = d / np.linalg.norm(d)
+                return
 
     @property
     def odom_valid(self):
@@ -139,7 +160,9 @@ class StairTargetGenerator:
 
     def reset(self):
         self.frames.clear()
+        self.track.clear()
         self.well_side = 0.0
+        self.flight_dir = None
         self.last_position = None
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
@@ -194,37 +217,43 @@ class StairTargetGenerator:
         out['reachable'] = reachable
         fwd = T_cam_to_world[:2, :3] @ np.array([0.0, 0.0, 1.0])
         fwd = fwd / (np.linalg.norm(fwd) + 1e-9)
-        lateral = fwd[0] * rel_xy[..., 1] - fwd[1] * rel_xy[..., 0]  # >0 on the left
 
-        # the stairwell shows up as observed-but-unreachable cells far beyond ground level in the travel direction
-        well = observed & ~reachable & (sign * (np.nan_to_num(height) - foot_z) > cfg.well_drop) & (np.abs(lateral) < 1.5)
-        if np.any(well):
-            self.well_side = cfg.well_decay * self.well_side + (1 - cfg.well_decay) * np.clip(np.mean(np.sign(lateral[well])), -1, 1) * 10
-        out['well_side'] = self.well_side
+        def lateral_to(d):  # >0 on the left of direction d
+            return d[0] * rel_xy[..., 1] - d[1] * rel_xy[..., 0]
 
         h = np.where(reachable, height, np.nan)
         best = np.nanmax(sign * h)
         if best >= sign * foot_z + cfg.min_level_gain:
+            out['status'] = 'ok'
+            # on a flight: estimate which side the stairwell is on. It is a hole whichever way we go:
+            # lower floors seen through it are observed but unreachable.
+            lateral = lateral_to(self.flight_dir if self.flight_dir is not None else fwd)
+            well = observed & ~reachable & (np.nan_to_num(height, nan=np.inf) < foot_z - cfg.well_drop) & (np.abs(lateral) < 1.5)
+            if np.any(well):
+                self.well_side = cfg.well_decay * self.well_side + (1 - cfg.well_decay) * np.clip(np.mean(np.sign(lateral[well])), -1, 1) * 10
             # among cells of the extreme level, take the nearest in path cost
             level = reachable & (sign * np.nan_to_num(h, nan=-np.inf) > best - 0.1)
-            out['status'] = 'ok'
             goal = np.unravel_index(np.argmin(np.where(level, dist, np.inf)), dist.shape)
         else:
-            # landing: nothing better is visible, explore the frontier on the stairwell side
+            # landing: nothing better is visible, explore the frontier on the stairwell side. Sides are taken
+            # w.r.t. the last flight, not the camera, which keeps turning on the landing.
             out['status'] = 'search'
+            fwd = self.flight_dir if self.flight_dir is not None else fwd
+            lateral = lateral_to(fwd)
             unobserved_nb = binary_dilation(~(observed | blind), structure=np.ones((3, 3), bool))
             frontier = reachable & unobserved_nb & (np.linalg.norm(rel_xy, axis=-1) > 0.4) & (rel_xy @ fwd > -0.3)
-            side = np.sign(self.well_side)
+            side = self.turn_side or np.sign(self.well_side)
             if side != 0:
                 frontier &= side * lateral > 0
             if not np.any(frontier):
                 left = np.array([-fwd[1], fwd[0]])
                 turn = cam[:2] + cfg.turn_target_dist * (left if side >= 0 else -left)
-                out['target'] = np.array([turn[0], turn[1], foot_z])
+                out.update(target=np.array([turn[0], turn[1], foot_z]), well_side=self.well_side)
                 return out
             # the next flight is beside the one we came from, across the stairwell
             score = np.where(frontier, side * lateral, -np.inf)
             goal = np.unravel_index(np.argmax(score), score.shape)
+        out['well_side'] = self.well_side
         path = [goal]
         while parent[path[-1][0], path[-1][1], 0] >= 0:
             path.append((parent[path[-1][0], path[-1][1], 0], parent[path[-1][0], path[-1][1], 1]))

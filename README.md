@@ -330,14 +330,16 @@ Each call returns a `status`:
 ```bash
 bash scripts/run_looper_stair_navigation.sh
 # in the last pane, pick the direction and press Enter
-ros2 topic pub --once /stair/cmd std_msgs/msg/String '{data: down}'   # or up / stop
+ros2 topic pub --once /stair/cmd std_msgs/msg/String '{data: down left}'   # or "up right", "down", "stop"
 ```
+
+The optional second word is the U-turn side at landings (`left` / `right`, `auto` if omitted). A stairwell always turns the same way, so give it when you know it: on the way up the stairwell is rarely visible and the automatic estimate is unreliable. The app's Stairs button asks for it too.
 
 | Topic | Direction | Notes |
 |---|---|---|
 | `/slam/depth` + `/slam/odometry_visual` | in | same synced pair as `planning_node`, feeds the height map every frame |
 | `/slam/odometry` | in | raw 100 Hz odometry for the jump check |
-| `/stair/cmd` (`std_msgs/String`) | in | `up` / `down` start stair mode, `stop` leaves it |
+| `/stair/cmd` (`std_msgs/String`) | in | `up` / `down` (optionally `left` / `right`) start stair mode, `stop` leaves it |
 | `/control/target_pose` | out | 2 Hz (`--rate`), same format as `map_node` |
 | `/mapping/poi_change` | out | sent once when the robot must stop (`no_seed` / `odom_invalid`, or `stop`); planning drops its target and `cmd_vel_control` stops within ~0.8 s |
 | `/stair/status`, `/stair/path` | out | debugging: status string and the planned path |
@@ -349,7 +351,7 @@ ros2 topic pub --once /stair/cmd std_msgs/msg/String '{data: down}'   # or up / 
 Replays a rosbag through `looper_bridge_node` + `planning_node` + `stair_node` in an isolated ROS domain (localhost only, so a robot on the network never sees these targets), records their outputs and renders a video:
 
 ```bash
-bash scripts/run_stair_replay_test.sh tinynav_db/ros2bags/bag_downstairs down output/stair_replay
+bash scripts/run_stair_replay_test.sh tinynav_db/ros2bags/bag_downstairs down output/stair_replay left
 ```
 
 `stair_replay.mp4` shows the camera image and planning's obstacle map with the planning trajectory (green), stair target (red), stair path (orange), recorded motion (white) and robot (yellow); STOP marks frames where stair_node told planning to stop. The replay is open loop: the robot follows the recording, so the video shows what planning would choose at each moment. The console prints how well the planning trajectory matches the recorded motion per phase.
@@ -374,6 +376,7 @@ source /opt/ros/humble/setup.bash
 | `--image-topic` | `/camera/camera/infra1/image_rect_raw` (only for the video) |
 | `--info-topic` | `/camera/camera/infra1/camera_info` |
 | `--memory` | override the height map memory in seconds (default 3.0) |
+| `--turn` | U-turn side at landings: `left`, `right` or `auto` (default) |
 | `--rate` | target update rate in Hz, e.g. `2` to match `map_node` (default: every depth frame); odometry jumps still stop immediately |
 | `--no-video` | skip writing the video |
 
