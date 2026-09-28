@@ -153,6 +153,7 @@ The repository is organized as follows:
   - `perception_node.py` – Processes sensor data for localization and perception.
   - `map_node.py` – Builds and maintains the environment map.
   - `planning_node.py` – Computes paths and trajectories using map and perception data.
+  - `stair_target.py` – Stair mode local target generator (experimental, see [Stair Mode](#stair-mode-experimental)).
   - `control_node.py` – Sends control commands to actuate the robot.
   - Supporting modules:
     - `driver_node.py`, `math_utils.py`, `models_trt.py`, `stereo_engine.py`.
@@ -301,6 +302,56 @@ You can combine multiple extras in one command:
 ```bash
 uv sync --extra unitree --extra 3dgs
 ```
+
+## Stair Mode (Experimental)
+
+In stairwells map relocalization is unreliable (repetitive steps, one floor's map reused for every floor). Stair mode ignores the map and follows local geometry; it only needs to know whether to go `up` or `down`.
+
+How it works (`tinynav/core/stair_target.py`):
+1. Build a 2.5D height map around the robot from the last 3 s of depth (walls/railings are cells with a large z-span).
+2. Search from the feet over cells whose height change fits a stair step.
+3. Target = 1.2 m ahead on the path to the highest (`up`) or lowest (`down`) reachable cell.
+4. On landings, where the next flight is not visible yet, explore toward the stairwell side (estimated online).
+
+It is not wired into `planning_node.py` yet. Evaluate it offline on a rosbag that contains depth, camera info and odometry:
+
+```bash
+source /opt/ros/humble/setup.bash
+.venv/bin/python tool/stair_offline_eval.py \
+    --bag tinynav_db/ros2bags/bag_downstairs \
+    --direction down \
+    --out output/stair_eval
+```
+
+| Option | Description (default) |
+|---|---|
+| `--direction` | `up` or `down` (required) |
+| `--depth-topic` | `/camera/camera/depth/image_rect_raw` (`16UC1`/`mono16` in mm, or `32FC1` in m) |
+| `--pose-topic` | `/camera/camera/vio_100hz` (`PoseStamped` or `Odometry`, camera pose in a z-up world frame) |
+| `--image-topic` | `/camera/camera/infra1/image_rect_raw` (only for the video) |
+| `--info-topic` | `/camera/camera/infra1/camera_info` |
+| `--memory` | override the height map memory in seconds (default 3.0) |
+| `--no-video` | skip writing the video |
+
+Outputs in `--out`:
+- `stair_eval.mp4`: camera image (left) and local height map (right).
+- `stair_eval.csv`: per depth frame `t, phase, status, err_deg, after_odom_jump, cam_z, target_z`.
+- Console summary: direction error between the target and the recorded motion 1 m ahead, split into `flight` / `landing` / `outside` (frames within 3 s after an odometry jump are excluded).
+
+Video legend (map is world-aligned, centered on the robot, 6 m x 6 m):
+
+| Mark | Meaning |
+|---|---|
+| Yellow dot + arrow | Robot position and camera heading |
+| Red dot | Target in `ok` state (a lower/higher level is reachable) |
+| Amber dot | Target in `search` state (landing exploration or in-place turn) |
+| Orange line | Planned path to the goal (the goal is its end) |
+| White line | Recorded motion in the next 4 s (ground truth, not algorithm output) |
+| Dark gray / light gray | Unobserved / wall or railing |
+| Cyan to magenta | Height relative to the feet, cyan is lower |
+| Green tint | Reachable from the feet |
+
+Tunables live in `StairConfig` (e.g. `camera_height`, `max_step`, `robot_radius`); set `camera_height` to your robot's camera height above the ground.
 
 # Next Steps
 - [ ] **High Optimization NN models**:
