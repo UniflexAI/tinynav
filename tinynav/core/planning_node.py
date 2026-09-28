@@ -337,8 +337,8 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 10)
         self.resolution = 0.05
+        self.grid_shape = (100, 100, int(round(2 * ROBOT_CONFIG.obstacle.grid_half_height_m / self.resolution)))
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)

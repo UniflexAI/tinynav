@@ -9,12 +9,15 @@ class ObstacleConfig:
 
     z-band is relative to camera height (T[2, 3]). Taller robots need a wider
     band so hanging obstacles and low walls still count as collisions.
+    The band is clipped to the local occupancy grid, which spans camera z
+    +- grid_half_height_m, so keep the grid at least as tall as the band.
     """
     robot_z_bottom: float = -0.4
     robot_z_top: float = 0.4
     occ_threshold: float = 0.1
     min_wall_span_m: float = 0.2
     dilation_cells: int = 2
+    grid_half_height_m: float = 0.75
 
 
 @dataclass
