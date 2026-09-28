@@ -903,19 +903,57 @@ def test_only_turn_in_place_rows_pay_it():
     assert turn_in_place_penalty(0.0, 0.0, 0.4, 10.0, 30.0) == 0.0
 
 
+# Camera convention, body +Z forward and level. The library's default identity
+# quaternion points +Z straight up, where every heading reads 0 and every turn reads
+# as no turn at all.
+_LEVEL_Q = np.array([-0.5, 0.5, -0.5, 0.5])
+
+
+def _spin(fastest):
+    """(heading it turns over the rollout, world yaw rate) of the fastest or slowest
+    turn-in-place row."""
+    trajs, params = generate_trajectory_library_3d(
+        init_q=_LEVEL_Q, max_angular_vel=ROBOT_CONFIG.max_angular_vel, min_linear_vel=0.2)
+    spins = [i for i, (vx, w) in enumerate(params) if vx == 0.0 and abs(w) > 0.05]
+    pick = max if fastest else min
+    traj = trajs[pick(spins, key=lambda k: abs(params[k][1]))]
+    turned = angle_between(heading_of_pose7(traj[-1]), heading_of_pose7(traj[0]))
+    dh = heading_of_pose7(traj[1]) - heading_of_pose7(traj[0])
+    return turned, float(np.arctan2(np.sin(dh), np.cos(dh)) / 0.1)
+
+
 def test_a_reversed_turn_still_beats_standing_still_facing_the_wrong_way():
     """The penalty must not bring back the freeze the heading term fixed: with the
     goal far behind on the side opposite the last turn, the fastest turn-in-place row
     has to save more heading cost than it pays, or standing still wins."""
-    w_heading, w_turn, w_rev = _init_weights(
-        'w_route_heading', 'w_turn_in_place', 'w_turn_reversal')
-    trajs, params = generate_trajectory_library_3d(
-        max_angular_vel=ROBOT_CONFIG.max_angular_vel, min_linear_vel=0.2)
-    spins = [i for i, (vx, w) in enumerate(params) if vx == 0.0 and abs(w) > 1e-6]
-    i = max(spins, key=lambda k: abs(params[k][1]))
-    traj = trajs[i]
-    turned = angle_between(heading_of_pose7(traj[-1]), heading_of_pose7(traj[0]))
-    dh = heading_of_pose7(traj[1]) - heading_of_pose7(traj[0])
-    yaw_rate = float(np.arctan2(np.sin(dh), np.cos(dh)) / 0.1)
-    paid = turn_in_place_penalty(0.0, yaw_rate, -yaw_rate, w_turn, w_rev)
+    w_heading, w_turn, w_rev, w_start = _init_weights(
+        'w_route_heading', 'w_turn_in_place', 'w_turn_reversal', 'w_turn_start')
+    turned, yaw_rate = _spin(fastest=True)
+    assert abs(yaw_rate) > 0.5, 'not the fastest spin -- nothing is being tested'
+    paid = turn_in_place_penalty(0.0, yaw_rate, -yaw_rate, w_turn, w_rev,
+                                 w_start, np.deg2rad(150.0))
     assert w_heading * turned > paid, (w_heading * turned, paid)
+
+
+def test_facing_the_target_a_slow_spin_loses_to_standing_still():
+    """What the start cost is for: on 65 (2026-09-28) the robot, blocked with the target
+    25 deg off its nose, turned in place a little at a time -- each slow spin winning
+    by a few points of heading cost -- until it pointed 60-78 deg away. The most a slow
+    spin can gain there must stay under what it pays to start."""
+    w_heading, w_turn, w_rev, w_start = _init_weights(
+        'w_route_heading', 'w_turn_in_place', 'w_turn_reversal', 'w_turn_start')
+    turned, yaw_rate = _spin(fastest=False)
+    assert 0.05 < abs(yaw_rate) < 0.2, 'not the slowest spin -- nothing is being tested'
+    paid = turn_in_place_penalty(0.0, yaw_rate, yaw_rate, w_turn, w_rev,
+                                 w_start, np.deg2rad(25.0))
+    assert w_heading * turned < paid, (w_heading * turned, paid)
+
+
+def test_the_start_cost_shrinks_as_the_robot_points_away():
+    costs = [turn_in_place_penalty(0.0, 0.3, 0.3, 0.0, 0.0, 40.0, np.deg2rad(e))
+             for e in (0.0, 45.0, 90.0, 135.0, 180.0)]
+    assert costs == sorted(costs, reverse=True)
+    assert costs[0] == 40.0 and costs[-1] == 0.0
+    # A standstill and a moving row pay none of it, whatever the heading.
+    assert turn_in_place_penalty(0.0, 0.0, 0.3, 10.0, 30.0, 40.0, 0.0) == 0.0
+    assert turn_in_place_penalty(0.3, 0.3, 0.3, 10.0, 30.0, 40.0, 0.0) == 0.0

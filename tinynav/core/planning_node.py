@@ -541,9 +541,16 @@ def route_heading_penalty(weight, heading_err_rad, end_remaining_m, terminal_ban
     return weight * heading_err_rad * route_band_fade(end_remaining_m, terminal_band_m)
 
 
-def turn_in_place_penalty(vx, yaw_rate, last_yaw_rate, w_turn, w_reversal):
-    """What a vx=0 row pays per rad/s of rotation, and more if it turns against the
-    last selected rotation. Moving rows pay nothing here.
+def turn_in_place_penalty(vx, yaw_rate, last_yaw_rate, w_turn, w_reversal,
+                          w_start=0.0, start_err_rad=0.0):
+    """What a rotating vx=0 row pays: a start cost that shrinks as the robot points
+    further from the target, then per rad/s of rotation, and more if it turns against
+    the last selected rotation. Moving rows and a standstill pay nothing here.
+
+    The start cost is `w_start * (1 - start_err_rad / pi)`: all of it facing the
+    target, none of it facing away. Facing the target a spin has little heading to
+    gain, so a small, noisy gain no longer outranks standing still; facing away the
+    spin is what the robot needs, and costs nothing extra.
 
     Yaw rates are world-frame (rad/s), from the trajectory poses, not the lattice's
     omega param -- the reverse vocabulary and the lattice do not share its sign.
@@ -551,9 +558,9 @@ def turn_in_place_penalty(vx, yaw_rate, last_yaw_rate, w_turn, w_reversal):
     (w_route_heading * rollout duration), or a standstill outranks the turn that
     would clear a large heading error.
     """
-    if abs(vx) > 1e-3:
+    if abs(vx) > 1e-3 or abs(yaw_rate) < 1e-3:
         return 0.0
-    cost = w_turn * abs(yaw_rate)
+    cost = w_start * (1.0 - min(abs(start_err_rad), np.pi) / np.pi) + w_turn * abs(yaw_rate)
     if yaw_rate * last_yaw_rate < 0.0:
         cost += w_reversal * abs(yaw_rate)
     return cost
@@ -788,6 +795,9 @@ class PlanningNode(Node):
         # against the last selected rotation. The sum stays under w_route_heading's
         # 90 per rad/s over a 3 s rollout (turn_in_place_penalty).
         self.w_turn_in_place = 10.0
+        # A turn-in-place row's start cost with the robot pointing at the target,
+        # falling linearly to 0 pointing away (turn_in_place_penalty).
+        self.w_turn_start = 40.0
         self.w_turn_reversal = 30.0
         self.last_yaw_rate = 0.0  # world yaw rate (rad/s) of the last selected trajectory
 
@@ -1329,11 +1339,17 @@ class PlanningNode(Node):
                 dh = _world_heading(traj[1]) - _world_heading(traj[0])
                 return float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
+            # From the robot's own pose, not a row's first pose: the lattice's rows are
+            # already one step in, each turned by its own omega.
+            start_err = (_end_heading_error(np.concatenate([init_p, init_q]), target)
+                         if target is not None else 0.0)
+
             def cost_function(i):
                 traj, param = trajectories[i], params[i]
                 turn_penalty = turn_in_place_penalty(
                     param[0], _yaw_rate(traj), self.last_yaw_rate,
-                    self.w_turn_in_place, self.w_turn_reversal)
+                    self.w_turn_in_place, self.w_turn_reversal,
+                    self.w_turn_start, start_err)
                 gate_penalty = reverse_gate_penalty(param[0], should_reverse)
                 traj_end = np.array(traj[-1, :3])
                 target_end = target if target is not None else traj_end
