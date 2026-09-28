@@ -40,7 +40,8 @@ class StairConfig:
                                     # 'ok' goal this long before switching to landing search
     lookahead: float = 1.2          # lookahead distance along the geodesic path [m]
     clearance_weight: float = 0.5   # extra cost near obstacles, keeps the path centered
-    well_drop: float = 0.4          # unreachable cells this far below the feet reveal the stairwell
+    side_view_min: float = 0.7      # cells seen this far to the side of a flight ...
+    side_view_max: float = 2.5      # ... up to here tell which side is open (railing) and which is a wall
     well_decay: float = 0.97        # memory of which side the stairwell is on
     turn_target_dist: float = 0.6   # last-resort in-place turn target distance
     search_clearance: float = 0.35  # landing targets keep this far from walls (planning backs off near walls)
@@ -119,7 +120,7 @@ class StairTargetGenerator:
     def __init__(self, cfg: StairConfig | None = None):
         self.cfg = cfg or StairConfig()
         self.frames = deque()  # (stamp, points_world)
-        self.well_side = 0.0   # >0: stairwell on the left of the last flight, <0: right
+        self.well_side = 0.0   # >0: next flight (railing side) on the left of the last flight, <0: right
         self.flight_dir = None  # horizontal travel direction on the last flight
         self.turn_side = 0      # U-turn side at landings if known: +1 left, -1 right, 0 estimate from the stairwell
         self.track = deque()    # recent odometry positions, for the flight direction
@@ -254,12 +255,16 @@ class StairTargetGenerator:
         elif best >= sign * foot_z + gain:
             out['status'] = 'ok'
             self.search_goal = None
-            # on a flight: estimate which side the stairwell is on. It is a hole whichever way we go:
-            # lower floors seen through it are observed but unreachable.
-            lateral = lateral_to(self.flight_dir if self.flight_dir is not None else fwd)
-            well = observed & ~reachable & (np.nan_to_num(height, nan=np.inf) < foot_z - cfg.well_drop) & (np.abs(lateral) < 1.5)
-            if np.any(well):
-                self.well_side = cfg.well_decay * self.well_side + (1 - cfg.well_decay) * np.clip(np.mean(np.sign(lateral[well])), -1, 1) * 10
+            # on a flight: the next flight is behind the railing, not behind the wall. A wall hides what is beyond
+            # it while a railing lets us see the parallel flight (above or below), so the open side is the one
+            # with more cells seen far to the side. This works both up and down.
+            ref = self.flight_dir if self.flight_dir is not None else fwd
+            lateral, along = lateral_to(ref), rel_xy @ ref
+            beside = observed & (np.abs(along) < 1.5)
+            seen_l = np.sum(beside & (lateral > cfg.side_view_min) & (lateral < cfg.side_view_max))
+            seen_r = np.sum(beside & (lateral < -cfg.side_view_min) & (lateral > -cfg.side_view_max))
+            if seen_l + seen_r > 0:
+                self.well_side = cfg.well_decay * self.well_side + (1 - cfg.well_decay) * (seen_l - seen_r) / (seen_l + seen_r) * 10
             # among cells of the extreme level, take the nearest in path cost
             level = reachable & (sign * np.nan_to_num(h, nan=-np.inf) > best - 0.1)
             goal = np.unravel_index(np.argmin(np.where(level, dist, np.inf)), dist.shape)

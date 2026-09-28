@@ -333,7 +333,7 @@ bash scripts/run_looper_stair_navigation.sh
 ros2 topic pub --once /stair/cmd std_msgs/msg/String '{data: down left}'   # or "up right", "down", "stop"
 ```
 
-The optional second word is the U-turn side at landings (`left` / `right`, `auto` if omitted). A stairwell always turns the same way, so give it when you know it: on the way up the stairwell is rarely visible and the automatic estimate is unreliable. The app's Stairs button asks for it too.
+The optional second word is the U-turn side at landings (`left` / `right`, `auto` if omitted). `auto` works out the side while walking a flight: the next flight is behind the railing, not the wall, and a wall hides what is beyond it while a railing lets the camera see the parallel flight, so the side that shows more is taken. A stairwell always turns the same way, so giving the side is still the safest choice. The app's Stairs button asks for it too.
 
 | Topic | Direction | Notes |
 |---|---|---|
