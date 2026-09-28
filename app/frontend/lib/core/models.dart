@@ -36,6 +36,8 @@ class DeviceStatus {
   final String rawState;
   final bool navNodesRunning;
   final bool navPaused;
+  final String? stairMode; // 'up' | 'down' | null
+  final String stairStatus;
 
   const DeviceStatus({
     required this.online,
@@ -48,6 +50,8 @@ class DeviceStatus {
     required this.rawState,
     required this.navNodesRunning,
     required this.navPaused,
+    this.stairMode,
+    this.stairStatus = '',
   });
 
   factory DeviceStatus.fromJson(Map<String, dynamic> json) => DeviceStatus(
@@ -61,6 +65,8 @@ class DeviceStatus {
         rawState: json['rawState'] as String? ?? 'unknown',
         navNodesRunning: json['navNodesRunning'] as bool? ?? false,
         navPaused: json['navPaused'] as bool? ?? false,
+        stairMode: json['stairMode'] as String?,
+        stairStatus: json['stairStatus'] as String? ?? '',
       );
 }
 

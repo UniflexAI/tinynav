@@ -1,6 +1,6 @@
 """Stair mode node: replaces map_node as the source of /control/target_pose inside a stairwell.
 
-Send "up" / "down" on /stair/cmd to start, "stop" to leave stair mode. No map or relocalization
+Start with --direction up|down, or send "up" / "down" on /stair/cmd; "stop" leaves stair mode. No map or relocalization
 is used; targets come from local geometry (see stair_target.py) at a low rate, like map_node.
 When there is no safe target (odometry jump, no ground under the feet) the planning target is
 cleared through /mapping/poi_change, so planning stops publishing paths and cmd_vel stops.
@@ -34,7 +34,7 @@ class StairNode(Node):
         self.gen = StairTargetGenerator(StairConfig(camera_height=args.camera_height))
         self.bridge = CvBridge()
         self.K = None
-        self.direction = None  # None: stair mode inactive
+        self.direction = args.direction  # None: stair mode inactive
         self.latest_T = None
         self.stopped = True  # planning target is currently cleared by us
 
@@ -51,7 +51,7 @@ class StairNode(Node):
         self.status_pub = self.create_publisher(String, '/stair/status', 10)
         self.path_pub = self.create_publisher(Path, '/stair/path', 10)
         self.create_timer(1.0 / args.rate, self.timer_callback)
-        self.get_logger().info('stair_node ready, send "up" / "down" / "stop" on /stair/cmd')
+        self.get_logger().info(f'stair_node ready, direction={self.direction}; send "up" / "down" / "stop" on /stair/cmd')
 
     def info_callback(self, msg):
         if self.K is None:
@@ -128,6 +128,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--rate', type=float, default=2.0, help='target update rate in Hz (map_node uses 2 Hz)')
     parser.add_argument('--camera_height', type=float, default=0.66, help='camera height above the ground [m]')
+    parser.add_argument('--direction', choices=['up', 'down'], default=None, help='start in stair mode right away')
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
     node = StairNode(args)

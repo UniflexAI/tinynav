@@ -248,7 +248,15 @@ class _OperateTabState extends ConsumerState<OperateTab> {
               Positioned(
                 bottom: 10,
                 right: 10,
-                child: _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    _StairButton(statusAsync: ref.watch(deviceStatusProvider)),
+                    const SizedBox(height: 8),
+                    _NavNodesButton(statusAsync: ref.watch(deviceStatusProvider)),
+                  ],
+                ),
               ),
             ],
           ),
@@ -1410,6 +1418,88 @@ class _NavNodesButtonState extends ConsumerState<_NavNodesButton> {
               size: 16,
             ),
       label: Text(running ? 'Nav ON' : 'Nav'),
+    );
+  }
+}
+
+// ── Stair mode button ─────────────────────────────────────────────────────────
+// Swaps map_node for stair_node on the robot; tapping again swaps back.
+
+class _StairButton extends ConsumerStatefulWidget {
+  final AsyncValue<DeviceStatus> statusAsync;
+  const _StairButton({required this.statusAsync});
+
+  @override
+  ConsumerState<_StairButton> createState() => _StairButtonState();
+}
+
+class _StairButtonState extends ConsumerState<_StairButton> {
+  bool _loading = false;
+
+  Future<void> _post(String path, [Map<String, dynamic>? data]) async {
+    setState(() => _loading = true);
+    try {
+      await ref.read(dioProvider).post(path, data: data);
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(e.response?.data?['detail'] ?? e.message ?? 'Error'),
+          backgroundColor: Colors.red,
+        ));
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _start() async {
+    final direction = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Stair mode'),
+        content: const Text(
+            'Stops map navigation and follows the stairs. The robot starts moving right away.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'up'), child: const Text('Up')),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'down'), child: const Text('Down')),
+        ],
+      ),
+    );
+    if (direction == null) return;
+    await _post('/nav/stair/start', {'direction': direction});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = widget.statusAsync.valueOrNull;
+    final mode = status?.stairMode;
+    final active = mode != null;
+    // stairStatus is "<direction> <status> well_side=..."
+    final parts = (status?.stairStatus ?? '').split(' ');
+    final detail = parts.length > 1 ? parts[1] : '';
+    final stopped = detail == 'odom_invalid' || detail == 'no_seed';
+
+    return FilledButton.icon(
+      onPressed: _loading ? null : (active ? () => _post('/nav/stair/stop') : _start),
+      style: FilledButton.styleFrom(
+        backgroundColor: !active
+            ? Colors.black87
+            : (stopped ? Colors.red : const Color(0xFF2196F3)).withOpacity(0.9),
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+      icon: _loading
+          ? const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+            )
+          : Icon(
+              !active ? Icons.stairs : (mode == 'up' ? Icons.north_rounded : Icons.south_rounded),
+              size: 16,
+            ),
+      label: Text(active ? 'Stairs ${mode == 'up' ? '↑' : '↓'} $detail'.trim() : 'Stairs'),
     );
   }
 }

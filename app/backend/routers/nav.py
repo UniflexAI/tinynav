@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -18,6 +20,10 @@ class GoToPoiRequest(BaseModel):
 
 class SendPoisRequest(BaseModel):
     poi_ids: list[int]
+
+
+class StairRequest(BaseModel):
+    direction: Literal['up', 'down']
 
 
 class ManualTargetRequest(BaseModel):
@@ -111,4 +117,22 @@ def nav_nodes_disable():
     if not node._nav_nodes_running:
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_stop_nav_nodes()
+    return {'ok': True}
+
+
+@router.post('/stair/start')
+def nav_stair_start(req: StairRequest):
+    node = _require_node()
+    if node.state not in ('idle', 'navigation', 'stair'):
+        raise HTTPException(409, f'Cannot enter stair mode while in state: {node.state}')
+    node.cmd_stair_start(req.direction)
+    return {'ok': True, 'direction': req.direction}
+
+
+@router.post('/stair/stop')
+def nav_stair_stop():
+    node = _require_node()
+    if node.state != 'stair':
+        raise HTTPException(409, 'Not in stair mode')
+    node.cmd_stair_stop()
     return {'ok': True}
