@@ -323,7 +323,30 @@ Each call returns a `status`:
 | `no_seed` | No ground found around the feet | Stop |
 | `odom_invalid` | Odometry jumped within the last 2 s | Stop |
 
-It is not wired into `planning_node.py` yet. Evaluate it offline on a rosbag that contains depth, camera info and odometry:
+### Running stair mode
+
+`tinynav/core/stair_node.py` replaces `map_node.py` as the source of `/control/target_pose` (run one or the other, not both). With the Looper camera:
+
+```bash
+bash scripts/run_looper_stair_navigation.sh
+# in the last pane, pick the direction and press Enter
+ros2 topic pub --once /stair/cmd std_msgs/msg/String '{data: down}'   # or up / stop
+```
+
+| Topic | Direction | Notes |
+|---|---|---|
+| `/slam/depth` + `/slam/odometry_visual` | in | same synced pair as `planning_node`, feeds the height map every frame |
+| `/slam/odometry` | in | raw 100 Hz odometry for the jump check |
+| `/stair/cmd` (`std_msgs/String`) | in | `up` / `down` start stair mode, `stop` leaves it |
+| `/control/target_pose` | out | 2 Hz (`--rate`), same format as `map_node` |
+| `/mapping/poi_change` | out | sent once when the robot must stop (`no_seed` / `odom_invalid`, or `stop`); planning drops its target and `cmd_vel_control` stops within ~0.8 s |
+| `/stair/status`, `/stair/path` | out | debugging: status string and the planned path |
+
+`cmd_vel_control` only moves while `/nav/active` is true (normally set by the app). Set `--camera_height` to your robot's camera height above the ground.
+
+### Offline evaluation
+
+Evaluate the generator offline on a rosbag that contains depth, camera info and odometry:
 
 ```bash
 source /opt/ros/humble/setup.bash
