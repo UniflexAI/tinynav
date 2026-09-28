@@ -5,6 +5,8 @@ Everything else comes from local geometry: build a short-memory 2.5D height map 
 depth, find ground cells connected to the robot through steps no higher than max_step,
 and pick the highest/lowest reachable cell. The geodesic path to it gives a lookahead
 target. Short memory keeps the map robust to odometry jumps; no map/relocalization is used.
+Odometry itself is checked on its raw high-rate stream: a jump between consecutive poses means
+the VIO is failing, so the map is dropped and no target is given until it has been quiet for a while.
 """
 import heapq
 from collections import deque
@@ -38,6 +40,8 @@ class StairConfig:
     well_drop: float = 0.4          # cells this far beyond ground in the travel direction reveal the stairwell
     well_decay: float = 0.97        # memory of which side the stairwell is on
     turn_target_dist: float = 0.6   # in-place turn target distance when nothing is explored yet
+    jump_dist: float = 0.10         # consecutive odometry poses further apart than this are a jump
+    jump_hold_s: float = 2.0        # odometry stays invalid this long after the last jump
 
 
 def depth_to_world_points(depth_m, K, T_cam_to_world, cfg: StairConfig):
@@ -108,8 +112,27 @@ class StairTargetGenerator:
         self.cfg = cfg or StairConfig()
         self.frames = deque()  # (stamp, points_world)
         self.well_side = 0.0   # >0: stairwell on the robot's left, <0: right
+        self.last_position = None
+        self.last_jump_stamp = -np.inf
+        self.latest_stamp = -np.inf
+
+    def add_pose(self, stamp, position):
+        """Feed every raw odometry pose (e.g. 100 Hz), not only the ones matched to depth."""
+        position = np.asarray(position, dtype=np.float64)
+        if self.last_position is not None and np.linalg.norm(position - self.last_position) > self.cfg.jump_dist:
+            self.last_jump_stamp = stamp
+            self.frames.clear()
+        self.last_position = position
+        self.latest_stamp = max(self.latest_stamp, stamp)
+
+    @property
+    def odom_valid(self):
+        return self.latest_stamp - self.last_jump_stamp >= self.cfg.jump_hold_s
 
     def add_depth(self, stamp, depth_m, K, T_cam_to_world):
+        self.latest_stamp = max(self.latest_stamp, stamp)
+        if not self.odom_valid:
+            return
         self.frames.append((stamp, depth_to_world_points(depth_m, K, T_cam_to_world, self.cfg)))
         while self.frames and stamp - self.frames[0][0] > self.cfg.memory_s:
             self.frames.popleft()
@@ -117,15 +140,20 @@ class StairTargetGenerator:
     def reset(self):
         self.frames.clear()
         self.well_side = 0.0
+        self.last_position = None
+        self.last_jump_stamp = -np.inf
+        self.latest_stamp = -np.inf
 
     def compute(self, T_cam_to_world, direction: str):
-        """direction: 'up' or 'down'. Returns dict with status in {'ok', 'no_seed', 'search'}.
-        'search' still carries a target (frontier or in-place turn) unless there is no seed."""
+        """direction: 'up' or 'down'. Returns dict with status in {'ok', 'no_seed', 'search', 'odom_invalid'}.
+        'search' still carries a target (frontier or in-place turn); 'no_seed' and 'odom_invalid' mean stop."""
         cfg = self.cfg
         assert direction in ('up', 'down')
         cam = T_cam_to_world[:3, 3]
         points = np.concatenate([p for _, p in self.frames]) if self.frames else np.zeros((0, 3))
         height, obstacle, observed, origin = build_height_map(points, cam[:2], cam[2], cfg)
+        if not self.odom_valid:
+            return dict(status='odom_invalid', height=height, obstacle=obstacle, free=observed & ~obstacle, origin=origin, target=None, goal=None, path=None)
         inflated = binary_dilation(obstacle, iterations=max(1, int(round(cfg.robot_radius / cfg.resolution))))
         free = observed & ~inflated
         clearance = distance_transform_edt(~obstacle) * cfg.resolution

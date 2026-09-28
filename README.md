@@ -312,6 +312,16 @@ How it works (`tinynav/core/stair_target.py`):
 2. Search from the feet over cells whose height change fits a stair step.
 3. Target = 1.2 m ahead on the path to the highest (`up`) or lowest (`down`) reachable cell.
 4. On landings, where the next flight is not visible yet, explore toward the stairwell side (estimated online).
+5. Odometry guard: every raw odometry pose (100 Hz) is fed in; if two consecutive poses are more than 10 cm apart the VIO is failing, so the height map is dropped and no target is given until 2 s without a jump.
+
+Each call returns a `status`:
+
+| Status | Meaning | Robot should |
+|---|---|---|
+| `ok` | A higher (`up`) / lower (`down`) level is reachable | Go to the target |
+| `search` | Nothing higher/lower is reachable yet, usually a landing | Go to the exploration target (or turn in place) |
+| `no_seed` | No ground found around the feet | Stop |
+| `odom_invalid` | Odometry jumped within the last 2 s | Stop |
 
 It is not wired into `planning_node.py` yet. Evaluate it offline on a rosbag that contains depth, camera info and odometry:
 
@@ -335,8 +345,8 @@ source /opt/ros/humble/setup.bash
 
 Outputs in `--out`:
 - `stair_eval.mp4`: camera image (left) and local height map (right).
-- `stair_eval.csv`: per depth frame `t, phase, status, err_deg, after_odom_jump, cam_z, target_z`.
-- Console summary: direction error between the target and the recorded motion 1 m ahead, split into `flight` / `landing` / `outside` (frames within 3 s after an odometry jump are excluded).
+- `stair_eval.csv`: per depth frame `t, phase, status, err_deg, cam_z, target_z`.
+- Console summary: status counts, the time spans flagged `odom_invalid`, and the direction error between the target and the recorded motion 1 m ahead, split into `flight` / `landing` / `outside`.
 
 Video legend (map is world-aligned, centered on the robot, 6 m x 6 m):
 
@@ -351,7 +361,7 @@ Video legend (map is world-aligned, centered on the robot, 6 m x 6 m):
 | Cyan to magenta | Height relative to the feet, cyan is lower |
 | Green tint | Reachable from the feet |
 
-Tunables live in `StairConfig` (e.g. `camera_height`, `max_step`, `robot_radius`); set `camera_height` to your robot's camera height above the ground.
+Tunables live in `StairConfig` (e.g. `camera_height`, `max_step`, `robot_radius`, `jump_dist`, `jump_hold_s`); set `camera_height` to your robot's camera height above the ground.
 
 # Next Steps
 - [ ] **High Optimization NN models**:

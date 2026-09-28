@@ -2,6 +2,7 @@
 
 Ground truth is where the robot actually went: for every depth frame we compare the
 direction to the generated target with the direction of the recorded trajectory 1 m ahead.
+Every raw pose is fed to the generator so its odometry jump check sees the full-rate stream.
 
 usage:
   source /opt/ros/humble/setup.bash
@@ -23,7 +24,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from tinynav.core.stair_target import StairConfig, StairTargetGenerator  # noqa: E402
 
 GT_ARC = 1.0
-JUMP_STEP = 0.3
 
 
 def read_bag(bag, depth_topic, pose_topic, image_topic, info_topic):
@@ -136,25 +136,26 @@ def main():
 
     depth, images, poses, K = read_bag(args.bag, args.depth_topic, args.pose_topic, args.image_topic, args.info_topic)
     print(f"depth {len(depth)}, images {len(images)}, poses {len(poses)}")
-    jumps = poses[1:, 0][np.linalg.norm(np.diff(poses[:, 1:4], axis=0), axis=1) > JUMP_STEP]
     cfg = StairConfig() if args.memory is None else StairConfig(memory_s=args.memory)
     phase_of = phase_labeler(poses)
     gen = StairTargetGenerator(cfg)
     img_t = np.array([t for t, _ in images])
     t0 = depth[0][0]
-    writer, rows = None, []
+    writer, rows, next_pose = None, [], 0
     for t, d, depth_scale in depth:
+        while next_pose < len(poses) and poses[next_pose, 0] <= t:
+            gen.add_pose(poses[next_pose, 0], poses[next_pose, 1:4])
+            next_pose += 1
         T, j, sync_err = pose_at(poses, t)
         if sync_err > 0.05:
             continue
         gen.add_depth(t, d.astype(np.float32) * depth_scale, K, T)
         res = gen.compute(T, args.direction)
         fut = future_point(poses, j, GT_ARC)
-        after_jump = np.any((t - jumps >= 0) & (t - jumps < cfg.memory_s))
         err = None
         if res['target'] is not None and fut is not None:
             err = angle_deg(res['target'][:2] - T[:2, 3], fut[:2] - T[:2, 3])
-        rows.append(dict(t=t - t0, phase=phase_of(t), status=res['status'], err_deg=err, after_odom_jump=bool(after_jump), cam_z=T[2, 3],
+        rows.append(dict(t=t - t0, phase=phase_of(t), status=res['status'], err_deg=err, cam_z=T[2, 3],
                          target_z=None if res['target'] is None else res['target'][2]))
         if not args.no_video:
             frame = render(res, cfg, T, poses, j, images[int(np.argmin(np.abs(img_t - t)))][1], t - t0, err)
@@ -169,10 +170,15 @@ def main():
         w.writerows(rows)
 
     status = np.array([r['status'] for r in rows])
-    print(f"frames {len(rows)}: " + ", ".join(f"{s}={np.sum(status == s)}" for s in ('ok', 'search', 'no_seed')))
-    print(f"direction error vs recorded motion, excluding {cfg.memory_s}s after odom jumps:")
+    print(f"frames {len(rows)}: " + ", ".join(f"{s}={np.sum(status == s)}" for s in ('ok', 'search', 'no_seed', 'odom_invalid')))
+    invalid_t = np.array([r['t'] for r in rows if r['status'] == 'odom_invalid'])
+    if len(invalid_t):
+        breaks = np.where(np.diff(invalid_t) > 0.5)[0]
+        spans = zip(np.r_[invalid_t[0], invalid_t[breaks + 1]], np.r_[invalid_t[breaks], invalid_t[-1]])
+        print("odom_invalid (stop) spans: " + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in spans))
+    print("direction error vs recorded motion (odom_invalid frames have no target and are excluded):")
     for ph in ('flight', 'landing', 'outside'):
-        sel = [r for r in rows if r['phase'] == ph and not r['after_odom_jump']]
+        sel = [r for r in rows if r['phase'] == ph and r['status'] != 'odom_invalid']
         errs = np.array([r['err_deg'] for r in sel if r['err_deg'] is not None])
         if len(errs):
             print(f"  {ph:8s} frames={len(sel):4d} with_target={len(errs) / len(sel) * 100:5.1f}%  median={np.median(errs):5.1f}deg  "
