@@ -35,11 +35,17 @@ class StairConfig:
     max_slope: float = 0.75         # steepest staircase rise/run allowed when bridging the blind zone
     seed_height_tol: float = 0.35
     min_level_gain: float = 0.20    # target must be more than a step higher/lower than the feet (landings have small bumps)
+    min_level_gain_exit: float = 0.10  # hysteresis: once on a flight, stay 'ok' down to this gain
+    ok_hold_s: float = 0.75         # the next level flickers out of view (occlusion, blind zone): keep the last
+                                    # 'ok' goal this long before switching to landing search
     lookahead: float = 1.2          # lookahead distance along the geodesic path [m]
     clearance_weight: float = 0.5   # extra cost near obstacles, keeps the path centered
     well_drop: float = 0.4          # unreachable cells this far below the feet reveal the stairwell
     well_decay: float = 0.97        # memory of which side the stairwell is on
-    turn_target_dist: float = 0.6   # in-place turn target distance when nothing is explored yet
+    turn_target_dist: float = 0.6   # last-resort in-place turn target distance
+    search_clearance: float = 0.35  # landing targets keep this far from walls (planning backs off near walls)
+    search_commit_s: float = 4.0    # keep a landing target this long instead of re-picking every call
+    search_reached: float = 0.4     # a landing target this close counts as reached
     jump_dist: float = 0.10         # consecutive odometry poses further apart than this are a jump
     flight_track_m: float = 1.0     # flight direction = horizontal displacement over this much recent travel
     flight_min_dz: float = 0.15     # ... counted only if the height changed this much over it (on a flight)
@@ -117,6 +123,9 @@ class StairTargetGenerator:
         self.flight_dir = None  # horizontal travel direction on the last flight
         self.turn_side = 0      # U-turn side at landings if known: +1 left, -1 right, 0 estimate from the stairwell
         self.track = deque()    # recent odometry positions, for the flight direction
+        self.last_status = None
+        self.search_goal = None  # (xy, stamp picked) of the current landing target
+        self.ok_goal = None      # (xy, stamp last seen) of the last 'ok' goal
         self.last_position = None
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
@@ -158,11 +167,18 @@ class StairTargetGenerator:
         while self.frames and stamp - self.frames[0][0] > self.cfg.memory_s:
             self.frames.popleft()
 
+    def new_run(self):
+        """Forget per-run state (last flight, stairwell side, landing target) but keep the height map."""
+        self.well_side = 0.0
+        self.flight_dir = None
+        self.last_status = None
+        self.search_goal = None
+        self.ok_goal = None
+
     def reset(self):
         self.frames.clear()
         self.track.clear()
-        self.well_side = 0.0
-        self.flight_dir = None
+        self.new_run()
         self.last_position = None
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
@@ -176,6 +192,7 @@ class StairTargetGenerator:
         points = np.concatenate([p for _, p in self.frames]) if self.frames else np.zeros((0, 3))
         height, obstacle, observed, origin = build_height_map(points, cam[:2], cam[2], cfg)
         if not self.odom_valid:
+            self.last_status, self.search_goal, self.ok_goal = 'odom_invalid', None, None
             return dict(status='odom_invalid', height=height, obstacle=obstacle, free=observed & ~obstacle, origin=origin, target=None, goal=None, path=None)
         inflated = binary_dilation(obstacle, iterations=max(1, int(round(cfg.robot_radius / cfg.resolution))))
         free = observed & ~inflated
@@ -207,6 +224,7 @@ class StairTargetGenerator:
         out.update(height=height, free=free)
         seeds = free & (r_robot < cfg.seed_radius) & (np.abs(np.nan_to_num(height, nan=1e9) - foot_z) < cfg.max_step)
         if not np.any(seeds):
+            self.last_status, self.search_goal, self.ok_goal = 'no_seed', None, None
             out['status'] = 'no_seed'
             return out
         sx, sy = np.nonzero(seeds)
@@ -223,8 +241,19 @@ class StairTargetGenerator:
 
         h = np.where(reachable, height, np.nan)
         best = np.nanmax(sign * h)
-        if best >= sign * foot_z + cfg.min_level_gain:
+        # hysteresis so the end of a flight does not flip between 'ok' and 'search' every call
+        gain = cfg.min_level_gain_exit if self.last_status == 'ok' else cfg.min_level_gain
+        held = None
+        if best < sign * foot_z + gain and self.ok_goal is not None and self.latest_stamp - self.ok_goal[1] < cfg.ok_hold_s:
+            gi = tuple(np.floor((self.ok_goal[0] - origin) / cfg.resolution).astype(int))
+            if 0 <= gi[0] < n and 0 <= gi[1] < n and reachable[gi] and np.linalg.norm(self.ok_goal[0] - cam[:2]) > cfg.search_reached:
+                held = gi
+        if held is not None:
             out['status'] = 'ok'
+            goal = held
+        elif best >= sign * foot_z + gain:
+            out['status'] = 'ok'
+            self.search_goal = None
             # on a flight: estimate which side the stairwell is on. It is a hole whichever way we go:
             # lower floors seen through it are observed but unreachable.
             lateral = lateral_to(self.flight_dir if self.flight_dir is not None else fwd)
@@ -234,25 +263,46 @@ class StairTargetGenerator:
             # among cells of the extreme level, take the nearest in path cost
             level = reachable & (sign * np.nan_to_num(h, nan=-np.inf) > best - 0.1)
             goal = np.unravel_index(np.argmin(np.where(level, dist, np.inf)), dist.shape)
+            self.ok_goal = (cell_xy[goal].copy(), self.latest_stamp)
         else:
             # landing: nothing better is visible, explore the frontier on the stairwell side. Sides are taken
-            # w.r.t. the last flight, not the camera, which keeps turning on the landing.
+            # w.r.t. the last flight, not the camera, which keeps turning on the landing. Targets keep clear of
+            # walls, and a chosen one is kept for a while so the target does not jump around.
             out['status'] = 'search'
+            self.ok_goal = None
             fwd = self.flight_dir if self.flight_dir is not None else fwd
             lateral = lateral_to(fwd)
-            unobserved_nb = binary_dilation(~(observed | blind), structure=np.ones((3, 3), bool))
-            frontier = reachable & unobserved_nb & (np.linalg.norm(rel_xy, axis=-1) > 0.4) & (rel_xy @ fwd > -0.3)
             side = self.turn_side or np.sign(self.well_side)
-            if side != 0:
-                frontier &= side * lateral > 0
-            if not np.any(frontier):
-                left = np.array([-fwd[1], fwd[0]])
-                turn = cam[:2] + cfg.turn_target_dist * (left if side >= 0 else -left)
-                out.update(target=np.array([turn[0], turn[1], foot_z]), well_side=self.well_side)
-                return out
-            # the next flight is beside the one we came from, across the stairwell
-            score = np.where(frontier, side * lateral, -np.inf)
-            goal = np.unravel_index(np.argmax(score), score.shape)
+            roomy = reachable & (clearance >= cfg.search_clearance)
+            goal = None
+            if self.search_goal is not None and self.latest_stamp - self.search_goal[1] < cfg.search_commit_s \
+                    and np.linalg.norm(self.search_goal[0] - cam[:2]) > cfg.search_reached:
+                gi = tuple(np.floor((self.search_goal[0] - origin) / cfg.resolution).astype(int))
+                if 0 <= gi[0] < n and 0 <= gi[1] < n and reachable[gi]:
+                    goal = gi
+            if goal is None:
+                unobserved_nb = binary_dilation(~(observed | blind), structure=np.ones((3, 3), bool))
+                frontier = roomy & unobserved_nb & (r_robot > 0.4) & (rel_xy @ fwd > -0.3)
+                if side != 0:
+                    frontier &= side * lateral > 0
+                if np.any(frontier):
+                    # the next flight is beside the one we came from, across the stairwell
+                    goal = np.unravel_index(np.argmax(np.where(frontier, side * lateral, -np.inf)), frontier.shape)
+                else:
+                    # nothing to explore in view: turn toward the stairwell side, aiming at the roomiest reachable
+                    # spot there so the target never sits in a wall
+                    near_cells = reachable & (r_robot > 0.3) & (r_robot < 1.2)
+                    turn_cells = near_cells & (side * lateral > 0) if side != 0 else near_cells
+                    cand = turn_cells if np.any(turn_cells) else near_cells
+                    if not np.any(cand):
+                        left = np.array([-fwd[1], fwd[0]])
+                        turn = cam[:2] + cfg.turn_target_dist * (left if side >= 0 else -left)
+                        self.last_status = 'search'
+                        out.update(target=np.array([turn[0], turn[1], foot_z]), well_side=self.well_side)
+                        return out
+                    goal = np.unravel_index(np.argmax(np.where(cand, clearance, -np.inf)), cand.shape)
+                self.search_goal = (cell_xy[goal].copy(), self.latest_stamp)
+        self.last_status = out['status']
         out['well_side'] = self.well_side
         path = [goal]
         while parent[path[-1][0], path[-1][1], 0] >= 0:

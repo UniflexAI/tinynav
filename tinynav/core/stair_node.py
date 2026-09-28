@@ -63,9 +63,7 @@ class StairNode(Node):
     def cmd_callback(self, msg):
         words = msg.data.strip().lower().split()
         if words and words[0] in ('up', 'down') and (len(words) == 1 or (len(words) == 2 and words[1] in TURN_SIDES)):
-            # keep the recent height map, only forget the last flight and which side the stairwell was on
-            self.gen.well_side = 0.0
-            self.gen.flight_dir = None
+            self.gen.new_run()  # keeps the recent height map
             self.gen.turn_side = TURN_SIDES[words[1] if len(words) == 2 else 'auto']
             self.direction = words[0]
             self.get_logger().info(f'stair mode on, going {self.direction}, turn {words[1] if len(words) == 2 else "auto"}')

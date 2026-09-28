@@ -137,13 +137,17 @@ def main():
     ap.add_argument('--rate', type=float, default=None, help='target update rate in Hz (default: every depth frame); '
                     'frames in between reuse the last target, odom_invalid is still immediate')
     ap.add_argument('--turn', choices=['auto', 'left', 'right'], default='auto', help='U-turn side at landings (auto: estimate)')
+    ap.add_argument('--set', action='append', default=[], metavar='KEY=VALUE', help='override a StairConfig field, repeatable')
     ap.add_argument('--no-video', action='store_true')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
     depth, images, poses, K = read_bag(args.bag, args.depth_topic, args.pose_topic, args.image_topic, args.info_topic)
     print(f"depth {len(depth)}, images {len(images)}, poses {len(poses)}")
-    cfg = StairConfig() if args.memory is None else StairConfig(memory_s=args.memory)
+    overrides = {k: float(v) for k, v in (kv.split('=', 1) for kv in args.set)}
+    if args.memory is not None:
+        overrides['memory_s'] = args.memory
+    cfg = StairConfig(**overrides)
     phase_of = phase_labeler(poses)
     gen = StairTargetGenerator(cfg)
     gen.turn_side = {'auto': 0, 'left': 1, 'right': -1}[args.turn]
