@@ -1,3 +1,5 @@
+import time
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -12,7 +14,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -311,6 +313,11 @@ def generate_trajectories(init_p, init_q):
     return trajectories, params
 
 
+# stair_node publishes /stair/status every 0.5 s while stair mode is on; no status for this long means off,
+# so a killed stair_node cannot leave planning in stair behavior
+STAIR_MODE_TIMEOUT_S = 1.5
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -364,6 +371,15 @@ class PlanningNode(Node):
         self.target_pose = None
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
+        self._stair_status_time = -float('inf')
+        self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
+
+    def _on_stair_status(self, msg):
+        self._stair_status_time = time.monotonic()
+
+    @property
+    def stair_mode(self):
+        return time.monotonic() - self._stair_status_time < STAIR_MODE_TIMEOUT_S
 
     def poi_change_callback(self, msg):
         self.target_pose = None
@@ -541,7 +557,15 @@ class PlanningNode(Node):
         # predefined backward trajectory penalty
         is_backward_traj = param[0] < 0.0
         reverse_gate_penalty = 0.0
-        if should_reverse and not is_backward_traj:
+        if should_reverse and self.stair_mode:
+            # stairwells are too tight to back up: when blocked in front, turn in place if that is
+            # collision free (the ESDF score rules out turns that clip a wall), reverse only otherwise
+            is_turn_in_place = param[0] == 0.0 and param[1] != 0.0
+            if is_backward_traj:
+                reverse_gate_penalty = 1e6
+            elif not is_turn_in_place:
+                reverse_gate_penalty = 1e9
+        elif should_reverse and not is_backward_traj:
                 reverse_gate_penalty = 1e9
         elif not should_reverse and is_backward_traj:
                 reverse_gate_penalty = 1e9
@@ -627,7 +651,10 @@ class PlanningNode(Node):
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            threshold = self.reverse_exit_threshold if self.reverse_engaged else self.reverse_enter_threshold
+            # in stair mode the gate turns in place instead of reversing; keeping it engaged up to the exit
+            # threshold could leave the robot spinning with 0.30-0.45 m free ahead, so no hysteresis there
+            exit_threshold = self.reverse_enter_threshold if self.stair_mode else self.reverse_exit_threshold
+            threshold = exit_threshold if self.reverse_engaged else self.reverse_enter_threshold
             should_reverse = front_clearance <= threshold
             self.reverse_engaged = should_reverse
 

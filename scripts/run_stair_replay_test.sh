@@ -18,7 +18,9 @@ $PY tool/stair_replay_recorder.py "$out/recorded_topics.pkl" > "$out/recorder.lo
 trap 'kill -9 $pids $rec 2>/dev/null' EXIT
 sleep 10  # let planning finish its numba warmup
 timeout 20 ros2 topic pub --once -w 1 /stair/cmd std_msgs/msg/String "{data: $direction $turn}" > /dev/null
-ros2 bag play "$bag" > "$out/play.log" 2>&1
+# play sensor topics only: bags recorded on the robot also hold the old targets/paths, which would feed planning twice
+inputs=$(grep -oE 'name: /[^ ]+' "$bag/metadata.yaml" | awk '{print $2}' | grep -vE '^/(control|planning|stair|mapping|cmd_vel|slam|nav)(/|$)')
+ros2 bag play "$bag" --topics $inputs > "$out/play.log" 2>&1
 sleep 3; kill -INT $rec; wait $rec || true
 kill -INT $pids; sleep 2
 cat "$out/recorder.log"
