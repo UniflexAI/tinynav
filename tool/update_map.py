@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Update a TinyNav map with a newly recorded bag.
 
-The source bag is first built into a temporary TinyNav map. Its keyframes are then
-retrieved against the destination map using the destination map's VLAD vocabulary
-so descriptors are comparable without training a new vocabulary. A robust
-SE(2)+z transform is fitted from the retrieved keyframe pose pairs. The original
+The source bag is first built into a temporary TinyNav map. The same bag is then
+replayed against the destination map with map_node.py, producing relocalized
+source keyframe poses in the destination map frame. A robust SE(2)+z transform is
+fitted from source-map keyframe poses to those relocalized poses. The original
 destination map is never modified: a new update directory is written only when
 the fitted transform passes conservative quality gates.
 """
@@ -145,6 +145,82 @@ def _run_build_map(
     _require_map(src_map)
 
 
+def _run_localization(
+    src_bag: Path,
+    dst_map: Path,
+    localization_dir: Path,
+    play_rate: float,
+    timeout_s: float,
+    verbose_timer: bool,
+) -> None:
+    from launch import LaunchDescription, LaunchService
+    from launch.actions import EmitEvent, ExecuteProcess, RegisterEventHandler
+    from launch.event_handlers import OnProcessExit
+    from launch.events import Shutdown
+
+    localization_dir.mkdir(parents=True, exist_ok=True)
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    source_name, source_cmd = _source_node_for_bag(src_bag, repo_root, verbose_timer, localization_dir)
+    localization_cmd = [
+        sys.executable,
+        str(repo_root / "tinynav/core/map_node.py"),
+        "--tinynav_db_path",
+        str(localization_dir),
+        "--tinynav_map_path",
+        str(dst_map),
+    ]
+    if not verbose_timer:
+        localization_cmd.append("--no_verbose_timer")
+
+    print(f"replaying source bag against destination map using {source_name}...")
+    source = ExecuteProcess(
+        cmd=source_cmd,
+        name=f"update_map_localize_{source_name}",
+        output="screen",
+        cwd=str(repo_root),
+        additional_env=env,
+    )
+    localization = ExecuteProcess(
+        cmd=localization_cmd,
+        name="update_map_localization",
+        output="screen",
+        cwd=str(repo_root),
+        additional_env=env,
+    )
+    bag_play = ExecuteProcess(
+        cmd=["ros2", "bag", "play", str(src_bag), "--rate", str(play_rate), "--clock"],
+        name="update_map_bag_play",
+        output="screen",
+    )
+    coordinator = ExecuteProcess(
+        cmd=[
+            sys.executable,
+            str(repo_root / "tool/benchmark/data_saving_coordinator.py"),
+            str(timeout_s),
+        ],
+        name="update_map_localization_coordinator",
+        output="screen",
+        cwd=str(repo_root),
+        additional_env=env,
+    )
+    on_bag_exit = RegisterEventHandler(OnProcessExit(target_action=bag_play, on_exit=[coordinator]))
+    on_coordinator_exit = RegisterEventHandler(
+        OnProcessExit(target_action=coordinator, on_exit=[EmitEvent(event=Shutdown())])
+    )
+    service = LaunchService()
+    service.include_launch_description(
+        LaunchDescription([source, localization, bag_play, on_bag_exit, on_coordinator_exit])
+    )
+    rc = service.run()
+    if rc not in (0, None):
+        raise RuntimeError(f"source localization launch failed with exit code {rc}")
+    relocalization_path = localization_dir / "relocalization_poses.npy"
+    if not relocalization_path.exists():
+        raise FileNotFoundError(f"localization did not produce {relocalization_path}")
+
+
 def _topk_from_chunk(similarities: np.ndarray, timestamps: list[int], top_k: int) -> list[tuple[int, float]]:
     if top_k >= len(similarities):
         indices = np.argsort(-similarities)
@@ -234,6 +310,106 @@ def _estimate_se2_z(points_src: np.ndarray, points_dst: np.ndarray) -> np.ndarra
 
 def _transform_points(transform: np.ndarray, points: np.ndarray) -> np.ndarray:
     return (transform @ np.c_[points, np.ones(len(points))].T).T[:, :3]
+
+
+def _find_closest_pose(timestamp: int, poses: dict[int, np.ndarray]) -> tuple[int | None, np.ndarray | None]:
+    if not poses:
+        return None, None
+    keys = np.asarray(sorted(poses), dtype=np.int64)
+    idx = int(np.searchsorted(keys, int(timestamp)))
+    candidates = []
+    if idx < len(keys):
+        candidates.append(int(keys[idx]))
+    if idx > 0:
+        candidates.append(int(keys[idx - 1]))
+    best = min(candidates, key=lambda ts: abs(int(ts) - int(timestamp)))
+    return best, poses[best]
+
+
+def _paired_source_and_relocalized_poses(
+    src_map: Path,
+    localization_dir: Path,
+    max_anchor_dt_ns: int,
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], dict[str, Any]]:
+    src_poses = _load_poses(src_map)
+    relocalized_poses = _load_poses(localization_dir / "relocalization_poses.npy")
+    paired_src: dict[int, np.ndarray] = {}
+    paired_dst: dict[int, np.ndarray] = {}
+    skipped_anchor_dt = 0
+    for src_ts in sorted(src_poses):
+        anchor_ts, relocalized_pose = _find_closest_pose(src_ts, relocalized_poses)
+        if anchor_ts is None or relocalized_pose is None:
+            continue
+        if abs(int(src_ts) - int(anchor_ts)) > max_anchor_dt_ns:
+            skipped_anchor_dt += 1
+            continue
+        paired_src[int(src_ts)] = src_poses[int(src_ts)]
+        paired_dst[int(src_ts)] = relocalized_pose
+    stats = {
+        "src_keyframes": len(src_poses),
+        "relocalized_keyframes": len(relocalized_poses),
+        "paired_keyframes": len(paired_src),
+        "skipped_anchor_dt": skipped_anchor_dt,
+        "max_anchor_dt_ns": int(max_anchor_dt_ns),
+    }
+    return paired_src, paired_dst, stats
+
+
+def _ransac_fit_pose_pairs(
+    source_poses: dict[int, np.ndarray],
+    target_poses: dict[int, np.ndarray],
+    *,
+    inlier_threshold_m: float,
+    iterations: int,
+    seed: int,
+    min_sample_separation_m: float,
+) -> dict[str, Any]:
+    timestamps = sorted(set(source_poses) & set(target_poses))
+    if len(timestamps) < 2:
+        raise RuntimeError(f"not enough paired relocalization poses: {len(timestamps)}")
+
+    src = np.asarray([source_poses[t][:3, 3] for t in timestamps], dtype=np.float64)
+    dst = np.asarray([target_poses[t][:3, 3] for t in timestamps], dtype=np.float64)
+    rng = np.random.default_rng(seed)
+    best_mask = np.zeros(len(timestamps), dtype=bool)
+    best_transform = np.eye(4, dtype=np.float64)
+    skipped_degenerate_samples = 0
+
+    for _ in range(max(1, iterations)):
+        sample = rng.choice(len(timestamps), size=2, replace=False)
+        if np.linalg.norm(src[sample[0], :2] - src[sample[1], :2]) < min_sample_separation_m:
+            skipped_degenerate_samples += 1
+            continue
+        candidate = _estimate_se2_z(src[sample], dst[sample])
+        residuals = np.linalg.norm(_transform_points(candidate, src) - dst, axis=1)
+        mask = residuals <= inlier_threshold_m
+        if int(mask.sum()) > int(best_mask.sum()):
+            best_mask = mask
+            best_transform = candidate
+
+    if int(best_mask.sum()) >= 2:
+        best_transform = _estimate_se2_z(src[best_mask], dst[best_mask])
+    residuals = np.linalg.norm(_transform_points(best_transform, src) - dst, axis=1)
+    inliers = residuals <= inlier_threshold_m
+    inlier_residuals = residuals[inliers]
+    yaw_deg = math.degrees(math.atan2(best_transform[1, 0], best_transform[0, 0]))
+    return {
+        "T_dst_src": best_transform.tolist(),
+        "yaw_deg": yaw_deg,
+        "candidate_pairs": len(timestamps),
+        "candidate_src_xy_span_m": _points_xy_span_m(src),
+        "candidate_dst_xy_span_m": _points_xy_span_m(dst),
+        "inlier_count": int(inliers.sum()),
+        "inlier_ratio": float(inliers.mean()) if len(inliers) else 0.0,
+        "min_sample_separation_m": float(min_sample_separation_m),
+        "skipped_degenerate_samples": int(skipped_degenerate_samples),
+        "median_residual_m": float(np.median(inlier_residuals)) if len(inlier_residuals) else None,
+        "p90_residual_m": float(np.percentile(inlier_residuals, 90)) if len(inlier_residuals) else None,
+        "max_residual_m": float(np.max(inlier_residuals)) if len(inlier_residuals) else None,
+        "all_residual_m": residuals.tolist(),
+        "inlier_src_timestamps": [int(ts) for ts, ok in zip(timestamps, inliers) if bool(ok)],
+        "inlier_dst_timestamps": [int(ts) for ts, ok in zip(timestamps, inliers) if bool(ok)],
+    }
 
 
 def _ransac_fit_transform(
@@ -447,17 +623,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.src_map:
         src_map = Path(args.src_map).resolve()
         _require_map(src_map)
+        localization_dir = (
+            Path(args.work_dir).resolve() / "localization"
+            if args.work_dir else src_map.parent / f"{src_map.name}_localization_in_dst"
+        )
     else:
         if args.work_dir:
-            src_map = Path(args.work_dir).resolve() / "src_map"
+            work_dir = Path(args.work_dir).resolve()
+            src_map = work_dir / "src_map"
+            localization_dir = work_dir / "localization"
             if src_map.exists() and not args.reuse_src_map:
                 shutil.rmtree(src_map)
         else:
             if args.keep_tmp:
-                src_map = Path(tempfile.mkdtemp(prefix="tinynav_update_map_")) / "src_map"
+                work_dir = Path(tempfile.mkdtemp(prefix="tinynav_update_map_"))
+                src_map = work_dir / "src_map"
+                localization_dir = work_dir / "localization"
             else:
                 temp_ctx = tempfile.TemporaryDirectory(prefix="tinynav_update_map_")
-                src_map = Path(temp_ctx.name) / "src_map"
+                work_dir = Path(temp_ctx.name)
+                src_map = work_dir / "src_map"
+                localization_dir = work_dir / "localization"
         if not args.reuse_src_map or not (src_map / "poses.npy").exists():
             _run_build_map(
                 src_bag,
@@ -470,17 +656,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         else:
             _require_map(src_map)
 
-    rows = _retrieve_src_against_dst(
-        dst_map=dst_map,
-        src_map=src_map,
-        top_k=args.top_k,
-        every_n=args.every_n,
-        max_queries=args.max_queries,
-        dst_chunk_size=args.dst_chunk_size,
+    if localization_dir.exists() and not args.reuse_localization:
+        shutil.rmtree(localization_dir)
+    if not args.reuse_localization or not (localization_dir / "relocalization_poses.npy").exists():
+        _run_localization(
+            src_bag,
+            dst_map,
+            localization_dir,
+            args.play_rate,
+            args.localization_timeout_s,
+            args.verbose_timer,
+        )
+    paired_src_poses, paired_dst_poses, localization_stats = _paired_source_and_relocalized_poses(
+        src_map,
+        localization_dir,
+        int(args.max_anchor_dt_s * 1e9),
     )
-    fit = _ransac_fit_transform(
-        rows,
-        min_similarity=args.min_similarity,
+    fit = _ransac_fit_pose_pairs(
+        paired_src_poses,
+        paired_dst_poses,
         inlier_threshold_m=args.ransac_threshold_m,
         iterations=args.ransac_iterations,
         seed=args.seed,
@@ -493,6 +687,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "dst": str(dst_map),
         "src": str(src_bag),
         "src_map": str(src_map),
+        "localization_dir": str(localization_dir),
         "output": str(output_map),
         "dry_run": bool(args.dry_run),
         "quality_ok": bool(ok),
@@ -502,15 +697,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "keyframes": len(src_poses_for_report),
             "xy_span_m": _trajectory_span_m(src_poses_for_report, sorted(src_poses_for_report)),
         },
-        "retrieval": {
-            "query_count": len(rows),
-            "top_k": args.top_k,
-            "min_similarity": args.min_similarity,
-            "every_n": args.every_n,
-            "max_queries": args.max_queries,
-            "dst_chunk_size": args.dst_chunk_size,
+        "localization": {
+            **localization_stats,
+            "timeout_s": args.localization_timeout_s,
+            "max_anchor_dt_s": args.max_anchor_dt_s,
         },
-        "rows": rows if args.save_rows else rows[: min(len(rows), 200)],
+        "rows": [
+            {
+                "src_timestamp_ns": int(ts),
+                "src_xyz": paired_src_poses[ts][:3, 3].tolist(),
+                "relocalized_xyz": paired_dst_poses[ts][:3, 3].tolist(),
+            }
+            for ts in (sorted(paired_src_poses) if args.save_rows else sorted(paired_src_poses)[:200])
+        ],
     }
 
     if ok and not args.dry_run:
@@ -538,10 +737,13 @@ def main() -> None:
     parser.add_argument("--src-map", help="Use an already-built source map instead of building --src.")
     parser.add_argument("--work-dir", help="Directory for the temporary built source map.")
     parser.add_argument("--reuse-src-map", action="store_true", help="Reuse work-dir/src_map if it already exists.")
+    parser.add_argument("--reuse-localization", action="store_true", help="Reuse work-dir/localization if relocalization_poses.npy exists.")
     parser.add_argument("--keep-tmp", action="store_true", help="Keep the auto-created temporary source map.")
     parser.add_argument("--dry-run", action="store_true", help="Only build/retrieve/fit/report; do not merge.")
     parser.add_argument("--save-rows", action="store_true", help="Write all per-query retrieval rows to the report.")
     parser.add_argument("--play-rate", type=float, default=1.0)
+    parser.add_argument("--localization-timeout-s", type=float, default=30.0)
+    parser.add_argument("--max-anchor-dt-s", type=float, default=1.0)
     parser.add_argument("--global-frames-ratio", type=float, default=1.1)
     parser.add_argument("--no-verbose-timer", dest="verbose_timer", action="store_false", default=True)
     parser.add_argument("--build-semantic-embedding", action="store_true", help="Build semantic embeddings for the temporary source map. Off by default so looper bags do not wait for RGB synchronization.")
