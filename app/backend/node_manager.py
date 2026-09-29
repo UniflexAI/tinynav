@@ -976,7 +976,7 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             if self._field_record_proc is not None and self._field_record_proc.poll() is None:
                 return
-            out_dir = os.path.join(self.tinynav_db_path, 'debug_bags')
+            out_dir = os.path.join(self.tinynav_db_path, 'debug')  # its own folder, not rosbags/
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, datetime.now().strftime('field_%Y_%m_%d_%H_%M_%S'))
             cmd = ['ros2', 'bag', 'record', '--output', path, '--max-cache-size', '2147483648'] + self.FIELD_RECORD_TOPICS
