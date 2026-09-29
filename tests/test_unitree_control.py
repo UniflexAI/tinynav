@@ -82,6 +82,8 @@ def _node(sport=None, gait=None):
     node._walking = False
     node._gait_due = False
     node._gait_held = False
+    node.robot_model = 'go2'
+    node._reasserted_in = None
     node._move_failures = 0
     node._move_failure_logged_at = None
     node.watch = uc.ChassisWatch(node.logger)
@@ -160,6 +162,51 @@ class TestTwistPath(unittest.TestCase):
         t = _drive(node, t, 5, 0.0)
         _drive(node, t, 10, 0.5)
         self.assertEqual(node.gait.requests, 1)
+
+    def _chassis_at(self, node, error_code):
+        node.watch.on_sport_state(0.0, 0, 0, error_code, (0.0, 0.0, 0.0), 0.0, ())
+
+    def test_a_stand_from_outside_is_asserted_once(self):
+        # The remote sat the robot and stood it again: the chassis came back at 100
+        # with the hold still set, and every turn in place of the dock went unexecuted.
+        node = _node()
+        node._note_gait(0)
+        self._chassis_at(node, 100)
+        t = _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1, 'asserted again in the same state')
+
+    def test_walking_is_not_asserted_again(self):
+        node = _node()
+        node._note_gait(0)
+        self._chassis_at(node, 2010)
+        t = _drive(node, 0.0, 10, 0.5)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 0)
+
+    def test_leaving_the_gait_again_is_asserted_again(self):
+        node = _node()
+        node._note_gait(0)
+        self._chassis_at(node, 100)
+        t = _drive(node, 0.0, 10, 0.5)
+        self._chassis_at(node, 2010)
+        t = _drive(node, t, 5, 0.0)
+        t = _drive(node, t, 10, 0.5)
+        self._chassis_at(node, 100)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 2)
+
+    def test_a_robot_without_a_measured_state_is_left_alone(self):
+        node = _node()
+        node.robot_model = 'b2'
+        node._note_gait(0)
+        self._chassis_at(node, 100)
+        _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.gait.requests, 0)
 
     def test_a_sit_clears_the_gait(self):
         node = _node()

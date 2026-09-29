@@ -30,6 +30,10 @@ _SUPPORTED_ROBOT_MODELS = _QUADRUPED_ROBOT_MODELS + ('g1',)
 # calling it there raises AttributeError -- inside a DDS reader callback, which is
 # fatal for the whole subscription (see ActionMessageHandler).
 _SWITCH_GAIT_ROBOT_MODELS = ('b2', 'b2w')
+# rt/sportmodestate's error_code once ClassicWalk has taken, measured on go2 (it is
+# the state machine's mode, not an error). A sit and stand from outside this node,
+# e.g. the remote, leaves 100: Move walks there, but a slow turn in place does not.
+_WALKING_STATE = {'go2': 2010, 'go2w': 2010}
 ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
 if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
@@ -299,6 +303,8 @@ class Ros2UnitreeManagerNode(Node):
         self._walking = False
         # The next Move re-asserts ClassicWalk first: set at every motion start.
         self._gait_due = False
+        # The chassis state a held gait was last re-asserted in (`_off_the_gait`).
+        self._reasserted_in = None
         self._move_failures = 0
         self._move_failure_logged_at = None
         self.watch = ChassisWatch(self.logger)
@@ -370,7 +376,8 @@ class Ros2UnitreeManagerNode(Node):
                 self._gait_due = True
             # Handed off, never called here: it is a reply RPC, and this thread must
             # stay free to keep pushing Move at the chassis.
-            if self._gait_due and self.gait is not None and not self._gait_held:
+            if (self._gait_due and self.gait is not None
+                    and (not self._gait_held or self._off_the_gait())):
                 self.gait.request()
             self._gait_due = False
             self._walking = True
@@ -381,6 +388,25 @@ class Ros2UnitreeManagerNode(Node):
         if code != 0:
             self._move_failed(now, code)
         self.watch.on_cmd(now, vx, vy, wz)
+
+    def _off_the_gait(self):
+        """Held, but the chassis reports a state other than walking: the posture was
+        changed without this node, so `_play_steps` never cleared the hold. True once
+        per state reported, so a ClassicWalk that does not reach it is not repeated
+        at every motion start."""
+        walking = _WALKING_STATE.get(self.robot_model)
+        state = self.watch.state
+        if walking is None or state is None:
+            return False
+        if state[2] == walking:
+            self._reasserted_in = None
+            return False
+        if state == self._reasserted_in:
+            return False
+        self._reasserted_in = state
+        self.logger.warning(f'[sport] chassis at error_code={state[2]}, not walking: '
+                            'asserting ClassicWalk again')
+        return True
 
     def _note_gait(self, code):
         """GaitWorker's result: held on 0, not held on anything else."""
