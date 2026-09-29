@@ -213,12 +213,16 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        # Whether the walking gait is known to be set: a ClassicWalk returned 0 and no
-        # sit or stand has run since. While it is, a motion start asks for nothing --
-        # a repeat is redundant (code -1), and each is a reply RPC that can hold the
-        # sport service for its whole 10s timeout, long enough for a sit sent at the
-        # end of a dock to time out behind it.
-        self._gait_held = self.is_quadruped and self.sport_client.ClassicWalk(True) == 0
+        if self.is_quadruped:
+            self.sport_client.ClassicWalk(True)
+        # Whether the walking gait is known to be set: a motion start's ClassicWalk
+        # returned 0 and no sit or stand has run since. While it is, a motion start
+        # asks for nothing -- a repeat is redundant (code -1), and each is a reply RPC
+        # that can hold the sport service for its whole 10s timeout, long enough for
+        # a sit sent at the end of a dock to time out behind it. Only a motion start's
+        # call counts: the one above and the one inside a stand return 0 before the
+        # robot is up, and trusting that stranded it in BalanceStand (65, 2026-09-29).
+        self._gait_held = False
         self._robot_status = RobotStatus.SITTING
         self.battery = None
         self.last_twist_time = None
@@ -370,9 +374,8 @@ class Ros2UnitreeManagerNode(Node):
         /robot_status is a statement about the chassis, and a false one is worse than
         none: a refusing sport service used to be reported as a successful stand."""
         codes = {name: call() for name, call in steps}
-        # A sit or stand changes the posture, so the gait is held only if this very
-        # action set it (a stand ends with ClassicWalk; a sit does not).
-        self._gait_held = codes.get('ClassicWalk') == 0
+        # A sit or stand changes the posture: the next motion start asserts the gait.
+        self._gait_held = False
         said = ', '.join(f'{k} code={v}' for k, v in codes.items())
         if all(c == 0 for c in codes.values()):
             self.logger.info(f"{what}: {said}")

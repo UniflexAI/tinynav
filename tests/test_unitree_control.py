@@ -144,17 +144,28 @@ class TestTwistPath(unittest.TestCase):
         _drive(node, t, 10, 0.5)
         self.assertEqual(node.gait.requests, 2)
 
-    def test_a_sit_or_stand_decides_the_gait_afresh(self):
+    def test_a_stand_is_followed_by_one_assertion(self):
+        # A stand's own ClassicWalk returns 0 within 10ms, before the robot is up;
+        # counted as held, it left the chassis in BalanceStand ignoring every Move
+        # (65, 2026-09-29). The next motion start asserts it once, and only that
+        # call's 0 holds it.
+        node = _node()
+        node._robot_status = None
+        node._note_gait(0)
+        node._play_steps('Standing', [('StandUp', lambda: 0),
+                                      ('ClassicWalk', lambda: 0)], 'standup')
+        t = _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1)
+        node._note_gait(0)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 1)
+
+    def test_a_sit_clears_the_gait(self):
         node = _node()
         node._robot_status = None
         node._note_gait(0)
         node._play_steps('Sitting', [('StandDown', lambda: 0)], 'sitting')
-        self.assertFalse(node._gait_held)
-        node._play_steps('Standing', [('StandUp', lambda: 0),
-                                      ('ClassicWalk', lambda: 0)], 'standup')
-        self.assertTrue(node._gait_held)
-        node._play_steps('Standing', [('StandUp', lambda: 0),
-                                      ('ClassicWalk', lambda: 3104)], 'standup')
         self.assertFalse(node._gait_held)
 
     def test_the_worker_reports_each_result(self):
