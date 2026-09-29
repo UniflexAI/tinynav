@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import signal
 import os
 import re
 import subprocess
@@ -229,6 +230,11 @@ class BackendNode(Ros2NodeManager):
         self._stair_status: str = ''
         self._poi_change_pub = self.create_publisher(Odometry, '/mapping/poi_change', 10)
         self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
+
+        # Field recording: a bag of a real run, alongside whatever is running (not part of the state machine)
+        self._field_record_proc: subprocess.Popen | None = None
+        self._field_record_path: str | None = None
+        self._field_record_start: float | None = None
 
         self._nav_progress: dict | None = None
         self.nav_progress_callbacks: list = []
@@ -703,6 +709,7 @@ class BackendNode(Ros2NodeManager):
             nav_active = self._nav_active
             stair_mode = self._stair_mode
             stair_status = self._stair_status
+        field_recording, field_path, field_seconds = self.field_record_state()
         bag_files_exist = self.active_bag_path is not None
         map_files_exist = os.path.exists(os.path.join(self.map_path, 'occupancy_grid.npy'))
         return {
@@ -718,6 +725,9 @@ class BackendNode(Ros2NodeManager):
             'navActive': nav_active,
             'stairMode': stair_mode,
             'stairStatus': stair_status,
+            'fieldRecording': field_recording,
+            'fieldRecordPath': field_path,
+            'fieldRecordSeconds': field_seconds,
         }
 
     @staticmethod
@@ -929,6 +939,69 @@ class BackendNode(Ros2NodeManager):
         self.state = 'idle'
         self._pub_state()
         self.get_logger().info('Stair mode off: stair_node stopped, map_node restarted')
+
+    # ------------------------------------------------------------------ #
+    # Field recording (runs alongside navigation / stair mode)             #
+    # ------------------------------------------------------------------ #
+
+    # enough to replay the run offline (tool/stair_offline_eval.py, scripts/run_stair_replay_test.sh) and to see
+    # what stair_node, planning and cmd_vel_control decided
+    FIELD_RECORD_TOPICS = [
+        # sensors
+        '/camera/camera/infra1/image_rect_raw',
+        '/camera/camera/infra1/camera_info',
+        '/camera/camera/depth/image_rect_raw',
+        '/camera/camera/imu',
+        '/camera/camera/vio_100hz',
+        '/camera/camera/vio_image',
+        '/tf_static',
+        # stair mode
+        '/stair/cmd',
+        '/stair/status',
+        '/stair/path',
+        '/stair/obstacles',
+        # navigation and control
+        '/mapping/global_plan',
+        '/mapping/poi_change',
+        '/control/target_pose',
+        '/planning/trajectory_path',
+        '/planning/obstacle_mask',
+        '/cmd_vel',
+        '/nav/active',
+        '/nav/paused',
+    ]
+
+    def cmd_field_record_start(self):
+        from datetime import datetime
+        with self._lock:
+            if self._field_record_proc is not None and self._field_record_proc.poll() is None:
+                return
+            out_dir = os.path.join(self.tinynav_db_path, 'debug_bags')
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, datetime.now().strftime('field_%Y_%m_%d_%H_%M_%S'))
+            cmd = ['ros2', 'bag', 'record', '--output', path, '--max-cache-size', '2147483648'] + self.FIELD_RECORD_TOPICS
+            self._field_record_proc = self._launch_proc('field_record', cmd)
+            self._field_record_path = path
+            self._field_record_start = time.time()
+        self.get_logger().info(f'Field recording started -> {path}')
+
+    def cmd_field_record_stop(self):
+        with self._lock:
+            proc, path = self._field_record_proc, self._field_record_path
+            self._field_record_proc = self._field_record_start = None
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)  # SIGINT lets ros2 bag close the bag cleanly
+                proc.wait(timeout=10)
+            except Exception:
+                self._kill_proc(proc)
+        self.get_logger().info(f'Field recording stopped -> {path}')
+
+    def field_record_state(self):
+        with self._lock:
+            proc, path, start = self._field_record_proc, self._field_record_path, self._field_record_start
+        recording = proc is not None and proc.poll() is None
+        return recording, path, (time.time() - start) if recording and start else None
 
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
@@ -1261,7 +1334,7 @@ class NodeRunner:
                 self.node.destroy_node()
             except Exception:
                 pass
-            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._stair_proc):
+            for proc in (self.node._looper_bridge_proc, self.node._realsense_proc, self.node._perception_proc, self.node._planning_proc, self.node._unitree_proc, self.node._map_node_proc, self.node._cmd_vel_proc, self.node._stair_proc, self.node._field_record_proc):
                 if proc and proc.poll() is None:
                     try:
                         os.killpg(os.getpgid(proc.pid), 15)

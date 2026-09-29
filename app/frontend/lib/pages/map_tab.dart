@@ -20,6 +20,13 @@ class MapTab extends ConsumerWidget {
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          // ── Field recording (a real run, for offline analysis) ────────
+          statusAsync.when(
+            data: (s) => _FieldRecordCard(status: s),
+            loading: () => const _LoadingCard(),
+            error: (_, __) => const SizedBox.shrink(),
+          ),
+          const SizedBox(height: 20),
           // ── Bag recording ─────────────────────────────────────────────
           statusAsync.when(
             data: (s) => _BagRecordCard(status: s),
@@ -122,6 +129,113 @@ class _BagRecordCardState extends ConsumerState<_BagRecordCard> {
               ),
             ),
           ]),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Field recording card ──────────────────────────────────────────────────────
+// Records a bag of a real run (sensors + stair/planning/control outputs) while navigation or stair mode keeps
+// running, so the run can be replayed and analysed offline.
+
+final _fieldRecordTopicsProvider = FutureProvider<List<String>>((ref) async {
+  final res = await ref.read(dioProvider).get('/field-record/info');
+  return (res.data['topics'] as List).cast<String>();
+});
+
+class _FieldRecordCard extends ConsumerStatefulWidget {
+  final DeviceStatus status;
+  const _FieldRecordCard({required this.status});
+
+  @override
+  ConsumerState<_FieldRecordCard> createState() => _FieldRecordCardState();
+}
+
+class _FieldRecordCardState extends ConsumerState<_FieldRecordCard> {
+  bool _busy = false;
+
+  Future<void> _toggle(bool recording) async {
+    setState(() => _busy = true);
+    try {
+      await ref.read(dioProvider).post(recording ? '/field-record/stop' : '/field-record/start');
+    } on DioException catch (e) {
+      if (mounted) _snack(context, e.response?.data?['detail'] ?? e.message ?? 'Error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  static String _clock(double seconds) {
+    final s = seconds.floor();
+    return '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.status;
+    final recording = s.fieldRecording;
+    final topics = ref.watch(_fieldRecordTopicsProvider);
+
+    return _SectionCard(
+      icon: Icons.radio_button_checked,
+      iconColor: recording ? Colors.red : Colors.grey,
+      title: 'Field Recording',
+      badge: recording ? 'REC ${_clock(s.fieldRecordSeconds ?? 0)}' : null,
+      badgeColor: Colors.red,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Records the real run while navigation or stair mode keeps going.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
+          const SizedBox(height: 12),
+          Row(children: [
+            // the light: red while recording
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: recording ? Colors.red : Colors.grey.shade300,
+                boxShadow: recording
+                    ? [BoxShadow(color: Colors.red.withOpacity(0.6), blurRadius: 10, spreadRadius: 2)]
+                    : null,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: s.online && !_busy ? () => _toggle(recording) : null,
+                icon: Icon(recording ? Icons.stop : Icons.fiber_manual_record, size: 16),
+                label: Text(recording ? 'Stop recording' : 'Start recording'),
+                style: FilledButton.styleFrom(backgroundColor: recording ? Colors.black87 : Colors.red),
+              ),
+            ),
+          ]),
+          if (s.fieldRecordPath != null) ...[
+            const SizedBox(height: 8),
+            Text(s.fieldRecordPath!, style: const TextStyle(fontSize: 11, color: Color(0xFF757575))),
+          ],
+          const SizedBox(height: 4),
+          topics.when(
+            data: (list) => ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: Text('Recorded topics (${list.length})', style: const TextStyle(fontSize: 13)),
+              children: [
+                for (final t in list)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Text(t, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                    ),
+                  ),
+              ],
+            ),
+            loading: () => const SizedBox.shrink(),
+            error: (_, __) => const SizedBox.shrink(),
+          ),
         ],
       ),
     );

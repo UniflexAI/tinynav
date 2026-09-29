@@ -75,6 +75,9 @@ The interactive API docs are available at `http://<host>:8000/docs`.
 | `POST` | `/nav/cancel` | Cancel active navigation |
 | `GET` | `/nav/status` | Navigation status |
 | `POST` | `/nav/stair/start` | Stair mode `{"direction": "up", "turn": "left"}` (`turn`: U-turn side at landings, `auto` by default): stops `map_node`, starts `stair_node` |
+| `GET` | `/field-record/info` | Field recording state and the recorded topic list |
+| `POST` | `/field-record/start` | Record a bag of the current real run into `{db}/debug_bags/field_<time>/`, alongside navigation or stair mode |
+| `POST` | `/field-record/stop` | Stop the field recording |
 | `POST` | `/nav/stair/stop` | Leave stair mode: stops `stair_node`, restarts `map_node` (relocalizes) |
 
 ## WebSocket endpoints

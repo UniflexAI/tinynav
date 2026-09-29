@@ -38,6 +38,9 @@ class DeviceStatus {
   final bool navPaused;
   final String? stairMode; // 'up' | 'down' | null
   final String stairStatus;
+  final bool fieldRecording;
+  final String? fieldRecordPath;
+  final double? fieldRecordSeconds;
 
   const DeviceStatus({
     required this.online,
@@ -52,6 +55,9 @@ class DeviceStatus {
     required this.navPaused,
     this.stairMode,
     this.stairStatus = '',
+    this.fieldRecording = false,
+    this.fieldRecordPath,
+    this.fieldRecordSeconds,
   });
 
   factory DeviceStatus.fromJson(Map<String, dynamic> json) => DeviceStatus(
@@ -67,6 +73,9 @@ class DeviceStatus {
         navPaused: json['navPaused'] as bool? ?? false,
         stairMode: json['stairMode'] as String?,
         stairStatus: json['stairStatus'] as String? ?? '',
+        fieldRecording: json['fieldRecording'] as bool? ?? false,
+        fieldRecordPath: json['fieldRecordPath'] as String?,
+        fieldRecordSeconds: (json['fieldRecordSeconds'] as num?)?.toDouble(),
       );
 }
 
