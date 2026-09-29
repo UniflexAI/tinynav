@@ -229,14 +229,19 @@ class CmdVelControlNode(Node):
         if is_backward_segment:
             vyaw = 0.0
 
+        # A turn-in-place rollout does not translate, so its heading_err is the bearing
+        # of float noise; steering by it overrides the planner's turn with a full-rate
+        # spin of either sign. Below reverse_min_vx the segment has no bearing.
+        has_bearing = float(np.hypot(linear_velocity_vec[0], linear_velocity_vec[1])) >= self.reverse_min_vx
+
         # Hack: if path first segment points >80 deg away from robot heading,
         # force an in-place turn. Skip explicit backward segments because reverse
         # naturally has heading_err close to +/-pi.
-        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+        if has_bearing and (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
             vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
         # Minimal rotate-first gate: apply only for forward motion.
-        elif vx > 0.0 and abs(heading_err) > 0.45:
+        elif has_bearing and vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 

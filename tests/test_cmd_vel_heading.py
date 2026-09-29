@@ -33,12 +33,14 @@ from tinynav.platforms.cmd_vel_control import CmdVelControlNode
 _DT = 1.0 / 12.0
 
 
-def _pose(x, y, z):
+def _pose(x, y, z, yaw=0.0):
+    """`yaw` is the robot's, left positive: a turn about world -y in this frame."""
     p = PoseStamped()
     p.pose.position.x = float(x)
     p.pose.position.y = float(y)
     p.pose.position.z = float(z)
-    p.pose.orientation.w = 1.0
+    p.pose.orientation.y = -math.sin(yaw / 2.0)
+    p.pose.orientation.w = math.cos(yaw / 2.0)
     return p
 
 
@@ -131,6 +133,33 @@ class HeadingControlTest(_NodeCase):
         # one back trips here rather than on a rig.
         for attr in ('_yaw_bias_per_m', '_drift_lp', 'yaw_kp', 'yaw_bias_ki'):
             self.assertFalse(hasattr(self.node, attr), f'{attr} is back')
+
+
+class TurnInPlaceTest(_NodeCase):
+    """A rollout that only rotates has no bearing: its position difference is float
+    noise, and noise a hair behind the robot reads as heading_err = +/-pi. The force
+    turn must not steer by it -- the planner's own yaw is the command."""
+
+    #: Behind the robot by float noise: atan2 of this is +/-pi.
+    NOISE = -1e-9
+
+    def test_a_turn_in_place_turns_the_way_the_planner_asked(self):
+        for yaw in (+0.4, -0.4):
+            out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, yaw)))[-1]
+            self.assertEqual(out.linear.x, 0.0)
+            self.assertAlmostEqual(out.angular.z, yaw, places=3, msg=f'asked {yaw:+}')
+
+    def test_a_standstill_is_not_a_spin(self):
+        # Same pose twice: the planner asked for nothing at all.
+        out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE)))[-1]
+        self.assertEqual(out.linear.x, 0.0)
+        self.assertEqual(out.angular.z, 0.0)
+
+    def test_a_real_sideways_segment_still_forces_the_turn(self):
+        # The pair to the two above: past reverse_min_vx the bearing is real.
+        out = self._drive(_path((0, 0, 0), (-1.0, 0, 0.05)))[-1]
+        self.assertEqual(out.linear.x, 0.0)
+        self.assertGreater(out.angular.z, 0.3)
 
 
 class DeadbandTest(_NodeCase):
