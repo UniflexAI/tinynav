@@ -860,15 +860,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     paired_src_poses = {int(ts): src_poses_all[int(ts)] for ts in paired_keys}
     paired_dst_poses = {int(ts): relocalized_poses[int(ts)] for ts in paired_keys}
     localization_stats["paired_keyframes"] = len(paired_keys)
-    fit = _ransac_fit_pose_pairs(
-        paired_src_poses,
-        paired_dst_poses,
-        inlier_threshold_m=args.ransac_threshold_m,
-        iterations=args.ransac_iterations,
-        seed=args.seed,
-        min_sample_separation_m=args.ransac_min_sample_separation_m,
-    )
-    ok, reject_reasons = _passes_quality_gate(args, src_map, fit)
+    if len(paired_keys) >= 2:
+        fit = _ransac_fit_pose_pairs(
+            paired_src_poses,
+            paired_dst_poses,
+            inlier_threshold_m=args.ransac_threshold_m,
+            iterations=args.ransac_iterations,
+            seed=args.seed,
+            min_sample_separation_m=args.ransac_min_sample_separation_m,
+        )
+        ok, reject_reasons = _passes_quality_gate(args, src_map, fit)
+    else:
+        fit = {
+            "T_dst_src": None,
+            "candidate_pairs": len(paired_keys),
+            "inlier_count": len(paired_keys),
+            "inlier_ratio": 0.0,
+            "median_residual_m": None,
+            "inlier_src_timestamps": [int(ts) for ts in paired_keys],
+            "inlier_dst_timestamps": [int(ts) for ts in paired_keys],
+        }
+        ok = False
+        reject_reasons = [f"not enough paired relocalization poses: {len(paired_keys)}"]
     src_poses_for_report = _load_poses(src_map)
     report = {
         "type": "tinynav_map_update",
