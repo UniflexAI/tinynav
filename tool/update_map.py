@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Update a TinyNav map with a newly recorded bag.
 
-The source bag is first built into a temporary TinyNav map. The same bag is then
-replayed against the destination map with map_node.py, producing relocalized
-source keyframe poses in the destination map frame. A robust SE(2)+z transform is
-fitted from source-map keyframe poses to those relocalized poses. The original
-destination map is never modified: a new update directory is written only when
-the fitted transform passes conservative quality gates.
+The source bag is first built into a temporary TinyNav map. Source keyframes are
+then relocalized directly against the destination map using their saved
+features/depth/images, producing relocalized poses in the destination map frame.
+A robust SE(2)+z transform is fitted from each source keyframe pose to its
+relocalized destination-map pose. The original destination map is never modified:
+a new update directory is written only when the fitted transform passes
+conservative quality gates.
 """
 from __future__ import annotations
 
@@ -223,6 +224,183 @@ def _run_localization(
     relocalization_path = localization_dir / "relocalization_poses.npy"
     if not relocalization_path.exists():
         raise FileNotFoundError(f"localization did not produce {relocalization_path}")
+
+
+def _image_shape_wh(image: np.ndarray | None) -> np.ndarray:
+    if image is None:
+        return np.array([640, 544], dtype=np.int64)
+    height, width = image.shape[:2]
+    return np.array([width, height], dtype=np.int64)
+
+
+def _match_keypoints(matcher: Any, feats0: dict, feats1: dict, image_shape0: np.ndarray, image_shape1: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    import asyncio
+
+    match_result = asyncio.run(
+        matcher.infer(
+            feats0["kpts"],
+            feats1["kpts"],
+            feats0["descps"],
+            feats1["descps"],
+            feats0["mask"],
+            feats1["mask"],
+            image_shape0,
+            image_shape1,
+        )
+    )
+    match_indices = match_result["match_indices"][0]
+    valid_mask = match_indices != -1
+    keypoints0 = feats0["kpts"][0][valid_mask]
+    keypoints1 = feats1["kpts"][0][match_indices[valid_mask]]
+    matches = np.array([[i, int(index)] for i, index in enumerate(match_indices) if index != -1], dtype=np.int64)
+    return keypoints0, keypoints1, matches
+
+
+def _keypoints_with_depth_to_world(
+    keypoints: np.ndarray,
+    depth: np.ndarray,
+    pose_camera_to_world: np.ndarray,
+    K: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    fx = K[0, 0]
+    fy = K[1, 1]
+    cx = K[0, 2]
+    cy = K[1, 2]
+    height, width = depth.shape[:2]
+    points_camera = []
+    valid = []
+    for kp in keypoints:
+        u = int(np.clip(int(kp[0]), 0, width - 1))
+        v = int(np.clip(int(kp[1]), 0, height - 1))
+        z = float(depth[v, u])
+        if z > 0.0 and z < 50.0:
+            x = (u - cx) * z / fx
+            y = (v - cy) * z / fy
+            valid.append(True)
+        else:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+            valid.append(False)
+        points_camera.append([x, y, z])
+    points_camera_np = np.asarray(points_camera, dtype=np.float32)
+    valid_np = np.asarray(valid, dtype=bool)
+    points_world = points_camera_np @ pose_camera_to_world[:3, :3].T + pose_camera_to_world[:3, 3]
+    return points_world, valid_np
+
+
+def _offline_relocalize_src_map_against_dst(
+    *,
+    src_map: Path,
+    dst_map: Path,
+    output_dir: Path,
+    top_k: int,
+    every_n: int,
+    max_queries: int,
+) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    from tinynav.core.build_map_node import TinyNavDB, find_loop
+    from tinynav.core.math_utils import rerank_by_pnp_inliers
+    from tinynav.core.models_trt import LightGlueTRT
+    from tinynav.core.vlad import compute_vlad
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    src_poses = _load_poses(src_map)
+    dst_poses = _load_poses(dst_map)
+    src_timestamps = sorted(src_poses)
+    if every_n > 1:
+        src_timestamps = src_timestamps[::every_n]
+    if max_queries > 0:
+        src_timestamps = src_timestamps[:max_queries]
+
+    dst_K = np.load(dst_map / "intrinsics.npy")
+    src_db = TinyNavDB(str(src_map), is_scratch=False)
+    dst_db = TinyNavDB(str(dst_map), is_scratch=False)
+    matcher = LightGlueTRT()
+    relocalized_poses: dict[int, np.ndarray] = {}
+    pose_weights: dict[int, float] = {}
+    failed: list[int] = []
+    rows: list[dict[str, Any]] = []
+    try:
+        dst_centres = np.asarray(dst_db.metadata["vlad_centres"], dtype=np.float32)
+        dst_timestamps = sorted(dst_poses)
+        dst_descriptors = np.stack([dst_db.vlad_descriptors[int(t)] for t in dst_timestamps]).astype(np.float32)
+
+        for index, src_ts in enumerate(src_timestamps, start=1):
+            src_depth, _, src_features, _, src_infra_loader = src_db.get_depth_embedding_features_images(src_ts)
+            del src_depth
+            query_vlad = compute_vlad(src_db.patch_tokens[int(src_ts)], dst_centres)
+            candidates = list(reversed(find_loop(query_vlad, dst_descriptors, -1.0, top_k)))
+            src_image = src_infra_loader()
+            src_shape = _image_shape_wh(src_image)
+            pnp_candidates = []
+            candidate_rows = []
+            for rank, (dst_index, similarity) in enumerate(candidates, start=1):
+                dst_ts = int(dst_timestamps[int(dst_index)])
+                dst_depth, _, dst_features, _, dst_infra_loader = dst_db.get_depth_embedding_features_images(dst_ts)
+                dst_image = dst_infra_loader()
+                dst_shape = _image_shape_wh(dst_image)
+                dst_kpts, src_kpts, matches = _match_keypoints(
+                    matcher,
+                    dst_features,
+                    src_features,
+                    dst_shape,
+                    src_shape,
+                )
+                row = {
+                    "rank": rank,
+                    "dst_timestamp_ns": dst_ts,
+                    "similarity": float(similarity),
+                    "match_count": int(len(matches)),
+                    "landmark_count": 0,
+                }
+                if len(matches) >= 50:
+                    points_world, valid = _keypoints_with_depth_to_world(dst_kpts, dst_depth, dst_poses[dst_ts], dst_K)
+                    points_world_valid = points_world[valid]
+                    src_kpts_valid = src_kpts[valid]
+                    row["landmark_count"] = int(len(src_kpts_valid))
+                    if len(src_kpts_valid) > 80:
+                        pnp_candidates.append((points_world_valid, src_kpts_valid))
+                candidate_rows.append(row)
+
+            success, pose_world_to_src_camera, pose_weight, best_candidate_index, best_inliers, best_points = rerank_by_pnp_inliers(pnp_candidates, dst_K)
+            if success:
+                relocalized_pose = np.linalg.inv(pose_world_to_src_camera)
+                relocalized_poses[int(src_ts)] = relocalized_pose
+                pose_weights[int(src_ts)] = float(pose_weight)
+            else:
+                failed.append(int(src_ts))
+            rows.append(
+                {
+                    "src_timestamp_ns": int(src_ts),
+                    "success": bool(success),
+                    "pose_weight": float(pose_weight),
+                    "best_candidate_index": int(best_candidate_index),
+                    "best_pnp_inliers": int(best_inliers),
+                    "best_pnp_points": int(best_points),
+                    "candidates": candidate_rows,
+                }
+            )
+            if index % 25 == 0:
+                print(f"offline relocalized {index}/{len(src_timestamps)} source keyframes, success={len(relocalized_poses)}")
+    finally:
+        src_db.close()
+        dst_db.close()
+
+    np.save(output_dir / "relocalization_poses.npy", relocalized_poses, allow_pickle=True)
+    np.save(output_dir / "relocalization_pose_weights.npy", pose_weights, allow_pickle=True)
+    np.save(output_dir / "failed_relocalizations.npy", np.asarray(failed, dtype=np.int64), allow_pickle=True)
+    with (output_dir / "offline_relocalization_rows.json").open("w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=True, indent=2)
+    stats = {
+        "mode": "offline_src_map_to_dst_map",
+        "src_keyframes": len(src_timestamps),
+        "relocalized_keyframes": len(relocalized_poses),
+        "failed_keyframes": len(failed),
+        "top_k": top_k,
+        "every_n": every_n,
+        "max_queries": max_queries,
+    }
+    return relocalized_poses, stats
 
 
 def _topk_from_chunk(similarities: np.ndarray, timestamps: list[int], top_k: int) -> list[tuple[int, float]]:
@@ -663,19 +841,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if localization_dir.exists() and not args.reuse_localization:
         shutil.rmtree(localization_dir)
     if not args.reuse_localization or not (localization_dir / "relocalization_poses.npy").exists():
-        _run_localization(
-            src_bag,
-            dst_map,
-            localization_dir,
-            args.play_rate,
-            args.localization_timeout_s,
-            args.verbose_timer,
+        relocalized_poses, localization_stats = _offline_relocalize_src_map_against_dst(
+            src_map=src_map,
+            dst_map=dst_map,
+            output_dir=localization_dir,
+            top_k=args.top_k,
+            every_n=args.every_n,
+            max_queries=args.max_queries,
         )
-    paired_src_poses, paired_dst_poses, localization_stats = _paired_source_and_relocalized_poses(
-        src_map,
-        localization_dir,
-        int(args.max_anchor_dt_s * 1e9),
-    )
+    else:
+        relocalized_poses = _load_pose_file(localization_dir / "relocalization_poses.npy")
+        localization_stats = {
+            "mode": "offline_src_map_to_dst_map_reused",
+            "relocalized_keyframes": len(relocalized_poses),
+        }
+    src_poses_all = _load_poses(src_map)
+    paired_keys = sorted(set(src_poses_all) & set(relocalized_poses))
+    paired_src_poses = {int(ts): src_poses_all[int(ts)] for ts in paired_keys}
+    paired_dst_poses = {int(ts): relocalized_poses[int(ts)] for ts in paired_keys}
+    localization_stats["paired_keyframes"] = len(paired_keys)
     fit = _ransac_fit_pose_pairs(
         paired_src_poses,
         paired_dst_poses,
@@ -703,8 +887,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "localization": {
             **localization_stats,
-            "timeout_s": args.localization_timeout_s,
-            "max_anchor_dt_s": args.max_anchor_dt_s,
         },
         "rows": [
             {
