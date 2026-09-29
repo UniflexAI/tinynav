@@ -29,6 +29,9 @@ class StairConfig:
     max_step: float = 0.22          # max height change between neighbor cells
     max_drop_down: float = 0.45     # descending: the stair edge hides the first treads, so drops look bigger
     wall_span: float = 0.35         # z-span inside one cell above which it is wall/railing ...
+    obstacle_memory_s: float = 5.0  # walls/railings handed to planning are remembered this long (points only
+                                    # memory_s): turning on a landing takes the railing out of view for longer
+    walked_clear: float = 0.25      # ... except within this distance of where we walked in that time
     wall_min_top: float = 0.3       # ... and only if it also rises this far above the feet: going down, step edges
                                     # collect points of several treads (depth edge pixels, many viewpoints) and
                                     # would otherwise read as walls across the flight
@@ -130,6 +133,7 @@ class StairTargetGenerator:
         self.flight_dir = None  # horizontal travel direction on the last flight
         self.turn_side = 0      # U-turn side at landings if known: +1 left, -1 right, 0 estimate from the stairwell
         self.track = deque()    # recent odometry positions, for the flight direction
+        self.obstacle_log = deque()  # (stamp, world cell indices) of walls/railings seen
         self.last_status = None
         self.search_goal = None  # (xy, stamp picked) of the current landing target
         self.ok_goal = None      # (xy, stamp last seen) of the last 'ok' goal
@@ -144,6 +148,7 @@ class StairTargetGenerator:
             self.last_jump_stamp = stamp
             self.frames.clear()
             self.track.clear()
+            self.obstacle_log.clear()
         self.last_position = position
         self.latest_stamp = max(self.latest_stamp, stamp)
         if not self.track or np.linalg.norm(position[:2] - self.track[-1][:2]) > 0.02:
@@ -161,6 +166,39 @@ class StairTargetGenerator:
                 if abs(now[2] - self.track[i][2]) > self.cfg.flight_min_dz and np.linalg.norm(d) > 0.5 * arc:
                     self.flight_dir = d / np.linalg.norm(d)
                 return
+
+    def _remember_obstacles(self, obstacle, height, origin, cam_z):
+        """Current walls/railings plus those seen within obstacle_memory_s, on the current local grid, for planning.
+        Targets use the current ones only: remembered railings smear with odometry error and would close the
+        tight turn around the railing end; cells we actually walked through are cleared for the same reason."""
+        cfg, n = self.cfg, obstacle.shape[0]
+        ix, iy = np.nonzero(obstacle)
+        cells = np.floor((origin + (np.stack([ix, iy], 1) + 0.5) * cfg.resolution) / cfg.resolution).astype(np.int64)
+        self.obstacle_log.append((self.latest_stamp, cells, height[ix, iy].astype(np.float32)))
+        while self.obstacle_log and self.latest_stamp - self.obstacle_log[0][0] > cfg.obstacle_memory_s:
+            self.obstacle_log.popleft()
+        allc = np.concatenate([c for _, c, _ in self.obstacle_log])
+        tops = np.concatenate([z for _, _, z in self.obstacle_log])
+        local = np.floor(((allc + 0.5) * cfg.resolution - origin) / cfg.resolution).astype(np.int64)
+        # flights are stacked: a railing seen from the flight above lies over the landing below, so only keep what
+        # is a wall at our current height (same rule as for the current map)
+        feet = cam_z - cfg.camera_height
+        ok = np.all((local >= 0) & (local < n), axis=1) & (tops > feet + cfg.wall_min_top) & (tops < cam_z + cfg.band_above_cam + 0.05)
+        remembered = np.zeros_like(obstacle)
+        remembered[local[ok, 0], local[ok, 1]] = True
+        # what we see now wins: memory only fills in what is out of view (e.g. the railing behind us while
+        # turning on a landing); a remembered cell now seen as floor is odometry drift, not a wall
+        seen_floor = np.isfinite(height) & ~obstacle & (np.nan_to_num(height, nan=np.inf) < feet + cfg.wall_min_top)
+        merged = obstacle | (remembered & ~seen_floor)
+        walked = np.array([p[:2] for p in self.track]) if self.track else np.zeros((0, 2))
+        if len(walked):
+            gx, gy = np.meshgrid(np.arange(n), np.arange(n), indexing='ij')
+            cell_xy = origin + (np.stack([gx, gy], -1) + 0.5) * cfg.resolution
+            near = np.zeros((n, n), bool)
+            for w in walked[::5]:
+                near |= np.sum((cell_xy - w) ** 2, axis=-1) < cfg.walked_clear ** 2
+            merged &= ~near
+        return merged
 
     @property
     def odom_valid(self):
@@ -185,6 +223,7 @@ class StairTargetGenerator:
     def reset(self):
         self.frames.clear()
         self.track.clear()
+        self.obstacle_log.clear()
         self.new_run()
         self.last_position = None
         self.last_jump_stamp = -np.inf
@@ -208,7 +247,8 @@ class StairTargetGenerator:
         free = observed & ~inflated
         clearance = distance_transform_edt(~obstacle) * cfg.resolution
         cost = 1.0 + cfg.clearance_weight / np.maximum(clearance, cfg.resolution)
-        out = dict(height=height, obstacle=obstacle, free=free, origin=origin, target=None, goal=None, path=None)
+        out = dict(height=height, obstacle=obstacle, free=free, origin=origin, target=None, goal=None, path=None,
+                   planning_obstacles=self._remember_obstacles(obstacle, height, origin, cam[2]))
 
         ground_z = cam[2] - cfg.camera_height
         n = height.shape[0]
