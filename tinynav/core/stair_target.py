@@ -42,6 +42,12 @@ class StairConfig:
     ok_hold_s: float = 0.75         # the next level flickers out of view (occlusion, blind zone): keep the last
                                     # 'ok' goal this long before switching to landing search
     lookahead: float = 1.2          # lookahead distance along the geodesic path [m]
+    goal_push_down: float = 0.8     # going down, aim this much farther (path cost) into the next level, at its deepest
+                                    # cell keeping search_clearance from walls, instead of its near edge. Going up it
+                                    # made landings worse on the upstairs bag, so it is down only.
+    target_open_radius: float = 0.2 # target: move it up to this far from the path point, to the cell farthest from
+                                    # walls (clearance counted up to target_open_cap), off walls and railings
+    target_open_cap: float = 0.6
     clearance_weight: float = 0.5   # extra cost near obstacles, keeps the path centered
     side_view_min: float = 0.7      # cells seen this far to the side of a flight ...
     side_view_max: float = 2.5      # ... up to here tell which side is open (railing) and which is a wall
@@ -276,7 +282,13 @@ class StairTargetGenerator:
                 self.well_side = cfg.well_decay * self.well_side + (1 - cfg.well_decay) * (seen_l - seen_r) / (seen_l + seen_r) * 10
             # among cells of the extreme level, take the nearest in path cost
             level = reachable & (sign * np.nan_to_num(h, nan=-np.inf) > best - 0.1)
-            goal = np.unravel_index(np.argmin(np.where(level, dist, np.inf)), dist.shape)
+            level_dist = np.where(level, dist, np.inf)
+            push = cfg.goal_push_down if direction == 'down' else 0.0
+            deep = (level_dist <= level_dist.min() + push) & (clearance >= cfg.search_clearance)
+            if push > 0 and np.any(deep):
+                goal = np.unravel_index(np.argmax(np.where(deep, level_dist, -np.inf)), dist.shape)
+            else:
+                goal = np.unravel_index(np.argmin(level_dist), dist.shape)
             self.ok_goal = (cell_xy[goal].copy(), self.latest_stamp)
         else:
             # landing: nothing better is visible, explore the frontier on the stairwell side. Sides are taken
@@ -336,5 +348,12 @@ class StairTargetGenerator:
         seg = np.linalg.norm(np.diff(path_xyz[:, :2], axis=0), axis=1)
         arc = np.concatenate([[0.0], np.cumsum(seg)])
         k = min(np.searchsorted(arc, cfg.lookahead), len(path_xyz) - 1)
-        out.update(goal=path_xyz[-1], target=path_xyz[k], path=path_xyz)
+        target = path_xyz[k]
+        if cfg.target_open_radius > 0:
+            # nudge the target into open space so planning is not pulled along a wall or railing
+            near = reachable & (np.linalg.norm(cell_xy - target[:2], axis=-1) <= cfg.target_open_radius)
+            if np.any(near):
+                c = np.unravel_index(np.argmax(np.where(near, np.minimum(clearance, cfg.target_open_cap), -np.inf)), near.shape)
+                target = np.array([*cell_xy[c], height[c]])
+        out.update(goal=path_xyz[-1], target=target, path=path_xyz)
         return out
