@@ -15,7 +15,7 @@ $PY tool/looper_bridge_node.py > "$out/bridge.log" 2>&1 & pids=$!
 $PY tinynav/core/planning_node.py > "$out/planning.log" 2>&1 & pids="$pids $!"
 $PY tinynav/core/stair_node.py > "$out/stair.log" 2>&1 & pids="$pids $!"
 $PY tool/stair_replay_recorder.py "$out/recorded_topics.pkl" > "$out/recorder.log" 2>&1 & rec=$!
-trap 'kill -9 $pids $rec 2>/dev/null' EXIT
+trap 'kill -9 $pids $rec 2>/dev/null; true' EXIT
 sleep 10  # let planning finish its numba warmup
 timeout 20 ros2 topic pub --once -w 1 /stair/cmd std_msgs/msg/String "{data: $direction $turn}" > /dev/null
 # play sensor topics only: bags recorded on the robot also hold the old targets/paths, which would feed planning twice
