@@ -56,9 +56,9 @@ class CmdVelControlNode(Node):
         # How small a REQUEST means the planner is stopping rather than driving -- not
         # the same quantity as the speed the chassis can execute. See `_snap`.
         self.linear_engage_threshold = 0.04
-        # No measured value for the turn axis yet, so it keeps the old behaviour
-        # (request below the executable minimum reads as a stop).
-        self.angular_engage_threshold = self.min_effective_angular_speed
+        # Below the planner's smallest turn (0.107 rad/s), so every turn it asks for
+        # is raised to what the chassis executes rather than read as a stop.
+        self.angular_engage_threshold = 0.05
         self.fixed_reverse_speed = 0.3
         # How far back the differenced path has to point before it reads as reverse.
         # A turn-in-place rollout barely translates, so the sign of `raw_vx` there is

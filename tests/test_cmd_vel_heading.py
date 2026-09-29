@@ -155,6 +155,17 @@ class TurnInPlaceTest(_NodeCase):
         self.assertEqual(out.linear.x, 0.0)
         self.assertEqual(out.angular.z, 0.0)
 
+    def test_a_slow_turn_in_place_is_raised_to_what_the_chassis_executes(self):
+        # A go2 does not yaw at all below 0.2; the planner's smallest turn is 0.107.
+        n = self.node
+        n.min_effective_angular_speed = 0.2
+        for yaw in (+0.107, -0.107):
+            out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, yaw)))[-1]
+            self.assertAlmostEqual(out.angular.z, math.copysign(0.2, yaw), places=6)
+        # The pair: a request below the engage threshold is still a stop.
+        out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, 0.03)))[-1]
+        self.assertEqual(out.angular.z, 0.0)
+
     def test_a_real_sideways_segment_still_forces_the_turn(self):
         # The pair to the two above: past reverse_min_vx the bearing is real.
         out = self._drive(_path((0, 0, 0), (-1.0, 0, 0.05)))[-1]
