@@ -6,7 +6,11 @@ import rclpy
 import threading
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+from cyclonedds.core import Policy
+from cyclonedds.qos import Qos
+from cyclonedds.util import duration
+from unitree_sdk2py.core.channel import (ChannelFactory, ChannelFactoryInitialize,
+                                         ChannelSubscriber)
 from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from std_msgs.msg import Float32, String
@@ -134,6 +138,17 @@ class GaitWorker:
             self._log.warning(f'[sport] {self._name} code={code} took {took:.2f}s')
         if self._on_result is not None:
             self._on_result(code)
+
+
+def reliable_reader(name, msg_type, handler, depth):
+    """An SDK reader with RELIABLE QoS. `ChannelSubscriber` passes none, which makes
+    it best effort: a one-shot sit whose packet is lost is gone, with nothing resent
+    (65: 4 of 17 dock sits never arrived). Volatile on purpose -- a restarted
+    process must not replay the last sit or stand. Returns the channel; keep it."""
+    channel = ChannelFactory().CreateChannel(name, msg_type)
+    channel.SetReader(Qos(Policy.Reliability.Reliable(duration(milliseconds=100)),
+                          Policy.History.KeepLast(depth)), handler, depth)
+    return channel
 
 
 class ActionWorker:
@@ -299,8 +314,8 @@ class Ros2UnitreeManagerNode(Node):
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
 
-        self.action_subscriber = ChannelSubscriber("rt/service/command", String_)
-        self.action_subscriber.Init(self.ActionMessageHandler, 10)
+        self.action_subscriber = reliable_reader("rt/service/command", String_,
+                                                 self.ActionMessageHandler, 10)
 
         lowstate_type, lowstate_topic = _lowstate_type_and_topic(robot_model)
         lowstate_subscriber = ChannelSubscriber(lowstate_topic, lowstate_type)

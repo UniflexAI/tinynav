@@ -355,6 +355,39 @@ class TestActionWorker(unittest.TestCase):
         self.assertEqual(node.actions._queue.qsize(), 1)
 
 
+class TestActionReader(unittest.TestCase):
+    """65: 4 of 17 dock sits never reached the handler through the SDK's default
+    best-effort reader."""
+
+    def _qos(self):
+        seen = {}
+
+        class _Channel:
+            def SetReader(self, qos, handler, depth):
+                seen.update(qos=qos, depth=depth)
+
+        class _Factory:
+            def CreateChannel(self, name, msg_type):
+                return _Channel()
+
+        from unittest import mock
+        with mock.patch.object(uc, 'ChannelFactory', _Factory):
+            uc.reliable_reader('rt/service/command', object, lambda m: None, 10)
+        return seen
+
+    def test_the_action_reader_is_reliable(self):
+        from cyclonedds.core import Policy
+        policies = list(self._qos()['qos'])
+        self.assertTrue(any(isinstance(p, Policy.Reliability.Reliable) for p in policies))
+
+    def test_the_action_reader_does_not_replay_on_restart(self):
+        from cyclonedds.core import Policy
+        policies = list(self._qos()['qos'])
+        replaying = (Policy.Durability.TransientLocal, Policy.Durability.Transient,
+                     Policy.Durability.Persistent)
+        self.assertFalse(any(p in replaying for p in policies))
+
+
 class TestChassisWatch(unittest.TestCase):
     def _run(self, cmd_v, chassis_v, seconds, watch=None, t0=0.0):
         log = watch.log if watch else _Log()
