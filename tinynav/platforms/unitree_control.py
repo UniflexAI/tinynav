@@ -84,10 +84,12 @@ class GaitWorker:
     times, so a request while a call is in flight is absorbed into the next one.
     """
 
-    def __init__(self, call, log, name='ClassicWalk'):
+    def __init__(self, call, log, name='ClassicWalk', on_result=None):
         self._call = call
         self._log = log
         self._name = name
+        # Told each call's code, so the node knows whether the gait is held.
+        self._on_result = on_result
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name='gait-worker', daemon=True)
@@ -121,10 +123,12 @@ class GaitWorker:
             code = self._call()
         except Exception:
             self._log.exception(f'[sport] {self._name} raised')
-            return
+            code = None
         took = time.monotonic() - t0
-        if code != 0 or took > _SLOW_RPC_S:
+        if code is not None and (code != 0 or took > _SLOW_RPC_S):
             self._log.warning(f'[sport] {self._name} code={code} took {took:.2f}s')
+        if self._on_result is not None:
+            self._on_result(code)
 
 
 class ChassisWatch:
@@ -209,8 +213,12 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        if self.is_quadruped:
-            self.sport_client.ClassicWalk(True)
+        # Whether the walking gait is known to be set: a ClassicWalk returned 0 and no
+        # sit or stand has run since. While it is, a motion start asks for nothing --
+        # a repeat is redundant (code -1), and each is a reply RPC that can hold the
+        # sport service for its whole 10s timeout, long enough for a sit sent at the
+        # end of a dock to time out behind it.
+        self._gait_held = self.is_quadruped and self.sport_client.ClassicWalk(True) == 0
         self._robot_status = RobotStatus.SITTING
         self.battery = None
         self.last_twist_time = None
@@ -224,7 +232,8 @@ class Ros2UnitreeManagerNode(Node):
         self.watch = ChassisWatch(self.logger)
         self.gait = None
         if self.is_quadruped:
-            self.gait = GaitWorker(lambda: self.sport_client.ClassicWalk(True), self.logger)
+            self.gait = GaitWorker(lambda: self.sport_client.ClassicWalk(True), self.logger,
+                                   on_result=self._note_gait)
             self.gait.start()
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
@@ -286,7 +295,7 @@ class Ros2UnitreeManagerNode(Node):
                 self._gait_due = True
             # Handed off, never called here: it is a reply RPC, and this thread must
             # stay free to keep pushing Move at the chassis.
-            if self._gait_due and self.gait is not None:
+            if self._gait_due and self.gait is not None and not self._gait_held:
                 self.gait.request()
             self._gait_due = False
             self._walking = True
@@ -297,6 +306,10 @@ class Ros2UnitreeManagerNode(Node):
         if code != 0:
             self._move_failed(now, code)
         self.watch.on_cmd(now, vx, vy, wz)
+
+    def _note_gait(self, code):
+        """GaitWorker's result: held on 0, not held on anything else."""
+        self._gait_held = code == 0
 
     def _move_failed(self, now, code):
         self._move_failures += 1
@@ -357,6 +370,9 @@ class Ros2UnitreeManagerNode(Node):
         /robot_status is a statement about the chassis, and a false one is worse than
         none: a refusing sport service used to be reported as a successful stand."""
         codes = {name: call() for name, call in steps}
+        # A sit or stand changes the posture, so the gait is held only if this very
+        # action set it (a stand ends with ClassicWalk; a sit does not).
+        self._gait_held = codes.get('ClassicWalk') == 0
         said = ', '.join(f'{k} code={v}' for k, v in codes.items())
         if all(c == 0 for c in codes.values()):
             self.logger.info(f"{what}: {said}")

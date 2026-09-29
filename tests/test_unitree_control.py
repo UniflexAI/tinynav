@@ -81,6 +81,7 @@ def _node(sport=None, gait=None):
     node.last_twist_time = None
     node._walking = False
     node._gait_due = False
+    node._gait_held = False
     node._move_failures = 0
     node._move_failure_logged_at = None
     node.watch = uc.ChassisWatch(node.logger)
@@ -123,6 +124,47 @@ class TestTwistPath(unittest.TestCase):
         _drive(node, t + 1.0, 3, 0.5)
         self.assertTrue(node.logger.has('warning', 'rt/cmd_vel silent'))
         self.assertEqual(node.gait.requests, 2)
+
+    def test_a_held_gait_is_not_asked_for_again(self):
+        # A dock's final approach starts and stops every second; each start used to
+        # send ClassicWalk, and one that timed out held the sport service while the
+        # dock's sit arrived, so the sit timed out too (65, 2026-09-29).
+        node = _node()
+        node._note_gait(0)
+        t = _drive(node, 0.0, 10, 0.5)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 0)
+
+    def test_a_failed_assertion_is_asked_for_at_the_next_start(self):
+        node = _node()
+        node._note_gait(3104)
+        t = _drive(node, 0.0, 10, 0.5)
+        t = _drive(node, t, 5, 0.0)
+        _drive(node, t, 10, 0.5)
+        self.assertEqual(node.gait.requests, 2)
+
+    def test_a_sit_or_stand_decides_the_gait_afresh(self):
+        node = _node()
+        node._robot_status = None
+        node._note_gait(0)
+        node._play_steps('Sitting', [('StandDown', lambda: 0)], 'sitting')
+        self.assertFalse(node._gait_held)
+        node._play_steps('Standing', [('StandUp', lambda: 0),
+                                      ('ClassicWalk', lambda: 0)], 'standup')
+        self.assertTrue(node._gait_held)
+        node._play_steps('Standing', [('StandUp', lambda: 0),
+                                      ('ClassicWalk', lambda: 3104)], 'standup')
+        self.assertFalse(node._gait_held)
+
+    def test_the_worker_reports_each_result(self):
+        seen = []
+        worker = uc.GaitWorker(lambda: 0, _Log(), on_result=seen.append)
+        worker.run_once()
+        worker = uc.GaitWorker(lambda: (_ for _ in ()).throw(RuntimeError()), _Log(),
+                               on_result=seen.append)
+        worker.run_once()
+        self.assertEqual(seen, [0, None])
 
     def test_steady_stream_logs_no_gap(self):
         node = _node()
