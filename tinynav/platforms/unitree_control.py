@@ -73,7 +73,7 @@ _REPEAT_S = 5.0
 # A sit or stand that waited longer than this for its turn is dropped: the sport
 # service can hold each one for its whole 10s timeout, and a stand queued behind
 # one ran 20s late with the robot walking at 0.9 m/s (65, 2026-09-29).
-_ACTION_MAX_WAIT_S = 2.0
+_ACTION_MAX_WAIT_S = 0.5
 _SPORT_STATE_SILENT_S = 1.0
 
 
