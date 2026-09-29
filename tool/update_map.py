@@ -37,6 +37,10 @@ VIO_IMAGE_TOPIC = "/camera/camera/vio_image"
 
 def _load_poses(map_path: Path) -> dict[int, np.ndarray]:
     path = map_path / "poses.npy"
+    return _load_pose_file(path)
+
+
+def _load_pose_file(path: Path) -> dict[int, np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(f"missing poses file: {path}")
     return {int(k): np.asarray(v, dtype=np.float64) for k, v in np.load(path, allow_pickle=True).item().items()}
@@ -332,7 +336,7 @@ def _paired_source_and_relocalized_poses(
     max_anchor_dt_ns: int,
 ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], dict[str, Any]]:
     src_poses = _load_poses(src_map)
-    relocalized_poses = _load_poses(localization_dir / "relocalization_poses.npy")
+    relocalized_poses = _load_pose_file(localization_dir / "relocalization_poses.npy")
     paired_src: dict[int, np.ndarray] = {}
     paired_dst: dict[int, np.ndarray] = {}
     skipped_anchor_dt = 0
