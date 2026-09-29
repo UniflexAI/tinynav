@@ -243,6 +243,7 @@ def _ransac_fit_transform(
     inlier_threshold_m: float,
     iterations: int,
     seed: int,
+    min_sample_separation_m: float,
 ) -> dict[str, Any]:
     pairs = [
         row
@@ -257,10 +258,12 @@ def _ransac_fit_transform(
     rng = np.random.default_rng(seed)
     best_mask = np.zeros(len(pairs), dtype=bool)
     best_transform = np.eye(4, dtype=np.float64)
+    skipped_degenerate_samples = 0
 
     for _ in range(max(1, iterations)):
         sample = rng.choice(len(pairs), size=2, replace=False)
-        if np.linalg.norm(src[sample[0], :2] - src[sample[1], :2]) < 1e-3:
+        if np.linalg.norm(src[sample[0], :2] - src[sample[1], :2]) < min_sample_separation_m:
+            skipped_degenerate_samples += 1
             continue
         candidate = _estimate_se2_z(src[sample], dst[sample])
         residuals = np.linalg.norm(_transform_points(candidate, src) - dst, axis=1)
@@ -280,8 +283,12 @@ def _ransac_fit_transform(
         "T_dst_src": best_transform.tolist(),
         "yaw_deg": yaw_deg,
         "candidate_pairs": len(pairs),
+        "candidate_src_xy_span_m": _points_xy_span_m(src),
+        "candidate_dst_xy_span_m": _points_xy_span_m(dst),
         "inlier_count": int(inliers.sum()),
         "inlier_ratio": float(inliers.mean()) if len(inliers) else 0.0,
+        "min_sample_separation_m": float(min_sample_separation_m),
+        "skipped_degenerate_samples": int(skipped_degenerate_samples),
         "median_residual_m": float(np.median(inlier_residuals)) if len(inlier_residuals) else None,
         "p90_residual_m": float(np.percentile(inlier_residuals, 90)) if len(inlier_residuals) else None,
         "max_residual_m": float(np.max(inlier_residuals)) if len(inlier_residuals) else None,
@@ -295,11 +302,17 @@ def _ransac_fit_transform(
     }
 
 
+def _points_xy_span_m(points: np.ndarray) -> float:
+    if len(points) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.max(points[:, :2], axis=0) - np.min(points[:, :2], axis=0)))
+
+
 def _trajectory_span_m(poses: dict[int, np.ndarray], timestamps: list[int]) -> float:
     if len(timestamps) < 2:
         return 0.0
     pts = np.asarray([poses[int(t)][:3, 3] for t in timestamps], dtype=np.float64)
-    return float(np.linalg.norm(np.max(pts[:, :2], axis=0) - np.min(pts[:, :2], axis=0)))
+    return _points_xy_span_m(pts)
 
 
 def _passes_quality_gate(args: argparse.Namespace, src_map: Path, fit: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -471,8 +484,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         inlier_threshold_m=args.ransac_threshold_m,
         iterations=args.ransac_iterations,
         seed=args.seed,
+        min_sample_separation_m=args.ransac_min_sample_separation_m,
     )
     ok, reject_reasons = _passes_quality_gate(args, src_map, fit)
+    src_poses_for_report = _load_poses(src_map)
     report = {
         "type": "tinynav_map_update",
         "dst": str(dst_map),
@@ -483,6 +498,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "quality_ok": bool(ok),
         "reject_reasons": reject_reasons,
         "fit": fit,
+        "src_map_stats": {
+            "keyframes": len(src_poses_for_report),
+            "xy_span_m": _trajectory_span_m(src_poses_for_report, sorted(src_poses_for_report)),
+        },
         "retrieval": {
             "query_count": len(rows),
             "top_k": args.top_k,
@@ -533,6 +552,7 @@ def main() -> None:
     parser.add_argument("--min-similarity", type=float, default=0.20)
     parser.add_argument("--ransac-threshold-m", type=float, default=0.50)
     parser.add_argument("--ransac-iterations", type=int, default=3000)
+    parser.add_argument("--ransac-min-sample-separation-m", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--min-pairs", type=int, default=20)
     parser.add_argument("--min-inliers", type=int, default=12)
