@@ -959,7 +959,6 @@ class BackendNode(Ros2NodeManager):
         '/stair/cmd',
         '/stair/status',
         '/stair/path',
-        '/stair/obstacles',
         # navigation and control
         '/mapping/global_plan',
         '/mapping/poi_change',
