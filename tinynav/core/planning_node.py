@@ -316,8 +316,6 @@ def generate_trajectories(init_p, init_q):
 # stair_node publishes /stair/status every 0.5 s while stair mode is on; no status for this long means off,
 # so a killed stair_node cannot leave planning in stair behavior
 STAIR_MODE_TIMEOUT_S = 1.5
-# stair_node's walls/railings come from measured heights, so they get less margin than the raycast occupancy
-STAIR_OBSTACLE_DILATION_CELLS = 1
 
 
 # === PlanningNode class ===
@@ -375,33 +373,6 @@ class PlanningNode(Node):
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
         self._stair_status_time = -float('inf')
         self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
-        self._stair_obstacles = None  # (receive time, origin xy, resolution, mask[ix, iy])
-        self.create_subscription(OccupancyGrid, '/stair/obstacles', self._on_stair_obstacles, 2)
-
-    def _on_stair_obstacles(self, msg):
-        mask = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width).T > 50
-        origin = np.array([msg.info.origin.position.x, msg.info.origin.position.y])
-        self._stair_obstacles = (time.monotonic(), origin, msg.info.resolution, mask)
-
-    def _add_stair_obstacles(self, obstacle_mask):
-        """Stair mode: add stair_node's walls/railings, which survive the free-space raycasting that clears
-        most of a railing here, so turning on a landing does not walk into it."""
-        if not self.stair_mode or self._stair_obstacles is None:
-            return obstacle_mask
-        stamp, origin, res, mask = self._stair_obstacles
-        if time.monotonic() - stamp > STAIR_MODE_TIMEOUT_S:
-            return obstacle_mask
-        h, w = obstacle_mask.shape
-        cx = self.origin[0] + (np.arange(h) + 0.5) * self.resolution
-        cy = self.origin[1] + (np.arange(w) + 0.5) * self.resolution
-        ix = np.floor((cx - origin[0]) / res).astype(int)
-        iy = np.floor((cy - origin[1]) / res).astype(int)
-        okx, oky = (ix >= 0) & (ix < mask.shape[0]), (iy >= 0) & (iy < mask.shape[1])
-        extra = np.zeros_like(obstacle_mask)
-        extra[np.ix_(okx, oky)] = mask[np.ix_(ix[okx], iy[oky])]
-        if STAIR_OBSTACLE_DILATION_CELLS > 0 and np.any(extra):
-            extra = binary_dilation(extra, iterations=STAIR_OBSTACLE_DILATION_CELLS)
-        return obstacle_mask | extra
 
     def _on_stair_status(self, msg):
         self._stair_status_time = time.monotonic()
@@ -658,7 +629,6 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
-            obstacle_mask = self._add_stair_obstacles(obstacle_mask)
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):

@@ -16,7 +16,7 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from nav_msgs.msg import Odometry, Path
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
@@ -65,9 +65,6 @@ class StairNode(Node):
         self.poi_change_pub = self.create_publisher(Odometry, '/mapping/poi_change', 10)
         self.status_pub = self.create_publisher(String, '/stair/status', 10)
         self.path_pub = self.create_publisher(Path, '/stair/path', 10)
-        # walls/railings seen in the last obstacle_memory_s; planning adds them to its own obstacle map in stair
-        # mode, since its free-space raycasting clears most of a railing through the gaps between bars
-        self.obstacle_pub = self.create_publisher(OccupancyGrid, '/stair/obstacles', 2) if args.share_obstacles else None
         self.create_timer(1.0 / args.rate, self.timer_callback)
         self.get_logger().info(f'stair_node ready, direction={self.direction}; send "up" / "down" / "stop" on /stair/cmd')
 
@@ -120,7 +117,6 @@ class StairNode(Node):
             return
         res = self.gen.compute(self.latest_T, self.direction, prior_dir=self.remembered_direction())
         self.guided = bool(res.get('guided', False))
-        self.publish_obstacles(res)
         self.publish_status(res['status'])
         if res['status'] in STOP_STATUSES or res['target'] is None:
             self.stop_robot(res['status'])
@@ -141,21 +137,6 @@ class StairNode(Node):
                 pose.pose.orientation.w = 1.0
                 path.poses.append(pose)
             self.path_pub.publish(path)
-
-    def publish_obstacles(self, res):
-        if self.obstacle_pub is None:
-            return
-        mask = res.get('planning_obstacles', res['obstacle'])
-        grid = OccupancyGrid()
-        grid.header.stamp = self.get_clock().now().to_msg()
-        grid.header.frame_id = 'world'
-        grid.info.resolution = float(self.gen.cfg.resolution)
-        grid.info.width, grid.info.height = int(mask.shape[0]), int(mask.shape[1])
-        grid.info.origin.position.x, grid.info.origin.position.y = float(res['origin'][0]), float(res['origin'][1])
-        grid.info.origin.position.z = float(self.latest_T[2, 3])
-        grid.info.origin.orientation.w = 1.0
-        grid.data = np.where(mask.T, 100, 0).astype(np.int8).ravel().tolist()  # row-major, x fastest
-        self.obstacle_pub.publish(grid)
 
     def publish_status(self, status):
         text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f}'
@@ -181,8 +162,6 @@ def main():
     parser.add_argument('--memory', default=None, help='stair memory built with tool/stair_memory.py (needs TensorRT)')
     parser.add_argument('--memory_min_similarity', type=float, default=0.8, help='trust the memory only above this')
     parser.add_argument('--image_topic', default='/camera/camera/infra1/image_rect_raw')
-    parser.add_argument('--no_share_obstacles', dest='share_obstacles', action='store_false',
-                        help='do not hand walls/railings to planning (planning then only uses its own map)')
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
     node = StairNode(args)

@@ -26,7 +26,7 @@ class StairReplayRecorder(Node):
     def __init__(self):
         super().__init__('stair_replay_recorder')
         self.t = None
-        self.data = {k: [] for k in ('plan', 'mask', 'target', 'stair_path', 'status', 'stop', 'stair_obstacles')}
+        self.data = {k: [] for k in ('plan', 'mask', 'target', 'stair_path', 'status', 'stop')}
         self.create_subscription(Odometry, '/slam/odometry_visual', self.odom_callback, 50)
         self.create_subscription(Path, '/planning/trajectory_path', lambda m: self.data['plan'].append((stamp(m.header), path_xyz(m))), 50)
         self.create_subscription(OccupancyGrid, '/planning/obstacle_mask', self.mask_callback, 50)
@@ -35,7 +35,6 @@ class StairReplayRecorder(Node):
         self.create_subscription(Path, '/stair/path', lambda m: self.tag('stair_path', path_xyz(m)), 50)
         self.create_subscription(String, '/stair/status', lambda m: self.tag('status', m.data), 50)
         self.create_subscription(Odometry, '/mapping/poi_change', lambda m: self.tag('stop', None), 50)
-        self.create_subscription(OccupancyGrid, '/stair/obstacles', self.stair_obstacles_callback, 10)
 
     def odom_callback(self, msg):
         self.t = stamp(msg.header)
@@ -43,11 +42,6 @@ class StairReplayRecorder(Node):
     def tag(self, key, value):
         if self.t is not None:
             self.data[key].append((self.t, value))
-
-    def stair_obstacles_callback(self, msg):
-        mask = np.array(msg.data, dtype=np.int8).reshape(msg.info.height, msg.info.width).T > 50
-        origin = np.array([msg.info.origin.position.x, msg.info.origin.position.y])
-        self.tag('stair_obstacles', (origin, msg.info.resolution, np.packbits(mask), mask.shape))
 
     def mask_callback(self, msg):
         mask = np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width), order='F') > 50

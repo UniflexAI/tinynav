@@ -342,7 +342,6 @@ The optional second word is the U-turn side at landings (`left` / `right`, `auto
 | `/stair/cmd` (`std_msgs/String`) | in | `up` / `down` (optionally `left` / `right`) start stair mode, `stop` leaves it |
 | `/control/target_pose` | out | 2 Hz (`--rate`), same format as `map_node` |
 | `/mapping/poi_change` | out | sent once when the robot must stop (`no_seed` / `odom_invalid`, or `stop`); planning drops its target and `cmd_vel_control` stops within ~0.8 s |
-| `/stair/obstacles` | out | walls/railings seen in the last 5 s at the robot's height; in stair mode `planning_node` adds them to its obstacle map, because its free-space raycasting clears most of a railing through the gaps between bars. `--no_share_obstacles` turns this off |
 | `/stair/status`, `/stair/path` | out | debugging: status string and the planned path |
 
 `cmd_vel_control` only moves while `/nav/active` is true (normally set by the app). Set `--camera_height` to your robot's camera height above the ground.
