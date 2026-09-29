@@ -105,6 +105,38 @@ class LateralAccelCapTest(unittest.TestCase):
                                    _OMEGA_MAX, places=6, msg=f'cap={cap}')
 
 
+class TurnSlowdownTest(unittest.TestCase):
+    """`turn_slowdown`: a row gives up speed in proportion to how hard it turns."""
+
+    FLOOR = 0.2
+
+    def _rows(self, slowdown):
+        _, params = _gen(init_p=np.zeros(3), init_q=_LEVEL, max_linear_vel=1.0,
+                         max_angular_vel=_OMEGA_MAX, min_linear_vel=self.FLOOR,
+                         turn_slowdown=slowdown)
+        return params
+
+    def test_a_full_rate_turn_drives_at_the_rest_of_its_speed(self):
+        free, slowed = self._rows(0.0), self._rows(0.5)
+        for (vx, om), (svx, som) in zip(free, slowed):
+            self.assertEqual(om, som, 'the turn itself changed')
+            if vx < 1e-6:
+                self.assertEqual(svx, 0.0, 'a standstill row was given speed')
+                continue
+            want = max(self.FLOOR, vx * (1 - 0.5 * abs(om) / _OMEGA_MAX))
+            self.assertAlmostEqual(svx, want, places=9, msg=f'vx={vx} omega={om}')
+            self.assertGreaterEqual(svx, self.FLOOR - 1e-9, 'slowed under the floor')
+
+    def test_a_straight_row_keeps_its_speed(self):
+        """The pair: the slowdown is for turning rows, and 0 turns it off."""
+        free, slowed = self._rows(0.0), self._rows(0.5)
+        straight = np.abs(free[:, 1]) < 1e-9
+        self.assertTrue(straight.any())
+        np.testing.assert_allclose(slowed[straight, 0], free[straight, 0])
+        self.assertTrue((slowed[~straight, 0] < free[~straight, 0] - 1e-9).any(),
+                        'no turning row slowed at all')
+
+
 class LatticeShapeTest(unittest.TestCase):
     def test_the_row_count_is_unchanged_by_the_cap(self):
         self.assertEqual(_lattice(max_lat_acc=0.3)[1].shape, _lattice()[1].shape)

@@ -15,7 +15,8 @@ from planning_node import (run_raycasting_loopy, build_route_fields, route_band_
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M, reverse_gate_penalty,
                            generate_trajectory_library_3d, turn_in_place_penalty,
-                           heading_of_pose7, angle_between)
+                           heading_of_pose7, angle_between, standstill_penalty,
+                           STANDSTILL_GOAL_M)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -901,6 +902,20 @@ def test_only_turn_in_place_rows_pay_it():
     assert turn_in_place_penalty(0.3, -0.5, 0.4, 10.0, 30.0) == 0.0
     assert turn_in_place_penalty(-0.3, -0.5, 0.4, 10.0, 30.0) == 0.0
     assert turn_in_place_penalty(0.0, 0.0, 0.4, 10.0, 30.0) == 0.0
+
+
+def test_a_standstill_is_banned_while_another_row_is_open():
+    """2026-09-29: 18 forward and 15 turn-in-place rows clear, and the robot stood
+    for minutes on a standstill that won on cost."""
+    assert standstill_penalty(True, True, 2.0) == 1e9
+
+
+def test_a_standstill_stays_when_nothing_else_is_open_or_at_the_goal():
+    """The pair: with every other row closed standing still is the honest answer,
+    and inside STANDSTILL_GOAL_M it is how the robot arrives."""
+    assert standstill_penalty(True, False, 2.0) == 0.0
+    assert standstill_penalty(True, True, STANDSTILL_GOAL_M) == 0.0
+    assert standstill_penalty(False, True, 2.0) == 0.0, 'a moving row paid it'
 
 
 # Camera convention, body +Z forward and level. The library's default identity

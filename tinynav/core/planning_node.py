@@ -176,13 +176,18 @@ def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    max_lat_acc=1e9, min_linear_vel=0.0,
+    max_lat_acc=1e9, min_linear_vel=0.0, turn_slowdown=0.0,
 ):
     """Regular sampled lattice (forward-only).
 
     `max_lat_acc` caps vx*omega, so the same steering that is fine at a crawl is not
     offered at speed. It binds only above max_lat_acc/max_angular_vel; below that the
     omega range is unchanged, and at a standstill it does not bind at all.
+
+    `turn_slowdown` takes speed off a row in proportion to how hard it turns:
+    `vx * (1 - turn_slowdown * |omega| / max_angular_vel)`, never under the floor. A
+    row that turns at the full rate drives at `1 - turn_slowdown` of its speed. The
+    standstill rows are left alone, and so is a row already at the floor.
     """
     num_steps = int(duration / dt) + 1
 
@@ -216,6 +221,9 @@ def generate_trajectory_library_3d(
         for i_omega in range(n_omega):
             k += 1
             omega_y = omega_y_samples[i_omega]
+            vx = vx_samples[i_vx]
+            if vx > 1e-6 and turn_slowdown > 0.0:
+                vx = max(vx_lo, vx * (1.0 - turn_slowdown * abs(omega_y) / max_angular_vel))
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
@@ -312,6 +320,25 @@ def reverse_armed(front_clearance, resolution, engaged=False):
     """
     threshold = REVERSE_EXIT_M if engaged else REVERSE_ENTER_M
     return front_clearance <= threshold + resolution / 2
+
+
+#: Inside this of the goal the robot may stand still whatever else is open: that is
+#: arriving. The same 0.3 m inside which the heading terms stop ranking anything.
+STANDSTILL_GOAL_M = 0.3
+
+
+def standstill_penalty(is_standstill, can_move, dist_to_goal):
+    """Bans standing still while some other row is open, short of the goal.
+
+    Every freeze measured so far was a standstill winning on cost with rows clear
+    around it: on 2026-09-29, 18 forward and 15 turn-in-place rows collision-free,
+    and the robot stood for minutes, because a turn's start cost outweighed what the
+    heading term paid for it. A standstill is kept for when nothing else is open --
+    then it is the honest answer -- and for the goal itself.
+    """
+    if is_standstill and can_move and dist_to_goal > STANDSTILL_GOAL_M:
+        return 1e9
+    return 0.0
 
 
 def reverse_gate_penalty(vx, should_reverse):
@@ -727,6 +754,10 @@ class PlanningNode(Node):
         # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
         # max_lat_acc/max_angular_vel; below that the omega range is unchanged.
         self.declare_parameter('traj_max_lat_acc', 0.5)
+        # Speed a turning row gives up, at the full turn rate: it drives at
+        # (1 - this) of its speed there, and proportionally less off it. A turn taken
+        # at the straight-line speed swings the footprint wide of the arc it plans.
+        self.declare_parameter('traj_turn_slowdown', 0.5)
         # Extra per-frame decay on cells under the footprint, on top of the global 0.99.
         self.declare_parameter('footprint_decay', 0.9)
         self._vx_max = float(self.get_parameter('vx_max').value)
@@ -737,6 +768,7 @@ class PlanningNode(Node):
         self._clear_scan_m = float(self.get_parameter('clear_scan_m').value)
         self._t_react_s = float(self.get_parameter('t_react_s').value)
         self._traj_max_lat_acc = float(self.get_parameter('traj_max_lat_acc').value)
+        self._traj_turn_slowdown = float(self.get_parameter('traj_turn_slowdown').value)
         self._footprint_decay = float(self.get_parameter('footprint_decay').value)
 
         # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
@@ -1181,6 +1213,7 @@ class PlanningNode(Node):
             max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             max_lat_acc=self._traj_max_lat_acc,
             min_linear_vel=self._vx_min,
+            turn_slowdown=self._traj_turn_slowdown,
         )
         vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
         trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
@@ -1344,13 +1377,25 @@ class PlanningNode(Node):
             start_err = (_end_heading_error(np.concatenate([init_p, init_q]), target)
                          if target is not None else 0.0)
 
+            def _is_standstill(i):
+                return (abs(params[i][0]) <= 1e-3
+                        and abs(_yaw_rate(trajectories[i])) < 1e-3)
+
+            # Open: collision-free, and not banned by the reverse gate.
+            can_move = any(scores[i] != float('inf') and not _is_standstill(i)
+                           and reverse_gate_penalty(params[i][0], should_reverse) == 0.0
+                           for i in range(len(trajectories)))
+            to_goal_m = (float(np.linalg.norm(init_p[:2] - target[:2]))
+                         if target is not None else 0.0)
+
             def cost_function(i):
                 traj, param = trajectories[i], params[i]
                 turn_penalty = turn_in_place_penalty(
                     param[0], _yaw_rate(traj), self.last_yaw_rate,
                     self.w_turn_in_place, self.w_turn_reversal,
                     self.w_turn_start, start_err)
-                gate_penalty = reverse_gate_penalty(param[0], should_reverse)
+                gate_penalty = (reverse_gate_penalty(param[0], should_reverse)
+                                + standstill_penalty(_is_standstill(i), can_move, to_goal_m))
                 traj_end = np.array(traj[-1, :3])
                 target_end = target if target is not None else traj_end
                 dist = np.linalg.norm(traj_end - target_end)
