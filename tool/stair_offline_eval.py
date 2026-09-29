@@ -22,6 +22,7 @@ from rosidl_runtime_py.utilities import get_message
 from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+from tinynav.core.stair_memory import StairMemory, prior_direction  # noqa: E402
 from tinynav.core.stair_target import StairConfig, StairTargetGenerator  # noqa: E402
 
 GT_ARC = 1.0
@@ -138,6 +139,8 @@ def main():
                     'frames in between reuse the last target, odom_invalid is still immediate')
     ap.add_argument('--turn', choices=['auto', 'left', 'right'], default='auto', help='U-turn side at landings (auto: estimate)')
     ap.add_argument('--set', action='append', default=[], metavar='KEY=VALUE', help='override a StairConfig field, repeatable')
+    ap.add_argument('--stair-memory', default=None, help='stair memory (tool/stair_memory.py build) used as a direction prior')
+    ap.add_argument('--features', default=None, help='image features of this bag (tool/stair_memory.py features), needed with --stair-memory')
     ap.add_argument('--no-video', action='store_true')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -148,6 +151,14 @@ def main():
     if args.memory is not None:
         overrides['memory_s'] = args.memory
     cfg = StairConfig(**overrides)
+    memory = feat_t = feat_f = None
+    if args.stair_memory:
+        if not args.features:
+            raise SystemExit('--stair-memory needs --features for the evaluated bag')
+        memory = StairMemory(args.stair_memory)
+        feats = np.load(args.features)
+        feat_t, feat_f = feats['t'], feats['f']
+        print(f"memory: {len(memory)} frames")
     phase_of = phase_labeler(poses)
     gen = StairTargetGenerator(cfg)
     gen.turn_side = {'auto': 0, 'left': 1, 'right': -1}[args.turn]
@@ -166,7 +177,13 @@ def main():
         due = args.rate is None or t - last_compute >= 1.0 / args.rate
         if res is None or due or not gen.odom_valid or res['status'] == 'odom_invalid':
             tic = time.perf_counter()
-            res = gen.compute(T, args.direction)
+            prior, mem_sim = None, np.nan
+            if memory is not None:
+                q = int(np.argmin(np.abs(feat_t - t)))
+                if abs(feat_t[q] - t) < 0.1:
+                    bearing, mem_sim = memory.query(feat_f[q], args.direction)
+                    prior = None if bearing is None else prior_direction(T, bearing)
+            res = gen.compute(T, args.direction, prior_dir=prior)
             compute_times.append(time.perf_counter() - tic)
             last_compute = t
         fut = future_point(poses, j, GT_ARC)
@@ -174,7 +191,8 @@ def main():
         if res['target'] is not None and fut is not None:
             err = angle_deg(res['target'][:2] - T[:2, 3], fut[:2] - T[:2, 3])
         rows.append(dict(t=t - t0, phase=phase_of(t), status=res['status'], err_deg=err, cam_z=T[2, 3],
-                         target_z=None if res['target'] is None else res['target'][2]))
+                         target_z=None if res['target'] is None else res['target'][2],
+                         guided=bool(res.get('guided', False)), mem_sim=mem_sim))
         if not args.no_video:
             frame = render(res, cfg, T, poses, j, images[int(np.argmin(np.abs(img_t - t)))][1], t - t0, err)
             if writer is None:
@@ -189,6 +207,8 @@ def main():
 
     status = np.array([r['status'] for r in rows])
     ct = np.array(compute_times[20:]) * 1000  # skip numba warmup
+    if memory is not None:
+        print(f"memory direction used in {np.mean([r['guided'] for r in rows]) * 100:.0f}% of frames")
     print(f"compute calls {len(compute_times)} ({len(compute_times) / (rows[-1]['t'] - rows[0]['t']):.1f}/s), "
           f"median {np.median(ct):.1f} ms, p95 {np.percentile(ct, 95):.1f} ms")
     print(f"frames {len(rows)}: " + ", ".join(f"{s}={np.sum(status == s)}" for s in ('ok', 'search', 'no_seed', 'odom_invalid')))

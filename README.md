@@ -346,6 +346,24 @@ The optional second word is the U-turn side at landings (`left` / `right`, `auto
 
 `cmd_vel_control` only moves while `/nav/active` is true (normally set by the app). Set `--camera_height` to your robot's camera height above the ground.
 
+### Stair memory (optional)
+
+Geometry alone is weakest on landings. A stair memory remembers how people walked a given stairwell: each frame of a teleoperated recording is stored as its DINOv2 feature plus the direction the robot went over the next metre. At run time, if the camera image looks like a remembered place (cosine similarity >= 0.8), the remembered direction picks among the reachable, wall-clear targets; in unfamiliar places stair mode behaves as without a memory. Build it from recordings of the stairwell the robot will work in (a person driving the robot, up and down, a few times; Record bag in the app also keeps `/camera/camera/vio_100hz`):
+
+```bash
+# 1. image features, needs TensorRT (robot or dev container)
+python tool/stair_memory.py features --bag <bag> --out <bag>_features.npz
+# 2. label and merge, one --features/--direction per --bag
+python tool/stair_memory.py build --bag A --features A_features.npz --direction down \
+                                  --bag B --features B_features.npz --direction up --out stair_memory.npz
+# run stair mode with it
+python tinynav/core/stair_node.py --memory stair_memory.npz
+# or evaluate offline with a bag that is not in the memory
+.venv/bin/python tool/stair_offline_eval.py --bag C --direction down --stair-memory stair_memory.npz --features C_features.npz
+```
+
+Frames around odometry jumps, while backing up and while not making progress are left out of the memory. `/stair/status` shows the best similarity and `guided` when the memory picked the target.
+
 ### Replay test with planning
 
 Replays a rosbag through `looper_bridge_node` + `planning_node` + `stair_node` in an isolated ROS domain (localhost only, so a robot on the network never sees these targets), records their outputs and renders a video:

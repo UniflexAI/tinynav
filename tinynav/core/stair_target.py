@@ -47,6 +47,9 @@ class StairConfig:
     search_clearance: float = 0.35  # landing targets keep this far from walls (planning backs off near walls)
     search_commit_s: float = 4.0    # keep a landing target this long instead of re-picking every call
     search_reached: float = 0.4     # a landing target this close counts as reached
+    guide_min_dist: float = 0.8     # with a remembered direction (stair_memory.py), aim at a reachable cell
+    guide_max_dist: float = 2.0     # this far away ...
+    guide_max_angle: float = 60.0   # ... within this many degrees of it, else ignore the memory
     jump_dist: float = 0.10         # consecutive odometry poses further apart than this are a jump
     flight_track_m: float = 1.0     # flight direction = horizontal displacement over this much recent travel
     flight_min_dz: float = 0.15     # ... counted only if the height changed this much over it (on a flight)
@@ -184,9 +187,11 @@ class StairTargetGenerator:
         self.last_jump_stamp = -np.inf
         self.latest_stamp = -np.inf
 
-    def compute(self, T_cam_to_world, direction: str):
+    def compute(self, T_cam_to_world, direction: str, prior_dir=None):
         """direction: 'up' or 'down'. Returns dict with status in {'ok', 'no_seed', 'search', 'odom_invalid'}.
-        'search' still carries a target (frontier or in-place turn); 'no_seed' and 'odom_invalid' mean stop."""
+        'search' still carries a target (frontier or in-place turn); 'no_seed' and 'odom_invalid' mean stop.
+        prior_dir: optional world-frame horizontal direction remembered for this place (stair_memory.py); it
+        only picks among reachable, wall-clear cells and is ignored when none lies near it."""
         cfg = self.cfg
         assert direction in ('up', 'down')
         cam = T_cam_to_world[:3, 3]
@@ -308,6 +313,16 @@ class StairTargetGenerator:
                     goal = np.unravel_index(np.argmax(np.where(cand, clearance, -np.inf)), cand.shape)
                 self.search_goal = (cell_xy[goal].copy(), self.latest_stamp)
         self.last_status = out['status']
+        if prior_dir is not None:
+            d = np.asarray(prior_dir, dtype=np.float64)
+            d = d / (np.linalg.norm(d) + 1e-9)
+            cos = (rel_xy @ d) / np.maximum(r_robot, 1e-6)
+            cand = reachable & (clearance >= cfg.search_clearance) & (r_robot > cfg.guide_min_dist) \
+                & (r_robot < cfg.guide_max_dist) & (cos > np.cos(np.radians(cfg.guide_max_angle)))
+            if np.any(cand):
+                # closest to the remembered direction, a little farther when tied
+                goal = np.unravel_index(np.argmax(np.where(cand, cos + 0.05 * r_robot, -np.inf)), cand.shape)
+                out['guided'] = True
         out['well_side'] = self.well_side
         path = [goal]
         while parent[path[-1][0], path[-1][1], 0] >= 0:

@@ -3,10 +3,13 @@
 Start with --direction up|down, or send "up" / "down" on /stair/cmd; "stop" leaves stair mode.
 Add the U-turn side at landings if known ("up left", or --turn left); otherwise it is estimated. No map or relocalization
 is used; targets come from local geometry (see stair_target.py) at a low rate, like map_node.
+With --memory (tool/stair_memory.py), the camera image is matched against recordings of this stairwell and the
+remembered walking direction picks among the reachable targets; unfamiliar places fall back to geometry.
 When there is no safe target (odometry jump, no ground under the feet) the planning target is
 cleared through /mapping/poi_change, so planning stops publishing paths and cmd_vel stops.
 """
 import argparse
+import asyncio
 
 import message_filters
 import numpy as np
@@ -20,6 +23,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 
 from tinynav.core.math_utils import msg2np, np2msg
+from tinynav.core.stair_memory import StairMemory, prior_direction
 from tinynav.core.stair_target import StairConfig, StairTargetGenerator
 
 STOP_STATUSES = ('no_seed', 'odom_invalid')
@@ -42,6 +46,14 @@ class StairNode(Node):
         self.stopped = True  # planning target is currently cleared by us
 
         self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
+        self.memory = self.dino = self.latest_image = None
+        self.memory_similarity, self.guided = 0.0, False
+        if args.memory:
+            from tinynav.core.models_trt import Dinov2TRT  # TensorRT only needed with a memory
+            self.memory = StairMemory(args.memory, min_similarity=args.memory_min_similarity)
+            self.dino = Dinov2TRT()
+            self.create_subscription(Image, args.image_topic, self.image_callback, 2)
+            self.get_logger().info(f'stair memory: {len(self.memory)} frames from {args.memory}')
         self.create_subscription(Odometry, '/slam/odometry', self.odom_callback, 100)
         self.create_subscription(String, '/stair/cmd', self.cmd_callback, 10)
         depth_sub = message_filters.Subscriber(self, Image, '/slam/depth')
@@ -90,10 +102,21 @@ class StairNode(Node):
         self.gen.add_depth(stamp_sec(odom_msg.header.stamp), depth, self.K, T)
         self.latest_T = T
 
+    def image_callback(self, msg):
+        self.latest_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+
+    def remembered_direction(self):
+        if self.memory is None or self.latest_image is None:
+            return None
+        feature = np.asarray(asyncio.run(self.dino.infer(self.latest_image)))
+        bearing, self.memory_similarity = self.memory.query(feature, self.direction)
+        return None if bearing is None else prior_direction(self.latest_T, bearing)
+
     def timer_callback(self):
         if self.direction is None or self.latest_T is None:
             return
-        res = self.gen.compute(self.latest_T, self.direction)
+        res = self.gen.compute(self.latest_T, self.direction, prior_dir=self.remembered_direction())
+        self.guided = bool(res.get('guided', False))
         self.publish_status(res['status'])
         if res['status'] in STOP_STATUSES or res['target'] is None:
             self.stop_robot(res['status'])
@@ -116,7 +139,10 @@ class StairNode(Node):
             self.path_pub.publish(path)
 
     def publish_status(self, status):
-        self.status_pub.publish(String(data=f'{self.direction} {status} well_side={self.gen.well_side:+.1f}'))
+        text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f}'
+        if self.memory is not None:
+            text += f' memory={self.memory_similarity:.2f}{" guided" if self.guided else ""}'
+        self.status_pub.publish(String(data=text))
 
     def stop_robot(self, reason):
         if self.stopped:
@@ -133,6 +159,9 @@ def main():
     parser.add_argument('--camera_height', type=float, default=0.66, help='camera height above the ground [m]')
     parser.add_argument('--direction', choices=['up', 'down'], default=None, help='start in stair mode right away')
     parser.add_argument('--turn', choices=list(TURN_SIDES), default='auto', help='U-turn side at landings (auto: estimate)')
+    parser.add_argument('--memory', default=None, help='stair memory built with tool/stair_memory.py (needs TensorRT)')
+    parser.add_argument('--memory_min_similarity', type=float, default=0.8, help='trust the memory only above this')
+    parser.add_argument('--image_topic', default='/camera/camera/infra1/image_rect_raw')
     args, ros_args = parser.parse_known_args()
     rclpy.init(args=ros_args)
     node = StairNode(args)
