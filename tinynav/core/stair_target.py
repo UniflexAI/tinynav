@@ -64,7 +64,9 @@ class StairConfig:
     level_pitch: float = 8.0        # back below this for level_min_s after >= flight_min_s on a flight: on the landing
     flight_min_s: float = 1.0
     level_min_s: float = 0.5
-    landing_search: bool = False    # at the landing: False stops there ('landing'), True looks for the next flight
+    landing_search: bool = True     # at the landing: look for the next flight (False: stop there, status 'landing')
+    next_flight_lateral: float = 1.3  # a U-turn landing: the next flight starts this far to the turn side of where
+    next_flight_back: float = 0.4     # we arrived and this far back (1.2-1.4 / 0.3-0.5 m on all recorded landings)
     max_target_bearing: float = 75.0    # never put the target further round than this from the camera heading;
                                         # a U-turn is done by turning toward the side instead of aiming behind
     guide_min_dist: float = 0.8     # with a remembered direction (stair_memory.py), aim at a reachable cell
@@ -153,6 +155,7 @@ class StairTargetGenerator:
         self.pitch = 0.0        # smoothed camera pitch (deg, + up)
         self.pitched_since = self.level_since = None
         self.flight_done = False  # walked a flight and are level again
+        self.next_entry = None    # predicted start of the next flight, set on arriving at a landing
         self.was_on_flight = False
         self.camera_height = self.cfg.camera_height
         self.last_status = None
@@ -216,14 +219,29 @@ class StairTargetGenerator:
         self.pitch = 0.7 * self.pitch + 0.3 * pitch  # ~0.5 s at the depth rate, the body rocks on every step
         if abs(self.pitch) > cfg.flight_pitch:
             self.pitched_since = self.pitched_since if self.pitched_since is not None else stamp
+            if self.flight_done and stamp - self.pitched_since >= cfg.flight_min_s:
+                # on the next flight: arm the landing detection again
+                self.flight_done, self.next_entry = False, None
             self.was_on_flight |= stamp - self.pitched_since >= cfg.flight_min_s
         else:
             self.pitched_since = None
         if abs(self.pitch) < cfg.level_pitch:
             self.level_since = self.level_since if self.level_since is not None else stamp
-            self.flight_done |= self.was_on_flight and stamp - self.level_since >= cfg.level_min_s
+            if self.was_on_flight and stamp - self.level_since >= cfg.level_min_s and not self.flight_done:
+                self.flight_done, self.was_on_flight = True, False
+                self._predict_next_flight()
         else:
             self.level_since = None
+
+    def _predict_next_flight(self):
+        """Arrived at a landing: the next flight of a U-shaped stairwell starts beside the one we came down/up,
+        on the turn side, a little behind where we arrived."""
+        side = self.turn_side or np.sign(self.well_side)
+        if side == 0 or self.flight_dir is None or self.last_position is None:
+            return
+        f = self.flight_dir
+        left = np.array([-f[1], f[0]])
+        self.next_entry = self.last_position[:2] + side * self.cfg.next_flight_lateral * left - self.cfg.next_flight_back * f
 
     @property
     def on_flight(self):
@@ -253,6 +271,7 @@ class StairTargetGenerator:
         self.ok_goal = None
         self.pitched_since = self.level_since = None
         self.flight_done = self.was_on_flight = False
+        self.next_entry = None
 
     def reset(self):
         self.frames.clear()
@@ -339,10 +358,25 @@ class StairTargetGenerator:
         if best < sign * foot_z + gain and self.ok_goal is not None and self.latest_stamp - self.ok_goal[1] < hold_s:
             gi = tuple(np.floor((self.ok_goal[0] - origin) / cfg.resolution).astype(int))
             if 0 <= gi[0] < n and 0 <= gi[1] < n and reachable[gi] and np.linalg.norm(self.ok_goal[0] - cam[:2]) > cfg.search_reached:
-                held = gi
+                # while pitched, hold only as long as the goal is still a level below/above the feet: stalled on the
+                # last steps we keep going, but once the feet are at landing height the landing search takes over
+                if not self.on_flight or sign * (height[gi] - foot_z) > cfg.min_level_gain_exit:
+                    held = gi
+        step_on = None
+        if held is None and self.on_flight and best < sign * foot_z + gain:
+            # front feet on the landing, rear still on the steps (still pitched): walk straight on to get fully onto
+            # the landing before turning anywhere
+            ahead = reachable & observed & (r_robot > 0.4) & (r_robot < 0.9) & (clearance >= 0.25) \
+                & ((rel_xy @ fwd) > 0.94 * r_robot)  # within ~20 deg of the heading
+            if np.any(ahead):
+                step_on = np.unravel_index(np.argmax(np.where(ahead, rel_xy @ fwd, -np.inf)), ahead.shape)
         if held is not None:
             out['status'] = 'ok'
             goal = held
+        elif step_on is not None:
+            out['status'] = 'ok'
+            out['stepping_on'] = True
+            goal = step_on
         elif best >= sign * foot_z + gain:
             out['status'] = 'ok'
             self.search_goal = None
@@ -386,10 +420,16 @@ class StairTargetGenerator:
                 # only seen, roomy cells away from anything unseen: we turn to look instead of walking into the
                 # unknown, which is where railings and the stairwell edge hide
                 near_unknown = binary_dilation(~(observed | blind), iterations=max(1, int(round(cfg.search_unknown_margin / cfg.resolution))))
-                seen = roomy & observed & ~near_unknown & (r_robot > 0.4) & (r_robot < 1.5) & (rel_xy @ fwd > -0.3)
+                seen_room = roomy & observed & ~near_unknown & (r_robot > 0.4)
+                toward_next = seen_room & (r_robot < 2.0)
+                seen = seen_room & (r_robot < 1.5) & (rel_xy @ fwd > -0.3)
                 if side != 0:
                     seen &= side * lateral > 0
-                if np.any(seen):
+                if self.next_entry is not None and np.any(toward_next):
+                    # head for the seen cell closest to where the next flight should start (turning toward it is
+                    # left to _keep_in_front, which never aims behind)
+                    goal = np.unravel_index(np.argmin(np.where(toward_next, np.linalg.norm(cell_xy - self.next_entry, axis=-1), np.inf)), seen.shape)
+                elif np.any(seen):
                     # the next flight is beside the one we came from, across the stairwell
                     goal = np.unravel_index(np.argmax(np.where(seen, side * lateral, -np.inf)), seen.shape)
                 else:
