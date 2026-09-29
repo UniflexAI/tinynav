@@ -90,6 +90,7 @@ def _run_build_map(
     play_rate: float,
     global_frames_ratio: float,
     verbose_timer: bool,
+    build_semantic_embedding: bool,
 ) -> None:
     from launch import LaunchDescription, LaunchService
     from launch.actions import EmitEvent, ExecuteProcess, RegisterEventHandler
@@ -115,6 +116,8 @@ def _run_build_map(
     ]
     if not verbose_timer:
         build_cmd.append("--no_verbose_timer")
+    if not build_semantic_embedding:
+        build_cmd.append("--no_enable_semantic_embedding")
 
     print(f"building source map from bag using {source_name}...")
     source = ExecuteProcess(
@@ -449,6 +452,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 args.play_rate,
                 args.global_frames_ratio,
                 args.verbose_timer,
+                args.build_semantic_embedding,
             )
         else:
             _require_map(src_map)
@@ -521,6 +525,7 @@ def main() -> None:
     parser.add_argument("--play-rate", type=float, default=1.0)
     parser.add_argument("--global-frames-ratio", type=float, default=1.1)
     parser.add_argument("--no-verbose-timer", dest="verbose_timer", action="store_false", default=True)
+    parser.add_argument("--build-semantic-embedding", action="store_true", help="Build semantic embeddings for the temporary source map. Off by default so looper bags do not wait for RGB synchronization.")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--every-n", type=int, default=1)
     parser.add_argument("--max-queries", type=int, default=0)

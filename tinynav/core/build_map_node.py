@@ -51,6 +51,7 @@ class BuildMapArgs:
     map_save_path: str = "tinynav_db"
     play_rate: float = 1.0
     verbose_timer: bool = True
+    enable_semantic_embedding: bool = True
     # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
@@ -581,12 +582,14 @@ class BuildMapNode(Node):
         self,
         map_save_path: str,
         verbose_timer: bool = True,
+        enable_semantic_embedding: bool = True,
         global_frames_ratio: float = 1.1,
     ):
         super().__init__('build_map_node')
         if global_frames_ratio < 1.0:
             raise ValueError(f"global_frames_ratio must be >= 1.0, got {global_frames_ratio}")
         self.verbose_timer = verbose_timer
+        self.enable_semantic_embedding = enable_semantic_embedding
         self.global_frames_ratio = global_frames_ratio
         # Keyframe count at the last global refinement (COLMAP: ba_prev_num_reg_frames).
         self._global_prev_num_frames = 0
@@ -597,7 +600,7 @@ class BuildMapNode(Node):
         self.super_point_extractor = SuperPointTRT()
         self.light_glue_matcher = LightGlueTRT()
         self.dinov2_model = Dinov2TRT()
-        self.semantic_embedder = SigLIPTRT()
+        self.semantic_embedder = SigLIPTRT() if enable_semantic_embedding else None
 
         self.bridge = CvBridge()
 
@@ -607,7 +610,7 @@ class BuildMapNode(Node):
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
-        self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw')
+        self.rgb_image_sub = Subscriber(self, Image, '/camera/camera/color/image_raw') if enable_semantic_embedding else None
         self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
 
         self.marker_pub = self.create_publisher(MarkerArray, '/mapping/pointcloud_markers', 10)
@@ -622,7 +625,10 @@ class BuildMapNode(Node):
         self.mapping_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.mapping_stop_callback, 10)
         self.mapping_save_finished_pub = self.create_publisher(Bool, '/benchmark/data_saved', 10)
         # Keep sync queue bounded to reduce memory spikes/OOM risk on Jetson during map building.
-        self.ts = ApproximateTimeSynchronizer([self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub, self.rgb_image_sub], 200, 0.02)
+        sync_inputs = [self.keyframe_image_sub, self.keyframe_odom_sub, self.depth_sub]
+        if self.rgb_image_sub is not None:
+            sync_inputs.append(self.rgb_image_sub)
+        self.ts = ApproximateTimeSynchronizer(sync_inputs, 200, 0.02)
         self.ts.registerCallback(self.keyframe_callback)
 
         self.K = None
@@ -725,13 +731,13 @@ class BuildMapNode(Node):
                 save_finished_msg.data = False
                 self.mapping_save_finished_pub.publish(save_finished_msg)
 
-    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
+    def keyframe_callback(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image | None = None):
         with self.stage_timer.timed("mapping_loop"):
             if self.K is None:
                 return
             self.process(keyframe_image_msg, keyframe_odom_msg, depth_msg, rgb_image_msg)
 
-    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image):
+    def process(self, keyframe_image_msg:Image, keyframe_odom_msg:Odometry, depth_msg:Image, rgb_image_msg:Image | None = None):
         with self.stage_timer.timed("msg_decode"):
             keyframe_image_timestamp = int(keyframe_image_msg.header.stamp.sec * 1e9) + int(keyframe_image_msg.header.stamp.nanosec)
             keyframe_odom_timestamp = int(keyframe_odom_msg.header.stamp.sec * 1e9) + int(keyframe_odom_msg.header.stamp.nanosec)
@@ -742,7 +748,10 @@ class BuildMapNode(Node):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
-            rgb_image = self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
+            rgb_image = (
+                self.bridge.imgmsg_to_cv2(rgb_image_msg, desired_encoding="bgr8")
+                if rgb_image_msg is not None else None
+            )
 
         with self.stage_timer.timed("save_image_and_depth"):
             self.db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = infra1_image, rgb_image = rgb_image)
@@ -751,9 +760,10 @@ class BuildMapNode(Node):
             embedding, patch_tokens = asyncio.run(self.dinov2_model.infer_global_and_patch_tokens(infra1_image))
             embedding = embedding / np.linalg.norm(embedding)
             self.db.set_entry(keyframe_image_timestamp, embedding = embedding, patch_tokens = patch_tokens)
-        with self.stage_timer.timed("get_semantic_embedding"):
-            semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
-            self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
+        if self.enable_semantic_embedding and self.semantic_embedder is not None and rgb_image is not None:
+            with self.stage_timer.timed("get_semantic_embedding"):
+                semantic_embedding = normalize_embedding(asyncio.run(self.semantic_embedder.encode_image(rgb_image)))
+                self.db.set_semantic_embedding(keyframe_image_timestamp, semantic_embedding)
         with self.stage_timer.timed("super_point_extractor"):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
@@ -1056,6 +1066,7 @@ if __name__ == '__main__':
     map_node = BuildMapNode(
         parsed_args.map_save_path,
         verbose_timer=parsed_args.verbose_timer,
+        enable_semantic_embedding=parsed_args.enable_semantic_embedding,
         global_frames_ratio=parsed_args.global_frames_ratio,
     )
     image_transports_node = ImageTransportsNode()
