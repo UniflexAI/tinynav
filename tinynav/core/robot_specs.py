@@ -35,6 +35,7 @@ class RobotConfig:
     radius: float = 0.3
     camera_x: float = 0.35
     camera_y: float = 0.0
+    camera_height: float = 0.66  # camera above the ground when standing (stair mode refines it on flat ground)
     control_x: float = 0.0
     control_y: float = 0.0
     safety_radius: float = 0.1
@@ -67,7 +68,7 @@ class RobotConfig:
 GO2_CONFIG = RobotConfig(
     name='go2', shape='square',
     length=0.4, width=0.3,
-    camera_x=0.2, camera_y=0.0,
+    camera_x=0.2, camera_y=0.0, camera_height=0.45,  # measured on two go2 stair runs (0.45 / 0.47 m)
     control_x=0.0, control_y=0.0,
     safety_radius=0.2,
     obstacle=ObstacleConfig(robot_z_bottom=-0.4, robot_z_top=0.4),

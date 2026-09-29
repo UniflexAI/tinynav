@@ -23,6 +23,7 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 
 from tinynav.core.math_utils import msg2np, np2msg
+from tinynav.core.robot_specs import ROBOT_CONFIG
 from tinynav.core.stair_memory import StairMemory, prior_direction
 from tinynav.core.stair_target import StairConfig, StairTargetGenerator
 
@@ -37,7 +38,8 @@ def stamp_sec(stamp):
 class StairNode(Node):
     def __init__(self, args):
         super().__init__('stair_node')
-        self.gen = StairTargetGenerator(StairConfig(camera_height=args.camera_height))
+        camera_height = args.camera_height if args.camera_height is not None else ROBOT_CONFIG.camera_height
+        self.gen = StairTargetGenerator(StairConfig(camera_height=camera_height))
         self.gen.turn_side = TURN_SIDES[args.turn]
         self.bridge = CvBridge()
         self.K = None
@@ -139,7 +141,7 @@ class StairNode(Node):
             self.path_pub.publish(path)
 
     def publish_status(self, status):
-        text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f}'
+        text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f} cam_h={self.gen.camera_height:.2f}'
         if self.memory is not None:
             text += f' memory={self.memory_similarity:.2f}{" guided" if self.guided else ""}'
         self.status_pub.publish(String(data=text))
@@ -156,7 +158,8 @@ class StairNode(Node):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--rate', type=float, default=2.0, help='target update rate in Hz (map_node uses 2 Hz)')
-    parser.add_argument('--camera_height', type=float, default=0.66, help='camera height above the ground [m]')
+    parser.add_argument('--camera_height', type=float, default=None,
+                        help='initial camera height above the ground [m] (default: robot_specs for ROBOT_TYPE; refined on flat ground)')
     parser.add_argument('--direction', choices=['up', 'down'], default=None, help='start in stair mode right away')
     parser.add_argument('--turn', choices=list(TURN_SIDES), default='auto', help='U-turn side at landings (auto: estimate)')
     parser.add_argument('--memory', default=None, help='stair memory built with tool/stair_memory.py (needs TensorRT)')
