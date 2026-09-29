@@ -141,6 +141,8 @@ def main():
     ap.add_argument('--set', action='append', default=[], metavar='KEY=VALUE', help='override a StairConfig field, repeatable')
     ap.add_argument('--stair-memory', default=None, help='stair memory (tool/stair_memory.py build) used as a direction prior')
     ap.add_argument('--features', default=None, help='image features of this bag (tool/stair_memory.py features), needed with --stair-memory')
+    ap.add_argument('--stop-at-landing', action='store_true',
+                    help="stay stopped after 'landing' (default: start stair mode again, like pressing Stairs on the landing)")
     ap.add_argument('--no-video', action='store_true')
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -184,6 +186,8 @@ def main():
                     bearing, mem_sim = memory.query(feat_f[q], args.direction)
                     prior = None if bearing is None else prior_direction(T, bearing)
             res = gen.compute(T, args.direction, prior_dir=prior)
+            if res['status'] == 'landing' and not args.stop_at_landing:
+                gen.new_run()
             compute_times.append(time.perf_counter() - tic)
             last_compute = t
         fut = future_point(poses, j, GT_ARC)
@@ -211,7 +215,7 @@ def main():
         print(f"memory direction used in {np.mean([r['guided'] for r in rows]) * 100:.0f}% of frames")
     print(f"compute calls {len(compute_times)} ({len(compute_times) / (rows[-1]['t'] - rows[0]['t']):.1f}/s), "
           f"median {np.median(ct):.1f} ms, p95 {np.percentile(ct, 95):.1f} ms")
-    print(f"frames {len(rows)}: " + ", ".join(f"{s}={np.sum(status == s)}" for s in ('ok', 'search', 'no_seed', 'odom_invalid')))
+    print(f"frames {len(rows)}: " + ", ".join(f"{s}={np.sum(status == s)}" for s in ('ok', 'search', 'no_seed', 'odom_invalid', 'landing')))
     invalid_t = np.array([r['t'] for r in rows if r['status'] == 'odom_invalid'])
     if len(invalid_t):
         breaks = np.where(np.diff(invalid_t) > 0.5)[0]

@@ -60,12 +60,18 @@ class StairConfig:
     search_reached: float = 0.4     # a landing target this close counts as reached
     search_unknown_margin: float = 0.2  # landing targets stay this far from unseen cells: turn to look, don't walk in
     turn_in_place_dist: float = 0.3     # with no room to the side, a target this close only turns the robot
+    flight_pitch: float = 12.0      # body pitched more than this (deg, smoothed): we are on a flight
+    level_pitch: float = 8.0        # back below this for level_min_s after >= flight_min_s on a flight: on the landing
+    flight_min_s: float = 1.0
+    level_min_s: float = 0.5
+    landing_search: bool = False    # at the landing: False stops there ('landing'), True looks for the next flight
     max_target_bearing: float = 75.0    # never put the target further round than this from the camera heading;
                                         # a U-turn is done by turning toward the side instead of aiming behind
     guide_min_dist: float = 0.8     # with a remembered direction (stair_memory.py), aim at a reachable cell
     guide_max_dist: float = 2.0     # this far away ...
     guide_max_angle: float = 60.0   # ... within this many degrees of it, else ignore the memory
-    jump_dist: float = 0.10         # consecutive odometry poses further apart than this are a jump
+    jump_dist: float = 0.10         # consecutive odometry poses further apart than this are a jump ...
+    jump_speed: float = 3.0         # ... if that is also faster than this (a gap in the stream is not a jump)
     flight_track_m: float = 1.0     # flight direction = horizontal displacement over this much recent travel
     flight_min_dz: float = 0.15     # ... counted only if the height changed this much over it (on a flight)
     jump_hold_s: float = 2.0        # odometry stays invalid this long after the last jump
@@ -143,6 +149,11 @@ class StairTargetGenerator:
         self.turn_side = 0      # U-turn side at landings if known: +1 left, -1 right, 0 estimate from the stairwell
         self.track = deque()    # recent odometry positions, for the flight direction
         self.z_log = deque()    # (stamp, z) of recent poses, to tell flat ground for the camera height
+        self.last_pose_stamp = None
+        self.pitch = 0.0        # smoothed camera pitch (deg, + up)
+        self.pitched_since = self.level_since = None
+        self.flight_done = False  # walked a flight and are level again
+        self.was_on_flight = False
         self.camera_height = self.cfg.camera_height
         self.last_status = None
         self.search_goal = None  # (xy, stamp picked) of the current landing target
@@ -154,11 +165,14 @@ class StairTargetGenerator:
     def add_pose(self, stamp, position):
         """Feed every raw odometry pose (e.g. 100 Hz), not only the ones matched to depth."""
         position = np.asarray(position, dtype=np.float64)
-        if self.last_position is not None and np.linalg.norm(position - self.last_position) > self.cfg.jump_dist:
+        step = np.linalg.norm(position - self.last_position) if self.last_position is not None else 0.0
+        dt = stamp - self.last_pose_stamp if self.last_pose_stamp is not None else 0.0
+        if step > self.cfg.jump_dist and step > self.cfg.jump_speed * max(dt, 1e-3):
             self.last_jump_stamp = stamp
             self.frames.clear()
             self.track.clear()
         self.last_position = position
+        self.last_pose_stamp = stamp
         self.latest_stamp = max(self.latest_stamp, stamp)
         self.z_log.append((stamp, position[2]))
         while self.z_log and stamp - self.z_log[0][0] > 2.0:
@@ -187,12 +201,33 @@ class StairTargetGenerator:
         self.latest_stamp = max(self.latest_stamp, stamp)
         if not self.odom_valid:
             return
+        self._update_pitch(stamp, T_cam_to_world)
         points = depth_to_world_points(depth_m, K, T_cam_to_world, self.cfg)
         self.frames.append((stamp, points))
         while self.frames and stamp - self.frames[0][0] > self.cfg.memory_s:
             self.frames.popleft()
         if self.cfg.auto_camera_height:
             self._measure_camera_height(points, T_cam_to_world[:3, 3])
+
+    def _update_pitch(self, stamp, T_cam_to_world):
+        """The body pitches ~20 deg on a flight and is level on a landing; the camera is fixed to it."""
+        cfg = self.cfg
+        pitch = np.degrees(np.arcsin(np.clip(T_cam_to_world[2, 2], -1.0, 1.0)))  # camera forward, z component
+        self.pitch = 0.7 * self.pitch + 0.3 * pitch  # ~0.5 s at the depth rate, the body rocks on every step
+        if abs(self.pitch) > cfg.flight_pitch:
+            self.pitched_since = self.pitched_since if self.pitched_since is not None else stamp
+            self.was_on_flight |= stamp - self.pitched_since >= cfg.flight_min_s
+        else:
+            self.pitched_since = None
+        if abs(self.pitch) < cfg.level_pitch:
+            self.level_since = self.level_since if self.level_since is not None else stamp
+            self.flight_done |= self.was_on_flight and stamp - self.level_since >= cfg.level_min_s
+        else:
+            self.level_since = None
+
+    @property
+    def on_flight(self):
+        return abs(self.pitch) > self.cfg.flight_pitch
 
     def _measure_camera_height(self, points, cam):
         """On flat ground (height steady for 2 s) the floor ahead is the strongest level below the camera."""
@@ -216,6 +251,8 @@ class StairTargetGenerator:
         self.last_status = None
         self.search_goal = None
         self.ok_goal = None
+        self.pitched_since = self.level_since = None
+        self.flight_done = self.was_on_flight = False
 
     def reset(self):
         self.frames.clear()
@@ -227,8 +264,9 @@ class StairTargetGenerator:
         self.latest_stamp = -np.inf
 
     def compute(self, T_cam_to_world, direction: str, prior_dir=None):
-        """direction: 'up' or 'down'. Returns dict with status in {'ok', 'no_seed', 'search', 'odom_invalid'}.
-        'search' still carries a target (frontier or in-place turn); 'no_seed' and 'odom_invalid' mean stop.
+        """direction: 'up' or 'down'. Returns dict with status in {'ok', 'no_seed', 'search', 'odom_invalid', 'landing'}.
+        'search' still carries a target (frontier or in-place turn); 'no_seed', 'odom_invalid' and 'landing'
+        (walked a flight and level again, with landing_search off) mean stop.
         prior_dir: optional world-frame horizontal direction remembered for this place (stair_memory.py); it
         only picks among reachable, wall-clear cells and is ignored when none lies near it."""
         cfg = self.cfg
@@ -286,12 +324,19 @@ class StairTargetGenerator:
         def lateral_to(d):  # >0 on the left of direction d
             return d[0] * rel_xy[..., 1] - d[1] * rel_xy[..., 0]
 
+        if self.flight_done and not cfg.landing_search:
+            # walked a flight and are level again: stop on the landing (turning for the next flight is not done)
+            self.last_status, self.search_goal, self.ok_goal = 'landing', None, None
+            out['status'] = 'landing'
+            return out
         h = np.where(reachable, height, np.nan)
         best = np.nanmax(sign * h)
         # hysteresis so the end of a flight does not flip between 'ok' and 'search' every call
         gain = cfg.min_level_gain_exit if self.last_status == 'ok' else cfg.min_level_gain
         held = None
-        if best < sign * foot_z + gain and self.ok_goal is not None and self.latest_stamp - self.ok_goal[1] < cfg.ok_hold_s:
+        # still pitched = still on the flight: keep going for the last goal however long the next level is out of view
+        hold_s = np.inf if self.on_flight else cfg.ok_hold_s
+        if best < sign * foot_z + gain and self.ok_goal is not None and self.latest_stamp - self.ok_goal[1] < hold_s:
             gi = tuple(np.floor((self.ok_goal[0] - origin) / cfg.resolution).astype(int))
             if 0 <= gi[0] < n and 0 <= gi[1] < n and reachable[gi] and np.linalg.norm(self.ok_goal[0] - cam[:2]) > cfg.search_reached:
                 held = gi

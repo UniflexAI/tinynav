@@ -27,7 +27,7 @@ from tinynav.core.robot_specs import ROBOT_CONFIG
 from tinynav.core.stair_memory import StairMemory, prior_direction
 from tinynav.core.stair_target import StairConfig, StairTargetGenerator
 
-STOP_STATUSES = ('no_seed', 'odom_invalid')
+STOP_STATUSES = ('no_seed', 'odom_invalid', 'landing')
 TURN_SIDES = {'auto': 0, 'left': 1, 'right': -1}
 
 
@@ -141,7 +141,7 @@ class StairNode(Node):
             self.path_pub.publish(path)
 
     def publish_status(self, status):
-        text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f} cam_h={self.gen.camera_height:.2f}'
+        text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f} cam_h={self.gen.camera_height:.2f} pitch={self.gen.pitch:+.0f}'
         if self.memory is not None:
             text += f' memory={self.memory_similarity:.2f}{" guided" if self.guided else ""}'
         self.status_pub.publish(String(data=text))

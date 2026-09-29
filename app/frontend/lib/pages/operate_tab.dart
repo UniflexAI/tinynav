@@ -1568,13 +1568,14 @@ class _StairButtonState extends ConsumerState<_StairButton> {
     final parts = (status?.stairStatus ?? '').split(' ');
     final detail = parts.length > 1 ? parts[1] : '';
     final stopped = detail == 'odom_invalid' || detail == 'no_seed';
+    final landed = detail == 'landing'; // walked the flight, stopped on the landing
 
     return FilledButton.icon(
       onPressed: _loading ? null : (active ? () => _post('/nav/stair/stop') : _start),
       style: FilledButton.styleFrom(
         backgroundColor: !active
             ? Colors.black87
-            : (stopped ? Colors.red : const Color(0xFF2196F3)).withOpacity(0.9),
+            : (stopped ? Colors.red : (landed ? const Color(0xFF45C95A) : const Color(0xFF2196F3))).withOpacity(0.9),
         foregroundColor: Colors.white,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       ),
