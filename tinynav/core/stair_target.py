@@ -28,7 +28,10 @@ class StairConfig:
     pixel_stride: int = 4
     max_step: float = 0.22          # max height change between neighbor cells
     max_drop_down: float = 0.45     # descending: the stair edge hides the first treads, so drops look bigger
-    wall_span: float = 0.35         # z-span inside one cell above which it is wall/railing
+    wall_span: float = 0.35         # z-span inside one cell above which it is wall/railing ...
+    wall_min_top: float = 0.3       # ... and only if it also rises this far above the feet: going down, step edges
+                                    # collect points of several treads (depth edge pixels, many viewpoints) and
+                                    # would otherwise read as walls across the flight
     robot_radius: float = 0.20
     seed_radius: float = 0.6        # ground cells this close to the robot can seed the search
     blind_radius: float = 0.8       # camera cannot see the ground this close; bridge it from the feet
@@ -200,6 +203,7 @@ class StairTargetGenerator:
         if not self.odom_valid:
             self.last_status, self.search_goal, self.ok_goal = 'odom_invalid', None, None
             return dict(status='odom_invalid', height=height, obstacle=obstacle, free=observed & ~obstacle, origin=origin, target=None, goal=None, path=None)
+        obstacle = obstacle & (np.nan_to_num(height, nan=-np.inf) > cam[2] - cfg.camera_height + cfg.wall_min_top)
         inflated = binary_dilation(obstacle, iterations=max(1, int(round(cfg.robot_radius / cfg.resolution))))
         free = observed & ~inflated
         clearance = distance_transform_edt(~obstacle) * cfg.resolution
