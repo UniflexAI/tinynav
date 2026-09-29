@@ -484,5 +484,18 @@ class TestChassisWatch(unittest.TestCase):
         self.assertTrue(log.has('warning', 'rt/sportmodestate silent'))
 
 
+class TestConstructionOrder(unittest.TestCase):
+    """The lowstate callback publishes /battery from the SDK's reader thread as soon
+    as its subscription's Init returns, so the publisher has to exist first."""
+
+    def test_the_battery_publisher_exists_before_lowstate_is_subscribed(self):
+        import inspect
+        src = inspect.getsource(uc.Ros2UnitreeManagerNode.__init__)
+        self.assertIn('self.publisher_battery = self.create_publisher(', src)
+        self.assertIn('lowstate_subscriber.Init(', src)
+        self.assertLess(src.index('self.publisher_battery = self.create_publisher('),
+                        src.index('lowstate_subscriber.Init('))
+
+
 if __name__ == '__main__':
     unittest.main()

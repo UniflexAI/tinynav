@@ -323,16 +323,18 @@ class Ros2UnitreeManagerNode(Node):
         self.action_subscriber = reliable_reader("rt/service/command", String_,
                                                  self.ActionMessageHandler, 10)
 
-        lowstate_type, lowstate_topic = _lowstate_type_and_topic(robot_model)
-        lowstate_subscriber = ChannelSubscriber(lowstate_topic, lowstate_type)
-        lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
-
         # Latched and sent only on change: lowstate arrives at ~500Hz, and every
         # message costs the backend's Python executor whatever the callback does.
+        # Before the subscription below: its callback publishes here from the
+        # SDK's reader thread as soon as Init returns.
         self.publisher_battery = self.create_publisher(
             Float32, '/battery',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
+
+        lowstate_type, lowstate_topic = _lowstate_type_and_topic(robot_model)
+        lowstate_subscriber = ChannelSubscriber(lowstate_topic, lowstate_type)
+        lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
 
         # Chassis odometry, republished onto the ROS bus. rt/utlidar/robot_odom
         # is the leg odometry wrapped as nav_msgs/Odometry, not lidar odometry:
@@ -526,8 +528,8 @@ class Ros2UnitreeManagerNode(Node):
             soc = float(msg.bms_state.soc)
             if soc == self.battery:
                 return
-            # Recorded only once sent: lowstate starts before the publisher exists,
-            # and a value marked sent but never published would stay unsent.
+            # Recorded only once sent: a value marked sent but never published would
+            # stay unsent.
             self.publisher_battery.publish(Float32(data=soc))
             self.battery = soc
         except Exception as e:
