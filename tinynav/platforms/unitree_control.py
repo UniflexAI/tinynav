@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import queue
 import rclpy
 import threading
 from rclpy.node import Node
@@ -69,6 +70,10 @@ _STALL_CHASSIS_V = 0.03
 _STALL_CHASSIS_W = 0.05
 _STALL_AFTER_S = 2.0
 _REPEAT_S = 5.0
+# A sit or stand that waited longer than this for its turn is dropped: the sport
+# service can hold each one for its whole 10s timeout, and a stand queued behind
+# one ran 20s late with the robot walking at 0.9 m/s (65, 2026-09-29).
+_ACTION_MAX_WAIT_S = 2.0
 _SPORT_STATE_SILENT_S = 1.0
 
 
@@ -129,6 +134,54 @@ class GaitWorker:
             self._log.warning(f'[sport] {self._name} code={code} took {took:.2f}s')
         if self._on_result is not None:
             self._on_result(code)
+
+
+class ActionWorker:
+    """Runs sits and stands off the rt/service/command reader thread, in order.
+
+    The reader only stamps each command on arrival and queues it, so the stamp is
+    when it arrived, not when the SDK got round to handing it over. A command whose
+    turn comes more than `_ACTION_MAX_WAIT_S` after it arrived is dropped, never run.
+    """
+
+    def __init__(self, play, log):
+        self._play = play
+        self._log = log
+        self._queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name='action-worker', daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def submit(self, data, now):
+        """Non-blocking: safe to call from a reader thread."""
+        self._queue.put((now, data))
+
+    def stop(self):
+        self._queue.put(None)
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def _run(self):
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            self.run_once(*item, time.monotonic())
+
+    def run_once(self, arrived, data, now):
+        """One command, or its drop. Separated out so it can be driven without a
+        thread."""
+        waited = now - arrived
+        if waited > _ACTION_MAX_WAIT_S:
+            self._log.warning(f'[action] {data!r} dropped: waited {waited:.1f}s for its turn')
+            return
+        # An exception escaping here would end the worker, and every later sit
+        # and stand would be silently lost.
+        try:
+            self._play(data)
+        except Exception:
+            self._log.exception('action failed')
 
 
 class ChassisWatch:
@@ -240,6 +293,9 @@ class Ros2UnitreeManagerNode(Node):
                                    on_result=self._note_gait)
             self.gait.start()
 
+        self.actions = ActionWorker(self._play_action, self.logger)
+        self.actions.start()
+
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
 
@@ -332,20 +388,21 @@ class Ros2UnitreeManagerNode(Node):
             self.logger.error(f"Error in SportStateMessageHandler: {e}")
 
     def ActionMessageHandler(self, msg: String_):
-        self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
         # unitree_sdk2py's reader thread calls this with no except around it, so an
         # exception escaping here kills that thread and the subscription goes deaf
         # for the rest of the run -- every later sit/stand silently dropped, while
         # the process still looks healthy. One bad action must not cost the channel.
         try:
-            self._play_action(msg)
+            self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
+            self.actions.submit(msg.data, time.monotonic())
         except Exception:
-            self.logger.exception("action failed")
+            self.logger.exception("action handling failed")
 
-    def _play_action(self, msg: String_):
-        if msg.data.split(" ")[0] != "play":
+    def _play_action(self, data: str):
+        words = data.split(" ")
+        if words[0] != "play" or len(words) < 2:
             return
-        action_key = msg.data.split(" ")[1]
+        action_key = words[1]
         if action_key == "sit":
             if self.is_quadruped:
                 steps = [('StandDown', self.sport_client.StandDown)]
@@ -451,6 +508,7 @@ def main(args=None):
     finally:
         if node.gait is not None:
             node.gait.stop()
+        node.actions.stop()
     node.destroy_node()
     rclpy.shutdown()
 

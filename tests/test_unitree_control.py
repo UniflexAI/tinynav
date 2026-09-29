@@ -291,6 +291,70 @@ class TestGaitWorker(unittest.TestCase):
             worker.stop()
 
 
+class TestActionWorker(unittest.TestCase):
+    """65, 2026-09-29: a stand queued behind a 20s refused one ran with the robot
+    walking at 0.9 m/s. The stamp is taken on arrival, so waiting is measurable."""
+
+    def _worker(self):
+        played, log = [], _Log()
+        return uc.ActionWorker(played.append, log), played, log
+
+    def test_a_command_run_on_arrival_is_played(self):
+        worker, played, _ = self._worker()
+        worker.run_once(10.0, 'play sit', 10.1)
+        self.assertEqual(played, ['play sit'])
+
+    def test_a_command_that_waited_too_long_is_dropped(self):
+        worker, played, log = self._worker()
+        worker.run_once(10.0, 'play stand', 10.0 + uc._ACTION_MAX_WAIT_S + 0.1)
+        self.assertEqual(played, [])
+        self.assertTrue(log.has('warning', 'dropped'))
+
+    def test_one_behind_a_stuck_call_is_dropped_and_the_next_is_not(self):
+        """Through the thread: the reader stamps on arrival while the first call
+        blocks, and only the one that waited past the limit is lost."""
+        played, gate = [], threading.Event()
+
+        def play(data):
+            if data == 'play stand' and not played:
+                gate.wait(2.0)
+            played.append(data)
+
+        worker = uc.ActionWorker(play, _Log())
+        worker.start()
+        t0 = time.monotonic()
+        worker.submit('play stand', t0)
+        worker.submit('play stand', t0 - uc._ACTION_MAX_WAIT_S)   # already stale
+        gate.set()
+        worker.submit('play sit', time.monotonic())
+        worker.stop()
+        self.assertEqual(played, ['play stand', 'play sit'])
+
+    def test_a_raising_play_does_not_kill_the_worker(self):
+        played = []
+
+        def play(data):
+            if data == 'bad':
+                raise RuntimeError('boom')
+            played.append(data)
+
+        log = _Log()
+        worker = uc.ActionWorker(play, log)
+        worker.start()
+        now = time.monotonic()
+        worker.submit('bad', now)
+        worker.submit('play sit', now)
+        worker.stop()
+        self.assertEqual(played, ['play sit'])
+        self.assertTrue(log.has('error', 'action failed'))
+
+    def test_the_reader_only_queues(self):
+        node = _node()
+        node.actions = uc.ActionWorker(lambda d: self.fail('played on the reader'), node.logger)
+        node.ActionMessageHandler(type('M', (), {'data': 'play sit'})())
+        self.assertEqual(node.actions._queue.qsize(), 1)
+
+
 class TestChassisWatch(unittest.TestCase):
     def _run(self, cmd_v, chassis_v, seconds, watch=None, t0=0.0):
         log = watch.log if watch else _Log()
