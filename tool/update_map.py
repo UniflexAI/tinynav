@@ -16,7 +16,6 @@ import math
 import os
 import shelve
 import shutil
-import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -33,6 +32,7 @@ SHELVE_STORES = [
     "depths",
     "vlad_descriptors",
 ]
+VIO_IMAGE_TOPIC = "/camera/camera/vio_image"
 
 
 def _load_poses(map_path: Path) -> dict[int, np.ndarray]:
@@ -54,12 +54,54 @@ def _default_output_path(dst: Path) -> Path:
     return dst.parent / f"{dst.name}_update_{stamp}"
 
 
-def _run_build_map(src_bag: Path, src_map: Path, play_rate: float, global_frames_ratio: float) -> None:
+def _bag_topics(bag_path: Path) -> set[str]:
+    import rosbag2_py
+
+    info = rosbag2_py.Info()
+    metadata = info.read_metadata(str(bag_path), "")
+    topics: set[str] = set()
+    for topic in metadata.topics_with_message_count:
+        if hasattr(topic, "name"):
+            topics.add(topic.name)
+        else:
+            topics.add(topic.topic_metadata.name)
+    return topics
+
+
+def _source_node_for_bag(bag_path: Path, repo_root: Path, verbose_timer: bool, log_dir: Path) -> tuple[str, list[str]]:
+    topics = _bag_topics(bag_path)
+    if VIO_IMAGE_TOPIC in topics:
+        return "looper_bridge", [sys.executable, str(repo_root / "tool/looper_bridge_node.py")]
+
+    cmd = [
+        sys.executable,
+        str(repo_root / "tinynav/core/perception_node.py"),
+        "--log_file",
+        str(log_dir / "perception.log"),
+    ]
+    if verbose_timer:
+        cmd.append("--verbose_timer")
+    return "perception", cmd
+
+
+def _run_build_map(
+    src_bag: Path,
+    src_map: Path,
+    play_rate: float,
+    global_frames_ratio: float,
+    verbose_timer: bool,
+) -> None:
+    from launch import LaunchDescription, LaunchService
+    from launch.actions import EmitEvent, ExecuteProcess, RegisterEventHandler
+    from launch.event_handlers import OnProcessExit
+    from launch.events import Shutdown
+
     src_map.mkdir(parents=True, exist_ok=True)
     repo_root = Path(__file__).resolve().parents[1]
     env = dict(os.environ)
     env["PYTHONPATH"] = f"{repo_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
-    cmd = [
+    source_name, source_cmd = _source_node_for_bag(src_bag, repo_root, verbose_timer, src_map)
+    build_cmd = [
         sys.executable,
         str(repo_root / "tinynav/core/build_map_node.py"),
         "--bag_file",
@@ -71,8 +113,32 @@ def _run_build_map(src_bag: Path, src_map: Path, play_rate: float, global_frames
         "--global_frames_ratio",
         str(global_frames_ratio),
     ]
-    print("building source map from bag...")
-    subprocess.run(cmd, check=True, cwd=str(repo_root), env=env)
+    if not verbose_timer:
+        build_cmd.append("--no_verbose_timer")
+
+    print(f"building source map from bag using {source_name}...")
+    source = ExecuteProcess(
+        cmd=source_cmd,
+        name=f"update_map_{source_name}",
+        output="screen",
+        cwd=str(repo_root),
+        additional_env=env,
+    )
+    mapping = ExecuteProcess(
+        cmd=build_cmd,
+        name="update_map_build_map",
+        output="screen",
+        cwd=str(repo_root),
+        additional_env=env,
+    )
+    on_mapping_exit = RegisterEventHandler(
+        OnProcessExit(target_action=mapping, on_exit=[EmitEvent(event=Shutdown())])
+    )
+    service = LaunchService()
+    service.include_launch_description(LaunchDescription([source, mapping, on_mapping_exit]))
+    rc = service.run()
+    if rc not in (0, None):
+        raise RuntimeError(f"source map build launch failed with exit code {rc}")
     _require_map(src_map)
 
 
@@ -377,7 +443,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 temp_ctx = tempfile.TemporaryDirectory(prefix="tinynav_update_map_")
                 src_map = Path(temp_ctx.name) / "src_map"
         if not args.reuse_src_map or not (src_map / "poses.npy").exists():
-            _run_build_map(src_bag, src_map, args.play_rate, args.global_frames_ratio)
+            _run_build_map(
+                src_bag,
+                src_map,
+                args.play_rate,
+                args.global_frames_ratio,
+                args.verbose_timer,
+            )
         else:
             _require_map(src_map)
 
@@ -448,6 +520,7 @@ def main() -> None:
     parser.add_argument("--save-rows", action="store_true", help="Write all per-query retrieval rows to the report.")
     parser.add_argument("--play-rate", type=float, default=1.0)
     parser.add_argument("--global-frames-ratio", type=float, default=1.1)
+    parser.add_argument("--no-verbose-timer", dest="verbose_timer", action="store_false", default=True)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--every-n", type=int, default=1)
     parser.add_argument("--max-queries", type=int, default=0)
