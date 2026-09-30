@@ -73,7 +73,9 @@ class StairConfig:
     guide_max_dist: float = 2.0     # this far away ...
     guide_max_angle: float = 60.0   # ... within this many degrees of it, else ignore the memory
     jump_dist: float = 0.10         # consecutive odometry poses further apart than this are a jump ...
-    jump_speed: float = 3.0         # ... if that is also faster than this (a gap in the stream is not a jump)
+    jump_speed: float = 3.0         # ... if that is also faster than this (a short gap in the stream is not a jump)
+    jump_gap_s: float = 1.0         # a gap this long between pose stamps is a jump too: VIO stopped and came back
+                                    # (reset to the origin after 63 s in bag_2026_09_29_16_14_32; normal gaps < 0.4 s)
     flight_track_m: float = 1.0     # flight direction = horizontal displacement over this much recent travel
     flight_min_dz: float = 0.15     # ... counted only if the height changed this much over it (on a flight)
     jump_hold_s: float = 2.0        # odometry stays invalid this long after the last jump
@@ -170,7 +172,7 @@ class StairTargetGenerator:
         position = np.asarray(position, dtype=np.float64)
         step = np.linalg.norm(position - self.last_position) if self.last_position is not None else 0.0
         dt = stamp - self.last_pose_stamp if self.last_pose_stamp is not None else 0.0
-        if step > self.cfg.jump_dist and step > self.cfg.jump_speed * max(dt, 1e-3):
+        if dt > self.cfg.jump_gap_s or (step > self.cfg.jump_dist and step > self.cfg.jump_speed * max(dt, 1e-3)):
             self.last_jump_stamp = stamp
             self.frames.clear()
             self.track.clear()

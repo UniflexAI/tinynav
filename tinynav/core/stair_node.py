@@ -29,6 +29,7 @@ from tinynav.core.stair_target import StairConfig, StairTargetGenerator
 
 STOP_STATUSES = ('no_seed', 'odom_invalid', 'landing')
 TURN_SIDES = {'auto': 0, 'left': 1, 'right': -1}
+ODOM_TIMEOUT_S = 0.5  # no VIO pose for this long (receive time): VIO stopped, stop instead of reusing the old target
 
 
 def stamp_sec(stamp):
@@ -45,6 +46,7 @@ class StairNode(Node):
         self.K = None
         self.direction = args.direction  # None: stair mode inactive
         self.latest_T = None
+        self.last_odom_rx = None  # receive time of the last VIO pose (/slam/odometry or a depth frame's pose)
         self.stopped = True  # planning target is currently cleared by us
 
         self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
@@ -89,6 +91,7 @@ class StairNode(Node):
 
     def odom_callback(self, msg):
         was_valid = self.gen.odom_valid
+        self.last_odom_rx = self.get_clock().now()
         p = msg.pose.pose.position
         self.gen.add_pose(stamp_sec(msg.header.stamp), (p.x, p.y, p.z))
         if self.direction is not None and was_valid and not self.gen.odom_valid:
@@ -101,6 +104,7 @@ class StairNode(Node):
             return
         depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
         T, _ = msg2np(odom_msg)
+        self.last_odom_rx = self.get_clock().now()  # bags without vio_100hz have only these poses
         self.gen.add_depth(stamp_sec(odom_msg.header.stamp), depth, self.K, T)
         self.latest_T = T
 
@@ -116,6 +120,11 @@ class StairNode(Node):
 
     def timer_callback(self):
         if self.direction is None or self.latest_T is None:
+            return
+        if (self.get_clock().now() - self.last_odom_rx).nanoseconds * 1e-9 > ODOM_TIMEOUT_S:
+            # the depth that built the map stops with it (the bridge pairs depth with VIO poses): nothing is fresh
+            self.publish_status('odom_invalid')
+            self.stop_robot('odometry stream stalled')
             return
         res = self.gen.compute(self.latest_T, self.direction, prior_dir=self.remembered_direction())
         self.guided = bool(res.get('guided', False))
