@@ -47,3 +47,13 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(validate_strategy(record,[0,0],0,3,101,1)[1],'stale_plan')
         r=copy.deepcopy(record);r['response']['answers']['alternative']['choice']='strategy_fake'
         self.assertEqual(validate_strategy(r,[0,0],0,3,101,.1)[1],'not_offered')
+
+    def test_rotating_footprint_sweep_not_only_center_ray(self):
+        from tool.simulator.planning_scene import SimObject, robot_hits_objects
+        objects=[SimObject('corner','box',[.05,.23,.5],[.03,.03,1])]
+        collision=lambda xy,yaw:robot_hits_objects(xy,yaw,self.robot,objects)
+        self.assertFalse(collision([0,0],0))
+        plan={'id':'turn','duration_s':3,'stages':[{'name':'turn','linear_mps':0,'yaw_radps':.6,'duration_s':3}]}
+        e=RecoveryExecutor();e.start(plan,[0,0],0,[2,0],0)
+        self.assertEqual(e.step([0,0],0,[2,0],.1,.1,.1,collision),(0,0,.1))
+        self.assertEqual(e.memory[-1]['outcome'],'stage_collision_rejected')
