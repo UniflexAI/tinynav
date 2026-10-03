@@ -2,27 +2,29 @@
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TinyNav · Decision Observer</title>
 <style>
-body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;max-width:1000px;margin:auto}a{color:#86bfff}button{background:#4277ed;color:white;border:0;padding:12px 20px;border-radius:8px;font:inherit;cursor:pointer}button:disabled{opacity:.5}pre{background:#182438;padding:20px;overflow:auto;border-radius:12px;font:13px monospace;white-space:pre-wrap}h1{font-size:28px}.muted{color:#a8b5c8}#summary{font-size:20px;padding:20px 0}progress{width:180px;margin:0 10px}td{padding:6px 12px}details{margin:20px 0}
+body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;max-width:1000px;margin:auto}a{color:#86bfff}button{background:#4277ed;color:white;border:0;padding:12px 20px;border-radius:8px;font:inherit;cursor:pointer}button:disabled{opacity:.5}pre{background:#182438;padding:20px;overflow:auto;border-radius:12px;font:13px monospace;white-space:pre-wrap;max-height:280px}h1{font-size:28px}.muted{color:#a8b5c8}#summary{font-size:20px;padding:20px 0}progress{width:180px;margin:0 10px}td{padding:6px 12px}details{margin:20px 0}
 </style>
 <a href="/">← 返回 Planning Lab</a><h1>StartLux Decision · 导航旁观测试</h1>
-<p class="muted">先在 Planning Lab 设置场景并运行感知，再评估当前 WorldState。每次手动调用一次；模型建议不会控制机器人。</p>
-<button id="evaluate">评估当前观察</button> <a id="download" hidden>下载本次 JSON</a>
-<div id="summary">等待评估</div><div id="probabilities"></div>
+<p class="muted">先在 Planning Lab 设置场景并运行感知，再评估当前 WorldState。每次分析读取最新规划报告；可开启低频自动分析。模型建议不会控制机器人。</p>
+<button id="evaluate">分析当前规划</button> <label><input type="checkbox" id="auto"> 每 2 秒自动分析（页面打开时）</label> <a id="download" hidden>下载本次 JSON</a>
+<h2>规划器选择 / 模型建议</h2><pre id="plan">等待规划报告</pre><div id="summary">等待评估</div><div id="probabilities"></div>
 <p class="muted">这些概率是模型输出，尚未在 TinyNav 导航场景校准。结果对应提交时的观察快照。</p>
 <details open><summary>输入 WorldState / 场景快照</summary><pre id="input">—</pre></details>
 <details><summary>完整请求与结果</summary><pre id="result">—</pre></details>
 <script>
-const button=document.querySelector('#evaluate');let record=null,downloadUrl=null;
+const button=document.querySelector('#evaluate');let record=null,downloadUrl=null,lastSubmit=0;
 function render(r){
  if(r&&record&&r.id===record.id&&r.status===record.status)return;
  record=r;if(!r)return;
  button.disabled=r.status==='running';
- document.querySelector('#input').textContent=JSON.stringify({created_at_unix:r.created_at_unix,context:r.context,state:r.request.state},null,2);
+ const plan=r.request.state.planning;
+ document.querySelector('#plan').textContent=plan?JSON.stringify({plan_id:plan.id,status:plan.status,goal_distance_m:plan.goal_distance_m,selected_id:plan.selected_id,candidate_count:plan.candidate_count,collision_count:plan.collision_count,planning_ms:plan.elapsed_ms,report_age_ms:plan.snapshot_age_ms,selected:plan.top_candidates.find(c=>c.id===plan.selected_id),top_candidates:plan.top_candidates.map(c=>({id:c.id,v:c.linear_mps,w:c.angular_radps,cost:c.cost,reasons:c.reasons}))},null,2):'没有规划报告';
+ document.querySelector('#input').textContent=JSON.stringify({created_at_unix:r.created_at_unix,context:{scenario:r.context.scenario,world_mode:r.context.world_mode,metrics:r.context.metrics},state:r.request.state},null,2);
  document.querySelector('#result').textContent=JSON.stringify(r,null,2);
  const summary=document.querySelector('#summary'),bars=document.querySelector('#probabilities');bars.replaceChildren();
  if(r.status==='complete'){
   const a=r.response.answers;
-  summary.textContent=`建议：${a.action.choice} · 卡住概率 ${(a.stuck.noul*100).toFixed(1)}% · ${r.latency_ms} ms · ${r.response.model}`;
+  summary.textContent=`建议：${a.action.choice} · 卡住概率 ${(a.stuck.noul*100).toFixed(1)}% · ${r.latency_ms} ms · ${r.response.model}\n规划问题：${a.planning_issue?.choice||"—"} (${((a.planning_issue?.confidence||0)*100).toFixed(1)}%) · 替代建议：${a.alternative?.choice||"—"} (${((a.alternative?.confidence||0)*100).toFixed(1)}%)`;
   const table=document.createElement('table');
   for(const [key,value] of Object.entries(a.action.probabilities)){
    const tr=document.createElement('tr'),name=document.createElement('td'),cell=document.createElement('td'),p=document.createElement('progress');
@@ -33,7 +35,7 @@ function render(r){
  downloadUrl=URL.createObjectURL(new Blob([JSON.stringify(r,null,2)],{type:'application/json'}));
  const link=document.querySelector('#download');link.href=downloadUrl;link.download=`decision-${r.id}.json`;link.hidden=r.status==='running';
 }
-async function poll(){try{const res=await fetch('/api/decision/status');if(!res.ok)throw new Error(`HTTP ${res.status}`);render((await res.json()).record);}catch(e){document.querySelector('#summary').textContent=e.message;}setTimeout(poll,1000);}
-button.onclick=async()=>{button.disabled=true;try{const res=await fetch('/api/decision/evaluate',{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||`HTTP ${res.status}`);render(data);}catch(e){button.disabled=false;document.querySelector('#summary').textContent=e.message;}};
+async function poll(){try{const res=await fetch('/api/decision/status');if(!res.ok)throw new Error(`HTTP ${res.status}`);const status=await res.json();render(status.record);if(document.querySelector('#auto').checked&&status.navigation_running&&(!status.record||status.record.status!=='running')&&Date.now()-lastSubmit>=2000)await button.onclick();}catch(e){document.querySelector('#summary').textContent=e.message;}setTimeout(poll,1000);}
+button.onclick=async()=>{lastSubmit=Date.now();button.disabled=true;try{const res=await fetch('/api/decision/evaluate',{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||`HTTP ${res.status}`);render(data);}catch(e){button.disabled=false;document.querySelector('#summary').textContent=e.message;}};
 poll();
 </script></html>

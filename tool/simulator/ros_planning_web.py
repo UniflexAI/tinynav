@@ -35,7 +35,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 from tool.simulator.navigation_lab import NavigationLab
 from tool.simulator.decision_observer import DecisionObserver
@@ -243,6 +243,8 @@ class RosPlanningSimNode(Node):
         self.world_mode = "observed"
         self.saved_run_id = None
         self.config_generation = 0
+        self.plan_report = None
+        self.plan_received_at = None
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
@@ -253,6 +255,7 @@ class RosPlanningSimNode(Node):
         self.nav_active_pub = self.create_publisher(Bool, "/nav/active", latched)
         self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched)
 
+        self.create_subscription(String, "/planning/report", self.report_callback, 1)
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)
         self.create_subscription(RosPath, "/planning/trajectory_path", self.path_callback, 10)
         self.create_subscription(PointCloud, "/planning/footprint", self.footprint_callback, 10)
@@ -304,6 +307,9 @@ class RosPlanningSimNode(Node):
             self.lab.cells.clear()
             self.lab.history.clear()
             self.config_generation += 1
+            self.config_changed_at = time.time()
+            self.plan_report = None
+            self.plan_received_at = None
             prev_map = self.config.get("map_path")
             self.config = copy.deepcopy(config)
             robot = self.config.get("robot")
@@ -323,6 +329,13 @@ class RosPlanningSimNode(Node):
                 self.last_esdf_grid = None
                 self.collision = False
                 self.geom_footprint = []
+
+    def report_callback(self, msg: String) -> None:
+        report = json.loads(msg.data)
+        with self.lock:
+            if report["stamp_unix"] >= getattr(self, "config_changed_at", 0):
+                self.plan_report = report
+                self.plan_received_at = time.monotonic()
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -444,6 +457,7 @@ class RosPlanningSimNode(Node):
             xy = [float(self.control_xy[0]), float(self.control_xy[1])]
             footprint = copy.deepcopy(self.geom_footprint) or copy.deepcopy(self.last_footprint)
             return {
+                "planning_report": copy.deepcopy(self.plan_report),
                 "metrics": self.lab.metrics(),
                 "world_state": self.lab.world_state(xy, self.yaw_deg, self.config, self.world_mode),
                 "robot_xy": xy,
@@ -512,6 +526,7 @@ def _child_env() -> dict[str, str]:
     env = os.environ.copy()
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(key, "1")
+    env["TINYNAV_PLAN_REPORT"] = "1"
     env["ROBOT_TYPE"] = _active_robot_type()
     return env
 
@@ -684,18 +699,37 @@ def decision_evaluate() -> dict[str, Any]:
     with node.lock:
         xy = [float(node.control_xy[0]), float(node.control_xy[1])]
         state = node.lab.world_state(xy, node.yaw_deg, node.config, node.world_mode)
+        if node.plan_report is None or time.monotonic() - node.plan_received_at > 3:
+            raise HTTPException(409, "No fresh planning report; start the ROS loop and retry")
+        report = copy.deepcopy(node.plan_report)
+        candidates = report["candidates"]
+        ranked = sorted((c for c in candidates if c["cost"] is not None), key=lambda c: c["cost"])
+        compact = {k: v for k, v in report.items() if k != "candidates"}
+        compact["top_candidates"] = ranked[:5]
+        compact["collision_examples"] = [c for c in candidates if c["cost"] is None][:2]
+        compact["snapshot_age_ms"] = round((time.monotonic() - node.plan_received_at) * 1000, 1)
+        state["planning"] = compact
+        state["robot"]["recent"].pop("pattern", None)
         state["navigation"] = {"running": bool(node.running), "collision": bool(node.collision)}
         context = {"scenario": node.config.get("scenario_id", node.config.get("name")),
-                   "world_mode": node.world_mode, "metrics": node.lab.metrics()}
+                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "metrics": node.lab.metrics()}
     try:
         return OBSERVER.submit(state, context)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
 
 
+@app.get("/api/planning/report")
+def planning_report() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        return {"report": copy.deepcopy(node.plan_report), "age_ms": round((time.monotonic()-node.plan_received_at)*1000, 1) if node.plan_received_at is not None else None,
+                "config_generation": node.config_generation, "navigation_running": bool(node.running)}
+
+
 @app.get("/api/decision/status")
 def decision_status() -> dict[str, Any]:
-    return {"record": OBSERVER.status()}
+    return {"record": OBSERVER.status(), "navigation_running": bool(SIM_NODE and SIM_NODE.running)}
 
 
 

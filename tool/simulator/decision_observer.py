@@ -24,7 +24,7 @@ QUESTIONS = {
 }
 
 
-def validate_response(result):
+def validate_response(result, questions=None):
     answers = result["answers"]
     action = answers["action"]
     probabilities = action["probabilities"]
@@ -38,6 +38,32 @@ def validate_response(result):
     stuck = answers["stuck"]["noul"]
     if not isinstance(stuck, (int, float)) or not math.isfinite(stuck) or not 0 <= stuck <= 1:
         raise ValueError("Invalid stuck probability")
+
+    for key, spec in (questions or {}).items():
+        if spec["type"] != "choice":
+            continue
+        answer = answers[key]
+        probs = answer["probabilities"]
+        if set(probs) != set(spec["criteria"]) or answer["choice"] not in probs:
+            raise ValueError("Unexpected choices for " + key)
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) and 0 <= v <= 1 for v in probs.values()) or abs(sum(probs.values()) - 1) > 0.001:
+            raise ValueError("Invalid distribution for " + key)
+
+
+def planning_questions(state):
+    questions = copy.deepcopy(QUESTIONS)
+    if "planning" not in state:
+        return questions
+    questions["planning_issue"] = {"type": "choice", "instructions": "Which issue best explains the current planning report and numerical motion history? Consider scores and target distance; do not infer safety from unknown observations.", "criteria": {
+        "none": "Plan has plausible progress and no evident issue", "stalled_progress": "Numerical history shows little progress away from the goal",
+        "collision_blocked": "Collision rejections eliminate useful candidates", "reverse_gate": "Reverse gating heavily penalizes otherwise useful candidates",
+        "goal_sampling": "Velocity sampling or horizon prevents a useful near-goal step", "insufficient_observation": "Evidence is insufficient to diagnose"}}
+    criteria = {"keep_current": "Keep the planner selection", "request_new_candidates": "No existing candidate provides a useful alternative", "uncertain": "Cannot establish a useful alternative from these observations"}
+    for c in state["planning"]["top_candidates"]:
+        if not c["reasons"] and c["id"] != state["planning"]["selected_id"]:
+            criteria["candidate_" + str(c["id"])] = "Consider this reported alternative, subject to planner collision checks: " + json.dumps(c)
+    questions["alternative"] = {"type": "choice", "instructions": "Recommend keeping the selected trajectory or investigating one reported alternative. Lower cost is better. This is analysis only; unknown space and sampled ESDF scores are not safety guarantees.", "criteria": criteria}
+    return questions
 
 
 class DecisionObserver:
@@ -56,7 +82,7 @@ class DecisionObserver:
             if self.current and self.current["status"] == "running":
                 raise RuntimeError("A decision request is already running")
             record = {"id": uuid.uuid4().hex, "status": "running", "created_at_unix": time.time(),
-                      "context": copy.deepcopy(context), "request": {"state": copy.deepcopy(world_state), "questions": copy.deepcopy(QUESTIONS)},
+                      "context": copy.deepcopy(context), "request": {"state": copy.deepcopy(world_state), "questions": planning_questions(world_state)},
                       "observer_only": True}
             self.current = record
         threading.Thread(target=self._run, args=(record,), daemon=True).start()
@@ -69,7 +95,7 @@ class DecisionObserver:
             req = request.Request(self.endpoint, data=json.dumps(record["request"]).encode(), headers={"Content-Type": "application/json"})
             with request.urlopen(req, timeout=30) as response:
                 result = json.load(response)
-            validate_response(result)
+            validate_response(result, record["request"]["questions"])
             outcome = {"status": "complete", "response": result}
         except (error.URLError, TimeoutError, OSError, ValueError, KeyError, TypeError) as exc:
             outcome = {"status": "error", "error": str(exc)}
