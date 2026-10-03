@@ -48,3 +48,8 @@ planner; physical robot deployment has not been tested or performed.
 - Full records in tinynav_temp/plan_report_validation and decision_observer.
 
 Model-in-loop control and improvement in arrival rate remain untested.
+
+## Follow-up
+Candidate selection and branch evaluation are extended in candidate_branches.md.
+The current model input includes direction representatives, and finite reverse-gate
+penalty candidates are available only for isolated evaluation.

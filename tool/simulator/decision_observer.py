@@ -60,9 +60,9 @@ def planning_questions(state):
         "goal_sampling": "Velocity sampling or horizon prevents a useful near-goal step", "insufficient_observation": "Evidence is insufficient to diagnose"}}
     criteria = {"keep_current": "Keep the planner selection", "request_new_candidates": "No existing candidate provides a useful alternative", "uncertain": "Cannot establish a useful alternative from these observations"}
     for c in state["planning"]["top_candidates"]:
-        if not c["reasons"] and c["id"] != state["planning"]["selected_id"]:
-            criteria["candidate_" + str(c["id"])] = "Consider this reported alternative, subject to planner collision checks: " + json.dumps(c)
-    questions["alternative"] = {"type": "choice", "instructions": "Recommend keeping the selected trajectory or investigating one reported alternative. Lower cost is better. This is analysis only; unknown space and sampled ESDF scores are not safety guarantees.", "criteria": criteria}
+        if c.get("cost", 0) is not None and "sampled_footprint_collision" not in c["reasons"] and c["id"] != state["planning"]["selected_id"]:
+            criteria["candidate_" + str(c["id"])] = "Consider this reported alternative, subject to planner collision checks: "
+    questions["alternative"] = {"type": "choice", "instructions": "Recommend keeping the selected trajectory or investigating one reported alternative. Compare progress and direction diversity, not cost alone when motion is stalled. Reverse-gate penalties are policy penalties, not collision rejection. This is isolated analysis only; unknown space and sampled ESDF scores are not safety guarantees.", "criteria": criteria}
     return questions
 
 

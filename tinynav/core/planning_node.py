@@ -614,6 +614,8 @@ class PlanningNode(Node):
                     gate = (front_clearance <= enter_threshold) != (param[0] < 0)
                     reasons = (["sampled_footprint_collision"] if not np.isfinite(score) else []) + (["reverse_gate_penalty"] if gate else [])
                     candidates.append({"id": i, "linear_mps": float(param[0]), "angular_radps": float(param[1]),
+                                       "control_linear_mps": float(np.dot(traj[10, :3] - traj[0, :3], quat_to_matrix(traj[0, 3:])[:, 2])),
+                                       "control_yaw_radps": float(-param[1]),
                                        "endpoint_world_xy": traj[-1, :2].tolist(), "cost": float(cost) if np.isfinite(cost) else None,
                                        "goal_endpoint_distance_m": float(np.linalg.norm(traj[-1, :3] - self.target_pose)) if self.target_pose is not None else None,
                                        "velocity_change_penalty": float(10 * abs(previous_param[0] - param[0]) + 10 * abs(previous_param[1] - param[1])),
@@ -624,7 +626,7 @@ class PlanningNode(Node):
                 report = {"schema_version": 1, "id": f"{os.getpid()}-{self.plan_sequence}",
                           "stamp_unix": stamp, "generated_at_unix": time.time(), "elapsed_ms": round((time.monotonic()-plan_started)*1000, 2),
                           "status": "no_target" if self.target_pose is None else ("all_collision" if selected is None else "selected"),
-                          "robot_world_xy": init_p[:2].tolist(), "target_world_xy": self.target_pose[:2].tolist() if self.target_pose is not None else None,
+                          "robot_world_xy": init_p[:2].tolist(), "robot_yaw_deg": float(np.degrees(np.arctan2(T[1, 2], T[0, 2]))), "target_world_xy": self.target_pose[:2].tolist() if self.target_pose is not None else None,
                           "goal_distance_m": goal_distance, "sampled_speed_limit_mps": float(speed_limit),
                           "front_clearance_m": float(front_clearance), "selected_id": selected,
                           "candidate_count": len(candidates), "collision_count": sum(not np.isfinite(x) for x in scores),

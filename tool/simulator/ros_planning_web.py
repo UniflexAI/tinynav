@@ -39,6 +39,7 @@ from std_msgs.msg import Bool, String
 
 from tool.simulator.navigation_lab import NavigationLab
 from tool.simulator.decision_observer import DecisionObserver
+from tool.simulator.candidate_branches import compact_report, compare
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
 from tool.simulator.map_volume import MapVolume
@@ -702,21 +703,32 @@ def decision_evaluate() -> dict[str, Any]:
         if node.plan_report is None or time.monotonic() - node.plan_received_at > 3:
             raise HTTPException(409, "No fresh planning report; start the ROS loop and retry")
         report = copy.deepcopy(node.plan_report)
-        candidates = report["candidates"]
-        ranked = sorted((c for c in candidates if c["cost"] is not None), key=lambda c: c["cost"])
-        compact = {k: v for k, v in report.items() if k != "candidates"}
-        compact["top_candidates"] = ranked[:5]
-        compact["collision_examples"] = [c for c in candidates if c["cost"] is None][:2]
+        compact = compact_report(report)
         compact["snapshot_age_ms"] = round((time.monotonic() - node.plan_received_at) * 1000, 1)
         state["planning"] = compact
         state["robot"]["recent"].pop("pattern", None)
         state["navigation"] = {"running": bool(node.running), "collision": bool(node.collision)}
         context = {"scenario": node.config.get("scenario_id", node.config.get("name")),
-                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "metrics": node.lab.metrics()}
+                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "scene_config": copy.deepcopy(node.config), "metrics": node.lab.metrics()}
     try:
         return OBSERVER.submit(state, context)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/decision/compare")
+def decision_compare(decision_id: str) -> dict[str, Any]:
+    record = OBSERVER.status()
+    if not record or record["status"] != "complete" or record["id"] != decision_id:
+        raise HTTPException(409, "No completed decision to compare")
+    try:
+        result = compare(record)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    folder = REPO_ROOT / "tinynav_temp" / "candidate_branches"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / (record["id"] + ".json")).write_text(json.dumps(result, indent=2))
+    return result
 
 
 @app.get("/api/planning/report")
