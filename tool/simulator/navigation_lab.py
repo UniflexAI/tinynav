@@ -24,6 +24,7 @@ class NavigationLab:
 
     def reset(self):
         self.cells = {}
+        self.cell_observed_at = {}
         self.history = deque(maxlen=160)
         self.run = None
         self.samples = []
@@ -65,14 +66,18 @@ class NavigationLab:
             free.update(map(tuple, np.floor(points[:, :2]/self.resolution).astype(int)))
             if bottom <= endpoint[2] <= top:
                 occupied.add(tuple(np.floor(endpoint[:2]/self.resolution).astype(int)))
+        observed_now = time.monotonic()
         for cell in free:
             if self.cells.get(cell) != 'blocked':
                 self.cells[cell] = 'clear'
+                self.cell_observed_at[cell] = observed_now
         for cell in occupied:
             self.cells[cell] = 'blocked'
+            self.cell_observed_at[cell] = observed_now
         if len(self.cells) > 50000:
             center = origin[:2]/self.resolution
             self.cells = {k: val for k, val in self.cells.items() if math.dist(k, center) < 120}
+            self.cell_observed_at = {k:v for k,v in self.cell_observed_at.items() if k in self.cells}
 
     def update(self, xy, yaw, target, collision, now=None):
         now = time.monotonic() if now is None else now

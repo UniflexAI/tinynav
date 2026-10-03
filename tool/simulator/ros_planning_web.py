@@ -42,6 +42,7 @@ from tool.simulator.decision_observer import DecisionObserver
 from tool.simulator.candidate_branches import compact_report, compare
 from tool.simulator.recovery_strategies import RecoveryExecutor, proposals, validate_strategy
 from tool.simulator.decision_information import enrich
+from tool.simulator.observed_topology import topology, capture_audit
 from tool.simulator.closed_loop_results import results as closed_loop_results
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
@@ -259,7 +260,7 @@ class RosPlanningSimNode(Node):
         self.override_until = 0.0
         self.recovery = RecoveryExecutor()
         self.information_version = os.getenv('TINYNAV_DECISION_INFORMATION', 'basic')
-        if self.information_version not in ('basic','rich'):raise ValueError('Unknown information version')
+        if self.information_version not in ('basic','rich','topology'):raise ValueError('Unknown information version')
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
@@ -320,6 +321,7 @@ class RosPlanningSimNode(Node):
                 self.lab.run["status"] = "config_changed"
                 self.save_result()
             self.lab.cells.clear()
+            self.lab.cell_observed_at.clear()
             self.lab.history.clear()
             self.experiment_events = []
             self.experiment_pending = None
@@ -740,6 +742,8 @@ def decision_evaluate() -> dict[str, Any]:
     node = _require_sim()
     with node.lock:
         xy = [float(node.control_xy[0]), float(node.control_xy[1])]
+        information_v1 = None
+        observation_audit = None
         state = node.lab.world_state(xy, node.yaw_deg, node.config, node.world_mode)
         if node.plan_report is None or time.monotonic() - node.plan_received_at > 3:
             raise HTTPException(409, "No fresh planning report; start the ROS loop and retry")
@@ -755,12 +759,22 @@ def decision_evaluate() -> dict[str, Any]:
                                  'previous_attempts':copy.deepcopy(node.recovery.memory),
                                  'notes':['No synthetic object geometry is used to build model proposals.',
                                           'Execution collision checks use simulator geometry; unknown remains unknown.']}
-            if node.information_version == 'rich':
+            if node.information_version in ('rich','topology'):
                 state = enrich(state,xy,node.yaw_deg,node.config['target'],node.config['robot'],node.lab.cells,node.lab.resolution,node.lab.samples)
+        if node.information_version == 'topology' and node.experiment_mode == 'model':
+            information_v1 = copy.deepcopy(state)
+            state = topology(state,xy,node.yaw_deg,node.config['target'],node.config['robot'],node.lab.cells,node.lab.resolution,
+                             node.lab.samples,node.lab.cell_observed_at,time.monotonic())
+            observation_audit = capture_audit(node.lab.cells,node.lab.cell_observed_at,xy,node.lab.resolution,time.monotonic())
         state["robot"]["recent"].pop("pattern", None)
         state["navigation"] = {"running": bool(node.running), "collision": bool(node.collision)}
         context = {"scenario": node.config.get("scenario_id", node.config.get("name")),
                    "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "scene_config": copy.deepcopy(node.config), "closed_loop_experiment": node.experiment_mode == "model", "information_version":node.information_version, "metrics": node.lab.metrics()}
+        if information_v1 is not None:
+            information_v1['robot']['recent'].pop('pattern',None)
+            information_v1['navigation']=copy.deepcopy(state['navigation'])
+            context['information_v1_state']=information_v1
+            context['observation_audit']=observation_audit
     try:
         return OBSERVER.submit(state, context)
     except RuntimeError as exc:
@@ -824,10 +838,10 @@ def experiment_worker() -> None:
 
 @app.get("/api/experiment/results")
 def experiment_results(run: str = 'strategies') -> dict[str, Any]:
-    folders = {'strategies':'closed_loop_strategies_20261003', 'short_actions':'closed_loop_20261003','rich_information':'information_rich_20261003'}
+    folders = {'strategies':'closed_loop_strategies_20261003', 'short_actions':'closed_loop_20261003','rich_information':'information_rich_20261003','topology_information':'information_topology_20261003'}
     if run not in folders:raise HTTPException(400, 'Unknown experiment')
     data = closed_loop_results(REPO_ROOT / 'tinynav_temp' / folders[run])
-    data['expected_runs'] = 8 if run == 'rich_information' else 20
+    data['expected_runs'] = 8 if run in ('rich_information','topology_information') else 20
     if run == 'short_actions':data['live'] = []
     return data
 
