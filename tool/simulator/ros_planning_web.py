@@ -38,6 +38,7 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
 
 from tool.simulator.navigation_lab import NavigationLab
+from tool.simulator.decision_observer import DecisionObserver
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
 from tool.simulator.map_volume import MapVolume
@@ -471,6 +472,7 @@ class LoadMapRequest(BaseModel):
 
 
 app = FastAPI(title="TinyNav ROS Planning Simulator")
+OBSERVER = DecisionObserver(REPO_ROOT / "tinynav_temp" / "decision_observer")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 SIM_NODE: RosPlanningSimNode | None = None
 EXECUTOR: MultiThreadedExecutor | None = None
@@ -669,6 +671,31 @@ def start_ros_loop() -> dict[str, Any]:
 @app.get("/api/sim-state")
 def sim_state() -> dict[str, Any]:
     return {"frame": _require_sim().frame()}
+
+
+@app.get("/decision", response_class=HTMLResponse)
+def decision_page() -> str:
+    return (STATIC_DIR / "decision.html").read_text()
+
+
+@app.post("/api/decision/evaluate")
+def decision_evaluate() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        xy = [float(node.control_xy[0]), float(node.control_xy[1])]
+        state = node.lab.world_state(xy, node.yaw_deg, node.config, node.world_mode)
+        state["navigation"] = {"running": bool(node.running), "collision": bool(node.collision)}
+        context = {"scenario": node.config.get("scenario_id", node.config.get("name")),
+                   "world_mode": node.world_mode, "metrics": node.lab.metrics()}
+    try:
+        return OBSERVER.submit(state, context)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/decision/status")
+def decision_status() -> dict[str, Any]:
+    return {"record": OBSERVER.status()}
 
 
 

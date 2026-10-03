@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TinyNav · Decision Observer</title>
+<style>
+body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;max-width:1000px;margin:auto}a{color:#86bfff}button{background:#4277ed;color:white;border:0;padding:12px 20px;border-radius:8px;font:inherit;cursor:pointer}button:disabled{opacity:.5}pre{background:#182438;padding:20px;overflow:auto;border-radius:12px;font:13px monospace;white-space:pre-wrap}h1{font-size:28px}.muted{color:#a8b5c8}#summary{font-size:20px;padding:20px 0}progress{width:180px;margin:0 10px}td{padding:6px 12px}details{margin:20px 0}
+</style>
+<a href="/">← 返回 Planning Lab</a><h1>StartLux Decision · 导航旁观测试</h1>
+<p class="muted">先在 Planning Lab 设置场景并运行感知，再评估当前 WorldState。每次手动调用一次；模型建议不会控制机器人。</p>
+<button id="evaluate">评估当前观察</button> <a id="download" hidden>下载本次 JSON</a>
+<div id="summary">等待评估</div><div id="probabilities"></div>
+<p class="muted">这些概率是模型输出，尚未在 TinyNav 导航场景校准。结果对应提交时的观察快照。</p>
+<details open><summary>输入 WorldState / 场景快照</summary><pre id="input">—</pre></details>
+<details><summary>完整请求与结果</summary><pre id="result">—</pre></details>
+<script>
+const button=document.querySelector('#evaluate');let record=null,downloadUrl=null;
+function render(r){
+ if(r&&record&&r.id===record.id&&r.status===record.status)return;
+ record=r;if(!r)return;
+ button.disabled=r.status==='running';
+ document.querySelector('#input').textContent=JSON.stringify({created_at_unix:r.created_at_unix,context:r.context,state:r.request.state},null,2);
+ document.querySelector('#result').textContent=JSON.stringify(r,null,2);
+ const summary=document.querySelector('#summary'),bars=document.querySelector('#probabilities');bars.replaceChildren();
+ if(r.status==='complete'){
+  const a=r.response.answers;
+  summary.textContent=`建议：${a.action.choice} · 卡住概率 ${(a.stuck.noul*100).toFixed(1)}% · ${r.latency_ms} ms · ${r.response.model}`;
+  const table=document.createElement('table');
+  for(const [key,value] of Object.entries(a.action.probabilities)){
+   const tr=document.createElement('tr'),name=document.createElement('td'),cell=document.createElement('td'),p=document.createElement('progress');
+   name.textContent=key;p.max=1;p.value=value;cell.append(p,document.createTextNode(`${(value*100).toFixed(1)}%`));tr.append(name,cell);table.append(tr);
+  }bars.append(table);
+ }else summary.textContent=r.status==='running'?'本地模型正在评估…':`评估失败：${r.error}`;
+ if(downloadUrl)URL.revokeObjectURL(downloadUrl);
+ downloadUrl=URL.createObjectURL(new Blob([JSON.stringify(r,null,2)],{type:'application/json'}));
+ const link=document.querySelector('#download');link.href=downloadUrl;link.download=`decision-${r.id}.json`;link.hidden=r.status==='running';
+}
+async function poll(){try{const res=await fetch('/api/decision/status');if(!res.ok)throw new Error(`HTTP ${res.status}`);render((await res.json()).record);}catch(e){document.querySelector('#summary').textContent=e.message;}setTimeout(poll,1000);}
+button.onclick=async()=>{button.disabled=true;try{const res=await fetch('/api/decision/evaluate',{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||`HTTP ${res.status}`);render(data);}catch(e){button.disabled=false;document.querySelector('#summary').textContent=e.message;}};
+poll();
+</script></html>
