@@ -2,6 +2,7 @@
 import argparse,json,time,math,statistics
 from pathlib import Path
 from urllib.request import Request,urlopen
+from urllib.error import URLError
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -29,7 +30,13 @@ def main():
         base=f'http://127.0.0.1:{port}'
         def api(path,body=None):
             with urlopen(Request(base+path,data=json.dumps(body).encode() if body is not None else None,headers={'Content-Type':'application/json'}),timeout=35) as r:return json.load(r)
-        if api('/api/experiment/status')['mode']!=mode:raise RuntimeError('Wrong experiment mode')
+        ready_deadline=time.monotonic()+30
+        while True:
+            try:status=api('/api/experiment/status');break
+            except (URLError,TimeoutError,OSError):
+                if time.monotonic()>ready_deadline:raise
+                time.sleep(.25)
+        if status['mode']!=mode:raise RuntimeError('Wrong experiment mode')
         scene=api('/api/baseline/scenarios')['scenarios'][case];runs=[]
         try:
             for repeat in range(a.repeats):

@@ -41,6 +41,7 @@ from tool.simulator.navigation_lab import NavigationLab
 from tool.simulator.decision_observer import DecisionObserver
 from tool.simulator.candidate_branches import compact_report, compare
 from tool.simulator.recovery_strategies import RecoveryExecutor, proposals, validate_strategy
+from tool.simulator.decision_information import enrich
 from tool.simulator.closed_loop_results import results as closed_loop_results
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
@@ -257,6 +258,8 @@ class RosPlanningSimNode(Node):
         self.override = None
         self.override_until = 0.0
         self.recovery = RecoveryExecutor()
+        self.information_version = os.getenv('TINYNAV_DECISION_INFORMATION', 'basic')
+        if self.information_version not in ('basic','rich'):raise ValueError('Unknown information version')
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
@@ -742,6 +745,8 @@ def decision_evaluate() -> dict[str, Any]:
             raise HTTPException(409, "No fresh planning report; start the ROS loop and retry")
         report = copy.deepcopy(node.plan_report)
         compact = compact_report(report)
+        compact["snapshot_age_ms"] = round((time.monotonic() - node.plan_received_at) * 1000, 1)
+        state["planning"] = compact
         if node.experiment_mode == 'model':
             if node.config.get('map_path') or node.world_mode != 'observed':
                 raise HTTPException(409, 'Recovery experiments require observed synthetic scenes')
@@ -750,12 +755,12 @@ def decision_evaluate() -> dict[str, Any]:
                                  'previous_attempts':copy.deepcopy(node.recovery.memory),
                                  'notes':['No synthetic object geometry is used to build model proposals.',
                                           'Execution collision checks use simulator geometry; unknown remains unknown.']}
-        compact["snapshot_age_ms"] = round((time.monotonic() - node.plan_received_at) * 1000, 1)
-        state["planning"] = compact
+            if node.information_version == 'rich':
+                state = enrich(state,xy,node.yaw_deg,node.config['target'],node.config['robot'],node.lab.cells,node.lab.resolution,node.lab.samples)
         state["robot"]["recent"].pop("pattern", None)
         state["navigation"] = {"running": bool(node.running), "collision": bool(node.collision)}
         context = {"scenario": node.config.get("scenario_id", node.config.get("name")),
-                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "scene_config": copy.deepcopy(node.config), "closed_loop_experiment": node.experiment_mode == "model", "metrics": node.lab.metrics()}
+                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "scene_config": copy.deepcopy(node.config), "closed_loop_experiment": node.experiment_mode == "model", "information_version":node.information_version, "metrics": node.lab.metrics()}
     try:
         return OBSERVER.submit(state, context)
     except RuntimeError as exc:
@@ -819,9 +824,10 @@ def experiment_worker() -> None:
 
 @app.get("/api/experiment/results")
 def experiment_results(run: str = 'strategies') -> dict[str, Any]:
-    folders = {'strategies':'closed_loop_strategies_20261003', 'short_actions':'closed_loop_20261003'}
+    folders = {'strategies':'closed_loop_strategies_20261003', 'short_actions':'closed_loop_20261003','rich_information':'information_rich_20261003'}
     if run not in folders:raise HTTPException(400, 'Unknown experiment')
     data = closed_loop_results(REPO_ROOT / 'tinynav_temp' / folders[run])
+    data['expected_runs'] = 8 if run == 'rich_information' else 20
     if run == 'short_actions':data['live'] = []
     return data
 
@@ -831,7 +837,7 @@ def experiment_status() -> dict[str, Any]:
     node = _require_sim()
     with node.lock:
         return {"mode":node.experiment_mode, "events":copy.deepcopy(node.experiment_events),"active_override":copy.deepcopy(node.override),"pending":node.experiment_pending,
-                "policy_version":"recovery_sequences_v1", "active_strategy":copy.deepcopy(node.recovery.active),
+                "policy_version":"recovery_sequences_v1", "information_version":node.information_version, "active_strategy":copy.deepcopy(node.recovery.active),
                 "attempts":copy.deepcopy(node.recovery.memory)}
 
 
