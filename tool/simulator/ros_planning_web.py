@@ -40,6 +40,8 @@ from std_msgs.msg import Bool, String
 from tool.simulator.navigation_lab import NavigationLab
 from tool.simulator.decision_observer import DecisionObserver
 from tool.simulator.candidate_branches import compact_report, compare
+from tool.simulator.experiment_policy import guarded_command
+from tool.simulator.closed_loop_results import results as closed_loop_results
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
 from tool.simulator.map_volume import MapVolume
@@ -246,6 +248,14 @@ class RosPlanningSimNode(Node):
         self.config_generation = 0
         self.plan_report = None
         self.plan_received_at = None
+        self.experiment_mode = os.getenv("TINYNAV_EXPERIMENT_MODE", "off")
+        if self.experiment_mode not in ("off", "baseline", "model") or (self.experiment_mode != "off" and (not 1 <= int(os.getenv("ROS_DOMAIN_ID", "0")) <= 229 or os.getenv("ROS_LOCALHOST_ONLY") != "1" or os.getenv("TINYNAV_WEB_HOST") != "127.0.0.1")):
+            raise ValueError("Experiments require a local-only ROS domain 1..229 and loopback HTTP")
+        self.experiment_events = []
+        self.experiment_pending = None
+        self.experiment_next_call = 0.0
+        self.override = None
+        self.override_until = 0.0
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
@@ -307,6 +317,10 @@ class RosPlanningSimNode(Node):
                 self.save_result()
             self.lab.cells.clear()
             self.lab.history.clear()
+            self.experiment_events = []
+            self.experiment_pending = None
+            self.experiment_next_call = time.monotonic() + 6
+            self.override = None
             self.config_generation += 1
             self.config_changed_at = time.time()
             self.plan_report = None
@@ -393,10 +407,18 @@ class RosPlanningSimNode(Node):
         if self.collision:
             self.last_cmd = Twist()
             return
+        command = self.override if self.override and time.monotonic() < self.override_until else None
+        if command:
+            robot = self.config["robot"]
+            v = float(np.clip(command["linear_mps"], -robot["max_linear_vel"], robot["max_linear_vel"]))
+            w = float(np.clip(command["yaw_radps"], -robot["max_angular_vel"], robot["max_angular_vel"]))
+        else:
+            self.override = None
+            v, w = self.last_cmd.linear.x, self.last_cmd.angular.z
         yaw = math.radians(self.yaw_deg)
-        self.control_xy[0] += math.cos(yaw) * self.last_cmd.linear.x * dt
-        self.control_xy[1] += math.sin(yaw) * self.last_cmd.linear.x * dt
-        self.yaw_deg = (self.yaw_deg + math.degrees(self.last_cmd.angular.z * dt) + 180.0) % 360.0 - 180.0
+        self.control_xy[0] += math.cos(yaw) * v * dt
+        self.control_xy[1] += math.sin(yaw) * v * dt
+        self.yaw_deg = (self.yaw_deg + math.degrees(w * dt) + 180.0) % 360.0 - 180.0
 
     def tick(self) -> None:
         with self.lock:
@@ -592,6 +614,8 @@ def stop_children() -> None:
 @app.on_event("startup")
 def startup() -> None:
     start_ros()
+    if SIM_NODE.experiment_mode == "model":
+        threading.Thread(target=experiment_worker, daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -709,11 +733,70 @@ def decision_evaluate() -> dict[str, Any]:
         state["robot"]["recent"].pop("pattern", None)
         state["navigation"] = {"running": bool(node.running), "collision": bool(node.collision)}
         context = {"scenario": node.config.get("scenario_id", node.config.get("name")),
-                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "scene_config": copy.deepcopy(node.config), "metrics": node.lab.metrics()}
+                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "scene_config": copy.deepcopy(node.config), "closed_loop_experiment": node.experiment_mode == "model", "metrics": node.lab.metrics()}
     try:
         return OBSERVER.submit(state, context)
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+def experiment_worker() -> None:
+    node = _require_sim()
+    while rclpy.ok():
+        time.sleep(.25)
+        with node.lock:
+            if not node.running or not node.lab.run or node.lab.run["status"] != "running":
+                node.override = None
+                continue
+            pending = node.experiment_pending
+            if pending:
+                record = OBSERVER.status()
+                if record is None or record["id"] != pending:
+                    node.experiment_pending = None
+                    continue
+                if record["status"] == "running":
+                    continue
+                age = time.monotonic()-node.plan_received_at if node.plan_received_at is not None else float("inf")
+                command, reason = guarded_command(record, node.plan_report, node.control_xy, node.yaw_deg, node.config_generation, time.time(), age)
+                if command:
+                    node.override = command
+                    node.override_until = time.monotonic()+command["duration_s"]
+                node.experiment_events.append({"t":node.lab.metrics()["elapsed_s"], "event":reason,"decision_id":record["id"],"latency_ms":record.get("latency_ms"),"command":command,
+                                               "confidence":record.get("response",{}).get("answers",{}).get("alternative",{}).get("confidence")})
+                node.experiment_pending = None
+                node.experiment_next_call = time.monotonic()+2
+                continue
+            if time.monotonic() < node.experiment_next_call or node.override:
+                continue
+            recent = node.lab.recent()
+            if recent["window_s"] < 3 or recent["moved_m"] >= .1 or recent["turned_deg"] >= 15:
+                continue
+            current = OBSERVER.status()
+            if current and current["status"] == "running":
+                continue
+        try:
+            record = decision_evaluate()
+        except HTTPException as exc:
+            if exc.status_code not in (409,503):raise
+            with node.lock:
+                node.experiment_next_call = time.monotonic()+1
+            continue
+        with node.lock:
+            node.experiment_pending = record["id"]
+            node.experiment_events.append({"t":node.lab.metrics()["elapsed_s"],"event":"request","decision_id":record["id"]})
+
+
+@app.get("/api/experiment/results")
+def experiment_results() -> dict[str, Any]:
+    folder = REPO_ROOT / "tinynav_temp" / "closed_loop_20261003"
+    return closed_loop_results(folder)
+
+
+@app.get("/api/experiment/status")
+def experiment_status() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        return {"mode":node.experiment_mode, "events":copy.deepcopy(node.experiment_events),"active_override":copy.deepcopy(node.override),"pending":node.experiment_pending}
 
 
 @app.post("/api/decision/compare")
@@ -830,7 +913,7 @@ def world_state_mode(mode: str = "observed") -> dict[str, Any]:
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8766)
+    uvicorn.run(app, host=os.getenv("TINYNAV_WEB_HOST", "0.0.0.0"), port=int(os.getenv("TINYNAV_WEB_PORT", "8766")))
 
 
 if __name__ == "__main__":
