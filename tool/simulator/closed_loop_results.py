@@ -17,7 +17,8 @@ def results(folder):
         records.append({'scenario':record['scenario'],'mode':record['mode'],'repeat':record['repeat'],
                         'status':metrics['status'],'goal_m':metrics['distance_to_goal_m'],'elapsed_s':metrics['elapsed_s'],
                         'collisions':metrics['collision_events'],'recovery':record['recovery'],
-                        'requests':sum(e['event']=='request' for e in events),'actions':sum(e['event']=='applied' for e in events)})
+                        'requests':sum(e['event']=='request' for e in events),'actions':sum(e['event']=='applied' for e in events),
+                        'strategies':[{'id':e['strategy_id'],'outcome':e['outcome']} for e in events if e['event']=='strategy_finished']})
     summary_path=folder/'summary.json'
     try:summary=json.loads(summary_path.read_text())
     except (OSError,ValueError):summary=None

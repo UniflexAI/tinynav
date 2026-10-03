@@ -53,8 +53,8 @@ def main():
     for case,mode,_ in jobs:
         chosen=[r for r in rows if r['scenario']==case and r['mode']==mode];m=[r['baseline']['metrics'] for r in chosen];events=[e for r in chosen for e in r['policy']['events']];times=[r['recovery']['recovery_after_stuck_s'] for r in chosen if r['recovery']['recovery_after_stuck_s'] is not None];fallbacks={}
         for e in events:
-            if e['event'] not in ('request','applied'):fallbacks[e['event']]=fallbacks.get(e['event'],0)+1
-        summary['groups'][case+':'+mode]={'runs':len(m),'arrived':sum(v['status']=='arrived' for v in m),'collision_runs':sum(v['collision_events']>0 for v in m),'timeouts':sum(v['status']=='timeout' for v in m),'final_goal_m':[round(v['distance_to_goal_m'],3) for v in m],'recovered':len(times),'recovery_after_stuck_s':times,'model_requests':sum(e['event']=='request' for e in events),'model_actions':sum(e['event']=='applied' for e in events),'fallbacks':fallbacks,'latency_ms':[e['latency_ms'] for e in events if e.get('latency_ms') is not None]}
+            if e['event'] not in ('request','applied','strategy_started','strategy_finished','stage_started'):fallbacks[e['event']]=fallbacks.get(e['event'],0)+1
+        summary['groups'][case+':'+mode]={'runs':len(m),'arrived':sum(v['status']=='arrived' for v in m),'collision_runs':sum(v['collision_events']>0 for v in m),'timeouts':sum(v['status']=='timeout' for v in m),'final_goal_m':[round(v['distance_to_goal_m'],3) for v in m],'recovered':len(times),'recovery_after_stuck_s':times,'model_requests':sum(e['event']=='request' for e in events),'model_actions':sum(e['event']=='applied' for e in events),'strategy_outcomes':[e for e in events if e['event']=='strategy_finished'],'fallbacks':fallbacks,'latency_ms':[e['latency_ms'] for e in events if e.get('latency_ms') is not None]}
     (folder/'summary.json').write_text(json.dumps(summary,indent=2));print('SUMMARY',json.dumps(summary),flush=True)
 
 if __name__=='__main__':main()

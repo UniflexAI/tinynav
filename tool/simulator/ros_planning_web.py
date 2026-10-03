@@ -40,7 +40,7 @@ from std_msgs.msg import Bool, String
 from tool.simulator.navigation_lab import NavigationLab
 from tool.simulator.decision_observer import DecisionObserver
 from tool.simulator.candidate_branches import compact_report, compare
-from tool.simulator.experiment_policy import guarded_command
+from tool.simulator.recovery_strategies import RecoveryExecutor, proposals, validate_strategy
 from tool.simulator.closed_loop_results import results as closed_loop_results
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
@@ -256,6 +256,7 @@ class RosPlanningSimNode(Node):
         self.experiment_next_call = 0.0
         self.override = None
         self.override_until = 0.0
+        self.recovery = RecoveryExecutor()
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
@@ -321,6 +322,7 @@ class RosPlanningSimNode(Node):
             self.experiment_pending = None
             self.experiment_next_call = time.monotonic() + 6
             self.override = None
+            self.recovery = RecoveryExecutor()
             self.config_generation += 1
             self.config_changed_at = time.time()
             self.plan_report = None
@@ -407,6 +409,18 @@ class RosPlanningSimNode(Node):
         if self.collision:
             self.last_cmd = Twist()
             return
+        if self.recovery.active:
+            age = time.monotonic()-self.plan_received_at if self.plan_received_at is not None else float('inf')
+            objects = [SimObject(**obj) for obj in self.config.get('objects', [])]
+            move = self.recovery.step(self.control_xy, self.yaw_deg, self.config['target'], dt, time.monotonic(), age,
+                                      lambda xy,yaw: robot_hits_objects(xy,yaw,self.config['robot'],objects))
+            if move:
+                v,w,used = move
+                angle = math.radians(self.yaw_deg)
+                self.control_xy[0] += math.cos(angle)*v*used
+                self.control_xy[1] += math.sin(angle)*v*used
+                self.yaw_deg = (self.yaw_deg+math.degrees(w*used)+180)%360-180
+                return
         command = self.override if self.override and time.monotonic() < self.override_until else None
         if command:
             robot = self.config["robot"]
@@ -728,6 +742,14 @@ def decision_evaluate() -> dict[str, Any]:
             raise HTTPException(409, "No fresh planning report; start the ROS loop and retry")
         report = copy.deepcopy(node.plan_report)
         compact = compact_report(report)
+        if node.experiment_mode == 'model':
+            if node.config.get('map_path') or node.world_mode != 'observed':
+                raise HTTPException(409, 'Recovery experiments require observed synthetic scenes')
+            state['recovery'] = {'strategies':proposals(xy,node.yaw_deg,node.config['target'],node.config['robot'],
+                                                       node.lab.cells,node.lab.resolution,node.recovery.memory),
+                                 'previous_attempts':copy.deepcopy(node.recovery.memory),
+                                 'notes':['No synthetic object geometry is used to build model proposals.',
+                                          'Execution collision checks use simulator geometry; unknown remains unknown.']}
         compact["snapshot_age_ms"] = round((time.monotonic() - node.plan_received_at) * 1000, 1)
         state["planning"] = compact
         state["robot"]["recent"].pop("pattern", None)
@@ -745,9 +767,19 @@ def experiment_worker() -> None:
     while rclpy.ok():
         time.sleep(.25)
         with node.lock:
+            if node.recovery.events:
+                for event in node.recovery.events:
+                    node.experiment_events.append({'t':node.lab.metrics()['elapsed_s'],**event})
+                node.recovery.events.clear()
             if not node.running or not node.lab.run or node.lab.run["status"] != "running":
                 node.override = None
+                node.recovery.finish('run_stopped',node.control_xy,node.config['target'],time.monotonic())
                 continue
+            if node.recovery.active or time.monotonic() < node.recovery.settle_until:
+                continue
+            if node.recovery.memory and 'post_planner_goal_progress_m' not in node.recovery.memory[-1]:
+                attempt = node.recovery.memory[-1]
+                attempt['post_planner_goal_progress_m'] = round(math.dist(attempt['start_xy'],node.config['target'][:2])-math.dist(node.control_xy,node.config['target'][:2]),3)
             pending = node.experiment_pending
             if pending:
                 record = OBSERVER.status()
@@ -757,10 +789,9 @@ def experiment_worker() -> None:
                 if record["status"] == "running":
                     continue
                 age = time.monotonic()-node.plan_received_at if node.plan_received_at is not None else float("inf")
-                command, reason = guarded_command(record, node.plan_report, node.control_xy, node.yaw_deg, node.config_generation, time.time(), age)
+                command, reason = validate_strategy(record, node.control_xy, node.yaw_deg, node.config_generation, time.time(), age)
                 if command:
-                    node.override = command
-                    node.override_until = time.monotonic()+command["duration_s"]
+                    node.recovery.start(command,node.control_xy,node.yaw_deg,node.config['target'],time.monotonic())
                 node.experiment_events.append({"t":node.lab.metrics()["elapsed_s"], "event":reason,"decision_id":record["id"],"latency_ms":record.get("latency_ms"),"command":command,
                                                "confidence":record.get("response",{}).get("answers",{}).get("alternative",{}).get("confidence")})
                 node.experiment_pending = None
@@ -787,16 +818,21 @@ def experiment_worker() -> None:
 
 
 @app.get("/api/experiment/results")
-def experiment_results() -> dict[str, Any]:
-    folder = REPO_ROOT / "tinynav_temp" / "closed_loop_20261003"
-    return closed_loop_results(folder)
+def experiment_results(run: str = 'strategies') -> dict[str, Any]:
+    folders = {'strategies':'closed_loop_strategies_20261003', 'short_actions':'closed_loop_20261003'}
+    if run not in folders:raise HTTPException(400, 'Unknown experiment')
+    data = closed_loop_results(REPO_ROOT / 'tinynav_temp' / folders[run])
+    if run == 'short_actions':data['live'] = []
+    return data
 
 
 @app.get("/api/experiment/status")
 def experiment_status() -> dict[str, Any]:
     node = _require_sim()
     with node.lock:
-        return {"mode":node.experiment_mode, "events":copy.deepcopy(node.experiment_events),"active_override":copy.deepcopy(node.override),"pending":node.experiment_pending}
+        return {"mode":node.experiment_mode, "events":copy.deepcopy(node.experiment_events),"active_override":copy.deepcopy(node.override),"pending":node.experiment_pending,
+                "policy_version":"recovery_sequences_v1", "active_strategy":copy.deepcopy(node.recovery.active),
+                "attempts":copy.deepcopy(node.recovery.memory)}
 
 
 @app.post("/api/decision/compare")
