@@ -22,7 +22,9 @@
         <div class="scenario-bar">
           <label class="scenario-label">Scenario
             <select id="scenarioSelect">
-              <option value="l_turn">L turn</option>
+              <option value="empty">Empty</option>
+              <option value="dead_end">Dead end escape</option>
+              <option value="l_turn" selected>L turn</option>
               <option value="straight">Straight</option>
               <option value="s_bend">S bend</option>
               <option value="narrow_gate">Narrow gate</option>
@@ -118,6 +120,24 @@
           <h2>Perception</h2>
           <span id="status">Ready</span>
         </div>
+        <div class="lab-section">
+          <h2>Baseline / WorldState</h2>
+          <p>Run fixed GO2 presets from the Scenario selector. Each run resets pose, observations and planner/control. Wall time includes startup.</p>
+          <label>Timeout (s) <input id="baselineTimeout" type="number" min="5" max="600" value="120" /></label>
+          <div class="toolbar">
+            <button id="baselineStart" class="primary">Run baseline</button>
+            <button id="baselineStop">Stop run</button>
+            <button id="baselineExport">Export JSON</button>
+          </div>
+          <p id="baselineMetrics" role="status">idle</p>
+          <details><summary>Recent arrival rates (same config and timeout)</summary><pre id="baselineHistory">No completed runs yet.</pre></details>
+          <p>Arrival: within 0.35 m of the point goal. A collision ends the run. Stuck events use recent motion; they do not end the run.</p>
+          <label>WorldState source
+            <select id="worldMode"><option value="observed">Depth observations (default)</option><option value="full_scene">Full scene boxes (debug)</option></select>
+          </label>
+          <p>Directional distances describe center rays, not safe robot paths. Unknown space is never marked free. No Jev calls yet.</p>
+          <details open><summary>Robot-relative WorldState JSON</summary><pre id="worldState">Start realtime or a baseline run to view observations.</pre></details>
+        </div>
         <details class="diagnostics" open>
           <summary>Perception / Planning Diagnostics</summary>
           <div class="image-grid">
@@ -138,6 +158,6 @@
         </details>
       </section>
     </main>
-    <script src="/static/app.js?v=20260902"></script>
+    <script src="/static/app.js?v=20261003-stage12"></script>
   </body>
 </html>

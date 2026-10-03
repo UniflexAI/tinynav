@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import copy
 import math
+import json
 import os
 import subprocess
 import threading
@@ -36,6 +37,7 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool
 
+from tool.simulator.navigation_lab import NavigationLab
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
 from tool.simulator.map_volume import MapVolume
@@ -236,6 +238,10 @@ class RosPlanningSimNode(Node):
         self.collision = False
         self.geom_footprint: list[list[float]] = []
         self.running = True
+        self.lab = NavigationLab()
+        self.world_mode = "observed"
+        self.saved_run_id = None
+        self.config_generation = 0
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
@@ -275,8 +281,28 @@ class RosPlanningSimNode(Node):
         cam = config.setdefault("camera", {})
         cam["ground_z"] = float(volume.origin[2])
 
+    def save_result(self) -> None:
+        if not self.lab.run or self.lab.run["status"] == "running":
+            return
+        run_id = self.lab.run["id"]
+        if self.saved_run_id == run_id:
+            return
+        folder = REPO_ROOT / "tinynav_temp" / "navigation_lab"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{run_id}.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.lab.export()), encoding="utf-8")
+        temporary.replace(path)
+        self.saved_run_id = run_id
+
     def set_config(self, config: dict[str, Any], reset: bool = False) -> None:
         with self.lock:
+            if self.lab.run and self.lab.run["status"] == "running":
+                self.lab.run["status"] = "config_changed"
+                self.save_result()
+            self.lab.cells.clear()
+            self.lab.history.clear()
+            self.config_generation += 1
             prev_map = self.config.get("map_path")
             self.config = copy.deepcopy(config)
             robot = self.config.get("robot")
@@ -360,6 +386,8 @@ class RosPlanningSimNode(Node):
     def tick(self) -> None:
         with self.lock:
             if not self.running:
+                self.last_update = time.monotonic()
+                self.nav_paused_pub.publish(Bool(data=True))
                 return
             now = time.monotonic()
             dt = max(1e-3, min(0.2, now - self.last_update))
@@ -367,6 +395,7 @@ class RosPlanningSimNode(Node):
             prev_xy = [float(self.control_xy[0]), float(self.control_xy[1])]
             prev_yaw = float(self.yaw_deg)
             self.integrate_cmd(dt)
+            generation = self.config_generation
             config = copy.deepcopy(self.config)
             robot = config.get("robot") or _robot_dict()
             objects = [SimObject(**obj) for obj in config.get("objects", [])]
@@ -385,7 +414,16 @@ class RosPlanningSimNode(Node):
         T_cam = make_camera_pose_from_config(config["start"]["xy"], yaw_deg, config["robot"], config["camera"])
         depth = render_depth(objects, T_cam, config["camera"], map_volume=map_volume)
         with self.lock:
+            if generation != self.config_generation:
+                return
             self.last_depth = depth
+            self.lab.observe_depth(depth, T_cam, config["camera"], robot)
+            was_measuring = self.lab.run and self.lab.run["status"] == "running"
+            self.lab.update(self.control_xy, self.yaw_deg, config["target"], self.collision)
+            if was_measuring and self.lab.run["status"] != "running":
+                self.running = False
+                self.last_cmd = Twist()
+                self.save_result()
 
         stamp = self.get_clock().now().to_msg()
         depth_msg = self.bridge.cv2_to_imgmsg(depth, encoding="32FC1")
@@ -398,13 +436,15 @@ class RosPlanningSimNode(Node):
         self.publish_camera_info(stamp, config)
         self.publish_target(stamp, config)
         self.nav_active_pub.publish(Bool(data=True))
-        self.nav_paused_pub.publish(Bool(data=False))
+        self.nav_paused_pub.publish(Bool(data=not self.running))
 
     def frame(self) -> dict[str, Any]:
         with self.lock:
             xy = [float(self.control_xy[0]), float(self.control_xy[1])]
             footprint = copy.deepcopy(self.geom_footprint) or copy.deepcopy(self.last_footprint)
             return {
+                "metrics": self.lab.metrics(),
+                "world_state": self.lab.world_state(xy, self.yaw_deg, self.config, self.world_mode),
                 "robot_xy": xy,
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": footprint,
@@ -612,6 +652,7 @@ def update_config(request: RunRequest) -> dict[str, Any]:
     reset = bool(request.reset)
     prev_robot = node.config.get("robot", {}).get("name")
     node.set_config(copy.deepcopy(request.config), reset=reset)
+    node.running = True
     robot_changed = prev_robot != node.config.get("robot", {}).get("name")
     if robot_changed:
         _stop_script("tinynav/platforms/simulator_control.py")
@@ -628,6 +669,89 @@ def start_ros_loop() -> dict[str, Any]:
 @app.get("/api/sim-state")
 def sim_state() -> dict[str, Any]:
     return {"frame": _require_sim().frame()}
+
+
+
+class BaselineRequest(BaseModel):
+    config: dict[str, Any]
+    timeout_s: float = 120.0
+
+
+@app.post("/api/baseline/start")
+def baseline_start(request: BaselineRequest) -> dict[str, Any]:
+    if not 5 <= request.timeout_s <= 600:
+        raise HTTPException(400, "timeout_s must be between 5 and 600")
+    node = _require_sim()
+    with node.lock:
+        node.running = False
+    stop_children()
+    with node.lock:
+        node.set_config(request.config, reset=True)
+        node.lab.begin(node.config, node.control_xy, node.yaw_deg, request.timeout_s)
+        node.last_update = time.monotonic()
+    ensure_ros_loop(reset_planning=True, force=True)
+    with node.lock:
+        node.running = True
+    return {"ok": True, "metrics": node.lab.metrics()}
+
+
+@app.post("/api/baseline/stop")
+def baseline_stop() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        if node.lab.run and node.lab.run["status"] == "running":
+            node.lab.run["status"] = "cancelled"
+            node.save_result()
+        node.running = False
+        node.last_cmd = Twist()
+    return {"ok": True}
+
+
+@app.get("/api/baseline/scenarios")
+def baseline_scenarios() -> dict[str, Any]:
+    return {"scenarios": json.loads((ROOT / "navigation_scenarios.json").read_text())}
+
+
+@app.get("/api/baseline/results")
+def baseline_results() -> dict[str, Any]:
+    folder = REPO_ROOT / "tinynav_temp" / "navigation_lab"
+    files = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:100]
+    records = [json.loads(path.read_text()) for path in files]
+    results = [{**record["metrics"], "scenario": record["config"].get("scenario_id", record["config"].get("name", "custom"))} for record in records]
+    groups: dict[str, Any] = {}
+    for result in results:
+        if result["status"] not in ("arrived", "collision", "timeout"):
+            continue
+        key = result["config_hash"] + ":" + str(result["timeout_s"])
+        group = groups.setdefault(key, {"scenario": result.get("scenario", "custom"), "config_hash": result["config_hash"], "timeout_s": result["timeout_s"], "runs": 0, "arrived": 0})
+        group["runs"] += 1
+        group["arrived"] += int(result["status"] == "arrived")
+        group["arrival_rate"] = group["arrived"] / group["runs"]
+    return {"results": results, "groups": list(groups.values()), "limit": 100}
+
+
+@app.get("/api/baseline/status")
+def baseline_status() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        return node.lab.metrics()
+
+
+@app.get("/api/baseline/export")
+def baseline_export() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        return node.lab.export()
+
+
+@app.post("/api/world-state/mode")
+def world_state_mode(mode: str = "observed") -> dict[str, Any]:
+    if mode not in ("observed", "full_scene"):
+        raise HTTPException(400, "mode must be observed or full_scene")
+    node = _require_sim()
+    with node.lock:
+        node.world_mode = mode
+    return {"ok": True, "mode": mode}
 
 
 def main() -> None:

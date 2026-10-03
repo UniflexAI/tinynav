@@ -27,95 +27,7 @@ let robotPresets = {};
 let mapBackgroundImage = null;
 let mapBackgroundSrc = null;
 
-function simBox(name, center, size) {
-  return { name, kind: "box", center, size };
-}
-
-const SCENARIOS = {
-  l_turn: {
-    label: "L turn",
-    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
-    target: [3.9, 4.4, 0.0],
-    cameraMaxRange: 8.0,
-    bounds: { xMin: -1.4, xMax: 5.6, yMin: -1.6, yMax: 5.7 },
-    objects: [
-      simBox("lower_horizontal_wall", [1.8, -0.85, 0.65], [5.6, 0.3, 1.3]),
-      simBox("upper_horizontal_wall_before_turn", [1.15, 0.85, 0.65], [4.3, 0.3, 1.3]),
-      simBox("inside_corner_block", [3.45, 0.85, 0.65], [0.3, 0.3, 1.3]),
-      simBox("left_vertical_wall_after_turn", [3.15, 2.8, 0.65], [0.3, 3.6, 1.3]),
-      simBox("right_vertical_wall", [4.85, 2.55, 0.65], [0.3, 5.1, 1.3]),
-      simBox("entry_left_stub", [-1.05, 0.85, 0.65], [0.8, 0.3, 1.3]),
-      simBox("entry_right_stub", [-1.05, -0.85, 0.65], [0.8, 0.3, 1.3]),
-      simBox("far_end_cap", [4.0, 5.25, 0.65], [2.0, 0.3, 1.3]),
-    ],
-  },
-  straight: {
-    label: "Straight",
-    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
-    target: [5.2, 0.0, 0.0],
-    cameraMaxRange: 8.0,
-    bounds: { xMin: -0.8, xMax: 6.0, yMin: -1.8, yMax: 1.8 },
-    objects: [
-      simBox("left_wall", [2.55, 0.9, 0.65], [6.1, 0.25, 1.3]),
-      simBox("right_wall", [2.55, -0.9, 0.65], [6.1, 0.25, 1.3]),
-      simBox("far_cap", [5.8, 0.0, 0.65], [0.25, 2.0, 1.3]),
-    ],
-  },
-  s_bend: {
-    label: "S bend",
-    start: { xy: [0.0, -0.7], yaw_deg: 0.0 },
-    target: [5.2, 0.7, 0.0],
-    cameraMaxRange: 8.0,
-    bounds: { xMin: -0.8, xMax: 6.0, yMin: -2.2, yMax: 2.2 },
-    objects: [
-      simBox("lower_wall_entry", [1.25, -1.45, 0.65], [3.1, 0.22, 1.3]),
-      simBox("upper_wall_entry", [1.15, 0.55, 0.65], [2.9, 0.22, 1.3]),
-      simBox("lower_wall_exit", [4.05, -0.35, 0.65], [3.1, 0.22, 1.3]),
-      simBox("upper_wall_exit", [4.05, 1.45, 0.65], [3.1, 0.22, 1.3]),
-      simBox("left_deflector", [2.55, -0.95, 0.65], [0.22, 0.9, 1.3]),
-      simBox("right_deflector", [3.25, 0.95, 0.65], [0.22, 0.9, 1.3]),
-    ],
-  },
-  narrow_gate: {
-    label: "Narrow gate",
-    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
-    target: [4.8, 0.0, 0.0],
-    cameraMaxRange: 8.0,
-    bounds: { xMin: -0.8, xMax: 5.6, yMin: -2.1, yMax: 2.1 },
-    objects: [
-      simBox("left_wall", [2.2, 1.05, 0.65], [5.6, 0.25, 1.3]),
-      simBox("right_wall", [2.2, -1.05, 0.65], [5.6, 0.25, 1.3]),
-      simBox("gate_left_block", [2.65, 0.75, 0.65], [0.45, 0.45, 1.3]),
-      simBox("gate_right_block", [2.65, -0.75, 0.65], [0.45, 0.45, 1.3]),
-      simBox("far_cap", [5.15, 0.0, 0.65], [0.25, 2.3, 1.3]),
-    ],
-  },
-  open_target: {
-    label: "Open target",
-    start: { xy: [0.0, 0.0], yaw_deg: -45.0 },
-    target: [4.2, 2.4, 0.0],
-    cameraMaxRange: 8.0,
-    bounds: { xMin: -1.0, xMax: 5.4, yMin: -2.4, yMax: 3.4 },
-    objects: [
-      simBox("near_column", [1.45, 0.65, 0.65], [0.45, 0.45, 1.3]),
-      simBox("middle_column", [2.65, -0.65, 0.65], [0.5, 0.5, 1.3]),
-      simBox("far_column", [3.35, 1.45, 0.65], [0.45, 0.45, 1.3]),
-      simBox("side_shelf", [3.9, -1.55, 0.65], [1.2, 0.35, 1.3]),
-    ],
-  },
-  back_target: {
-    label: "Back target",
-    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
-    target: [-1.35, 0.0, 0.0],
-    cameraMaxRange: 5.0,
-    bounds: { xMin: -2.2, xMax: 1.6, yMin: -1.6, yMax: 1.6 },
-    objects: [
-      simBox("front_block", [0.95, 0.0, 0.65], [0.25, 2.0, 1.3]),
-      simBox("left_boundary", [-0.35, 1.05, 0.65], [2.6, 0.22, 1.3]),
-      simBox("right_boundary", [-0.35, -1.05, 0.65], [2.6, 0.22, 1.3]),
-    ],
-  },
-};
+let SCENARIOS = {};
 
 const canvas = document.getElementById("sceneCanvas");
 const ctx = canvas.getContext("2d");
@@ -918,11 +830,15 @@ async function realtimeTick() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Sim state failed");
     const frame = data.frame;
+    renderLab(frame);
+    if (frame.metrics?.id && frame.metrics.status !== "running" && frame.metrics.id !== lastResultId) {
+      lastResultId = frame.metrics?.id; refreshResults();
+    }
     syncStartFieldsFromFrame(frame);
     realtimePath.push(frame.robot_xy);
     if (realtimePath.length > 300) realtimePath = realtimePath.slice(-300);
     drawRealtimeFrame(frame);
-    statusEl.textContent = "Realtime running";
+    statusEl.textContent = frame.metrics?.id ? `Baseline ${frame.metrics.status}` : "Realtime running";
   } catch (error) {
     statusEl.textContent = "Realtime error";
     stopRealtime();
@@ -1278,6 +1194,7 @@ mapCanvas.addEventListener("pointerup", (event) => handleCanvasPointerUp(event, 
 mapCanvas.addEventListener("pointercancel", (event) => handleCanvasPointerUp(event, mapCanvas));
 
 loadDefault().then(async () => {
+  SCENARIOS = (await (await fetch("/api/baseline/scenarios")).json()).scenarios;
   await Promise.all([fetchMapCatalog(), fetchRobotPresets()]);
 });
 syncControlsLayout();
@@ -1293,3 +1210,63 @@ if (typeof ResizeObserver !== "undefined") {
   }).observe(canvas);
   new ResizeObserver(() => drawPerceptionMap()).observe(mapCanvas);
 }
+
+function renderLab(frame) {
+  const m = frame.metrics || {status: "idle"};
+  $("baselineMetrics").textContent = `${m.status} | ${Number(m.elapsed_s || 0).toFixed(1)} s | path ${Number(m.path_length_m || 0).toFixed(2)} m | goal ${Number(m.distance_to_goal_m || 0).toFixed(2)} m | collisions ${m.collision_events || 0} | stuck ${m.stuck_events || 0}`;
+  $("worldState").textContent = JSON.stringify(frame.world_state || {}, null, 2);
+}
+async function labRequest(url, body) {
+  const response = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, ...(body ? {body: JSON.stringify(body)} : {})});
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "Request failed");
+  return data;
+}
+$("baselineStart").addEventListener("click", async () => {
+  try {
+    stopRealtime();
+    const key = fields.scenarioSelect.value;
+    const scenario = SCENARIOS[key];
+    const base = await (await fetch("/api/default-config")).json();
+    config = {...base, name: scenario.label, scenario_id: key,
+      start: structuredClone(scenario.start), target: structuredClone(scenario.target),
+      objects: structuredClone(scenario.objects)};
+    config.camera.max_range = scenario.cameraMaxRange;
+    sceneBounds = {...scenario.bounds}; setMapBackground(null); refreshFields();
+    await labRequest("/api/baseline/start", {config, timeout_s: Number($("baselineTimeout").value)});
+    realtimePath = []; realtimeRunning = true;
+    realtimeButton.textContent = "Stop"; realtimeButton.classList.remove("primary");
+    realtimeTick();
+  } catch (error) { statusEl.textContent = error.message; }
+});
+$("baselineStop").addEventListener("click", async () => {
+  try { await labRequest("/api/baseline/stop"); } catch (error) {statusEl.textContent = error.message;}
+});
+$("worldMode").addEventListener("change", async () => {
+  try {
+    await labRequest(`/api/world-state/mode?mode=${encodeURIComponent($("worldMode").value)}`);
+    const data = await (await fetch("/api/sim-state")).json(); renderLab(data.frame);
+  } catch (error) {statusEl.textContent = error.message;}
+});
+$("baselineExport").addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/baseline/export");
+    if (!response.ok) throw new Error("Export failed");
+    const data = await response.json();
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type: "application/json"}));
+    const link = document.createElement("a"); link.href = url;
+    link.download = `tinynav-baseline-${data.metrics.id || "idle"}.json`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {statusEl.textContent = error.message;}
+});
+
+let lastResultId = null;
+async function refreshResults() {
+  try {
+    const response = await fetch("/api/baseline/results");
+    if (!response.ok) throw new Error("History unavailable");
+    const data = await response.json();
+    $("baselineHistory").textContent = data.groups.length ? data.groups.map(g => `${g.scenario} (${g.config_hash}): ${g.arrived}/${g.runs} arrived (${(100*g.arrival_rate).toFixed(0)}%), timeout ${g.timeout_s}s`).join("\n") : "No completed runs yet.";
+  } catch (error) {$("baselineHistory").textContent = error.message;}
+}
+refreshResults();

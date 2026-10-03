@@ -342,3 +342,9 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+
+.lab-section {padding: 12px 0;} .lab-section p {font-size: 13px; line-height: 1.5;} #worldState {max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px;}
+
+@media (min-width: 1181px) {
+  .app:has(.controls.is-hidden) {grid-template-columns: minmax(520px, 1.2fr) minmax(420px, 0.9fr);}
+}
