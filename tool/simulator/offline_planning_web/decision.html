@@ -14,19 +14,24 @@ body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;
 <h2>规则辅助开／关对照</h2>
 <div id="comparison-banner" style="font-size:24px;font-weight:700;padding:16px;background:#253950;border-radius:8px;margin-bottom:16px">等待实验</div>
 <p class="muted">持续卡住 → 原地扫描 → 唯一通畅转向或长退让 → 恢复原 planner。任务目标保持不变；动作由规则选择，未调用模型。</p>
-<select id="rule-scene"><option value="dead_end">死胡同</option><option value="l_turn">L 转弯</option></select>
+<select id="rule-scene"><option value="dead_end">1 · U 形死胡同</option><option value="l_turn">2 · L 形遮挡拐角</option><option value="s_bend">3 · S 形连续绕障</option><option value="narrow_gate">4 · 狭窄门洞</option><option value="back_target">5 · 后方目标与前方封堵</option></select>
+<p id="scene-challenge" style="color:#91c9ff"></p>
 <label><input id="recording-view" type="checkbox" checked> 录屏简洁模式</label><br><br>
-<label>模式 <select id="rule-mode"><option value="on">开启规则辅助</option><option value="off">关闭规则辅助（原 planner）</option></select></label> <label>时限 <input id="rule-timeout" type="number" value="60" min="5" max="600" style="width:70px"> 秒</label>
+<label>模式 <select id="rule-mode"><option value="on">开启规则辅助</option><option value="off">关闭规则辅助（原 planner）</option></select></label> <label>时限 <input id="rule-timeout" type="number" value="120" min="5" max="600" style="width:70px"> 秒</label>
 <button id="rule-start" disabled>从起点开始对照运行</button> <button id="rule-stop" disabled>停止</button> <button id="rule-download">下载实验 JSON</button>
 <p class="muted">每次重置相同场景、起点、目标和观测。下表仅配对相同配置与时限；耗时包含启动与扫描。</p><div id="comparison-results"></div>
 <p id="rule-stage">读取实验状态…</p><pre id="rule-evidence">—</pre>
 <details><summary>阶段与执行事件</summary><pre id="rule-events">—</pre></details>
 </section>
 <script>
+const challengeScenes={dead_end:['U 形死胡同','先远离目标，退出陷阱再绕行'],l_turn:['L 形遮挡拐角','转角后的通道需要补充观测'],s_bend:['S 形连续绕障','连续改变方向，检查重复卡住与恢复'],narrow_gate:['狭窄门洞','检查车体间隙与保守碰撞判断'],back_target:['后方目标与前方封堵','目标在视野后方，需要转向补齐观测']};
+function challengeDescription(){const c=challengeScenes[document.querySelector('#rule-scene').value];document.querySelector('#scene-challenge').textContent=c?c[1]:'';}
+document.querySelector('#rule-scene').addEventListener('change',challengeDescription);challengeDescription();
 document.body.classList.add('recording');
 document.querySelector('#recording-view').onchange=e=>document.body.classList.toggle('recording',e.target.checked);
 let comparisonRuns=[];
 try{comparisonRuns=JSON.parse(localStorage.getItem('tinynav-rule-comparisons')||'[]');}catch(e){comparisonRuns=[];}
+comparisonRuns=comparisonRuns.filter(r=>['arrived','timeout','collision','cancelled'].includes(r.status));
 function comparisonRender(s){
  const m=s.metrics||{};
  if(s.mode==='rules'&&m.id&&['arrived','timeout','collision','cancelled'].includes(m.status)&&!comparisonRuns.some(r=>r.id===m.id)){
@@ -36,8 +41,8 @@ function comparisonRender(s){
  const groups=new Map();for(const r of comparisonRuns){const key=r.config_hash+':'+r.timeout_s;const g=groups.get(key)||{scenario:r.scenario,timeout:r.timeout_s};g[r.rules_enabled?'on':'off']=r;groups.set(key,g);}
  const box=document.querySelector('#comparison-results');box.replaceChildren();
  const table=document.createElement('table');const head=table.insertRow();for(const label of ['场景 / 时限','关闭规则辅助','开启规则辅助'])head.insertCell().textContent=label;
- const describe=r=>r?`${({arrived:'到达',timeout:'超时',collision:'碰撞停止',cancelled:'手动停止'})[r.status]} · ${Number(r.elapsed_s).toFixed(1)}s · 碰撞 ${r.collision_events} · 距目标 ${Number(r.distance_to_goal_m).toFixed(2)}m`:'待运行';
- for(const g of [...groups.values()].reverse().slice(0,4)){const row=table.insertRow();row.insertCell().textContent=`${g.scenario} / ${g.timeout}s`;row.insertCell().textContent=describe(g.off);row.insertCell().textContent=describe(g.on);}box.append(table);
+ const describe=r=>r?`${({arrived:'到达',timeout:'超时',collision:'碰撞停止',cancelled:'手动停止'})[r.status]||r.status} · ${Number(r.elapsed_s).toFixed(1)}s · 碰撞 ${r.collision_events} · 距目标 ${Number(r.distance_to_goal_m).toFixed(2)}m`:'待运行';
+ for(const g of [...groups.values()].reverse().slice(0,10)){const row=table.insertRow();row.insertCell().textContent=`${challengeScenes[g.scenario]?.[0]||g.scenario} / ${g.timeout}s`;row.insertCell().textContent=describe(g.off);row.insertCell().textContent=describe(g.on);}box.append(table);
 }
 async function ruleApi(path,body){const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());return r.json();}
 async function rulePoll(){try{
@@ -46,10 +51,10 @@ async function rulePoll(){try{
  document.querySelector('#rule-stop').disabled=!enabled||m.status!=='running';
  for(const id of ['rule-mode','rule-scene','rule-timeout'])document.querySelector('#'+id).disabled=m.status==='running';
  const activeRules=enabled&&s.rules_enabled!==false;
- document.querySelector('#comparison-banner').textContent=enabled?`${activeRules?'开启规则辅助':'关闭规则辅助 · 仅原 planner'} ｜ ${m.scenario||'未开始'} ｜ ${m.status||'idle'}`:'当前服务不支持对照';
+ document.querySelector('#comparison-banner').textContent=enabled?`${activeRules?'开启规则辅助':'关闭规则辅助 · 仅原 planner'} ｜ ${challengeScenes[m.scenario]?.[0]||m.scenario||'未开始'} ｜ ${m.status||'idle'}`:'当前服务不支持对照';
  document.querySelector('#comparison-banner').style.background=activeRules?'#164b3c':'#473d20';
  const history=await ruleApi('/api/experiment/comparisons');
- for(const r of history.runs||[])if(!comparisonRuns.some(old=>old.id===r.id))comparisonRuns.push(r);
+ for(const r of history.runs||[])if(['arrived','timeout','collision','cancelled'].includes(r.status)&&!comparisonRuns.some(old=>old.id===r.id))comparisonRuns.push(r);
  comparisonRuns.sort((a,b)=>a.started_at_unix-b.started_at_unix);
  comparisonRender(s);
  const names={planner_only:'原 planner 导航中',cancelled:'已停止',idle:'未开始',watching:'观察卡住状态',scanning:'原地扫描',fresh_report:'等待扫描后新规划报告',executing:'执行退让',planner_resumed:'原 planner 已接管',arrived:'到达原任务目标',collision:'碰撞，运行停止',timeout:'运行超时',attempt_limit:'达到脱困尝试上限',no_observed_candidate:'没有符合完整观测条件的动作',scan_aborted:'扫描中止'};
