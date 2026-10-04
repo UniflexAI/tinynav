@@ -261,6 +261,7 @@ class RosPlanningSimNode(Node):
         self.override_until = 0.0
         self.recovery = RecoveryExecutor()
         self.rule_recovery = RuleRecovery()
+        self.rules_enabled = True
         self.information_version = os.getenv('TINYNAV_DECISION_INFORMATION', 'basic')
         if self.information_version not in ('basic','rich','topology'):raise ValueError('Unknown information version')
 
@@ -315,7 +316,7 @@ class RosPlanningSimNode(Node):
         temporary = path.with_suffix(".tmp")
         record = self.lab.export()
         if self.experiment_mode == 'rules':
-            record['experiment'] = {'mode':'rules','decision_source':'rule','model_used':False,
+            record['experiment'] = {'mode':'rules','rules_enabled':self.rules_enabled,'decision_source':'rule' if self.rules_enabled else 'planner','model_used':False,
                                     'state':copy.deepcopy(self.rule_recovery.status()),
                                     'events':copy.deepcopy(self.experiment_events+self.recovery.events),
                                     'attempts':copy.deepcopy(self.recovery.memory)}
@@ -800,7 +801,10 @@ def experiment_worker() -> None:
                     node.experiment_events.append({'t':node.lab.metrics()['elapsed_s'],**event})
                 node.recovery.events.clear()
             if node.experiment_mode == "rules":
-                node.rule_recovery.step(node,time.monotonic())
+                if node.rules_enabled:
+                    node.rule_recovery.step(node,time.monotonic())
+                else:
+                    node.rule_recovery.phase = 'planner_only' if node.running else node.lab.metrics().get('status','idle')
                 if not node.running:
                     node.recovery.finish('run_stopped',node.control_xy,node.config['target'],time.monotonic())
                 continue
@@ -866,7 +870,20 @@ def experiment_status() -> dict[str, Any]:
     with node.lock:
         return {"mode":node.experiment_mode, "events":copy.deepcopy(node.experiment_events),"active_override":copy.deepcopy(node.override),"pending":node.experiment_pending,
                 "policy_version":"observed_rules_v1" if node.experiment_mode == "rules" else "recovery_sequences_v1", "information_version":node.information_version, "active_strategy":copy.deepcopy(node.recovery.active),
-                "attempts":copy.deepcopy(node.recovery.memory), "rule_recovery":copy.deepcopy(node.rule_recovery.status()), "metrics":node.lab.metrics()}
+                "attempts":copy.deepcopy(node.recovery.memory), "rules_enabled":node.rules_enabled, "rule_recovery":{**copy.deepcopy(node.rule_recovery.status()),"decision_source":"rule" if node.rules_enabled else "planner"}, "metrics":node.lab.metrics()}
+
+
+@app.get('/api/experiment/comparisons')
+def experiment_comparisons() -> dict[str, Any]:
+    folder = REPO_ROOT / 'tinynav_temp' / 'navigation_lab'
+    files = sorted(folder.glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True)[:40]
+    runs = []
+    for path in files:
+        record = json.loads(path.read_text())
+        experiment = record.get('experiment',{})
+        if experiment.get('mode')=='rules' and isinstance(experiment.get('rules_enabled'),bool):
+            runs.append({**record['metrics'],'rules_enabled':experiment['rules_enabled']})
+    return {'runs':runs}
 
 
 @app.post("/api/decision/compare")
@@ -901,6 +918,7 @@ def decision_status() -> dict[str, Any]:
 class BaselineRequest(BaseModel):
     config: dict[str, Any]
     timeout_s: float = 120.0
+    rules_enabled: bool | None = None
 
 
 @app.post("/api/baseline/start")
@@ -908,11 +926,14 @@ def baseline_start(request: BaselineRequest) -> dict[str, Any]:
     if not 5 <= request.timeout_s <= 600:
         raise HTTPException(400, "timeout_s must be between 5 and 600")
     node = _require_sim()
+    if request.rules_enabled is not None and node.experiment_mode != 'rules':
+        raise HTTPException(400, 'Rule comparison requires the isolated rules service')
     with node.lock:
         node.running = False
     stop_children()
     with node.lock:
         node.set_config(request.config, reset=True)
+        node.rules_enabled = request.rules_enabled if request.rules_enabled is not None else True
         node.lab.begin(node.config, node.control_xy, node.yaw_deg, request.timeout_s)
         node.last_update = time.monotonic()
     ensure_ros_loop(reset_planning=True, force=True)
