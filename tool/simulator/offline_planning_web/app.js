@@ -1,3 +1,5 @@
+const OBSERVE_ONLY = new URLSearchParams(location.search).get('observe') === '1';
+let observedRunId = null;
 const REALTIME_TICK_DELAY_MS = 33;
 const GRID_STEP_M = 1.0;
 const MARKER_HIT_RADIUS = window.matchMedia?.("(pointer: coarse)").matches ? 22 : 14;
@@ -830,6 +832,16 @@ async function realtimeTick() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.detail || "Sim state failed");
     const frame = data.frame;
+    if (OBSERVE_ONLY && frame.metrics?.id !== observedRunId) {
+      const saved = await (await fetch('/api/baseline/export')).json();
+      if (saved.config) {
+        config = saved.config;
+        const scene = SCENARIOS[config.scenario_id];
+        if (scene) sceneBounds = {...scene.bounds};
+        refreshFields(); realtimePath = (saved.samples || []).map(p => p.xy).filter(Boolean).slice(-300);
+      }
+      observedRunId = frame.metrics?.id;
+    }
     renderLab(frame);
     if (frame.metrics?.id && frame.metrics.status !== "running" && frame.metrics.id !== lastResultId) {
       lastResultId = frame.metrics?.id; refreshResults();
@@ -1193,9 +1205,19 @@ mapCanvas.addEventListener("pointermove", (event) => handleCanvasPointerMove(eve
 mapCanvas.addEventListener("pointerup", (event) => handleCanvasPointerUp(event, mapCanvas));
 mapCanvas.addEventListener("pointercancel", (event) => handleCanvasPointerUp(event, mapCanvas));
 
-loadDefault().then(async () => {
+(OBSERVE_ONLY ? (async () => {
+  config = await (await fetch('/api/default-config')).json();
+  refreshFields();
+})() : loadDefault()).then(async () => {
   SCENARIOS = (await (await fetch("/api/baseline/scenarios")).json()).scenarios;
-  await Promise.all([fetchMapCatalog(), fetchRobotPresets()]);
+  if (OBSERVE_ONLY) {
+    document.body.classList.add('observe-only');
+    document.querySelectorAll('button,input,select,textarea').forEach(el => el.disabled = true);
+    const style = document.createElement('style');
+    style.textContent = '.observe-only .controls,.observe-only .header-actions,.observe-only .scenario-bar,.observe-only .panel-head p{display:none!important}.observe-only canvas{pointer-events:none}.observe-only .app{display:block}.observe-only .scene-panel{margin-bottom:12px}';
+    document.head.append(style);
+    realtimeRunning = true; realtimeTick();
+  } else await Promise.all([fetchMapCatalog(), fetchRobotPresets()]);
 });
 syncControlsLayout();
 window.addEventListener("resize", () => {

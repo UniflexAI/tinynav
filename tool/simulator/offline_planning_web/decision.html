@@ -2,11 +2,13 @@
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TinyNav · Decision Observer</title>
 <style>
-body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;max-width:1000px;margin:auto}a{color:#86bfff}button{background:#4277ed;color:white;border:0;padding:12px 20px;border-radius:8px;font:inherit;cursor:pointer}button:disabled{opacity:.5}pre{background:#182438;padding:20px;overflow:auto;border-radius:12px;font:13px monospace;white-space:pre-wrap;max-height:280px}h1{font-size:28px}.muted{color:#a8b5c8}#summary{font-size:20px;padding:20px 0}progress{width:180px;margin:0 10px}td{padding:6px 12px}details{margin:20px 0}
+body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;max-width:1600px;margin:auto}a{color:#86bfff}button{background:#4277ed;color:white;border:0;padding:12px 20px;border-radius:8px;font:inherit;cursor:pointer}button:disabled{opacity:.5}pre{background:#182438;padding:20px;overflow:auto;border-radius:12px;font:13px monospace;white-space:pre-wrap;max-height:280px}h1{font-size:28px}.muted{color:#a8b5c8}#summary{font-size:20px;padding:20px 0}progress{width:180px;margin:0 10px}td{padding:6px 12px}details{margin:20px 0}
+.observation-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:24px;align-items:start}.scene-live{position:sticky;top:16px}.scene-live iframe{width:100%;height:780px;border:1px solid #34465c;border-radius:12px;background:#101827}.decision-content{min-width:0}@media(max-width:950px){.observation-layout{grid-template-columns:1fr}.scene-live{position:static}.scene-live iframe{height:600px}}
 </style>
 <a href="/">← 返回 Planning Lab</a><h1>StartLux Decision · 导航旁观测试</h1>
 <p class="muted">先在 Planning Lab 设置场景并运行感知，再评估当前 WorldState。每次分析读取最新规划报告；可开启低频自动分析。模型建议不会控制机器人。</p>
 
+<div class="observation-layout"><aside class="scene-live"><h2>Websim 实时场景</h2><p class="muted">与右侧实验同步 · 只读观察 · <a href="/" target="_blank" rel="noopener">单独打开场景</a></p><iframe src="/?observe=1" title="Websim 实时场景"></iframe></aside><div class="decision-content">
 <section style="background:#182438;padding:20px;border-radius:12px;margin:20px 0">
 <h2>规则辅助脱困 · 隔离实验</h2>
 <p class="muted">持续卡住 → 原地扫描 → 唯一通畅转向或长退让 → 恢复原 planner。任务目标保持不变；动作由规则选择，未调用模型。</p>
@@ -65,3 +67,5 @@ button.onclick=async()=>{lastSubmit=Date.now();button.disabled=true;try{const re
 document.querySelector('#compare').onclick=async()=>{document.querySelector('#auto').checked=false;const panel=document.querySelector('#branches');panel.hidden=false;try{const res=await fetch(`/api/decision/compare?decision_id=${record.id}`,{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||`HTTP ${res.status}`);const brief=b=>b?{candidate:b.candidate_id,goal_progress_m:b.goal_progress_m,collision:b.collision,final_goal_m:b.final_goal_m}:null;panel.textContent=JSON.stringify({scene:data.scene,kind:data.kind,choice:data.choice,baseline:brief(data.baseline),model:brief(data.model),progress_delta_m:data.progress_delta_m,notes:data.notes},null,2);}catch(e){panel.textContent=e.message;}};
 poll();
 </script></html>
+
+</div></div>
