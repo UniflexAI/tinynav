@@ -6,6 +6,31 @@ body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;
 </style>
 <a href="/">← 返回 Planning Lab</a><h1>StartLux Decision · 导航旁观测试</h1>
 <p class="muted">先在 Planning Lab 设置场景并运行感知，再评估当前 WorldState。每次分析读取最新规划报告；可开启低频自动分析。模型建议不会控制机器人。</p>
+
+<section style="background:#182438;padding:20px;border-radius:12px;margin:20px 0">
+<h2>规则辅助脱困 · 隔离实验</h2>
+<p class="muted">持续卡住 → 原地扫描 → 唯一通畅转向或长退让 → 恢复原 planner。任务目标保持不变；动作由规则选择，未调用模型。</p>
+<select id="rule-scene"><option value="dead_end">死胡同</option><option value="l_turn">L 转弯</option></select>
+<button id="rule-start" disabled>开始规则辅助测试</button> <button id="rule-stop" disabled>停止</button> <button id="rule-download">下载实验 JSON</button>
+<p id="rule-stage">读取实验状态…</p><pre id="rule-evidence">—</pre>
+<details><summary>阶段与执行事件</summary><pre id="rule-events">—</pre></details>
+</section>
+<script>
+async function ruleApi(path,body){const r=await fetch(path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());return r.json();}
+async function rulePoll(){try{
+ const s=await ruleApi('/api/experiment/status'),enabled=s.mode==='rules',state=s.rule_recovery||{},m=s.metrics||{};
+ document.querySelector('#rule-start').disabled=!enabled||m.status==='running';
+ document.querySelector('#rule-stop').disabled=!enabled||m.status!=='running';
+ const names={watching:'观察卡住状态',scanning:'原地扫描',fresh_report:'等待扫描后新规划报告',executing:'执行退让',planner_resumed:'原 planner 已接管',arrived:'到达原任务目标',collision:'碰撞，运行停止',timeout:'运行超时',attempt_limit:'达到脱困尝试上限',no_observed_candidate:'没有符合完整观测条件的动作',scan_aborted:'扫描中止'};
+ document.querySelector('#rule-stage').textContent=enabled?`规则辅助 · ${names[state.phase]||state.phase} · 耗时 ${m.elapsed_s||0}s · 碰撞 ${m.collision_events||0} · 扫描 ${Math.min(360,state.scan?.rotation_deg??[...(s.events||[])].reverse().find(e=>e.event==='scan_completed')?.rotation_deg??0).toFixed(1)}°`:`当前服务模式：${s.mode}。规则辅助只在隔离 rules 服务可用。`;
+ document.querySelector('#rule-evidence').textContent=JSON.stringify({decision_source:enabled?'rule':'未启用',model_used:false,mission_result:m.status||'未开始',distance_to_original_goal_m:m.distance_to_goal_m,selection:state.selection,execution:s.active_strategy,attempts:s.attempts},null,2);
+ document.querySelector('#rule-events').textContent=JSON.stringify((s.events||[]).slice(-30),null,2);
+}catch(e){document.querySelector('#rule-stage').textContent='状态读取失败：'+e.message;}}
+document.querySelector('#rule-start').onclick=async()=>{try{const id=document.querySelector('#rule-scene').value,all=await ruleApi('/api/baseline/scenarios'),scene=all.scenarios[id],config=await ruleApi('/api/default-config');Object.assign(config,{scenario_id:id,name:scene.label,start:scene.start,target:scene.target,objects:scene.objects});config.camera.max_range=scene.cameraMaxRange;await ruleApi('/api/baseline/start',{config,timeout_s:120});await rulePoll();}catch(e){document.querySelector('#rule-stage').textContent='启动失败：'+e.message;}};
+document.querySelector('#rule-stop').onclick=async()=>{await ruleApi('/api/baseline/stop',{});await rulePoll();};
+document.querySelector('#rule-download').onclick=async()=>{const s=await ruleApi('/api/experiment/status'),url=URL.createObjectURL(new Blob([JSON.stringify(s,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='rules-experiment.json';a.click();URL.revokeObjectURL(url);};
+rulePoll();setInterval(rulePoll,1000);
+</script>
 <button id="evaluate">分析当前规划</button> <label><input type="checkbox" id="auto"> 每 2 秒自动分析（页面打开时）</label> <a id="download" hidden>下载本次 JSON</a>
 <h2>规划器选择 / 模型建议</h2><pre id="plan">等待规划报告</pre><button id="compare" disabled>独立分支对比（3秒）</button><pre id="branches" hidden></pre><div id="summary">等待评估</div><div id="probabilities"></div>
 <p class="muted">这些概率是模型输出，尚未在 TinyNav 导航场景校准。结果对应提交时的观察快照。</p>

@@ -38,6 +38,7 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool, String
 
 from tool.simulator.navigation_lab import NavigationLab
+from tool.simulator.rule_recovery import RuleRecovery
 from tool.simulator.decision_observer import DecisionObserver
 from tool.simulator.candidate_branches import compact_report, compare
 from tool.simulator.recovery_strategies import RecoveryExecutor, proposals, validate_strategy
@@ -251,7 +252,7 @@ class RosPlanningSimNode(Node):
         self.plan_report = None
         self.plan_received_at = None
         self.experiment_mode = os.getenv("TINYNAV_EXPERIMENT_MODE", "off")
-        if self.experiment_mode not in ("off", "baseline", "model") or (self.experiment_mode != "off" and (not 1 <= int(os.getenv("ROS_DOMAIN_ID", "0")) <= 229 or os.getenv("ROS_LOCALHOST_ONLY") != "1" or os.getenv("TINYNAV_WEB_HOST") != "127.0.0.1")):
+        if self.experiment_mode not in ("off", "baseline", "model", "rules") or (self.experiment_mode != "off" and (not 1 <= int(os.getenv("ROS_DOMAIN_ID", "0")) <= 229 or os.getenv("ROS_LOCALHOST_ONLY") != "1" or os.getenv("TINYNAV_WEB_HOST") != "127.0.0.1")):
             raise ValueError("Experiments require a local-only ROS domain 1..229 and loopback HTTP")
         self.experiment_events = []
         self.experiment_pending = None
@@ -259,6 +260,7 @@ class RosPlanningSimNode(Node):
         self.override = None
         self.override_until = 0.0
         self.recovery = RecoveryExecutor()
+        self.rule_recovery = RuleRecovery()
         self.information_version = os.getenv('TINYNAV_DECISION_INFORMATION', 'basic')
         if self.information_version not in ('basic','rich','topology'):raise ValueError('Unknown information version')
 
@@ -311,7 +313,13 @@ class RosPlanningSimNode(Node):
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"{run_id}.json"
         temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self.lab.export()), encoding="utf-8")
+        record = self.lab.export()
+        if self.experiment_mode == 'rules':
+            record['experiment'] = {'mode':'rules','decision_source':'rule','model_used':False,
+                                    'state':copy.deepcopy(self.rule_recovery.status()),
+                                    'events':copy.deepcopy(self.experiment_events+self.recovery.events),
+                                    'attempts':copy.deepcopy(self.recovery.memory)}
+        temporary.write_text(json.dumps(record), encoding="utf-8")
         temporary.replace(path)
         self.saved_run_id = run_id
 
@@ -328,6 +336,7 @@ class RosPlanningSimNode(Node):
             self.experiment_next_call = time.monotonic() + 6
             self.override = None
             self.recovery = RecoveryExecutor()
+            self.rule_recovery = RuleRecovery()
             self.config_generation += 1
             self.config_changed_at = time.time()
             self.plan_report = None
@@ -633,7 +642,7 @@ def stop_children() -> None:
 @app.on_event("startup")
 def startup() -> None:
     start_ros()
-    if SIM_NODE.experiment_mode == "model":
+    if SIM_NODE.experiment_mode in ("model", "rules"):
         threading.Thread(target=experiment_worker, daemon=True).start()
 
 
@@ -790,6 +799,11 @@ def experiment_worker() -> None:
                 for event in node.recovery.events:
                     node.experiment_events.append({'t':node.lab.metrics()['elapsed_s'],**event})
                 node.recovery.events.clear()
+            if node.experiment_mode == "rules":
+                node.rule_recovery.step(node,time.monotonic())
+                if not node.running:
+                    node.recovery.finish('run_stopped',node.control_xy,node.config['target'],time.monotonic())
+                continue
             if not node.running or not node.lab.run or node.lab.run["status"] != "running":
                 node.override = None
                 node.recovery.finish('run_stopped',node.control_xy,node.config['target'],time.monotonic())
@@ -851,8 +865,8 @@ def experiment_status() -> dict[str, Any]:
     node = _require_sim()
     with node.lock:
         return {"mode":node.experiment_mode, "events":copy.deepcopy(node.experiment_events),"active_override":copy.deepcopy(node.override),"pending":node.experiment_pending,
-                "policy_version":"recovery_sequences_v1", "information_version":node.information_version, "active_strategy":copy.deepcopy(node.recovery.active),
-                "attempts":copy.deepcopy(node.recovery.memory)}
+                "policy_version":"observed_rules_v1" if node.experiment_mode == "rules" else "recovery_sequences_v1", "information_version":node.information_version, "active_strategy":copy.deepcopy(node.recovery.active),
+                "attempts":copy.deepcopy(node.recovery.memory), "rule_recovery":copy.deepcopy(node.rule_recovery.status()), "metrics":node.lab.metrics()}
 
 
 @app.post("/api/decision/compare")

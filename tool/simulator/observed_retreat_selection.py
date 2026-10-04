@@ -30,6 +30,10 @@ def shortlist(plans, xy, yaw, robot, cells, resolution):
         candidates = [(length,p) for length,p in eligible if p['id'].endswith('_'+side)]
         if candidates:
             selected.append(max(candidates,key=lambda row:(row[0],row[1]['id']))[1])
+    retained = {p['id'] for p in selected}
+    for _,plan in eligible:
+        if plan['id'] not in retained:
+            excluded[plan['id']] = 'shorter_observed_retreat_same_side'
     return {'plans':selected,'excluded':excluded,'rule':'longest_observed_clear_retreat_per_side',
             'current_safety_unproven':True,'model_preference':None}
 
