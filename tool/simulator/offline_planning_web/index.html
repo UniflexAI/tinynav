@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TinyNav Navigation</title>
+    <title>TinyNav Planning Lab</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -11,8 +11,8 @@
       <section class="panel scene-panel">
         <div class="panel-head">
           <div>
-            <h1>TinyNav Navigation</h1>
-            <p>Automatic recovery: scan, escape, then continue to the original goal.</p>
+            <h1>TinyNav Planning Lab</h1>
+            <p>Drag objects, tune footprint, run the perception-to-planning loop.</p>
           </div>
           <div class="header-actions">
             <button id="controlsToggle" class="secondary controls-toggle" type="button" aria-expanded="true">Controls</button>
@@ -22,9 +22,7 @@
         <div class="scenario-bar">
           <label class="scenario-label">Scenario
             <select id="scenarioSelect">
-              <option value="empty">Empty</option>
-              <option value="dead_end">Dead end escape</option>
-              <option value="l_turn" selected>L turn</option>
+              <option value="l_turn">L turn</option>
               <option value="straight">Straight</option>
               <option value="s_bend">S bend</option>
               <option value="narrow_gate">Narrow gate</option>
@@ -120,20 +118,6 @@
           <h2>Perception</h2>
           <span id="status">Ready</span>
         </div>
-        <div class="lab-section">
-          <h2>Navigation</h2>
-          <p>Select a scenario and start navigation. Recovery is enabled automatically when the robot stays stuck.</p>
-          <label>Timeout (s) <input id="baselineTimeout" type="number" min="5" max="600" value="180" /></label>
-          <div class="toolbar">
-            <button id="baselineStart" class="primary">Start navigation</button>
-            <button id="baselineStop">Stop run</button>
-            <button id="baselineExport">Export JSON</button>
-          </div>
-          <p id="baselineMetrics" role="status">idle</p>
-          <p id="recoveryStatus" role="status">Recovery ready</p>
-          <details><summary>Recovery events</summary><pre id="recoveryEvents">No recovery events yet.</pre></details>
-          <details hidden><select id="worldMode"><option value="observed">Observed</option></select><pre id="worldState"></pre></details>
-        </div>
         <details class="diagnostics" open>
           <summary>Perception / Planning Diagnostics</summary>
           <div class="image-grid">
@@ -154,6 +138,6 @@
         </details>
       </section>
     </main>
-    <script src="/static/app.js?v=20261006-native-recovery"></script>
+    <script src="/static/app.js?v=20260902"></script>
   </body>
 </html>
