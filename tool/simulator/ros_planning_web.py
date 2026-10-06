@@ -38,13 +38,6 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud
 from std_msgs.msg import Bool, String
 
 from tool.simulator.navigation_lab import NavigationLab
-from tool.simulator.rule_recovery import RuleRecovery
-from tool.simulator.decision_observer import DecisionObserver
-from tool.simulator.candidate_branches import compact_report, compare
-from tool.simulator.recovery_strategies import RecoveryExecutor, proposals, validate_strategy
-from tool.simulator.decision_information import enrich
-from tool.simulator.observed_topology import topology, capture_audit
-from tool.simulator.closed_loop_results import results as closed_loop_results
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
 from tool.simulator.map_volume import MapVolume
@@ -252,18 +245,12 @@ class RosPlanningSimNode(Node):
         self.plan_report = None
         self.plan_received_at = None
         self.experiment_mode = os.getenv("TINYNAV_EXPERIMENT_MODE", "off")
-        if self.experiment_mode not in ("off", "baseline", "model", "rules") or (self.experiment_mode != "off" and (not 1 <= int(os.getenv("ROS_DOMAIN_ID", "0")) <= 229 or os.getenv("ROS_LOCALHOST_ONLY") != "1" or os.getenv("TINYNAV_WEB_HOST") != "127.0.0.1")):
+        if self.experiment_mode not in ("off", "baseline", "rules") or (self.experiment_mode != "off" and (not 1 <= int(os.getenv("ROS_DOMAIN_ID", "0")) <= 229 or os.getenv("ROS_LOCALHOST_ONLY") != "1" or os.getenv("TINYNAV_WEB_HOST") != "127.0.0.1")):
             raise ValueError("Experiments require a local-only ROS domain 1..229 and loopback HTTP")
-        self.experiment_events = []
-        self.experiment_pending = None
-        self.experiment_next_call = 0.0
-        self.override = None
-        self.override_until = 0.0
-        self.recovery = RecoveryExecutor()
-        self.rule_recovery = RuleRecovery()
         self.rules_enabled = True
-        self.information_version = os.getenv('TINYNAV_DECISION_INFORMATION', 'basic')
-        if self.information_version not in ('basic','rich','topology'):raise ValueError('Unknown information version')
+        self.native_recovery_status = {}
+        self.create_subscription(String,"/navigation/recovery/status",self.recovery_status_callback,10)
+        self.information_version = 'basic'
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
         self.odom_visual_pub = self.create_publisher(Odometry, "/slam/odometry_visual", 10)
@@ -304,6 +291,10 @@ class RosPlanningSimNode(Node):
         cam = config.setdefault("camera", {})
         cam["ground_z"] = float(volume.origin[2])
 
+    def recovery_status_callback(self, msg):
+        with self.lock:
+            self.native_recovery_status = json.loads(msg.data)
+
     def save_result(self) -> None:
         if not self.lab.run or self.lab.run["status"] == "running":
             return
@@ -317,9 +308,9 @@ class RosPlanningSimNode(Node):
         record = self.lab.export()
         if self.experiment_mode == 'rules':
             record['experiment'] = {'mode':'rules','rules_enabled':self.rules_enabled,'decision_source':'rule' if self.rules_enabled else 'planner','model_used':False,
-                                    'state':copy.deepcopy(self.rule_recovery.status()),
-                                    'events':copy.deepcopy(self.experiment_events+self.recovery.events),
-                                    'attempts':copy.deepcopy(self.recovery.memory)}
+                                    'state':copy.deepcopy(self.native_recovery_status),
+                                    'events':copy.deepcopy(self.native_recovery_status.get('events',[])),
+                                    'attempts':copy.deepcopy(self.native_recovery_status.get("attempts",[]))}
         temporary.write_text(json.dumps(record), encoding="utf-8")
         temporary.replace(path)
         self.saved_run_id = run_id
@@ -332,12 +323,6 @@ class RosPlanningSimNode(Node):
             self.lab.cells.clear()
             self.lab.cell_observed_at.clear()
             self.lab.history.clear()
-            self.experiment_events = []
-            self.experiment_pending = None
-            self.experiment_next_call = time.monotonic() + 6
-            self.override = None
-            self.recovery = RecoveryExecutor()
-            self.rule_recovery = RuleRecovery()
             self.config_generation += 1
             self.config_changed_at = time.time()
             self.plan_report = None
@@ -424,26 +409,7 @@ class RosPlanningSimNode(Node):
         if self.collision:
             self.last_cmd = Twist()
             return
-        if self.recovery.active:
-            age = time.monotonic()-self.plan_received_at if self.plan_received_at is not None else float('inf')
-            objects = [SimObject(**obj) for obj in self.config.get('objects', [])]
-            move = self.recovery.step(self.control_xy, self.yaw_deg, self.config['target'], dt, time.monotonic(), age,
-                                      lambda xy,yaw: robot_hits_objects(xy,yaw,self.config['robot'],objects))
-            if move:
-                v,w,used = move
-                angle = math.radians(self.yaw_deg)
-                self.control_xy[0] += math.cos(angle)*v*used
-                self.control_xy[1] += math.sin(angle)*v*used
-                self.yaw_deg = (self.yaw_deg+math.degrees(w*used)+180)%360-180
-                return
-        command = self.override if self.override and time.monotonic() < self.override_until else None
-        if command:
-            robot = self.config["robot"]
-            v = float(np.clip(command["linear_mps"], -robot["max_linear_vel"], robot["max_linear_vel"]))
-            w = float(np.clip(command["yaw_radps"], -robot["max_angular_vel"], robot["max_angular_vel"]))
-        else:
-            self.override = None
-            v, w = self.last_cmd.linear.x, self.last_cmd.angular.z
+        v, w = self.last_cmd.linear.x, self.last_cmd.angular.z
         yaw = math.radians(self.yaw_deg)
         self.control_xy[0] += math.cos(yaw) * v * dt
         self.control_xy[1] += math.sin(yaw) * v * dt
@@ -538,14 +504,13 @@ class LoadMapRequest(BaseModel):
 
 
 app = FastAPI(title="TinyNav ROS Planning Simulator")
-OBSERVER = DecisionObserver(REPO_ROOT / "tinynav_temp" / "decision_observer")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 SIM_NODE: RosPlanningSimNode | None = None
 EXECUTOR: MultiThreadedExecutor | None = None
 PROCS: list[subprocess.Popen] = []
 CHILD_SCRIPTS = (
     "tinynav/core/planning_node.py",
-    "tinynav/platforms/simulator_control.py",
+    "tinynav/platforms/cmd_vel_control.py",
 )
 _LAST_PLANNING_RESET = 0.0
 _PLANNING_RESET_COOLDOWN_S = 1.0
@@ -578,7 +543,7 @@ def _child_env() -> dict[str, str]:
     env = os.environ.copy()
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(key, "1")
-    env["TINYNAV_PLAN_REPORT"] = "1"
+    env["TINYNAV_RULE_RECOVERY"] = "1" if SIM_NODE.experiment_mode=="rules" and SIM_NODE.rules_enabled else "0"
     env["ROBOT_TYPE"] = _active_robot_type()
     return env
 
@@ -643,8 +608,6 @@ def stop_children() -> None:
 @app.on_event("startup")
 def startup() -> None:
     start_ros()
-    if SIM_NODE.experiment_mode in ("model", "rules"):
-        threading.Thread(target=experiment_worker, daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -747,130 +710,17 @@ def decision_page() -> str:
     return (STATIC_DIR / "decision.html").read_text()
 
 
-@app.post("/api/decision/evaluate")
-def decision_evaluate() -> dict[str, Any]:
-    node = _require_sim()
-    with node.lock:
-        xy = [float(node.control_xy[0]), float(node.control_xy[1])]
-        information_v1 = None
-        observation_audit = None
-        state = node.lab.world_state(xy, node.yaw_deg, node.config, node.world_mode)
-        if node.plan_report is None or time.monotonic() - node.plan_received_at > 3:
-            raise HTTPException(409, "No fresh planning report; start the ROS loop and retry")
-        report = copy.deepcopy(node.plan_report)
-        compact = compact_report(report)
-        compact["snapshot_age_ms"] = round((time.monotonic() - node.plan_received_at) * 1000, 1)
-        state["planning"] = compact
-        if node.experiment_mode == 'model':
-            if node.config.get('map_path') or node.world_mode != 'observed':
-                raise HTTPException(409, 'Recovery experiments require observed synthetic scenes')
-            state['recovery'] = {'strategies':proposals(xy,node.yaw_deg,node.config['target'],node.config['robot'],
-                                                       node.lab.cells,node.lab.resolution,node.recovery.memory),
-                                 'previous_attempts':copy.deepcopy(node.recovery.memory),
-                                 'notes':['No synthetic object geometry is used to build model proposals.',
-                                          'Execution collision checks use simulator geometry; unknown remains unknown.']}
-            if node.information_version in ('rich','topology'):
-                state = enrich(state,xy,node.yaw_deg,node.config['target'],node.config['robot'],node.lab.cells,node.lab.resolution,node.lab.samples)
-        if node.information_version == 'topology' and node.experiment_mode == 'model':
-            information_v1 = copy.deepcopy(state)
-            state = topology(state,xy,node.yaw_deg,node.config['target'],node.config['robot'],node.lab.cells,node.lab.resolution,
-                             node.lab.samples,node.lab.cell_observed_at,time.monotonic())
-            observation_audit = capture_audit(node.lab.cells,node.lab.cell_observed_at,xy,node.lab.resolution,time.monotonic())
-        state["robot"]["recent"].pop("pattern", None)
-        state["navigation"] = {"running": bool(node.running), "collision": bool(node.collision)}
-        context = {"scenario": node.config.get("scenario_id", node.config.get("name")),
-                   "world_mode": node.world_mode, "config_generation": node.config_generation, "planning_report": report, "scene_config": copy.deepcopy(node.config), "closed_loop_experiment": node.experiment_mode == "model", "information_version":node.information_version, "metrics": node.lab.metrics()}
-        if information_v1 is not None:
-            information_v1['robot']['recent'].pop('pattern',None)
-            information_v1['navigation']=copy.deepcopy(state['navigation'])
-            context['information_v1_state']=information_v1
-            context['observation_audit']=observation_audit
-    try:
-        return OBSERVER.submit(state, context)
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-def experiment_worker() -> None:
-    node = _require_sim()
-    while rclpy.ok():
-        time.sleep(.25)
-        with node.lock:
-            if node.recovery.events:
-                for event in node.recovery.events:
-                    node.experiment_events.append({'t':node.lab.metrics()['elapsed_s'],**event})
-                node.recovery.events.clear()
-            if node.experiment_mode == "rules":
-                if node.rules_enabled:
-                    node.rule_recovery.step(node,time.monotonic())
-                else:
-                    node.rule_recovery.phase = 'planner_only' if node.running else node.lab.metrics().get('status','idle')
-                if not node.running:
-                    node.recovery.finish('run_stopped',node.control_xy,node.config['target'],time.monotonic())
-                continue
-            if not node.running or not node.lab.run or node.lab.run["status"] != "running":
-                node.override = None
-                node.recovery.finish('run_stopped',node.control_xy,node.config['target'],time.monotonic())
-                continue
-            if node.recovery.active or time.monotonic() < node.recovery.settle_until:
-                continue
-            if node.recovery.memory and 'post_planner_goal_progress_m' not in node.recovery.memory[-1]:
-                attempt = node.recovery.memory[-1]
-                attempt['post_planner_goal_progress_m'] = round(math.dist(attempt['start_xy'],node.config['target'][:2])-math.dist(node.control_xy,node.config['target'][:2]),3)
-            pending = node.experiment_pending
-            if pending:
-                record = OBSERVER.status()
-                if record is None or record["id"] != pending:
-                    node.experiment_pending = None
-                    continue
-                if record["status"] == "running":
-                    continue
-                age = time.monotonic()-node.plan_received_at if node.plan_received_at is not None else float("inf")
-                command, reason = validate_strategy(record, node.control_xy, node.yaw_deg, node.config_generation, time.time(), age)
-                if command:
-                    node.recovery.start(command,node.control_xy,node.yaw_deg,node.config['target'],time.monotonic())
-                node.experiment_events.append({"t":node.lab.metrics()["elapsed_s"], "event":reason,"decision_id":record["id"],"latency_ms":record.get("latency_ms"),"command":command,
-                                               "confidence":record.get("response",{}).get("answers",{}).get("alternative",{}).get("confidence")})
-                node.experiment_pending = None
-                node.experiment_next_call = time.monotonic()+2
-                continue
-            if time.monotonic() < node.experiment_next_call or node.override:
-                continue
-            recent = node.lab.recent()
-            if recent["window_s"] < 3 or recent["moved_m"] >= .1 or recent["turned_deg"] >= 15:
-                continue
-            current = OBSERVER.status()
-            if current and current["status"] == "running":
-                continue
-        try:
-            record = decision_evaluate()
-        except HTTPException as exc:
-            if exc.status_code not in (409,503):raise
-            with node.lock:
-                node.experiment_next_call = time.monotonic()+1
-            continue
-        with node.lock:
-            node.experiment_pending = record["id"]
-            node.experiment_events.append({"t":node.lab.metrics()["elapsed_s"],"event":"request","decision_id":record["id"]})
-
-
-@app.get("/api/experiment/results")
-def experiment_results(run: str = 'strategies') -> dict[str, Any]:
-    folders = {'strategies':'closed_loop_strategies_20261003', 'short_actions':'closed_loop_20261003','rich_information':'information_rich_20261003','topology_information':'information_topology_20261003'}
-    if run not in folders:raise HTTPException(400, 'Unknown experiment')
-    data = closed_loop_results(REPO_ROOT / 'tinynav_temp' / folders[run])
-    data['expected_runs'] = 8 if run in ('rich_information','topology_information') else 20
-    if run == 'short_actions':data['live'] = []
-    return data
-
-
 @app.get("/api/experiment/status")
 def experiment_status() -> dict[str, Any]:
     node = _require_sim()
     with node.lock:
-        return {"mode":node.experiment_mode, "events":copy.deepcopy(node.experiment_events),"active_override":copy.deepcopy(node.override),"pending":node.experiment_pending,
-                "policy_version":"observed_rules_v1" if node.experiment_mode == "rules" else "recovery_sequences_v1", "information_version":node.information_version, "active_strategy":copy.deepcopy(node.recovery.active),
-                "attempts":copy.deepcopy(node.recovery.memory), "rules_enabled":node.rules_enabled, "rule_recovery":{**copy.deepcopy(node.rule_recovery.status()),"decision_source":"rule" if node.rules_enabled else "planner"}, "metrics":node.lab.metrics()}
+        state = copy.deepcopy(node.native_recovery_status)
+        if not node.rules_enabled:state['phase']='planner_only' if node.running else node.lab.metrics().get('status','idle')
+        if not node.running:state['phase']=node.lab.metrics().get('status','idle')
+        return {'mode':node.experiment_mode,'events':state.get('events',[]),'active_override':None,
+                'policy_version':'native_observed_rules_v4','information_version':'observed_depth','pending':None,
+                'active_strategy':state.get('active_strategy'),'attempts':state.get('attempts',[]),
+                'rules_enabled':node.rules_enabled,'rule_recovery':state,'metrics':node.lab.metrics()}
 
 
 @app.get('/api/experiment/comparisons')
@@ -881,24 +731,9 @@ def experiment_comparisons() -> dict[str, Any]:
     for path in files:
         record = json.loads(path.read_text())
         experiment = record.get('experiment',{})
-        if experiment.get('mode')=='rules' and isinstance(experiment.get('rules_enabled'),bool):
+        if experiment.get('mode')=='rules' and isinstance(experiment.get('rules_enabled'),bool) and record.get('config',{}).get('recovery_control')=='native_v4':
             runs.append({**record['metrics'],'rules_enabled':experiment['rules_enabled']})
     return {'runs':runs}
-
-
-@app.post("/api/decision/compare")
-def decision_compare(decision_id: str) -> dict[str, Any]:
-    record = OBSERVER.status()
-    if not record or record["status"] != "complete" or record["id"] != decision_id:
-        raise HTTPException(409, "No completed decision to compare")
-    try:
-        result = compare(record)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    folder = REPO_ROOT / "tinynav_temp" / "candidate_branches"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / (record["id"] + ".json")).write_text(json.dumps(result, indent=2))
-    return result
 
 
 @app.get("/api/planning/report")
@@ -909,15 +744,9 @@ def planning_report() -> dict[str, Any]:
                 "config_generation": node.config_generation, "navigation_running": bool(node.running)}
 
 
-@app.get("/api/decision/status")
-def decision_status() -> dict[str, Any]:
-    return {"record": OBSERVER.status(), "navigation_running": bool(SIM_NODE and SIM_NODE.running)}
-
-
-
 class BaselineRequest(BaseModel):
     config: dict[str, Any]
-    timeout_s: float = 120.0
+    timeout_s: float = 180.0
     rules_enabled: bool | None = None
 
 
@@ -932,7 +761,8 @@ def baseline_start(request: BaselineRequest) -> dict[str, Any]:
         node.running = False
     stop_children()
     with node.lock:
-        node.set_config(request.config, reset=True)
+        node.set_config({**request.config,'recovery_control':'native_v4'}, reset=True)
+        node.native_recovery_status = {}
         node.rules_enabled = request.rules_enabled if request.rules_enabled is not None else True
         node.lab.begin(node.config, node.control_xy, node.yaw_deg, request.timeout_s)
         node.last_update = time.monotonic()

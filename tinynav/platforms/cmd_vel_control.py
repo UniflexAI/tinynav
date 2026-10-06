@@ -1,3 +1,4 @@
+import os
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -68,6 +69,12 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
+        self.recovery_enabled = self.declare_parameter('rule_recovery_enabled',
+            os.getenv('TINYNAV_RULE_RECOVERY','1')=='1').value
+        self.recovery = None
+        if self.recovery_enabled:
+            from tinynav.core.recovery.ros_adapter import RecoveryAdapter
+            self.recovery = RecoveryAdapter(self,self.robot)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _on_paused(self, msg: Bool):
@@ -98,11 +105,17 @@ class CmdVelControlNode(Node):
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
 
+        recovery_cmd = self.recovery.command(self._nav_active,self._paused) if self.recovery else None
         if not self._nav_active:
             return
 
         if self._paused:
             self.cmd_pub.publish(Twist())
+            self.prev_cmd = Twist()
+            return
+
+        if recovery_cmd is not None:
+            self.cmd_pub.publish(recovery_cmd)
             self.prev_cmd = Twist()
             return
 
@@ -235,6 +248,7 @@ class CmdVelControlNode(Node):
         )
 
     def destroy_node(self):
+        if self._nav_active:self.cmd_pub.publish(Twist())
         self.logger.info("Destroying cmd_vel_control connection.")
         super().destroy_node()
         

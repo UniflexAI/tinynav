@@ -1,13 +1,13 @@
 <!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TinyNav · Decision Observer</title>
+<title>TinyNav · 规则脱困</title>
 <style>
 body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;max-width:1600px;margin:auto}a{color:#86bfff}button{background:#4277ed;color:white;border:0;padding:12px 20px;border-radius:8px;font:inherit;cursor:pointer}button:disabled{opacity:.5}pre{background:#182438;padding:20px;overflow:auto;border-radius:12px;font:13px monospace;white-space:pre-wrap;max-height:280px}h1{font-size:28px}.muted{color:#a8b5c8}#summary{font-size:20px;padding:20px 0}progress{width:180px;margin:0 10px}td{padding:6px 12px}details{margin:20px 0}
 .observation-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:24px;align-items:start}.scene-live{position:sticky;top:16px}.scene-live iframe{width:100%;height:780px;border:1px solid #34465c;border-radius:12px;background:#101827}.decision-content{min-width:0}@media(max-width:950px){.observation-layout{grid-template-columns:1fr}.scene-live{position:static}.scene-live iframe{height:600px}}
 .recording #observer-tools,.recording #rule-evidence,.recording details{display:none}.recording .scene-live iframe{height:760px}
 </style>
-<a href="/">← 返回 Planning Lab</a><h1>StartLux Decision · 导航旁观测试</h1>
-<p class="muted">先在 Planning Lab 设置场景并运行感知，再评估当前 WorldState。每次分析读取最新规划报告；可开启低频自动分析。模型建议不会控制机器人。</p>
+<a href="/">← 返回 Planning Lab</a><h1>TinyNav · 规则辅助脱困</h1>
+<p class="muted">使用与机器人相同的控制节点，验证持续卡住后的扫描、退让与接管。选择场景和规则开关，再运行对照。</p>
 
 <div class="observation-layout"><aside class="scene-live"><h2>Websim 实时场景</h2><p class="muted">与右侧实验同步 · 只读观察 · <a href="/" target="_blank" rel="noopener">单独打开场景</a></p><iframe src="/?observe=1" title="Websim 实时场景"></iframe></aside><div class="decision-content">
 <section style="background:#182438;padding:20px;border-radius:12px;margin:20px 0">
@@ -17,7 +17,7 @@ body{font:16px system-ui;background:#101827;color:#e6edf6;margin:0;padding:32px;
 <select id="rule-scene"><option value="dead_end">1 · U 形死胡同</option><option value="l_turn">2 · L 形遮挡拐角</option><option value="s_bend">3 · S 形连续绕障</option><option value="narrow_gate">4 · 狭窄门洞</option><option value="back_target">5 · 后方目标与前方封堵</option></select>
 <p id="scene-challenge" style="color:#91c9ff"></p>
 <label><input id="recording-view" type="checkbox" checked> 录屏简洁模式</label><br><br>
-<label>模式 <select id="rule-mode"><option value="on">开启规则辅助</option><option value="off">关闭规则辅助（原 planner）</option></select></label> <label>时限 <input id="rule-timeout" type="number" value="120" min="5" max="600" style="width:70px"> 秒</label>
+<label>模式 <select id="rule-mode"><option value="on">开启规则辅助</option><option value="off">关闭规则辅助（原 planner）</option></select></label> <label>时限 <input id="rule-timeout" type="number" value="180" min="5" max="600" style="width:70px"> 秒</label>
 <button id="rule-start" disabled>从起点开始对照运行</button> <button id="rule-stop" disabled>停止</button> <button id="rule-download">下载实验 JSON</button>
 <p class="muted">每次重置相同场景、起点、目标和观测。下表仅配对相同配置与时限；耗时包含启动与扫描。</p><div id="comparison-results"></div>
 <p id="rule-stage">读取实验状态…</p><pre id="rule-evidence">—</pre>
@@ -30,13 +30,13 @@ document.querySelector('#rule-scene').addEventListener('change',challengeDescrip
 document.body.classList.add('recording');
 document.querySelector('#recording-view').onchange=e=>document.body.classList.toggle('recording',e.target.checked);
 let comparisonRuns=[];
-try{comparisonRuns=JSON.parse(localStorage.getItem('tinynav-rule-comparisons')||'[]');}catch(e){comparisonRuns=[];}
+try{comparisonRuns=JSON.parse(localStorage.getItem('tinynav-native-rule-comparisons')||'[]');}catch(e){comparisonRuns=[];}
 comparisonRuns=comparisonRuns.filter(r=>['arrived','timeout','collision','cancelled'].includes(r.status));
 function comparisonRender(s){
  const m=s.metrics||{};
  if(s.mode==='rules'&&m.id&&['arrived','timeout','collision','cancelled'].includes(m.status)&&!comparisonRuns.some(r=>r.id===m.id)){
   comparisonRuns.push({...m,rules_enabled:s.rules_enabled!==false});comparisonRuns=comparisonRuns.slice(-40);
-  try{localStorage.setItem('tinynav-rule-comparisons',JSON.stringify(comparisonRuns));}catch(e){}
+  try{localStorage.setItem('tinynav-native-rule-comparisons',JSON.stringify(comparisonRuns));}catch(e){}
  }
  const groups=new Map();for(const r of comparisonRuns){const key=r.config_hash+':'+r.timeout_s;const g=groups.get(key)||{scenario:r.scenario,timeout:r.timeout_s};g[r.rules_enabled?'on':'off']=r;groups.set(key,g);}
  const box=document.querySelector('#comparison-results');box.replaceChildren();
@@ -57,7 +57,7 @@ async function rulePoll(){try{
  for(const r of history.runs||[])if(['arrived','timeout','collision','cancelled'].includes(r.status)&&!comparisonRuns.some(old=>old.id===r.id))comparisonRuns.push(r);
  comparisonRuns.sort((a,b)=>a.started_at_unix-b.started_at_unix);
  comparisonRender(s);
- const names={planner_only:'原 planner 导航中',cancelled:'已停止',idle:'未开始',watching:'观察卡住状态',scanning:'原地扫描',fresh_report:'等待扫描后新规划报告',executing:'执行退让',planner_resumed:'原 planner 已接管',arrived:'到达原任务目标',collision:'碰撞，运行停止',timeout:'运行超时',attempt_limit:'达到脱困尝试上限',no_observed_candidate:'没有符合完整观测条件的动作',scan_aborted:'扫描中止'};
+ const names={planner_only:'原 planner 导航中',cancelled:'已停止',idle:'未开始',goal_approach:'目标附近低速收尾',goal_approach_timeout:'收尾超时，交还原 planner',watching:'观察卡住状态',scanning:'原地扫描',fresh_report:'等待扫描后新规划报告',executing:'执行退让',planner_resumed:'原 planner 已接管',arrived:'到达原任务目标',collision:'碰撞，运行停止',timeout:'运行超时',attempt_limit:'达到脱困尝试上限',no_observed_candidate:'没有符合完整观测条件的动作',scan_aborted:'扫描中止'};
  document.querySelector('#rule-stage').textContent=enabled?`${activeRules?'规则辅助':'仅原 planner'} · ${names[state.phase]||state.phase} · 耗时 ${m.elapsed_s||0}s · 碰撞 ${m.collision_events||0} · 扫描 ${Math.min(360,state.scan?.rotation_deg??[...(s.events||[])].reverse().find(e=>e.event==='scan_completed')?.rotation_deg??0).toFixed(1)}°`:`当前服务模式：${s.mode}。规则辅助只在隔离 rules 服务可用。`;
  document.querySelector('#rule-evidence').textContent=JSON.stringify({decision_source:enabled?(activeRules?'rule':'planner'):'未启用',model_used:false,mission_result:m.status||'未开始',distance_to_original_goal_m:m.distance_to_goal_m,selection:state.selection,execution:s.active_strategy,attempts:s.attempts},null,2);
  document.querySelector('#rule-events').textContent=JSON.stringify((s.events||[]).slice(-30),null,2);
@@ -67,39 +67,5 @@ document.querySelector('#rule-stop').onclick=async()=>{await ruleApi('/api/basel
 document.querySelector('#rule-download').onclick=async()=>{const s=await ruleApi('/api/experiment/status'),url=URL.createObjectURL(new Blob([JSON.stringify(s,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='rules-experiment.json';a.click();URL.revokeObjectURL(url);};
 rulePoll();setInterval(rulePoll,1000);
 </script>
-<div id="observer-tools"><button id="evaluate">分析当前规划</button> <label><input type="checkbox" id="auto"> 每 2 秒自动分析（页面打开时）</label> <a id="download" hidden>下载本次 JSON</a>
-<h2>规划器选择 / 模型建议</h2><pre id="plan">等待规划报告</pre><button id="compare" disabled>独立分支对比（3秒）</button><pre id="branches" hidden></pre><div id="summary">等待评估</div><div id="probabilities"></div>
-<p class="muted">这些概率是模型输出，尚未在 TinyNav 导航场景校准。结果对应提交时的观察快照。</p>
-<details open><summary>输入 WorldState / 场景快照</summary><pre id="input">—</pre></details>
-<details><summary>完整请求与结果</summary><pre id="result">—</pre></details>
-<script>
-const button=document.querySelector('#evaluate');let record=null,downloadUrl=null,lastSubmit=0;
-function render(r){
- if(r&&record&&r.id===record.id&&r.status===record.status)return;
- record=r;if(!r)return;
- button.disabled=r.status==='running';document.querySelector('#compare').disabled=r.status!=='complete';document.querySelector('#branches').hidden=true;
- const plan=r.request.state.planning;
- document.querySelector('#plan').textContent=plan?JSON.stringify({plan_id:plan.id,status:plan.status,goal_distance_m:plan.goal_distance_m,selected_id:plan.selected_id,candidate_count:plan.candidate_count,collision_count:plan.collision_count,planning_ms:plan.elapsed_ms,report_age_ms:plan.snapshot_age_ms,selected:plan.top_candidates.find(c=>c.id===plan.selected_id),top_candidates:plan.top_candidates.map(c=>({id:c.id,v:c.linear_mps,w:c.angular_radps,cost:c.cost,reasons:c.reasons}))},null,2):'没有规划报告';
- document.querySelector('#input').textContent=JSON.stringify({created_at_unix:r.created_at_unix,context:{scenario:r.context.scenario,world_mode:r.context.world_mode,metrics:r.context.metrics},state:r.request.state},null,2);
- document.querySelector('#result').textContent=JSON.stringify(r,null,2);
- const summary=document.querySelector('#summary'),bars=document.querySelector('#probabilities');bars.replaceChildren();
- if(r.status==='complete'){
-  const a=r.response.answers;
-  summary.textContent=`建议：${a.action.choice} · 卡住概率 ${(a.stuck.noul*100).toFixed(1)}% · ${r.latency_ms} ms · ${r.response.model}\n规划问题：${a.planning_issue?.choice||"—"} (${((a.planning_issue?.confidence||0)*100).toFixed(1)}%) · 替代建议：${a.alternative?.choice||"—"} (${((a.alternative?.confidence||0)*100).toFixed(1)}%)`;
-  const table=document.createElement('table');
-  for(const [key,value] of Object.entries(a.action.probabilities)){
-   const tr=document.createElement('tr'),name=document.createElement('td'),cell=document.createElement('td'),p=document.createElement('progress');
-   name.textContent=key;p.max=1;p.value=value;cell.append(p,document.createTextNode(`${(value*100).toFixed(1)}%`));tr.append(name,cell);table.append(tr);
-  }bars.append(table);
- }else summary.textContent=r.status==='running'?'本地模型正在评估…':`评估失败：${r.error}`;
- if(downloadUrl)URL.revokeObjectURL(downloadUrl);
- downloadUrl=URL.createObjectURL(new Blob([JSON.stringify(r,null,2)],{type:'application/json'}));
- const link=document.querySelector('#download');link.href=downloadUrl;link.download=`decision-${r.id}.json`;link.hidden=r.status==='running';
-}
-async function poll(){try{const res=await fetch('/api/decision/status');if(!res.ok)throw new Error(`HTTP ${res.status}`);const status=await res.json();render(status.record);if(document.querySelector('#auto').checked&&status.navigation_running&&(!status.record||status.record.status!=='running')&&Date.now()-lastSubmit>=2000)await button.onclick();}catch(e){document.querySelector('#summary').textContent=e.message;}setTimeout(poll,1000);}
-button.onclick=async()=>{lastSubmit=Date.now();button.disabled=true;try{const res=await fetch('/api/decision/evaluate',{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||`HTTP ${res.status}`);render(data);}catch(e){button.disabled=false;document.querySelector('#summary').textContent=e.message;}};
-document.querySelector('#compare').onclick=async()=>{document.querySelector('#auto').checked=false;const panel=document.querySelector('#branches');panel.hidden=false;try{const res=await fetch(`/api/decision/compare?decision_id=${record.id}`,{method:'POST'});const data=await res.json();if(!res.ok)throw new Error(data.detail||`HTTP ${res.status}`);const brief=b=>b?{candidate:b.candidate_id,goal_progress_m:b.goal_progress_m,collision:b.collision,final_goal_m:b.final_goal_m}:null;panel.textContent=JSON.stringify({scene:data.scene,kind:data.kind,choice:data.choice,baseline:brief(data.baseline),model:brief(data.model),progress_delta_m:data.progress_delta_m,notes:data.notes},null,2);}catch(e){panel.textContent=e.message;}};
-poll();
-</script></html>
 
-</div></div></div>
+</div></div></div></body></html>

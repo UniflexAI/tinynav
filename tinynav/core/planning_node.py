@@ -1,7 +1,4 @@
 import rclpy
-import os
-import json
-import time
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
@@ -15,7 +12,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header, String
+from std_msgs.msg import Header
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -314,8 +311,6 @@ class PlanningNode(Node):
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
         self.bridge = CvBridge()
-        self.report_pub = self.create_publisher(String, "/planning/report", 1) if os.getenv("TINYNAV_PLAN_REPORT") == "1" else None
-        self.plan_sequence = 0
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
@@ -504,7 +499,6 @@ class PlanningNode(Node):
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
             return
-        plan_started = time.monotonic()
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
@@ -551,11 +545,9 @@ class PlanningNode(Node):
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
             init_q = np.array([odom_msg.pose.pose.orientation.x, odom_msg.pose.pose.orientation.y, odom_msg.pose.pose.orientation.z, odom_msg.pose.pose.orientation.w])
-            goal_distance = float(np.linalg.norm((self.target_pose - init_p)[:2])) if self.target_pose is not None else None
-            speed_limit = min(ROBOT_CONFIG.max_linear_vel, goal_distance / 3.0) if goal_distance is not None else ROBOT_CONFIG.max_linear_vel
             trajectories, params = generate_trajectory_library_3d(
                 init_p=init_p, init_q=init_q,
-                max_linear_vel=speed_limit,
+                max_linear_vel=ROBOT_CONFIG.max_linear_vel,
                 max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             )
             vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
@@ -602,37 +594,8 @@ class PlanningNode(Node):
                 )
 
             top_k = 1
-            costs = np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))])
-            top_indices = np.argsort(costs, kind='stable')[:top_k]
-            previous_param = self.last_param
+            top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
-
-            if self.report_pub is not None:
-                self.plan_sequence += 1
-                candidates = []
-                for i, (traj, param, score, cost) in enumerate(zip(trajectories, params, scores, costs)):
-                    gate = (front_clearance <= enter_threshold) != (param[0] < 0)
-                    reasons = (["sampled_footprint_collision"] if not np.isfinite(score) else []) + (["reverse_gate_penalty"] if gate else [])
-                    candidates.append({"id": i, "linear_mps": float(param[0]), "angular_radps": float(param[1]),
-                                       "control_linear_mps": float(np.dot(traj[10, :3] - traj[0, :3], quat_to_matrix(traj[0, 3:])[:, 2])),
-                                       "control_yaw_radps": float(-param[1]),
-                                       "endpoint_world_xy": traj[-1, :2].tolist(), "cost": float(cost) if np.isfinite(cost) else None,
-                                       "goal_endpoint_distance_m": float(np.linalg.norm(traj[-1, :3] - self.target_pose)) if self.target_pose is not None else None,
-                                       "velocity_change_penalty": float(10 * abs(previous_param[0] - param[0]) + 10 * abs(previous_param[1] - param[1])),
-                                       "obstacle_score": float(score) if np.isfinite(score) else None,
-                                       "obstacle_penalty": float(score * 100000) if np.isfinite(score) else None,
-                                       "reverse_gate_penalty": 1e9 if gate else 0, "reasons": reasons})
-                selected = int(top_indices[0]) if self.target_pose is not None and any(np.isfinite(scores)) else None
-                report = {"schema_version": 1, "id": f"{os.getpid()}-{self.plan_sequence}",
-                          "stamp_unix": stamp, "generated_at_unix": time.time(), "elapsed_ms": round((time.monotonic()-plan_started)*1000, 2),
-                          "status": "no_target" if self.target_pose is None else ("all_collision" if selected is None else "selected"),
-                          "robot_world_xy": init_p[:2].tolist(), "robot_yaw_deg": float(np.degrees(np.arctan2(T[1, 2], T[0, 2]))), "target_world_xy": self.target_pose[:2].tolist() if self.target_pose is not None else None,
-                          "goal_distance_m": goal_distance, "sampled_speed_limit_mps": float(speed_limit),
-                          "front_clearance_m": float(front_clearance), "selected_id": selected,
-                          "candidate_count": len(candidates), "collision_count": sum(not np.isfinite(x) for x in scores),
-                          "candidates": candidates, "selected_path_world_xy": trajectories[selected, ::10, :2].tolist() if selected is not None else [],
-                          "notes": ["Costs are minimized; null cost means collision rejection.", "Reverse gate is a cost penalty, not collision rejection.", "ESDF unobserved space is not proven clear; scores do not certify safety."]}
-                self.report_pub.publish(String(data=json.dumps(report, allow_nan=False)))
 
             # path
             path = Path()
