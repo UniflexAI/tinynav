@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>TinyNav Planning Lab</title>
+    <title>TinyNav Navigation</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -11,10 +11,10 @@
       <section class="panel scene-panel">
         <div class="panel-head">
           <div>
-            <h1>TinyNav Planning Lab</h1>
-            <p>Drag objects, tune footprint, run the perception-to-planning loop.</p>
+            <h1>TinyNav Navigation</h1>
+            <p>Automatic recovery: scan, escape, then continue to the original goal.</p>
           </div>
-          <div class="header-actions"><a href="/decision" target="_blank" rel="noopener">Rule Recovery</a>
+          <div class="header-actions">
             <button id="controlsToggle" class="secondary controls-toggle" type="button" aria-expanded="true">Controls</button>
             <button id="realtimeButton" class="primary">Realtime</button>
           </div>
@@ -121,22 +121,18 @@
           <span id="status">Ready</span>
         </div>
         <div class="lab-section">
-          <h2>Baseline / WorldState</h2>
-          <p>Run fixed GO2 presets from the Scenario selector. Each run resets pose, observations and planner/control. Wall time includes startup.</p>
-          <label>Timeout (s) <input id="baselineTimeout" type="number" min="5" max="600" value="120" /></label>
+          <h2>Navigation</h2>
+          <p>Select a scenario and start navigation. Recovery is enabled automatically when the robot stays stuck.</p>
+          <label>Timeout (s) <input id="baselineTimeout" type="number" min="5" max="600" value="180" /></label>
           <div class="toolbar">
-            <button id="baselineStart" class="primary">Run baseline</button>
+            <button id="baselineStart" class="primary">Start navigation</button>
             <button id="baselineStop">Stop run</button>
             <button id="baselineExport">Export JSON</button>
           </div>
           <p id="baselineMetrics" role="status">idle</p>
-          <details><summary>Recent arrival rates (same config and timeout)</summary><pre id="baselineHistory">No completed runs yet.</pre></details>
-          <p>Arrival: within 0.35 m of the point goal. A collision ends the run. Stuck events use recent motion; they do not end the run.</p>
-          <label>WorldState source
-            <select id="worldMode"><option value="observed">Depth observations (default)</option><option value="full_scene">Full scene boxes (debug)</option></select>
-          </label>
-          <p>Directional distances describe center rays, not safe robot paths. Unknown space is never marked free.</p>
-          <details open><summary>Robot-relative WorldState JSON</summary><pre id="worldState">Start realtime or a baseline run to view observations.</pre></details>
+          <p id="recoveryStatus" role="status">Recovery ready</p>
+          <details><summary>Recovery events</summary><pre id="recoveryEvents">No recovery events yet.</pre></details>
+          <details hidden><select id="worldMode"><option value="observed">Observed</option></select><pre id="worldState"></pre></details>
         </div>
         <details class="diagnostics" open>
           <summary>Perception / Planning Diagnostics</summary>
@@ -158,6 +154,6 @@
         </details>
       </section>
     </main>
-    <script src="/static/app.js?v=20261004-observe1"></script>
+    <script src="/static/app.js?v=20261006-native-recovery"></script>
   </body>
 </html>

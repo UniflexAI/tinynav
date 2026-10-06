@@ -3,7 +3,7 @@
 
 Web UI edits the scene. This process publishes synthetic /slam/depth,
 /slam/odometry(_visual), /control/target_pose, then mirrors outputs from the
-real planning_node + simulator_control loop.
+real planning_node + cmd_vel_control loop with automatic rule recovery.
 """
 
 from __future__ import annotations
@@ -475,6 +475,7 @@ class RosPlanningSimNode(Node):
             xy = [float(self.control_xy[0]), float(self.control_xy[1])]
             footprint = copy.deepcopy(self.geom_footprint) or copy.deepcopy(self.last_footprint)
             return {
+                "recovery": copy.deepcopy(self.native_recovery_status),
                 "planning_report": copy.deepcopy(self.plan_report),
                 "metrics": self.lab.metrics(),
                 "world_state": self.lab.world_state(xy, self.yaw_deg, self.config, self.world_mode),
@@ -543,7 +544,7 @@ def _child_env() -> dict[str, str]:
     env = os.environ.copy()
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(key, "1")
-    env["TINYNAV_RULE_RECOVERY"] = "1" if SIM_NODE.experiment_mode=="rules" and SIM_NODE.rules_enabled else "0"
+    env["TINYNAV_RULE_RECOVERY"] = "1"
     env["ROBOT_TYPE"] = _active_robot_type()
     return env
 
@@ -707,7 +708,7 @@ def sim_state() -> dict[str, Any]:
 
 @app.get("/decision", response_class=HTMLResponse)
 def decision_page() -> str:
-    return (STATIC_DIR / "decision.html").read_text()
+    return (STATIC_DIR / "index.html").read_text()
 
 
 @app.get("/api/experiment/status")
@@ -723,19 +724,6 @@ def experiment_status() -> dict[str, Any]:
                 'rules_enabled':node.rules_enabled,'rule_recovery':state,'metrics':node.lab.metrics()}
 
 
-@app.get('/api/experiment/comparisons')
-def experiment_comparisons() -> dict[str, Any]:
-    folder = REPO_ROOT / 'tinynav_temp' / 'navigation_lab'
-    files = sorted(folder.glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True)[:40]
-    runs = []
-    for path in files:
-        record = json.loads(path.read_text())
-        experiment = record.get('experiment',{})
-        if experiment.get('mode')=='rules' and isinstance(experiment.get('rules_enabled'),bool) and record.get('config',{}).get('recovery_control')=='native_v4':
-            runs.append({**record['metrics'],'rules_enabled':experiment['rules_enabled']})
-    return {'runs':runs}
-
-
 @app.get("/api/planning/report")
 def planning_report() -> dict[str, Any]:
     node = _require_sim()
@@ -747,7 +735,6 @@ def planning_report() -> dict[str, Any]:
 class BaselineRequest(BaseModel):
     config: dict[str, Any]
     timeout_s: float = 180.0
-    rules_enabled: bool | None = None
 
 
 @app.post("/api/baseline/start")
@@ -755,15 +742,13 @@ def baseline_start(request: BaselineRequest) -> dict[str, Any]:
     if not 5 <= request.timeout_s <= 600:
         raise HTTPException(400, "timeout_s must be between 5 and 600")
     node = _require_sim()
-    if request.rules_enabled is not None and node.experiment_mode != 'rules':
-        raise HTTPException(400, 'Rule comparison requires the isolated rules service')
     with node.lock:
         node.running = False
     stop_children()
     with node.lock:
         node.set_config({**request.config,'recovery_control':'native_v4'}, reset=True)
         node.native_recovery_status = {}
-        node.rules_enabled = request.rules_enabled if request.rules_enabled is not None else True
+        node.rules_enabled = True
         node.lab.begin(node.config, node.control_xy, node.yaw_deg, request.timeout_s)
         node.last_update = time.monotonic()
     ensure_ros_loop(reset_planning=True, force=True)

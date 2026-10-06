@@ -844,13 +844,13 @@ async function realtimeTick() {
     }
     renderLab(frame);
     if (frame.metrics?.id && frame.metrics.status !== "running" && frame.metrics.id !== lastResultId) {
-      lastResultId = frame.metrics?.id; refreshResults();
+      lastResultId = frame.metrics?.id;
     }
     syncStartFieldsFromFrame(frame);
     realtimePath.push(frame.robot_xy);
     if (realtimePath.length > 300) realtimePath = realtimePath.slice(-300);
     drawRealtimeFrame(frame);
-    statusEl.textContent = frame.metrics?.id ? `Baseline ${frame.metrics.status}` : "Realtime running";
+    statusEl.textContent = frame.metrics?.id ? `Navigation ${frame.metrics.status}` : "Realtime running";
   } catch (error) {
     statusEl.textContent = "Realtime error";
     stopRealtime();
@@ -1236,7 +1236,11 @@ if (typeof ResizeObserver !== "undefined") {
 function renderLab(frame) {
   const m = frame.metrics || {status: "idle"};
   $("baselineMetrics").textContent = `${m.status} | ${Number(m.elapsed_s || 0).toFixed(1)} s | path ${Number(m.path_length_m || 0).toFixed(2)} m | goal ${Number(m.distance_to_goal_m || 0).toFixed(2)} m | collisions ${m.collision_events || 0} | stuck ${m.stuck_events || 0}`;
-  $("worldState").textContent = JSON.stringify(frame.world_state || {}, null, 2);
+  const recovery = frame.recovery || {};
+  const phases = {idle: "Normal planning", watching: "Normal planning", planner_resumed: "Normal planning resumed", fresh_report: "Waiting for fresh depth", paused: "Paused", inactive: "Stopped", arrived: "Goal reached", scanning: "Scanning surroundings", executing: "Escaping", goal_approach: "Approaching goal", goal_reached: "Goal reached"};
+  const phase = recovery.phase || "idle";
+  $("recoveryStatus").textContent = `Automatic recovery enabled | ${phases[phase] || phase}${recovery.active_strategy ? " | " + recovery.active_strategy : ""}`;
+  $("recoveryEvents").textContent = JSON.stringify(recovery.events || [], null, 2);
 }
 async function labRequest(url, body) {
   const response = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, ...(body ? {body: JSON.stringify(body)} : {})});
@@ -1247,14 +1251,6 @@ async function labRequest(url, body) {
 $("baselineStart").addEventListener("click", async () => {
   try {
     stopRealtime();
-    const key = fields.scenarioSelect.value;
-    const scenario = SCENARIOS[key];
-    const base = await (await fetch("/api/default-config")).json();
-    config = {...base, name: scenario.label, scenario_id: key,
-      start: structuredClone(scenario.start), target: structuredClone(scenario.target),
-      objects: structuredClone(scenario.objects)};
-    config.camera.max_range = scenario.cameraMaxRange;
-    sceneBounds = {...scenario.bounds}; setMapBackground(null); refreshFields();
     await labRequest("/api/baseline/start", {config, timeout_s: Number($("baselineTimeout").value)});
     realtimePath = []; realtimeRunning = true;
     realtimeButton.textContent = "Stop"; realtimeButton.classList.remove("primary");
@@ -1277,18 +1273,9 @@ $("baselineExport").addEventListener("click", async () => {
     const data = await response.json();
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type: "application/json"}));
     const link = document.createElement("a"); link.href = url;
-    link.download = `tinynav-baseline-${data.metrics.id || "idle"}.json`; link.click();
+    link.download = `tinynav-navigation-${data.metrics.id || "idle"}.json`; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (error) {statusEl.textContent = error.message;}
 });
 
 let lastResultId = null;
-async function refreshResults() {
-  try {
-    const response = await fetch("/api/baseline/results");
-    if (!response.ok) throw new Error("History unavailable");
-    const data = await response.json();
-    $("baselineHistory").textContent = data.groups.length ? data.groups.map(g => `${g.scenario} (${g.config_hash}): ${g.arrived}/${g.runs} arrived (${(100*g.arrival_rate).toFixed(0)}%), timeout ${g.timeout_s}s`).join("\n") : "No completed runs yet.";
-  } catch (error) {$("baselineHistory").textContent = error.message;}
-}
-refreshResults();

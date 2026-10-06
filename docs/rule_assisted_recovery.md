@@ -88,19 +88,17 @@ Inside the ROS-enabled container:
 bash scripts/run_rule_assisted_web.sh
 ```
 
-Defaults: localhost ROS domain 216 and loopback HTTP port 8774. Do not start a
-second instance on an occupied domain/port. Forward the port and open `/decision`.
-Choose one of five scenes and rule on/off. Default run limit is 180 s to cover
-the conservative recovery speeds and subsequent path following. The web simulator now launches the
-same `cmd_vel_control.py` used by the robot, not the previous simulator-only
-controller. Each run restarts planner/control and resets the same scene/pose.
-The simulator mirrors status from `/navigation/recovery/status`; it does not
-run a second recovery policy or override velocity.
+Defaults: localhost ROS domain 216 and loopback HTTP port 8774. Open `/`.
+Select a scene, edit the goal if desired, and click **Start navigation**.
+The current scene is used unchanged. Automatic rule recovery is always enabled
+in Websim, including the regular `run_ros_planning_web.sh` startup. There is one
+navigation mode, with no comparison page or model observer.
 
-Comparison records are separated by native control version and configuration.
-Old simulator-controller results are not presented as this version's results.
-Historical model experiments remain in the observer branch and local evidence
-archives, not in this branch's active source tree.
+The main page shows actual controller recovery phase and event history alongside
+robot motion. Default run limit is 180 s. The simulator launches the same
+`planning_node.py` and `cmd_vel_control.py` as the robot; it mirrors velocity and
+`/navigation/recovery/status` without a second recovery policy. The existing main
+planner algorithm is preserved, with recovery integrated at velocity arbitration.
 
 ## Validation
 
