@@ -1,4 +1,5 @@
 import rclpy
+import time
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
@@ -14,6 +15,7 @@ from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header, Bool
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from tinynav.core.planner_recovery import RecoveryRuntime
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -308,132 +310,6 @@ def generate_recovery_trajectory(init_p, init_q, v, w, heading=0.0, duration=3.0
     return ts[k], ps[k]
 
 
-class StallRecovery:
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.phase = 'normal'
-        self.history = []
-        self.target = None
-        self.last_yaw = None
-        self.last_at = None
-        self.rotation = 0.0
-        self.attempts = 0
-        self.cooldown = 0.0
-        self.phase_at = 0.0
-        self.anchor = None
-        self.turn = 1.0
-
-    def command(self, now, xy, yaw, target, safe):
-        if target is None:
-            self.reset()
-            return None
-        target = np.asarray(target[:2])
-        if self.target is None or np.linalg.norm(target - self.target) > 0.25:
-            self.reset()
-            self.target = target.copy()
-        if np.linalg.norm(target - xy) <= 0.35:
-            self.phase = 'arrived'
-            return (0.0, 0.0)
-        if self.last_at is not None and (now-self.last_at > 1.0 or now <= self.last_at):
-            active = self.phase not in ('normal','arrived')
-            self.finish(now)
-            self.last_yaw = None
-            self.last_at = now
-            return (0.0,0.0) if active else None
-        self.last_at = now
-        if self.last_yaw is not None:
-            delta = np.arctan2(np.sin(yaw-self.last_yaw), np.cos(yaw-self.last_yaw))
-            if self.phase == 'scan':
-                self.rotation += delta * self.turn
-        self.last_yaw = yaw
-        self.history.append((now, np.asarray(xy).copy()))
-        while self.history and now-self.history[0][0] > 6.5:
-            self.history.pop(0)
-        if self.phase == 'normal':
-            if now < self.cooldown or self.attempts >= 3 or len(self.history) < 2:
-                return None
-            if now-self.history[0][0] < 6.0 or any(np.linalg.norm(p-xy) > 0.1 for _,p in self.history):
-                return None
-            self.turn = 1.0 if self.attempts % 2 == 0 else -1.0
-            if not safe(0.0, -0.4*self.turn):
-                self.turn *= -1
-                if not safe(0.0, -0.4*self.turn):
-                    self.cooldown = now+8.0
-                    return None
-            self.phase = 'scan'
-            self.rotation = 0.0
-            self.phase_at = now
-            self.attempts += 1
-        if now-self.phase_at > 25.0:
-            self.finish(now)
-            return (0.0, 0.0)
-        if self.phase == 'scan':
-            if self.rotation < 2*np.pi:
-                cmd = (0.0, -0.4*self.turn)
-            else:
-                headings = sorted(np.arange(-4,4)*np.pi/4, key=abs)
-                heading = next((a for a in headings if safe(-0.2,0.0,a,6.0)), None)
-                if heading is None:
-                    self.finish(now)
-                    return (0.0,0.0)
-                self.phase = 'align_retreat'
-                self.anchor = yaw+heading
-                self.phase_at = now
-                cmd = (0.0, -0.4*np.sign(heading))
-        elif self.phase == 'align_retreat':
-            error = np.arctan2(np.sin(self.anchor-yaw), np.cos(self.anchor-yaw))
-            if abs(error) > 0.05:
-                cmd = (0.0,-0.4*np.sign(error))
-            else:
-                self.phase = 'retreat'
-                self.anchor = np.asarray(xy).copy()
-                self.phase_at = now
-                cmd = (-0.2,0.0)
-        elif self.phase == 'retreat':
-            if np.linalg.norm(xy-self.anchor) < 3.0:
-                cmd = (-0.2, 0.0)
-            else:
-                turns = (self.turn,-self.turn)
-                turn = next((a for a in turns if safe(0.2,0.0,a*np.pi/2,9.0)), None)
-                if turn is None:
-                    self.finish(now)
-                    return (0.0,0.0)
-                self.turn = turn
-                self.phase = 'turn'
-                self.anchor = yaw
-                self.phase_at = now
-                cmd = (0.0, -0.4*self.turn)
-        elif self.phase == 'turn':
-            angle = np.arctan2(np.sin(yaw-self.anchor), np.cos(yaw-self.anchor)) * self.turn
-            if angle < np.pi/2-0.05:
-                cmd = (0.0, -0.4*self.turn)
-            else:
-                self.phase = 'probe'
-                self.anchor = np.asarray(xy).copy()
-                self.phase_at = now
-                cmd = (0.2, 0.0)
-        elif self.phase == 'probe':
-            if np.linalg.norm(xy-self.anchor) < 1.8:
-                cmd = (0.2, 0.0)
-            else:
-                self.finish(now)
-                return None
-        else:
-            self.finish(now)
-            return None
-        if not safe(*cmd):
-            self.finish(now)
-            return (0.0, 0.0)
-        return cmd
-
-    def finish(self, now):
-        self.phase = 'normal'
-        self.history = []
-        self.cooldown = now+8.0
-
-
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -446,6 +322,7 @@ class PlanningNode(Node):
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
         self.bridge = CvBridge()
+        generate_recovery_trajectory(np.zeros(3),np.array([0.,0.,0.,1.]),0.,0.)
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
@@ -477,7 +354,8 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
-        self.recovery = StallRecovery()
+        self.recovery = RecoveryRuntime(ROBOT_CONFIG)
+        self.recovery_target_anchor = None
         self.nav_active = True
         self.nav_paused = False
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -488,20 +366,48 @@ class PlanningNode(Node):
 
     def active_callback(self, msg):
         if bool(msg.data) != self.nav_active:
-            self.recovery.reset()
+            self.recovery.reset(self.target_pose)
         self.nav_active = bool(msg.data)
 
     def paused_callback(self, msg):
         if bool(msg.data) != self.nav_paused:
-            self.recovery.reset()
+            self.recovery.reset(self.target_pose)
         self.nav_paused = bool(msg.data)
 
     def poi_change_callback(self, msg):
         self.target_pose = None
         self.recovery.reset()
+        self.recovery_target_anchor = None
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        if self.recovery_target_anchor is None or np.linalg.norm(self.target_pose-self.recovery_target_anchor) > .25:
+            self.recovery.reset(self.target_pose)
+            self.recovery_target_anchor = self.target_pose.copy()
+        else:
+            self.recovery.target = self.target_pose.tolist()
+
+    def recovery_command(self, depth, T, stamp):
+        now = time.monotonic()
+        center = self.camera_to_robot_center(T)
+        forward = T[:3,2]
+        yaw = float(np.degrees(np.arctan2(forward[1],forward[0])))
+        age = self.get_clock().now().nanoseconds*1e-9-stamp
+        previous_phase = self.recovery.phase
+        if self.nav_active and not self.nav_paused and -.1 <= age <= .5:
+            stride = max(1,int(np.ceil(max(depth.shape[1]/160,depth.shape[0]/100))))
+            observed = depth[::stride,::stride].copy()
+            observed[(~np.isfinite(observed)) | (observed<=0) | (observed>8)] = 0
+            camera = {'fx':self.K[0,0]/stride,'fy':self.K[1,1]/stride,
+                'cx':self.K[0,2]/stride,'cy':self.K[1,2]/stride,
+                'ground_z':T[2,3]+ROBOT_CONFIG.obstacle.robot_z_bottom-.05}
+            self.recovery.observe(observed,T,camera,now)
+        command = self.recovery.tick(center[:2].tolist(),yaw,time.monotonic(),
+            self.nav_active,self.nav_paused,max(0,age) if age>=-.1 else float('inf'))
+        if self.recovery.phase != previous_phase:
+            choice = self.recovery.policy.last_selection or {}
+            self.get_logger().info(f'Rule recovery: {previous_phase} -> {self.recovery.phase}, selected={choice.get("selected_id")}')
+        return command
 
     def info_callback(self, msg):
         if self.K is None:
@@ -747,30 +653,14 @@ class PlanningNode(Node):
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
-            def recovery_trajectory(v, w, heading=0.0, duration=3.0):
-                v = float(np.clip(v, -ROBOT_CONFIG.max_linear_vel, ROBOT_CONFIG.max_linear_vel))
-                w = float(np.clip(w, -ROBOT_CONFIG.max_angular_vel, ROBOT_CONFIG.max_angular_vel))
-                return generate_recovery_trajectory(init_p,init_q,v,w,heading,duration)
-
-            def recovery_safe(v, w, heading=0.0, duration=3.0):
-                traj, _ = recovery_trajectory(v,w,heading,duration)
-                # Recovery uses the same footprint/obstacle semantics as normal planning.
-                score, _ = score_trajectories_by_ESDF(np.asarray([traj]), ESDF_map, self.origin,
-                    self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
-                return bool(np.isfinite(score[0]))
-
-            previous_phase = self.recovery.phase
-            fwd = T[:3,2]
-            command = self.recovery.command(stamp, init_p[:2], np.arctan2(fwd[1],fwd[0]),
-                self.target_pose, recovery_safe) if self.nav_active and not self.nav_paused else None
+            command = self.recovery_command(depth,T,stamp)
             if command is not None:
-                traj, param = recovery_trajectory(*command)
+                v,w = command
+                traj,param = generate_recovery_trajectory(init_p,init_q,float(v),-float(w))
                 trajectories = np.asarray([traj])
                 params = np.asarray([param])
                 top_indices = np.array([0])
                 scores = [0.0]
-            if self.recovery.phase != previous_phase:
-                self.get_logger().info(f'Rule recovery: {previous_phase} -> {self.recovery.phase}, scanned={np.rad2deg(self.recovery.rotation):.1f} deg')
             self.last_param = params[top_indices[0]]
 
             # path
