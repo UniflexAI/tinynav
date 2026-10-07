@@ -1,5 +1,6 @@
-"""Planner recovery policy preserved from the validated 1308840 implementation."""
+"""Observed planner recovery with bounded actions and map-aware route ranking."""
 import math
+import heapq
 from collections import deque
 import copy
 import hashlib
@@ -265,7 +266,8 @@ class RecoveryExecutor:
         a = self.active
         outcome = {'strategy_id':a['plan']['id'],'start_xy':a['start_xy'],'start_yaw_deg':a['start_yaw_deg'],
                    'outcome':reason,'duration_s':round(now-a['started'],3),'end_xy':list(xy),
-                   'goal_progress_m':round(a['start_goal_m']-math.dist(xy,target[:2]),3)}
+                   'goal_progress_m':round(a['start_goal_m']-math.dist(xy,target[:2]),3),
+                   'retreat_m':sum(max(0,-s['linear_mps'])*s['duration_s'] for s in a['plan']['stages'])}
         self.memory.append(outcome);self.memory = self.memory[-24:]
         self.events.append({'event':'strategy_finished',**outcome});self.active = None;self.settle_until = now+5
 
@@ -313,28 +315,71 @@ def shortlist(plans, xy, yaw, robot, cells, resolution):
             excluded[plan['id']] = 'no_reverse_displacement'
             continue
         eligible.append((retreat,plan))
-    selected = []
-    for side in ('left','right'):
-        candidates = [(length,p) for length,p in eligible if p['id'].endswith('_'+side)]
-        if candidates:
-            selected.append(max(candidates,key=lambda row:(row[0],row[1]['id']))[1])
-    retained = {p['id'] for p in selected}
-    for _,plan in eligible:
-        if plan['id'] not in retained:
-            excluded[plan['id']] = 'shorter_observed_retreat_same_side'
-    return {'plans':selected,'excluded':excluded,'rule':'longest_observed_clear_retreat_per_side',
+    return {'plans':[p for _,p in eligible],'excluded':excluded,'rule':'observed_route_cost',
             'current_safety_unproven':True,'model_preference':None}
+
+
+def route_cost(plan, previous_attempts=()):
+    stages = plan['stages']
+    retreat = sum(max(0,-s['linear_mps'])*s['duration_s'] for s in stages)
+    length = sum(abs(s['linear_mps'])*s['duration_s'] for s in stages)
+    duration = sum(s['duration_s'] for s in stages)
+    progress = plan.get('predicted_goal_progress_m',0)
+    failed = [a for a in previous_attempts if a.get('outcome')=='reblocked']
+    minimum = max(1.2 if any(a['strategy_id'].startswith('pivot_') for a in failed) else 0,
+                  2*max((a.get('retreat_m',0) for a in failed),default=0))
+    escalation = 20.0 if minimum and retreat+1e-6 < minimum else 0.0
+    repeats = sum(a.get('strategy_id')==plan['id'] for a in previous_attempts)
+    remaining = plan.get('handoff_cost_m',-1.5*progress)
+    return round(length+.05*duration+remaining+5*repeats+escalation,6)
 
 
 def choose(screening, previous_attempts=()):
     plans = screening['plans']
-    if not plans:
-        return None
-    # Equal evidence uses a declared, auditable rule; never fabricate model certainty.
-    counts = {p['id']:sum(a.get('strategy_id')==p['id'] for a in previous_attempts) for p in plans}
-    def distance(plan):
-        return sum(max(0,-s['linear_mps'])*s['duration_s'] for s in plan['stages'])
-    return min(plans,key=lambda p:(counts[p['id']],-distance(p),p['id']))
+    if not plans:return None
+    return min(plans,key=lambda p:(route_cost(p,previous_attempts),p['id']))
+
+
+
+def estimate_handoff(plans, xy, yaw, target, robot, cells, resolution):
+    # Unknown cells may inform ranking, but never pass the execution coverage check.
+    endpoints = {p['id']:list(poses(xy,yaw,p['stages']))[-1][0] for p in plans}
+    if not endpoints:return
+    def cell(point):return tuple(math.floor(v/resolution) for v in point[:2])
+    goal = cell(target);points = [cell(xy),goal]+[cell(p) for p in endpoints.values()]
+    pad = math.ceil(3/resolution)
+    lo = [min(p[i] for p in points)-pad for i in (0,1)]
+    hi = [max(p[i] for p in points)+pad for i in (0,1)]
+    if (hi[0]-lo[0])*(hi[1]-lo[1])>40000:return
+    offsets = footprint_cells([resolution*.5,resolution*.5],robot,resolution)
+    blocked = {(x-dx,y-dy) for (x,y),value in cells.items() if value=='blocked' for dx,dy in offsets
+               if lo[0]<=x-dx<=hi[0] and lo[1]<=y-dy<=hi[1]}
+    if goal in blocked:return
+    distances = {goal:0.0};queue = [(0.0,goal)];following = {}
+    wanted = {cell(p) for p in endpoints.values()}
+    neighbors = ((1,0),(-1,0),(0,1),(0,-1))
+    while queue and wanted:
+        cost,point = heapq.heappop(queue)
+        if cost!=distances[point]:continue
+        wanted.discard(point)
+        for dx,dy in neighbors:
+            other = (point[0]+dx,point[1]+dy)
+            if other in blocked or not (lo[0]<=other[0]<=hi[0] and lo[1]<=other[1]<=hi[1]):continue
+            step = resolution*(1 if cells.get(point)=='clear' else 1.5)
+            proposed = cost+step
+            if proposed < distances.get(other,float('inf')):
+                distances[other]=proposed;following[other]=point
+                heapq.heappush(queue,(proposed,other))
+    for plan in plans:
+        end = endpoints[plan['id']];point=cell(end)
+        remaining = distances.get(point)
+        if remaining is None:
+            plan['handoff_cost_m']=100.0
+            continue
+        next_point = following.get(point,point)
+        towards = sum((next_point[i]-point[i])*(target[i]-end[i]) for i in (0,1))
+        # A greedy planner is likely to re-enter the trap if the required route starts backwards.
+        plan['handoff_cost_m']=round(remaining+(6.0 if towards < -1e-6 else 0.0),3)
 
 
 def recovery_candidates(offered,xy,yaw,robot,cells,resolution):
@@ -352,14 +397,8 @@ def recovery_candidates(offered,xy,yaw,robot,cells,resolution):
         if plan['id'].startswith('pivot_') and plan.get('predicted_goal_progress_m',0)>.1 and row['unknown_cells']==row['blocked_cells']==0:
             pivots.append(plan)
     screened = shortlist(offered,xy,yaw,robot,cells,resolution)
-    if len(pivots)==1:
-        selected = pivots[0]
-        screened = {'plans':[selected],'excluded':{p['id']:'unique_observed_progress_pivot_preferred' for p in offered if p!=selected},
-                    'rule':'unique_observed_progress_pivot','model_preference':None,'current_safety_unproven':True}
-    elif not screened['plans'] and pivots:
-        selected = max(pivots,key=lambda p:p.get('predicted_goal_progress_m',0))
-        screened = {'plans':[selected],'excluded':{p['id']:'observed_progress_pivot_when_no_retreat' for p in offered if p!=selected},
-                    'rule':'observed_progress_pivot_when_no_retreat','model_preference':None,'current_safety_unproven':True}
+    screened['plans'].extend(pivots)
+    for plan in pivots:screened['excluded'].pop(plan['id'],None)
     for identity in screened['excluded']:
         if coverage[identity]['unknown_cells'] or coverage[identity]['blocked_cells']:
             screened['excluded'][identity] = 'unknown_or_blocked_footprint'
@@ -424,10 +463,16 @@ class RuleRecovery:
                 return
             offered = proposals(node.control_xy,node.yaw_deg,node.config['target'],node.config['robot'],node.lab.cells,node.lab.resolution,node.recovery.memory)
             screened = recovery_candidates(offered,node.control_xy,node.yaw_deg,node.config['robot'],node.lab.cells,node.lab.resolution)
-            plan = choose(screened,node.recovery.memory)
+            memory = [a for a in node.recovery.memory if min(math.dist(node.control_xy,a['start_xy']),
+                math.dist(node.control_xy,a.get('end_xy',a['start_xy'])))<1.0]
+            estimate_handoff(screened['plans'],node.control_xy,node.yaw_deg,node.config['target'],
+                node.config['robot'],node.lab.cells,node.lab.resolution)
+            plan = choose(screened,memory)
             self.last_selection = {'eligible_ids':[p['id'] for p in screened['plans']],
                                    'excluded':screened['excluded'],'coverage':screened['coverage'],'rule':screened['rule'],
-                                   'selected_id':plan['id'] if plan else None,'model_preference':None}
+                                   'selected_id':plan['id'] if plan else None,'model_preference':None,
+                                   'costs':{p['id']:route_cost(p,memory) for p in screened['plans']},
+                                   'handoff_costs':{p['id']:p.get('handoff_cost_m') for p in screened['plans']}}
             event('candidates_screened',**self.last_selection)
             release('executing' if plan else 'no_observed_candidate')
             if plan:
@@ -447,6 +492,12 @@ class RuleRecovery:
             return
         if age>.5 or node.override or recent['window_s']<6 or recent['moved_m']>=.1:
             return
+        if node.recovery.memory:
+            last = node.recovery.memory[-1]
+            if last.get('outcome')=='completed' and min(math.dist(node.control_xy,last.get('end_xy',node.control_xy)),
+                    math.dist(node.control_xy,last['start_xy']))<.8:
+                last['outcome']='reblocked'
+                event('recovery_reblocked',strategy_id=last['strategy_id'],retreat_m=last.get('retreat_m',0))
         self.scan = {'anchor_xy':list(node.control_xy),'last_yaw':node.yaw_deg,'rotation_deg':0.0,'started':now}
         self.scans += 1
         self.phase = 'scanning'

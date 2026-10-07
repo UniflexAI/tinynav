@@ -17,17 +17,17 @@ class RuleTest(unittest.TestCase):
             return {'id':identity,'predicted_goal_progress_m':.2,'stages':[{'linear_mps':v,'yaw_radps':0,'duration_s':2}]}
         right=plan('pivot_right',.3);retreat=plan('retreat_60_left',-.3)
         selected=recovery_candidates([right,retreat],[0,0],0,robot,cells,.1)
-        self.assertEqual(selected['plans'],[right])
+        self.assertEqual(choose(selected)['id'],right['id'])
         left=plan('pivot_left',.3)
         selected=recovery_candidates([right,left,retreat],[0,0],0,robot,cells,.1)
-        self.assertEqual(selected['plans'],[retreat])
+        self.assertEqual(choose(selected)['id'],left['id'])
 
     def test_observed_pivot_fallback_requires_measured_sweep(self):
         robot={'length':.4,'width':.3}
         cells={(i,j):'clear' for i in range(-30,31) for j in range(-20,21)}
         plans=[{'id':'pivot_'+side,'predicted_goal_progress_m':progress,'stages':[{'linear_mps':.3,'yaw_radps':0,'duration_s':2}]} for side,progress in [('left',.2),('right',.3)]]
         result=recovery_candidates(plans,[0,0],0,robot,cells,.1)
-        self.assertEqual(result['plans'][0]['id'],'pivot_right')
+        self.assertEqual(choose(result)['id'],'pivot_right')
         cells.clear()
         self.assertEqual(recovery_candidates(plans,[0,0],0,robot,cells,.1)['plans'],[])
 
@@ -73,16 +73,17 @@ class SelectionTest(unittest.TestCase):
         self.plans = [{'id':f'retreat_{n}_{side}','stages':[{'linear_mps':-.3,'yaw_radps':0,'duration_s':n/30}]}
                       for side in ('left','right') for n in (60,120,180)]
 
-    def test_reduce_six_retreats_to_two_without_claiming_model_preference(self):
+    def test_keep_short_clear_retreats_for_cost_ranking(self):
         result = shortlist(self.plans,[0,0],0,self.robot,self.cells,.1)
-        self.assertEqual([p['id'] for p in result['plans']],['retreat_180_left','retreat_180_right'])
+        self.assertEqual(len(result['plans']),6)
         self.assertIsNone(result['model_preference'])
-        self.assertEqual(choose(result,[{'strategy_id':'retreat_180_left'}])['id'],'retreat_180_right')
+        self.assertEqual(choose(result,[{'strategy_id':'retreat_60_left'}])['id'],'retreat_60_right')
 
     def test_single_unknown_cell_excludes_long_sweep(self):
         del self.cells[(-17,0)]
         result = shortlist(self.plans,[0,0],0,self.robot,self.cells,.1)
-        self.assertEqual([p['id'] for p in result['plans']],['retreat_120_left','retreat_120_right'])
+        self.assertEqual(len(result['plans']),4)
+        self.assertNotIn('retreat_180_left',[p['id'] for p in result['plans']])
 
     def test_blocked_current_footprint_refuses_every_retreat(self):
         self.cells[(0,0)] = 'blocked'
@@ -204,7 +205,7 @@ class RuntimeTests(unittest.TestCase):
         r.depth_at=10.1;self.assertEqual(r.tick([0,0],0,10.1,True,False,0),(0,0))
         r.depth_at=10.2
         cmd=r.tick([0,0],0,10.2,True,False,0)
-        self.assertLess(cmd[0],0)
+        self.assertNotEqual(cmd,(0,0))
         self.assertIsNotNone(r.executor.active)
         self.assertFalse(r.status()['model_used'])
 
@@ -222,11 +223,11 @@ class RuntimeTests(unittest.TestCase):
         r.lab.cells.pop((-30,18))
         self.assertEqual(recovery_candidates([plan],[0,0],0,r.robot,r.lab.cells,.1)['plans'],[])
 
-    def test_longer_clear_side_preferred_when_attempt_counts_equal(self):
+    def test_shorter_clear_side_preferred_when_attempt_counts_equal(self):
         from tinynav.core.planner_recovery import choose
         short={'id':'retreat_180_right','stages':[{'linear_mps':-.2,'duration_s':9}]}
         long={'id':'retreat_300_left','stages':[{'linear_mps':-.2,'duration_s':15}]}
-        self.assertEqual(choose({'plans':[short,long]})['id'],long['id'])
+        self.assertEqual(choose({'plans':[short,long]})['id'],short['id'])
         self.assertEqual(choose({'plans':[short,long]},[{'strategy_id':long['id']}])['id'],short['id'])
 
     def test_near_goal_finish_uses_observed_footprint_and_original_goal(self):
@@ -343,3 +344,55 @@ class PlannerIntegrationTests(unittest.TestCase):
             self.assertIsNone(r.policy.scan)
             self.assertIsNone(node.recovery_command(np.zeros((100,160),dtype=np.float32),T,stamp))
         finally:node.destroy_node()
+
+
+class RankedRecoveryTests(unittest.TestCase):
+    def plan(self,n,progress=0):
+        return {'id':'retreat_'+str(n),'predicted_goal_progress_m':progress,
+                'stages':[{'linear_mps':-.2,'yaw_radps':0,'duration_s':n/.2}]}
+
+    def test_short_then_long_after_reblocked(self):
+        plans=[self.plan(n) for n in (.6,1.2,1.8,3.)]
+        self.assertEqual(choose({'plans':plans})['id'],'retreat_0.6')
+        memory=[{'strategy_id':'retreat_0.6','outcome':'reblocked','retreat_m':.6}]
+        self.assertEqual(choose({'plans':plans},memory)['id'],'retreat_1.2')
+        memory.append({'strategy_id':'retreat_1.2','outcome':'reblocked','retreat_m':1.2})
+        self.assertEqual(choose({'plans':plans},memory)['id'],'retreat_3.0')
+
+    def test_progress_can_outweigh_small_extra_distance(self):
+        a=self.plan(.6,-.5);b=self.plan(1.2,.6)
+        self.assertEqual(choose({'plans':[a,b]})['id'],b['id'])
+
+    def test_reblocked_is_detected_after_settling(self):
+        node=RuleTest().node();node.recovery.memory=[{'strategy_id':'retreat_60_left',
+            'outcome':'completed','start_xy':[0,0],'end_xy':[-.6,0],'retreat_m':.6}]
+        p=RuleRecovery();p.step(node,10.1)
+        self.assertEqual(node.recovery.memory[-1]['outcome'],'reblocked')
+
+    def test_failed_short_cannot_make_unknown_long_eligible(self):
+        robot={'length':.4,'width':.3};cells={(x,y):'clear' for x in range(-10,11) for y in range(-10,11)}
+        result=recovery_candidates([self.plan(.6),self.plan(3.)],[0,0],0,robot,cells,.1)
+        self.assertNotIn('retreat_3.0',[p['id'] for p in result['plans']])
+
+
+class HandoffCostTests(unittest.TestCase):
+    def test_dead_end_prefers_exit_over_short_interior_motion(self):
+        from tinynav.core.planner_recovery import estimate_handoff
+        r=RecoveryRuntime(GO2_CONFIG)
+        cells={(x,y):'clear' for x in range(-65,66) for y in range(-50,51)}
+        for x in range(-10,21):
+            cells[(x,14)]='blocked';cells[(x,-14)]='blocked'
+        for y in range(-14,15):cells[(20,y)]='blocked'
+        plans=proposals([.9,0],0,[4,0,0],r.robot,cells,.1,[])
+        result=recovery_candidates(plans,[.9,0],0,r.robot,cells,.1)
+        estimate_handoff(result['plans'],[.9,0],0,[4,0,0],r.robot,cells,.1)
+        self.assertTrue(choose(result)['id'].startswith('retreat_300_'))
+
+    def test_open_space_prefers_short_progress_pivot(self):
+        from tinynav.core.planner_recovery import estimate_handoff
+        r=RecoveryRuntime(GO2_CONFIG)
+        cells={(x,y):'clear' for x in range(-65,66) for y in range(-50,51)}
+        plans=proposals([0,0],0,[0,4,0],r.robot,cells,.1,[])
+        result=recovery_candidates(plans,[0,0],0,r.robot,cells,.1)
+        estimate_handoff(result['plans'],[0,0],0,[0,4,0],r.robot,cells,.1)
+        self.assertEqual(choose(result)['id'],'pivot_left')
