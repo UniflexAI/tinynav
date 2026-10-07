@@ -15,6 +15,7 @@ from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header, Bool
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from tinynav.core.planner_guide import local_detour_target, retained_esdf
 from tinynav.core.planner_recovery import RecoveryRuntime
 from codetiming import Timer
 import cv2
@@ -624,7 +625,7 @@ class PlanningNode(Node):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
             enter_threshold = 0.30
 
-            def cost_function(traj, param, score, target_pose):
+            def cost_function(traj, param, score, target_pose, obstacle_weight=100000, detour=False):
                 # predefined backward trajectory penalty
                 is_backward_traj = param[0] < 0.0
                 should_reverse = front_clearance <= enter_threshold
@@ -643,16 +644,53 @@ class PlanningNode(Node):
                 heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
 
                 return (
-                    score * 100000
+                    score * obstacle_weight
                     + 100 * dist
                     + 100 * heading
                     + 10 * abs(self.last_param[0] - param[0])
                     + 10 * abs(self.last_param[1] - param[1])
-                    + reverse_gate_penalty
+                    + (0.0 if detour else reverse_gate_penalty)
                 )
 
             top_k = 1
             top_indices = np.argsort(np.array([cost_function(trajectories[i], params[i], scores[i], self.target_pose) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            goal = self.target_pose
+            if goal is not None and self.nav_active and not self.nav_paused:
+                now = time.monotonic()
+                anchor = getattr(self, '_guide_anchor', None)
+                if anchor is None or np.linalg.norm(goal-anchor) > .25:
+                    self._guide_anchor = goal.copy()
+                    self._guide_pose = init_p.copy()
+                    self._guide_since = now
+                    self._guide_until = 0.0
+                    self._guide_next = 0.0
+                if np.linalg.norm(init_p[:2]-self._guide_pose[:2]) > .1:
+                    self._guide_pose = init_p.copy()
+                    self._guide_since = now
+                if now-self._guide_since > 2.0 and np.linalg.norm(init_p[:2]-goal[:2]) > .65:
+                    self._guide_until = now+8.0
+                if now < self._guide_until and np.linalg.norm(init_p[:2]-goal[:2]) > .65:
+                    guide_esdf = retained_esdf(ESDF_map,self.origin,self.resolution,self.recovery.lab.cells,
+                        self.recovery.lab.resolution,self.obstacle_config.dilation_cells)
+                    if now >= self._guide_next:
+                        self._guide_waypoint = local_detour_target(guide_esdf,self.origin,self.resolution,init_p,goal,half_w)
+                        self._guide_next = now+.5
+                    waypoint = self._guide_waypoint
+                    if waypoint is not None:
+                        # Retained obstacles guide the route; the live scorer validates motion.
+                        guide_trajs, guide_params = generate_trajectory_library_3d(
+                            init_p=init_p,init_q=init_q,max_linear_vel=min(.15,ROBOT_CONFIG.max_linear_vel),
+                            max_angular_vel=ROBOT_CONFIG.max_angular_vel)
+                        guide_scores,_ = score_trajectories_by_ESDF(guide_trajs,ESDF_map,self.origin,
+                            self.resolution,ROBOT_CONFIG.safety_radius,front_len,rear_len,half_w)
+                        guide_costs = np.array([cost_function(t,p,s,waypoint,obstacle_weight=1,detour=True)
+                                                for t,p,s in zip(guide_trajs,guide_params,guide_scores)])
+                        if now >= getattr(self,'_guide_debug_next',0):
+                            self.get_logger().info(f'Local guide: xy={init_p[:2]}, waypoint={waypoint[:2]}, finite={np.isfinite(guide_costs).sum()}, selected={guide_params[np.argmin(guide_costs)]}')
+                            self._guide_debug_next = now+3
+                        if np.any(np.isfinite(guide_costs)):
+                            trajectories,params,scores = guide_trajs,guide_params,guide_scores
+                            top_indices = np.array([np.argmin(guide_costs)])
             command = self.recovery_command(depth,T,stamp)
             if command is not None:
                 v,w = command
