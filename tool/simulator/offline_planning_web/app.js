@@ -61,6 +61,18 @@ const SCENARIOS = {
       simBox("far_cap", [5.8, 0.0, 0.65], [0.25, 2.0, 1.3]),
     ],
   },
+  dead_end: {
+    label: "Dead end escape",
+    start: { xy: [0.0, 0.0], yaw_deg: 0.0 },
+    target: [4.0, 0.0, 0.0],
+    cameraMaxRange: 8.0,
+    bounds: { xMin: -3.6, xMax: 5.0, yMin: -4.0, yMax: 4.0 },
+    objects: [
+      simBox("cap", [2.0, 0.0, 0.65], [0.25, 3.0, 1.3]),
+      simBox("left", [0.5, 1.4, 0.65], [3.0, 0.25, 1.3]),
+      simBox("right", [0.5, -1.4, 0.65], [3.0, 0.25, 1.3]),
+    ],
+  },
   s_bend: {
     label: "S bend",
     start: { xy: [0.0, -0.7], yaw_deg: 0.0 },
