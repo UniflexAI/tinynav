@@ -154,7 +154,9 @@ _FACING_X = np.array([[0.0, 0.0, 1.0],
                       [0.0, -1.0, 0.0]])
 
 # mirrors the regular-trajectory term of PlanningNode.cost_function (planning_node.py); keep
-# the weights (100000/100/100/10/10) and heading fade distance (2.0) in sync by hand
+# the weights and heading fade distance (2.0) in sync by hand
+_ESDF_WEIGHT = 2000.0
+_DIST_WEIGHT = 1000.0
 _HEADING_WEIGHT = 100.0
 _HEADING_FADE_DIST = 2.0
 
@@ -162,8 +164,8 @@ def _trajectory_cost(traj, param, score, target_end, last_param, heading_weight=
     dist = np.linalg.norm(np.asarray(traj[-1, :3]) - target_end)
     heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / _HEADING_FADE_DIST)
     return (
-        score * 100000
-        + 100 * dist
+        score * _ESDF_WEIGHT
+        + _DIST_WEIGHT * dist
         + heading_weight * heading
         + 10 * abs(last_param[0] - param[0])
         + 10 * abs(last_param[1] - param[1])
@@ -193,14 +195,17 @@ def test_goal_heading_error():
         got = goal_heading_error(end, np.array(target))
         assert abs(got - expected) < 1e-6, f"target {target}: {got} != {expected}"
 
-def test_goal_behind_turns_in_place():
-    # forward-only samples all recede from a target behind, so distance alone picks vx=0,
-    # and the shared vx=0 endpoint leaves smoothness to pick omega=0 too
+def test_goal_behind_curves_toward_target():
+    # forward-only samples can't reverse, but a tight max-rate turn still shaves a little
+    # off the final distance to a target directly behind; at _DIST_WEIGHT=1000 that small
+    # gain outweighs the smoothness cost of moving, so the pick curves instead of standing
+    # still or rotating in place
     behind = np.array([-5.0, 0.0, 0.0])
-    assert tuple(_pick(behind, heading_weight=0.0)) == (0.0, 0.0)
+    vx0, omega0 = _pick(behind, heading_weight=0.0)
+    assert vx0 > 0.0 and abs(omega0) > 1e-6, f"target behind (no heading term) yields vx={vx0}, omega={omega0}"
 
     vx, omega = _pick(behind)
-    assert abs(omega) > 1e-6, f"target behind still yields omega={omega}"
+    assert vx > 0.0 and abs(omega) > 1e-6, f"target behind still yields vx={vx}, omega={omega}"
 
 def test_goal_ahead_still_drives_straight():
     vx, omega = _pick(np.array([5.0, 0.0, 0.0]))
@@ -233,7 +238,7 @@ def test_heading_fade_is_monotonic_in_distance():
 
     def heading_term(range_m):
         target = np.array([0.0, range_m, 0.0])  # 90 deg off the nose at every range
-        return _trajectory_cost(traj, param, 0.0, target, last_param) - 100 * range_m
+        return _trajectory_cost(traj, param, 0.0, target, last_param) - _DIST_WEIGHT * range_m
 
     terms = [heading_term(r) for r in (0.5, 1.0, 2.0, 4.0)]
     assert terms[0] < terms[1] < terms[2], f"heading penalty not growing with range: {terms}"
@@ -242,7 +247,7 @@ def test_heading_fade_is_monotonic_in_distance():
 
 if __name__ == "__main__":
     test_goal_heading_error()
-    test_goal_behind_turns_in_place()
+    test_goal_behind_curves_toward_target()
     test_goal_ahead_still_drives_straight()
     test_goal_abeam_turns_while_driving()
     test_heading_fades_within_arrival_radius()
