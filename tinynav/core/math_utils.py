@@ -310,3 +310,17 @@ def uf_all_sets_list(uf, min_component_size=1):
         if part.size >= int(min_component_size):
             out.append(np.sort(part).tolist())
     return out
+
+
+def stall_check(last_remaining, last_time, remaining_now, now, progress_eps, timeout_s):
+    """
+    Track path-following progress and flag a stall: no drop in remaining route length
+    for timeout_s, despite deviation from the path staying within its own replan
+    threshold -- e.g. the robot stopped in front of a newly observed obstacle.
+    :return: (new_last_remaining, new_last_time, stalled)
+    """
+    if last_remaining is None or last_remaining - remaining_now > progress_eps:
+        return remaining_now, now, False
+    if now - last_time > timeout_s:
+        return last_remaining, last_time, True
+    return last_remaining, last_time, False
