@@ -40,7 +40,8 @@ class StairNode(Node):
     def __init__(self, args):
         super().__init__('stair_node')
         camera_height = args.camera_height if args.camera_height is not None else ROBOT_CONFIG.camera_height
-        self.gen = StairTargetGenerator(StairConfig(camera_height=camera_height))
+        self.gen = StairTargetGenerator(StairConfig(camera_height=camera_height,
+                                                    camera_ahead=ROBOT_CONFIG.camera_x - ROBOT_CONFIG.control_x))
         self.gen.turn_side = TURN_SIDES[args.turn]
         self.bridge = CvBridge()
         self.K = None

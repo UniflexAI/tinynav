@@ -316,6 +316,8 @@ def generate_trajectories(init_p, init_q):
 # stair_node publishes /stair/status every 0.5 s while stair mode is on; no status for this long means off,
 # so a killed stair_node cannot leave planning in stair behavior
 STAIR_MODE_TIMEOUT_S = 1.5
+# stair mode: a target this close to the body center is a turn-in-place cue, steer by heading there
+STAIR_NEAR_TARGET_M = 0.8
 
 
 # === PlanningNode class ===
@@ -366,6 +368,7 @@ class PlanningNode(Node):
         self.reverse_enter_threshold = 0.30
         self.reverse_exit_threshold = 0.45
         self.reverse_engaged = False
+        self._stair_turn_cue = False  # set per planning cycle, see trajectory_cost
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -577,11 +580,17 @@ class PlanningNode(Node):
         # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
         # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
         heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
+        heading_weight = 100
+        if self._stair_turn_cue:
+            # stair_node turns the robot in place with a target just beside it: there the faded heading term
+            # lost to creeping forward into the wall, which left the robot backing up and wiggling on landings
+            heading = goal_heading_error(traj[-1], target_end)
+            heading_weight = 300
 
         return (
             score * 2000
             + 1000 * dist
-            + 100 * heading
+            + heading_weight * heading
             + 10 * abs(self.last_param[0] - param[0])
             + 10 * abs(self.last_param[1] - param[1])
             + reverse_gate_penalty
@@ -658,6 +667,8 @@ class PlanningNode(Node):
             should_reverse = front_clearance <= threshold
             self.reverse_engaged = should_reverse
 
+            self._stair_turn_cue = self.stair_mode and self.target_pose is not None \
+                and np.linalg.norm(init_p[:2] - self.target_pose[:2]) < STAIR_NEAR_TARGET_M
             top_k = 1
             top_indices = np.argsort(np.array([self.trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, should_reverse) for i in range(len(trajectories))]), kind='stable')[:top_k]
             self.last_param = params[top_indices[0]]
