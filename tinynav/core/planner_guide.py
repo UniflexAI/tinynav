@@ -78,3 +78,57 @@ def retained_esdf(esdf, origin, resolution, cells, cell_resolution, dilation_cel
     if dilation_cells:
         retained = binary_dilation(retained,iterations=dilation_cells)
     return distance_transform_edt(~(retained | (esdf < resolution*.5))).astype(np.float32)*resolution
+
+
+class LocalGuide:
+    """Own stall timing and cached waypoints independently of ROS callbacks."""
+    stall_distance_m = .1
+    stall_duration_s = 2.0
+    hold_duration_s = 8.0
+    replan_interval_s = .5
+    goal_radius_m = .65
+    goal_reset_distance_m = .25
+    max_linear_vel = .15
+    obstacle_weight = 1.0
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.anchor = None
+        self.position = None
+        self.since = 0.0
+        self.until = 0.0
+        self.next_replan = 0.0
+        self.waypoint = None
+
+    def update(self, xy, target, now, esdf, origin, resolution, half_width,
+               cells, cell_resolution, dilation_cells, recovery_owned=False):
+        if target is None:
+            self.reset()
+            return None
+        if self.anchor is None or np.linalg.norm(target-self.anchor) > self.goal_reset_distance_m:
+            self.reset()
+            self.anchor = np.asarray(target).copy()
+            self.position = np.asarray(xy)[:2].copy()
+            self.since = now
+        if np.linalg.norm(np.asarray(xy)[:2]-self.position) > self.stall_distance_m:
+            self.position = np.asarray(xy)[:2].copy()
+            self.since = now
+        if np.linalg.norm(np.asarray(xy)[:2]-np.asarray(target)[:2]) <= self.goal_radius_m:
+            self.until = 0.0
+            self.waypoint = None
+            return None
+        if now-self.since > self.stall_duration_s:
+            self.until = now+self.hold_duration_s
+        if recovery_owned:
+            self.next_replan = 0.0
+            self.waypoint = None
+            return None
+        if now >= self.until:
+            return None
+        if now >= self.next_replan:
+            guide_esdf = retained_esdf(esdf,origin,resolution,cells,cell_resolution,dilation_cells)
+            self.waypoint = local_detour_target(guide_esdf,origin,resolution,xy,target,half_width)
+            self.next_replan = now+self.replan_interval_s
+        return self.waypoint
