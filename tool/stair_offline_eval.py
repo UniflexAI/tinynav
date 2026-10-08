@@ -196,7 +196,11 @@ def main():
             err = angle_deg(res['target'][:2] - T[:2, 3], fut[:2] - T[:2, 3])
         rows.append(dict(t=t - t0, phase=phase_of(t), status=res['status'], err_deg=err, cam_z=T[2, 3],
                          target_z=None if res['target'] is None else res['target'][2],
-                         guided=bool(res.get('guided', False)), mem_sim=mem_sim))
+                         cam_x=T[0, 3], cam_y=T[1, 3], fwd_x=T[0, 2], fwd_y=T[1, 2],
+                         target_x=None if res['target'] is None else res['target'][0],
+                         target_y=None if res['target'] is None else res['target'][1],
+                         guided=bool(res.get('guided', False)), mem_sim=mem_sim,
+                         uturn=bool(res.get('uturn', False)), turn_in_place=bool(res.get('turn_in_place', False))))
         if not args.no_video:
             frame = render(res, cfg, T, poses, j, images[int(np.argmin(np.abs(img_t - t)))][1], t - t0, err)
             if writer is None:
