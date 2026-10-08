@@ -8,7 +8,7 @@ time.
 
 numpy only: the replay runs on a laptop against pilot's `cost_trace` CSVs.
 
-    python3 -m tinynav.core.planning_cost cost-r3-*.csv            # agreement + who decided
+    python3 -m tinynav.core.planning_cost cost-r3-*.csv            # agreement, who decided, shadow
     python3 -m tinynav.core.planning_cost cost-r3-*.csv --frame 120  # one frame's table
 """
 import csv
@@ -181,7 +181,70 @@ def select(rows, ctx):
     return min(range(len(rows)), key=costs.__getitem__)
 
 
+# ------------------------------------------------------------ time to go --- #
+# The cost under trial: seconds still to go, in shadow -- computed and published
+# beside the weighted cost above, which still drives.
+
+#: Rollout steps (of the 0.1 s lattice) the time cost samples, and what each sample
+#: holds. Not the end alone: the slowest forward row (0.2 m/s for 3 s) is longer than
+#: the last 0.7 m, so its end is past the goal and pointing anywhere.
+STEP_SAMPLES = (5, 10, 15, 20, 25, 30)
+STEP_COLUMNS = ('t', 'remaining', 'path_dev', 'route_err', 'goal_err', 'goal_dxy')
+#: Below this much left, which way the robot points stops mattering.
+D_TURN_M = 0.3
+#: Metres of route one unit of clearance score is worth: the weighted cost's
+#: w_clearance / w_route_progress.
+CLEARANCE_M = 2.0
+#: The last pick keeps its slot unless something is this much faster.
+HYSTERESIS_S = 0.15
+
+
+def time_to_go(r, ctx):
+    """Seconds to the goal through candidate `r`: the best over its samples of time
+    spent so far, plus distance left at v_nom, plus heading left at w_nom -- the
+    heading share fading out over the last D_TURN_M. Clearance adds the time its
+    score is worth in route metres.
+
+    `ctx` adds v_nom (m/s) and w_nom (rad/s) to what candidate_terms reads.
+    """
+    v, w, band = ctx['v_nom'], ctx['w_nom'], ctx['band']
+    best = float('inf')
+    for s in r['steps']:
+        t, rem, dev, rerr, gerr, gd = s
+        if ctx['has_route']:
+            fade = route_band_fade(rem, band)
+            d = rem + dev + (1.0 - fade) * gd
+            h = fade * rerr + (1.0 - fade) * gerr
+        else:
+            d, h = gd, gerr
+        best = min(best, t + d / v + h / w * min(1.0, d / D_TURN_M))
+    return best + CLEARANCE_M * r['clr'] / v
+
+
+def _time_allowed(r, ctx):
+    return (reverse_gate_penalty(r['vx'], ctx['should_reverse']) == 0.0
+            and standstill_penalty(is_standstill(r['vx'], r['yaw']),
+                                   ctx['can_move'], ctx['to_goal']) == 0.0)
+
+
+def select_time(rows, ctx):
+    """Position in `rows` of the time cost's pick. The gates filter, falling back to
+    every row when they leave none; then hysteresis on (vx, omega) of the last pick,
+    `ctx['shadow_last']`."""
+    pool = [k for k, r in enumerate(rows) if _time_allowed(r, ctx)] or list(range(len(rows)))
+    cost = {k: time_to_go(rows[k], ctx) for k in pool}
+    best = min(pool, key=cost.__getitem__)
+    last = ctx.get('shadow_last')
+    if last is not None:
+        for k in pool:
+            if (abs(rows[k]['vx'] - last[0]) < 1e-3 and abs(rows[k]['omega'] - last[1]) < 1e-3
+                    and cost[k] <= cost[best] + HYSTERESIS_S):
+                return k
+    return best
+
+
 # ---------------------------------------------------------------- replay --- #
+# RECORDING: everything below goes with /planning/cost_terms.
 
 def read_frames(path):
     """The frames of one cost_trace CSV: `t,payload`, payload the published JSON.
@@ -258,10 +321,36 @@ def replay(paths, frame_no=None):
         print(f'only {n} frames')
         return
     print(f'{n} frames, {agree} replayed to the logged pick ({100.0 * agree / max(n, 1):.1f}%)')
+    shadow(paths)
     print('picked: ' + ' '.join(f'{k}={v}' for k, v in sorted(picked.items())))
     if decided:
         print('turn/standstill over an open forward row, the term that cost forward most: '
               + ' '.join(f'{k}={v}' for k, v in sorted(decided.items(), key=lambda x: -x[1])))
+
+
+def shadow(paths):
+    """The time cost against the weighted one on the same frames: how often its
+    replay reproduces the shadow pick the planner logged, and where the two costs
+    pick a different kind of row."""
+    n = agree = 0
+    flips = {}
+    for path in paths:
+        for frame in read_frames(path):
+            if 'shadow' not in frame:
+                continue
+            rows = frame['rows']
+            n += 1
+            mine = rows[select_time(rows, frame)]
+            agree += mine['i'] == frame['shadow']
+            a, b = kind(next(r for r in rows if r['i'] == frame['sel'])), kind(mine)
+            if a != b:
+                flips[(a, b)] = flips.get((a, b), []) + [n - 1]
+    if not n:
+        return
+    print(f'shadow: {n} frames, {agree} replayed to the logged shadow pick '
+          f'({100.0 * agree / n:.1f}%)')
+    for (a, b), frames in sorted(flips.items(), key=lambda x: -len(x[1])):
+        print(f'  weighted {a} -> time {b}: {len(frames)} frames, e.g. {frames[:12]}')
 
 
 def main(argv=None):

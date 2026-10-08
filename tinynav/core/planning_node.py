@@ -34,7 +34,7 @@ from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
-from tinynav.core.planning_cost import COLUMNS, can_move, select
+from tinynav.core.planning_cost import COLUMNS, STEP_SAMPLES, can_move, select, select_time
 
 # === Helper functions ===
 @njit(cache=True)
@@ -517,6 +517,47 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
+def step_features(trajs, path_dist_map, remaining_map, route_heading_map, origin,
+                  resolution, target, dt):
+    """Per trajectory, at each STEP_SAMPLES step: (t, remaining, path_dev, route_err,
+    goal_err, goal_dxy) -- planning_cost.STEP_COLUMNS, shape (n, len(STEP_SAMPLES), 6).
+
+    The lookups score_trajectories_by_ESDF makes at the end, made along the way:
+    remaining with the same arc-length floor, path_dev at that step rather than the
+    worst so far, and off-grid samples at 1e3 / 1e3 / 0 as there.
+    """
+    steps = np.asarray(STEP_SAMPLES)
+    rows, cols = remaining_map.shape
+    seg = np.linalg.norm(np.diff(trajs[:, :, :2], axis=1), axis=2)
+    arc = np.concatenate([np.zeros((len(trajs), 1)), np.cumsum(seg, axis=1)], axis=1)[:, steps]
+
+    def cells(xy):
+        xi = ((xy[..., 0] - origin[0]) / resolution).astype(int)
+        yi = ((xy[..., 1] - origin[1]) / resolution).astype(int)
+        ok = (xi >= 0) & (xi < rows) & (yi >= 0) & (yi < cols)
+        return np.where(ok, xi, 0), np.where(ok, yi, 0), ok
+
+    p = trajs[:, steps]
+    xi, yi, ok = cells(p[..., :2])
+    rem = np.where(ok, remaining_map[xi, yi], 1e3)
+    sx, sy, sok = cells(trajs[:, 0, :2])
+    start_rem = np.where(sok, remaining_map[sx, sy], 1e3)[:, None]
+    rem = np.where(start_rem < 1e3, np.maximum(rem, start_rem - arc), rem)
+    dev = np.where(ok, path_dist_map[xi, yi], 1e3)
+    qx, qy, qz, qw = p[..., 3], p[..., 4], p[..., 5], p[..., 6]
+    heading = np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
+
+    def fold(a):
+        return np.abs(np.arctan2(np.sin(a), np.cos(a)))
+
+    route_err = np.where(ok, fold(heading - route_heading_map[xi, yi]), 0.0)
+    to_goal = target[None, None, :2] - p[..., :2]
+    goal_err = fold(np.arctan2(to_goal[..., 1], to_goal[..., 0]) - heading)
+    goal_dxy = np.linalg.norm(to_goal, axis=2)
+    t = np.broadcast_to(steps * dt, rem.shape)
+    return np.stack([t, rem, dev, route_err, goal_err, goal_dxy], axis=2)
+
+
 def build_route_fields(route_xy, shape, origin, resolution):
     """
     Rasterize a route into the lookup maps read by the DWA scoring, so scoring costs
@@ -616,6 +657,7 @@ class PlanningNode(Node):
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
+        # RECORDING: removed once the time cost is decided.
         # Every frame's candidate table, for planning_cost's replay. Built only while
         # someone listens.
         self.cost_pub = self.create_publisher(String, '/planning/cost_terms', 10)
@@ -759,6 +801,7 @@ class PlanningNode(Node):
         self.w_turn_start = 40.0
         self.w_turn_reversal = 30.0
         self.last_yaw_rate = 0.0  # world yaw rate (rad/s) of the last selected trajectory
+        self._shadow_last = None  # (vx, omega) of the time cost's last pick
 
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
@@ -888,13 +931,20 @@ class PlanningNode(Node):
                 'route_heading': self.w_route_heading, 'turn_in_place': self.w_turn_in_place,
                 'turn_reversal': self.w_turn_reversal, 'turn_start': self.w_turn_start}
 
-    def _publish_cost_terms(self, rows, ctx, sel, stamp):
+    # RECORDING: removed once the time cost is decided.
+    def _publish_cost_terms(self, rows, ctx, sel, shadow, stamp):
         """Rounded to 1e-4: the replay then reproduces every pick but ties closer than
-        that, and a frame stays near 10 kB."""
-        r4 = lambda x: round(x, 4) if isinstance(x, float) else x
+        that. `steps` rides as one more column, a list per row."""
+        def r4(x):
+            if isinstance(x, float):
+                return round(x, 4)
+            if isinstance(x, (list, tuple)):
+                return [r4(y) for y in x]
+            return x
+        cols = COLUMNS + ('steps',)
         payload = {k: r4(v) for k, v in ctx.items()}
-        payload.update(stamp=stamp.sec + stamp.nanosec * 1e-9, sel=sel, cols=COLUMNS,
-                       rows=[[r4(r[c]) for c in COLUMNS] for r in rows])
+        payload.update(stamp=stamp.sec + stamp.nanosec * 1e-9, sel=sel, shadow=shadow,
+                       cols=cols, rows=[[r4(r[c]) for c in cols] for r in rows])
         self.cost_pub.publish(String(data=json.dumps(payload, separators=(',', ':'))))
 
     def publish_selected_path(self, trajectories, indices, header):
@@ -1323,9 +1373,11 @@ class PlanningNode(Node):
             # The collision-free candidates as features; the cost reads nothing else,
             # which is what lets a recorded frame be re-scored (planning_cost).
             rows = []
-            for i in range(len(trajectories)):
-                if scores[i] == float('inf'):
-                    continue
+            free = [i for i in range(len(trajectories)) if scores[i] != float('inf')]
+            steps = step_features(trajectories[free], path_dist_map, remaining_map,
+                                  route_heading_map, self.origin, self.resolution, target,
+                                  self._traj_dt).tolist()
+            for j, i in enumerate(free):
                 traj = trajectories[i]
                 rows.append({
                     'i': i, 'vx': float(params[i][0]), 'omega': float(params[i][1]),
@@ -1335,6 +1387,7 @@ class PlanningNode(Node):
                     'goal_err': float(_end_heading_error(traj[-1], target)),
                     'goal_d': float(np.linalg.norm(traj[-1, :3] - target)),
                     'goal_dxy': float(np.linalg.norm(traj[-1, :2] - target[:2])),
+                    'steps': steps[j],
                 })
             ctx = {
                 'has_route': bool(has_route), 'should_reverse': bool(should_reverse),
@@ -1345,8 +1398,16 @@ class PlanningNode(Node):
                 'w': self._cost_weights(),
             }
             top_indices = [rows[select(rows, ctx)]['i']]
+            # The time cost in shadow: picked and published, never driven.
+            ctx.update(v_nom=max(float(v_allow), self._vx_min, 0.1),
+                       w_nom=float(ROBOT_CONFIG.max_angular_vel),
+                       shadow_last=self._shadow_last)
+            shadow = rows[select_time(rows, ctx)]
+            self._shadow_last = (shadow['vx'], shadow['omega'])
+            # RECORDING: removed once the time cost is decided.
             if self.cost_pub.get_subscription_count() > 0:
-                self._publish_cost_terms(rows, ctx, top_indices[0], depth_msg.header.stamp)
+                self._publish_cost_terms(rows, ctx, top_indices[0], shadow['i'],
+                                         depth_msg.header.stamp)
 
             self.last_param = params[top_indices[0]]
 
@@ -1354,6 +1415,7 @@ class PlanningNode(Node):
             # anything else means stuck by cost with somewhere to go.
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
+                f'shadow vx={shadow["vx"]:.2f} omega={shadow["omega"]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '

@@ -13,8 +13,9 @@ from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
-                           generate_trajectory_library_3d, heading_of_pose7, angle_between)
-from planning_cost import (route_band_fade, route_heading_penalty, reverse_gate_penalty,
+                           generate_trajectory_library_3d, heading_of_pose7, angle_between,
+                           step_features, generate_predefined_trajectory_vocabularies)
+from planning_cost import (STEP_SAMPLES, route_band_fade, route_heading_penalty, reverse_gate_penalty,
                            turn_in_place_penalty, standstill_penalty, STANDSTILL_GOAL_M)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -301,6 +302,29 @@ def test_carrying_straight_on_at_a_corner_costs_more_than_turning():
     assert route_heading_penalty(w, np.deg2rad(85), 0.0, band) == 0.0
     assert (route_heading_penalty(w, np.deg2rad(85), 0.25, band)
             < 0.6 * route_heading_penalty(w, np.deg2rad(85), 3.0, band))
+
+
+def test_the_last_step_sample_is_the_end_the_weighted_cost_reads():
+    """step_features repeats score_trajectories_by_ESDF's end lookups along the way;
+    at the last step the two must agree, or the time cost ranks a different end."""
+    res, shape = 0.05, (100, 100)
+    origin = np.array([-2.5, -2.5, 0.0])
+    init_q = np.array([0.5, -0.5, 0.5, -0.5])
+    tr, _ = generate_trajectory_library_3d(init_q=init_q, max_linear_vel=0.6,
+                                           max_angular_vel=0.75, min_linear_vel=0.2)
+    vt, _ = generate_predefined_trajectory_vocabularies(init_q=init_q)
+    tr = np.concatenate([tr, vt])
+    assert STEP_SAMPLES[-1] == tr.shape[1] - 1
+    target = np.array([1.5, 0.8, 0.0])
+    route = np.stack([np.linspace(0, 1.5, 30), 0.8 * np.linspace(0, 1, 30) ** 2], axis=1)
+    pdm, rem, rhm, _ = build_route_fields(route, shape, origin, res)
+    esdf = np.full(shape, 5.0, dtype=np.float32)
+    _, _, _, end_rem, end_herr = score_trajectories_by_ESDF(
+        np.ascontiguousarray(tr), esdf, pdm, rem, rhm, origin, res)
+    f = step_features(tr, pdm, rem, rhm, origin, res, target, 0.1)
+    np.testing.assert_allclose(f[:, -1, 1], end_rem, atol=1e-6)
+    np.testing.assert_allclose(f[:, -1, 3], end_herr, atol=1e-6)
+    np.testing.assert_allclose(f[:, -1, 5], np.linalg.norm(tr[:, -1, :2] - target[:2], axis=1))
 
 
 if __name__ == "__main__":
