@@ -15,7 +15,7 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between,
                            step_features, generate_predefined_trajectory_vocabularies)
-from planning_cost import (STEP_SAMPLES, route_band_fade, route_heading_penalty, reverse_gate_penalty,
+from planning_cost import (STEP_SAMPLES, ARRIVE_M, route_band_fade, route_heading_penalty, reverse_gate_penalty,
                            turn_in_place_penalty, standstill_penalty, STANDSTILL_GOAL_M)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -321,10 +321,17 @@ def test_the_last_step_sample_is_the_end_the_weighted_cost_reads():
     esdf = np.full(shape, 5.0, dtype=np.float32)
     _, _, _, end_rem, end_herr = score_trajectories_by_ESDF(
         np.ascontiguousarray(tr), esdf, pdm, rem, rhm, origin, res)
-    f = step_features(tr, pdm, rem, rhm, origin, res, target, 0.1)
+    f = step_features(tr, pdm, rem, rhm, origin, res, target, 0.1, np.zeros(3))
     np.testing.assert_allclose(f[:, -1, 1], end_rem, atol=1e-6)
     np.testing.assert_allclose(f[:, -1, 3], end_herr, atol=1e-6)
     np.testing.assert_allclose(f[:, -1, 5], np.linalg.norm(tr[:, -1, :2] - target[:2], axis=1))
+
+
+def test_the_time_cost_arrives_where_map_node_does():
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core', 'map_node.py')).read()
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], 'id', None) == '_ARRIVE_M')
+    assert ast.literal_eval(node.value) == ARRIVE_M
 
 
 if __name__ == "__main__":

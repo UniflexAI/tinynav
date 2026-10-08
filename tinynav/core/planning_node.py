@@ -17,6 +17,7 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
+from scipy.spatial.transform import Rotation
 from dataclasses import replace
 from numba import njit
 import cv2
@@ -518,9 +519,10 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
 
 
 def step_features(trajs, path_dist_map, remaining_map, route_heading_map, origin,
-                  resolution, target, dt):
-    """Per trajectory, at each STEP_SAMPLES step: (t, remaining, path_dev, route_err,
-    goal_err, goal_dxy) -- planning_cost.STEP_COLUMNS, shape (n, len(STEP_SAMPLES), 6).
+                  resolution, target, dt, cam_offset):
+    """Per trajectory, at each STEP_SAMPLES step: planning_cost.STEP_COLUMNS, shape
+    (n, len(STEP_SAMPLES), 7). `cam_offset` is ROBOT_CONFIG.cam_offset_3d: the
+    trajectory poses are the control centre in the camera's orientation.
 
     The lookups score_trajectories_by_ESDF makes at the end, made along the way:
     remaining with the same arc-length floor, path_dev at that step rather than the
@@ -554,8 +556,11 @@ def step_features(trajs, path_dist_map, remaining_map, route_heading_map, origin
     to_goal = target[None, None, :2] - p[..., :2]
     goal_err = fold(np.arctan2(to_goal[..., 1], to_goal[..., 0]) - heading)
     goal_dxy = np.linalg.norm(to_goal, axis=2)
+    cam = p[..., :3] + Rotation.from_quat(p[..., 3:7].reshape(-1, 4)).apply(
+        cam_offset).reshape(p.shape[:-1] + (3,))
+    cam_d = np.linalg.norm(cam[..., :2] - target[None, None, :2], axis=2)
     t = np.broadcast_to(steps * dt, rem.shape)
-    return np.stack([t, rem, dev, route_err, goal_err, goal_dxy], axis=2)
+    return np.stack([t, rem, dev, route_err, goal_err, goal_dxy, cam_d], axis=2)
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -1376,7 +1381,7 @@ class PlanningNode(Node):
             free = [i for i in range(len(trajectories)) if scores[i] != float('inf')]
             steps = step_features(trajectories[free], path_dist_map, remaining_map,
                                   route_heading_map, self.origin, self.resolution, target,
-                                  self._traj_dt).tolist()
+                                  self._traj_dt, ROBOT_CONFIG.cam_offset_3d).tolist()
             for j, i in enumerate(free):
                 traj = trajectories[i]
                 rows.append({

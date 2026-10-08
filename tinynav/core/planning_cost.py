@@ -186,12 +186,12 @@ def select(rows, ctx):
 # beside the weighted cost above, which still drives.
 
 #: Rollout steps (of the 0.1 s lattice) the time cost samples, and what each sample
-#: holds. Not the end alone: the slowest forward row (0.2 m/s for 3 s) is longer than
-#: the last 0.7 m, so its end is past the goal and pointing anywhere.
+#: holds; cam_d is the camera's distance to the target, the one arrival measures.
 STEP_SAMPLES = (5, 10, 15, 20, 25, 30)
-STEP_COLUMNS = ('t', 'remaining', 'path_dev', 'route_err', 'goal_err', 'goal_dxy')
-#: Below this much left, which way the robot points stops mattering.
-D_TURN_M = 0.3
+STEP_COLUMNS = ('t', 'remaining', 'path_dev', 'route_err', 'goal_err', 'goal_dxy', 'cam_d')
+#: map_node's _ARRIVE_M: arrival is its rule, so the time to go is the time until it
+#: fires. A test holds the two equal.
+ARRIVE_M = 0.5
 #: Metres of route one unit of clearance score is worth: the weighted cost's
 #: w_clearance / w_route_progress.
 CLEARANCE_M = 2.0
@@ -200,25 +200,29 @@ HYSTERESIS_S = 0.15
 
 
 def time_to_go(r, ctx):
-    """Seconds to the goal through candidate `r`: the best over its samples of time
-    spent so far, plus distance left at v_nom, plus heading left at w_nom -- the
-    heading share fading out over the last D_TURN_M. Clearance adds the time its
-    score is worth in route metres.
+    """Seconds to the goal through candidate `r`.
+
+    If the rollout arrives -- the camera inside ARRIVE_M of the target where the route
+    has run out (the target is only the goal there; before, it is a carrot) -- the
+    time is the first sample that does. Otherwise it is the whole rollout plus the
+    distance left at v_nom and the heading left at w_nom. Clearance adds the time its
+    score is worth in route metres either way.
 
     `ctx` adds v_nom (m/s) and w_nom (rad/s) to what candidate_terms reads.
     """
     v, w, band = ctx['v_nom'], ctx['w_nom'], ctx['band']
-    best = float('inf')
-    for s in r['steps']:
-        t, rem, dev, rerr, gerr, gd = s
-        if ctx['has_route']:
-            fade = route_band_fade(rem, band)
-            d = rem + dev + (1.0 - fade) * gd
-            h = fade * rerr + (1.0 - fade) * gerr
-        else:
-            d, h = gd, gerr
-        best = min(best, t + d / v + h / w * min(1.0, d / D_TURN_M))
-    return best + CLEARANCE_M * r['clr'] / v
+    clearance = CLEARANCE_M * r['clr'] / v
+    for t, rem, dev, rerr, gerr, gd, cam_d in r['steps']:
+        if cam_d < ARRIVE_M and (not ctx['has_route'] or rem <= band):
+            return t + clearance
+    t, rem, dev, rerr, gerr, gd, cam_d = r['steps'][-1]
+    if ctx['has_route']:
+        fade = route_band_fade(rem, band)
+        d = rem + dev + (1.0 - fade) * gd
+        h = fade * rerr + (1.0 - fade) * gerr
+    else:
+        d, h = gd, gerr
+    return t + d / v + h / w + clearance
 
 
 def _time_allowed(r, ctx):
