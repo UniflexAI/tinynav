@@ -81,8 +81,7 @@ def retained_esdf(esdf, origin, resolution, cells, cell_resolution, dilation_cel
 
 
 class LocalGuide:
-    """Own stall timing and cached waypoints independently of ROS callbacks."""
-    stall_distance_m = .1
+    """Owns detour waypoints; stall timing comes from the shared MotionTracker."""
     stall_duration_s = 2.0
     hold_duration_s = 8.0
     replan_interval_s = .5
@@ -96,13 +95,12 @@ class LocalGuide:
 
     def reset(self):
         self.anchor = None
-        self.position = None
-        self.since = 0.0
+        self.anchor_at = 0.0
         self.until = 0.0
         self.next_replan = 0.0
         self.waypoint = None
 
-    def update(self, xy, target, now, esdf, origin, resolution, half_width,
+    def update(self, xy, target, now, stalled, esdf, origin, resolution, half_width,
                cells, cell_resolution, dilation_cells, recovery_owned=False):
         if target is None:
             self.reset()
@@ -110,16 +108,13 @@ class LocalGuide:
         if self.anchor is None or np.linalg.norm(target-self.anchor) > self.goal_reset_distance_m:
             self.reset()
             self.anchor = np.asarray(target).copy()
-            self.position = np.asarray(xy)[:2].copy()
-            self.since = now
-        if np.linalg.norm(np.asarray(xy)[:2]-self.position) > self.stall_distance_m:
-            self.position = np.asarray(xy)[:2].copy()
-            self.since = now
+            self.anchor_at = now
         if np.linalg.norm(np.asarray(xy)[:2]-np.asarray(target)[:2]) <= self.goal_radius_m:
             self.until = 0.0
             self.waypoint = None
             return None
-        if now-self.since > self.stall_duration_s:
+        # A stall that predates this goal must re-accumulate under it.
+        if stalled and now - self.anchor_at >= self.stall_duration_s:
             self.until = now+self.hold_duration_s
         if recovery_owned:
             self.next_replan = 0.0

@@ -48,37 +48,37 @@ class GuideLifecycleTests(unittest.TestCase):
         self.xy = np.array([.5,.5,0.])
         self.goal = np.array([2.,.5,0.])
 
-    def update(self, now, **kwargs):
-        return self.guide.update(self.xy,self.goal,now,self.esdf,np.zeros(3),.05,.15,{},.1,2,**kwargs)
+    def update(self, now, stalled=False, **kwargs):
+        return self.guide.update(self.xy,self.goal,now,stalled,self.esdf,np.zeros(3),.05,.15,{},.1,2,**kwargs)
 
     def test_stall_cache_and_reset(self):
         from unittest.mock import patch
         with patch('tinynav.core.planner_guide.retained_esdf',return_value=self.esdf) as build:
             self.assertIsNone(self.update(10))
-            self.assertIsNotNone(self.update(12.1))
-            self.assertIsNotNone(self.update(12.2))
+            self.assertIsNotNone(self.update(12.1,stalled=True))
+            self.assertIsNotNone(self.update(12.2,stalled=True))
             self.assertEqual(build.call_count,1)
             self.guide.reset()
             self.assertIsNone(self.update(12.3))
             self.assertIsNone(self.guide.waypoint)
-            self.assertIsNotNone(self.update(14.4))
+            self.assertIsNotNone(self.update(14.4,stalled=True))
             self.assertEqual(build.call_count,2)
 
     def test_goal_change_restarts_stall_detection(self):
         self.update(10)
-        self.assertIsNotNone(self.update(12.1))
+        self.assertIsNotNone(self.update(12.1,stalled=True))
         self.goal = np.array([.5,2.,0.])
-        self.assertIsNone(self.update(12.2))
+        self.assertIsNone(self.update(12.2,stalled=True))
         self.assertIsNone(self.guide.waypoint)
 
     def test_recovery_ownership_invalidates_cache(self):
         from unittest.mock import patch
         with patch('tinynav.core.planner_guide.retained_esdf',return_value=self.esdf) as build:
             self.update(10)
-            self.assertIsNotNone(self.update(12.1))
-            self.assertIsNone(self.update(12.2,recovery_owned=True))
+            self.assertIsNotNone(self.update(12.1,stalled=True))
+            self.assertIsNone(self.update(12.2,recovery_owned=True,stalled=True))
             self.assertEqual(build.call_count,1)
-            self.assertIsNotNone(self.update(12.3))
+            self.assertIsNotNone(self.update(12.3,stalled=True))
             self.assertEqual(build.call_count,2)
 
     def test_navigation_callbacks_clear_guidance(self):
@@ -91,7 +91,7 @@ class GuideLifecycleTests(unittest.TestCase):
             with self.subTest(callback=callback.__name__):
                 self.guide.reset()
                 self.update(10)
-                self.assertIsNotNone(self.update(12.1))
+                self.assertIsNotNone(self.update(12.1,stalled=True))
                 node = SimpleNamespace(recovery=Mock(),guide=self.guide,target_pose=self.goal,
                     nav_active=True,nav_paused=False,recovery_target_anchor=self.goal.copy())
                 node.reset_navigation_helpers = lambda target=None: PlanningNode.reset_navigation_helpers(node,target)

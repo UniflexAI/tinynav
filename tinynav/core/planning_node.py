@@ -431,7 +431,7 @@ class PlanningNode(Node):
         command = self.recovery.tick(center[:2].tolist(),yaw,time.monotonic(),
             self.nav_active,self.nav_paused,max(0,age) if age>=-.1 else float('inf'))
         if self.recovery.phase != previous_phase:
-            choice = self.recovery.policy.last_selection or {}
+            choice = self.recovery.last_selection or {}
             self.get_logger().info(f'Rule recovery: {previous_phase} -> {self.recovery.phase}, selected={choice.get("selected_id")}')
         return command
 
@@ -700,11 +700,11 @@ class PlanningNode(Node):
             goal = self.target_pose
             if goal is not None and self.nav_active and not self.nav_paused:
                 now = time.monotonic()
-                owned = (self.recovery.policy.scan is not None or
-                         self.recovery.executor.active is not None or self.recovery.approach_active)
-                waypoint = self.guide.update(init_p,goal,now,ESDF_map,self.origin,self.resolution,
-                    half_w,self.recovery.lab.cells,self.recovery.lab.resolution,
-                    self.obstacle_config.dilation_cells,recovery_owned=owned)
+                self.recovery.tracker.update(init_p[:2], now)
+                stalled = self.recovery.tracker.stalled(now, self.guide.stall_duration_s)
+                waypoint = self.guide.update(init_p,goal,now,stalled,ESDF_map,self.origin,self.resolution,
+                    half_w,self.recovery.map.cells,self.recovery.map.resolution,
+                    self.obstacle_config.dilation_cells,recovery_owned=self.recovery.owns_motion())
                 if waypoint is not None:
                     # Retained obstacles guide the route; the live scorer validates motion.
                     guide_trajs, guide_params = generate_trajectory_library_3d(

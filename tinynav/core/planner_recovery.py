@@ -1,15 +1,16 @@
-"""Observed planner recovery with bounded actions and map-aware route ranking."""
-import math
-import heapq
-from collections import deque
+"""Rule-based planner recovery: bounded maneuvers ranked on a retained observed map.
+
+The planner feeds depth frames via observe() and calls tick() at plan rate.
+tick() returns (v, w) while recovery owns motion, else None.
+Unknown space is never assumed free: only measured-clear footprints are used.
+"""
 import copy
-import hashlib
-import json
-import time
-import uuid
-import numpy as np
+import heapq
+import math
+from collections import deque
 from dataclasses import asdict
-from types import SimpleNamespace
+
+import numpy as np
 
 
 def footprint_cells(xy, robot, resolution):
@@ -22,42 +23,60 @@ def footprint_cells(xy, robot, resolution):
             for i in range(-n,n+1) for j in range(-n,n+1) if math.hypot(i*resolution,j*resolution)<=radius+resolution/2}
 
 
-DIRECTIONS = [('ahead', 0), ('ahead_left', 45), ('left', 90), ('behind_left', 135),
-              ('behind', 180), ('behind_right', -135), ('right', -90), ('ahead_right', -45)]
+class MotionTracker:
+    """Shared motion history: anchor-stall (guide) and windowed path length (recovery)."""
+    move_epsilon_m = .1
+    window_s = 8.0
+
+    def __init__(self, maxlen=600):
+        self.history = deque(maxlen=maxlen)  # (now, [x, y])
+        self.anchor = None
+        self.anchor_since = None
+
+    def reset(self):
+        self.history.clear()
+        self.anchor = None
+        self.anchor_since = None
+
+    def update(self, xy, now):
+        xy = [float(xy[0]), float(xy[1])]
+        if self.anchor is None or math.dist(xy, self.anchor) > self.move_epsilon_m:
+            self.anchor, self.anchor_since = xy, now
+        self.history.append((now, xy))
+
+    def stalled(self, now, duration_s):
+        """True when the robot stayed within move_epsilon_m for duration_s."""
+        return self.anchor_since is not None and now - self.anchor_since >= duration_s
+
+    def recent(self, now):
+        """(window duration, path length) inside window_s, excluding stale gaps."""
+        points = [p for p in self.history if now - p[0] <= self.window_s]
+        if len(points) < 2:
+            return 0.0, 0.0
+        moved = sum(math.dist(a[1], b[1]) for a, b in zip(points, points[1:]))
+        return points[-1][0] - points[0][0], moved
 
 
-def bearing_name(angle):
-    return min(DIRECTIONS, key=lambda item: abs((angle-item[1]+180) % 360-180))[0]
+class ObservationMap:
+    """Conservative local occupancy: measured clear/blocked cells at fixed resolution.
 
-
-class NavigationLab:
+    Blocked evidence never expires (dead-end walls must stay); clear evidence
+    expires so moved obstacles stop blocking after clear_ttl_s.
+    """
     resolution = 0.1
+    clear_ttl_s = 30.0
+    max_cells = 50000
 
     def __init__(self):
-        self.reset()
+        self.cells = {}
+        self.observed_at = {}
 
     def reset(self):
         self.cells = {}
-        self.cell_observed_at = {}
-        self.history = deque(maxlen=160)
-        self.run = None
-        self.samples = []
+        self.observed_at = {}
 
-    def begin(self, config, xy, yaw, timeout=120):
-        self.reset()
-        self.run = {'id': uuid.uuid4().hex, 'scenario': config.get('scenario_id', config.get('name','custom')), 'config': copy.deepcopy(config), 'status': 'running',
-                    'timeout_s': timeout, 'arrival_radius_m': 0.35, 'path_length_m': 0.0,
-                    'collision_events': 0, 'stuck_events': 0, 'elapsed_s': 0.0,
-                    'distance_to_goal_m': math.dist(xy, config['target'][:2]),
-                    'started_at_unix': time.time(),
-                    'config_hash': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()[:16]}
-        self.started = time.monotonic()
-        self.previous_xy = list(xy)
-        self.was_collision = False
-        self.was_stuck = False
-
-    def observe_depth(self, depth, transform, camera, robot):
-        # Only measured rays carve free space. Zero/no-return depth remains unknown.
+    def observe(self, depth, transform, camera, robot, now):
+        # Only measured rays carve free space. Zero/no-return depth stays unknown.
         h, w = depth.shape
         v, u = np.mgrid[0:h:4, 0:w:4]
         z = depth[v, u].ravel()
@@ -75,120 +94,30 @@ class NavigationLab:
         for endpoint in endpoints:
             length = np.linalg.norm(endpoint-origin)
             n = max(2, int(length/0.07))
-            points = origin + np.arange(n)[:, None]/n*(endpoint-origin)
-            points = points[(points[:, 2] >= bottom) & (points[:, 2] <= top)]
-            free.update(map(tuple, np.floor(points[:, :2]/self.resolution).astype(int)))
+            ray = origin + np.arange(n)[:, None]/n*(endpoint-origin)
+            ray = ray[(ray[:, 2] >= bottom) & (ray[:, 2] <= top)]
+            free.update(map(tuple, np.floor(ray[:, :2]/self.resolution).astype(int)))
             if bottom <= endpoint[2] <= top:
                 occupied.add(tuple(np.floor(endpoint[:2]/self.resolution).astype(int)))
-        observed_now = time.monotonic()
         for cell in free:
             if self.cells.get(cell) != 'blocked':
                 self.cells[cell] = 'clear'
-                self.cell_observed_at[cell] = observed_now
+                self.observed_at[cell] = now
         for cell in occupied:
             self.cells[cell] = 'blocked'
-            self.cell_observed_at[cell] = observed_now
-        if len(self.cells) > 50000:
+            self.observed_at[cell] = now
+        # Clear evidence expires; blocked evidence is retained until reset.
+        self.cells = {c: v for c, v in self.cells.items()
+                      if v == 'blocked' or now - self.observed_at[c] <= self.clear_ttl_s}
+        self.observed_at = {c: t for c, t in self.observed_at.items() if c in self.cells}
+        if len(self.cells) > self.max_cells:
             center = origin[:2]/self.resolution
-            self.cells = {k: val for k, val in self.cells.items() if math.dist(k, center) < 120}
-            self.cell_observed_at = {k:v for k,v in self.cell_observed_at.items() if k in self.cells}
+            self.cells = {k: v for k, v in self.cells.items() if math.dist(k, center) < 120}
+            self.observed_at = {c: t for c, t in self.observed_at.items() if c in self.cells}
 
-    def update(self, xy, yaw, target, collision, now=None):
-        now = time.monotonic() if now is None else now
-        distance = math.dist(xy, target[:2])
-        self.history.append((now, list(xy), yaw, distance))
-        recent = self.recent(now)
-        if self.run and self.run['status'] == 'running':
-            r = self.run
-            r['elapsed_s'] = round(now-self.started, 3)
-            r['path_length_m'] += math.dist(xy, self.previous_xy)
-            self.previous_xy = list(xy)
-            r['distance_to_goal_m'] = distance
-            if collision and not self.was_collision:
-                r['collision_events'] += 1
-            stuck = recent['pattern'] == 'stuck'
-            if stuck and not self.was_stuck:
-                r['stuck_events'] += 1
-            self.was_stuck, self.was_collision = stuck, collision
-            self.samples.append({'t': r['elapsed_s'], 'xy': list(xy), 'yaw_deg': yaw,
-                                 'collision': collision, 'distance_m': distance})
-            if collision:
-                r['status'] = 'collision'
-            elif distance <= r['arrival_radius_m']:
-                r['status'] = 'arrived'
-            elif r['elapsed_s'] >= r['timeout_s']:
-                r['status'] = 'timeout'
-        return recent
-
-    def recent(self, now=None):
-        now = (self.history[-1][0] if self.history else time.monotonic()) if now is None else now
-        history = [p for p in self.history if now-p[0] <= 8]
-        if len(history) < 2:
-            return {'window_s': 0, 'moved_m': 0, 'turned_deg': 0, 'target_closer_m': 0, 'pattern': 'starting'}
-        moved = sum(math.dist(a[1], b[1]) for a,b in zip(history, history[1:]))
-        turned = sum(abs((b[2]-a[2]+180)%360-180) for a,b in zip(history, history[1:]))
-        progress = history[0][3]-history[-1][3]
-        duration = history[-1][0]-history[0][0]
-        pattern = ('starting' if duration < 3 else 'stuck' if moved < 0.1 and turned < 15
-                   else 'turning_on_the_spot' if moved < 0.1 else 'advancing' if progress > 0.1
-                   else 'moving_without_getting_closer')
-        return dict(window_s=round(duration,2), moved_m=round(moved,3), turned_deg=round(turned,1),
-                    target_closer_m=round(progress,3), pattern=pattern)
-
-    def ray(self, xy, angle, config, mode, limit=5):
-        last = 0.0
-        for distance in np.arange(0.2, limit+0.01, 0.1):
-            x, y = xy[0]+math.cos(angle)*distance, xy[1]+math.sin(angle)*distance
-            if mode == 'observed':
-                state = self.cells.get((math.floor(x/self.resolution), math.floor(y/self.resolution)), 'unknown')
-            elif config.get('map_path'):
-                state = 'unknown'  # Imported volumes require a separate body-band adapter.
-            else:
-                state = 'clear'
-                ground = config['camera'].get('ground_z', 0)
-                band = config['robot'].get('obstacle', {})
-                for obj in config.get('objects', []):
-                    cx,cy,cz = obj['center']; sx,sy,sz = obj['size']
-                    if (abs(x-cx)<=sx/2 and abs(y-cy)<=sy/2 and
-                        cz+sz/2>=max(ground+0.05, config['camera'].get('mount_height',0.45)+band.get('robot_z_bottom',-0.4)) and
-                        cz-sz/2<=config['camera'].get('mount_height',0.45)+band.get('robot_z_top',0.4)):
-                        state = 'blocked'; break
-            if state != 'clear':
-                return {'known_clear_distance_m': round(last,2), 'ends_in': state}
-            last = float(distance)
-        return {'known_clear_distance_m': round(last,2), 'ends_in': 'range_limit'}
-
-    def world_state(self, xy, yaw, config, mode='observed'):
-        target = config['target']; dx,dy = target[0]-xy[0], target[1]-xy[1]
-        distance = math.hypot(dx,dy)
-        bearing = (math.degrees(math.atan2(dy,dx))-yaw+180)%360-180
-        directions = {name:self.ray(xy, math.radians(yaw+angle), config, mode)
-                      for name,angle in DIRECTIONS}
-        direct = self.ray(xy, math.atan2(dy,dx), config, mode, min(5,max(0.2,distance)))
-        return {'schema_version': 1, 'source': mode, 'frame': 'robot_relative',
-                'goal': {'bearing': bearing_name(bearing), 'bearing_deg': round(bearing,1),
-                         'distance_m': round(distance,2), 'distance': 'near' if distance<2 else 'far',
-                         'position_source': 'user_supplied_goal'},
-                'robot': {'recent': self.recent()}, 'directions': directions,
-                'way_to_target': direct,
-                'notes': ['Distances are sampled center rays, not footprint-safe paths.',
-                          'Unknown is not free. No semantic object labels are inferred.',
-                          'Observed cells retain prior depth observations until reset.',
-                          'Full-scene mode uses synthetic boxes only; imported maps are unknown.']}
-
-    def metrics(self):
-        if not self.run:
-            return {'status': 'idle'}
-        return {k:v for k,v in self.run.items() if k!='config'}
-
-    def export(self):
-        return {'schema_version':1, 'metrics': self.metrics(),
-                'config': copy.deepcopy(self.run['config']) if self.run else None,
-                'samples': copy.deepcopy(self.samples),
-                'definitions': {'arrival': 'XY distance <= 0.35 m; no semantic/visibility check',
-                                'collision': 'existing simulator geometric collision latch',
-                                'stuck': '8 s history; >=3 s, <0.1 m movement and <15 deg turning',
-                                'time': 'monotonic wall time; not deterministic simulation time'}}
+    def footprint_clear(self, xy, yaw, robot):
+        """Unknown counts as blocked: only measured-clear footprints pass."""
+        return all(self.cells.get(c) == 'clear' for c in footprint_cells(xy, robot, self.resolution))
 
 
 def advance(xy, yaw, v, w, dt):
@@ -243,8 +172,7 @@ def proposals(xy, yaw, target, robot, cells, resolution, memory):
         result.append({'id':ident,'stages':stages,'duration_s':round(sum(s['duration_s'] for s in stages),2),
                        'predicted_goal_progress_m':round(math.dist(xy,target[:2])-math.dist(end_xy,target[:2]),3),
                        'displacement_m':round(math.dist(xy,end_xy),3),'final_yaw_deg':round(end_yaw,1),
-                       'unknown_fraction':round(unknown/max(1,len(seen)),3),'observed_blocked_cells':blocked,
-                       'observation_note':'Measured occupancy only. Unknown footprint cells require execution checks; no safety guarantee.'})
+                       'unknown_fraction':round(unknown/max(1,len(seen)),3),'observed_blocked_cells':blocked})
     return result
 
 
@@ -315,8 +243,7 @@ def shortlist(plans, xy, yaw, robot, cells, resolution):
             excluded[plan['id']] = 'no_reverse_displacement'
             continue
         eligible.append((retreat,plan))
-    return {'plans':[p for _,p in eligible],'excluded':excluded,'rule':'observed_route_cost',
-            'current_safety_unproven':True,'model_preference':None}
+    return {'plans':[p for _,p in eligible],'excluded':excluded}
 
 
 def route_cost(plan, previous_attempts=()):
@@ -338,7 +265,6 @@ def choose(screening, previous_attempts=()):
     plans = screening['plans']
     if not plans:return None
     return min(plans,key=lambda p:(route_cost(p,previous_attempts),p['id']))
-
 
 
 def estimate_handoff(plans, xy, yaw, target, robot, cells, resolution):
@@ -408,235 +334,241 @@ def recovery_candidates(offered,xy,yaw,robot,cells,resolution):
     return screened
 
 
-class RuleRecovery:
-    def __init__(self):
-        self.phase = 'watching'
+class RecoveryRuntime:
+    """Scan-rank-execute recovery owned by the planner.
+
+    Phases: watching -> scanning -> fresh_report -> executing -> planner_resumed,
+    plus terminal guards (paused/inactive/arrived/stale_sensor/timer_gap/...).
+    """
+    goal_radius_m = .35
+    approach_radius_m = .65
+    approach_timeout_s = 15.0
+    stale_s = .5
+    timer_gap_s = .25
+    drift_tolerance_m = .02
+    pose_deviation_m = .25
+    pose_deviation_deg = 20
+    scan_rotation_deg = 359.5
+    scan_timeout_s = 25.0
+    scan_interval_s = 8.0
+    max_scans = 3
+    stall_window_s = 6.0
+    stall_path_m = .1
+
+    def __init__(self, robot, tracker=None):
+        self.robot = asdict(robot)
+        self.robot['max_linear_vel'] = min(.2, self.robot['max_linear_vel'])
+        self.robot['max_angular_vel'] = min(.4, self.robot['max_angular_vel'])
+        self.robot['recovery_margin'] = .05
+        self.robot['recovery_detour'] = True
+        self.map = ObservationMap()
+        self.tracker = tracker if tracker is not None else MotionTracker()
+        self.reset()
+
+    def reset(self, target=None):
+        self.map.reset()
+        self.tracker.reset()
+        self.executor = RecoveryExecutor()
+        self.target = list(target) if target is not None else None
+        self.phase = 'idle'
         self.scan = None
         self.last_selection = None
         self.attempts = 0
         self.scans = 0
-        self.next_scan = 0
-
-    def status(self):
-        return {'phase':self.phase,'scan':self.scan,'selection':self.last_selection,
-                'attempts':self.attempts,'scan_attempts':self.scans,'decision_source':'rule','model_used':False}
-
-    def step(self,node,now):
-        def event(name,**values):
-            node.experiment_events.append({'t':node.lab.metrics()['elapsed_s'],'event':name,'source':'rule',**values})
-        def release(phase):
-            node.override = None
-            node.override_until = 0
-            self.scan = None
-            self.phase = phase
-            self.next_scan = now+8
-        running = node.running and node.lab.run and node.lab.run['status']=='running'
-        if not running:
-            if self.scan:
-                release('stopped')
-            self.phase = node.lab.run['status'] if node.lab.run else 'idle'
-            return
-        if node.world_mode != 'observed' or node.config.get('map_path'):
-            if self.scan:
-                release('unsupported_scene')
-            self.phase = 'unsupported_scene'
-            return
-        age = now-node.plan_received_at if node.plan_received_at is not None else float('inf')
-        if self.scan:
-            scan = self.scan
-            if node.collision or math.dist(scan['anchor_xy'],node.control_xy)>.02 or age>.5 or now-scan['started']>25:
-                event('scan_aborted',reason='collision_drift_stale_report_or_timeout')
-                release('scan_aborted')
-                return
-            scan['rotation_deg'] += abs((node.yaw_deg-scan['last_yaw']+180)%360-180)
-            scan['last_yaw'] = node.yaw_deg
-            if scan['rotation_deg'] < 359.5:
-                node.override['yaw_radps'] = min(.6,node.config['robot']['max_angular_vel'],math.radians(360-scan['rotation_deg'])/.25)
-                return
-            node.override['yaw_radps'] = 0
-            if self.phase != 'fresh_report':
-                self.phase = 'fresh_report'
-                scan['finished'] = now
-                event('scan_completed',rotation_deg=scan['rotation_deg'])
-                return
-            if node.plan_received_at <= scan['finished']:
-                return
-            offered = proposals(node.control_xy,node.yaw_deg,node.config['target'],node.config['robot'],node.lab.cells,node.lab.resolution,node.recovery.memory)
-            screened = recovery_candidates(offered,node.control_xy,node.yaw_deg,node.config['robot'],node.lab.cells,node.lab.resolution)
-            memory = [a for a in node.recovery.memory if min(math.dist(node.control_xy,a['start_xy']),
-                math.dist(node.control_xy,a.get('end_xy',a['start_xy'])))<1.0]
-            estimate_handoff(screened['plans'],node.control_xy,node.yaw_deg,node.config['target'],
-                node.config['robot'],node.lab.cells,node.lab.resolution)
-            plan = choose(screened,memory)
-            self.last_selection = {'eligible_ids':[p['id'] for p in screened['plans']],
-                                   'excluded':screened['excluded'],'coverage':screened['coverage'],'rule':screened['rule'],
-                                   'selected_id':plan['id'] if plan else None,'model_preference':None,
-                                   'costs':{p['id']:route_cost(p,memory) for p in screened['plans']},
-                                   'handoff_costs':{p['id']:p.get('handoff_cost_m') for p in screened['plans']}}
-            event('candidates_screened',**self.last_selection)
-            release('executing' if plan else 'no_observed_candidate')
-            if plan:
-                node.recovery.start(plan,node.control_xy,node.yaw_deg,node.config['target'],now)
-                self.attempts += 1
-            return
-        if node.recovery.active:
-            self.phase = 'executing'
-            return
-        if now < node.recovery.settle_until or now < self.next_scan:
-            self.phase = 'planner_resumed'
-            return
-        self.phase = 'watching'
-        recent = node.lab.recent()
-        if self.scans >= 3:
-            self.phase = 'attempt_limit'
-            return
-        if age>.5 or node.override or recent['window_s']<6 or recent['moved_m']>=.1:
-            return
-        if node.recovery.memory:
-            last = node.recovery.memory[-1]
-            if last.get('outcome')=='completed' and min(math.dist(node.control_xy,last.get('end_xy',node.control_xy)),
-                    math.dist(node.control_xy,last['start_xy']))<.8:
-                last['outcome']='reblocked'
-                event('recovery_reblocked',strategy_id=last['strategy_id'],retreat_m=last.get('retreat_m',0))
-        self.scan = {'anchor_xy':list(node.control_xy),'last_yaw':node.yaw_deg,'rotation_deg':0.0,'started':now}
-        self.scans += 1
-        self.phase = 'scanning'
-        node.override = {'linear_mps':0,'yaw_radps':min(.6,node.config['robot']['max_angular_vel'])}
-        node.override_until = now+26
-        event('scan_started',trigger=recent)
-
-
-class RecoveryRuntime:
-    def __init__(self, robot):
-        self.robot = asdict(robot)
-        self.robot['max_linear_vel'] = min(.2,self.robot['max_linear_vel'])
-        self.robot['max_angular_vel'] = min(.4,self.robot['max_angular_vel'])
-        self.robot['recovery_margin'] = .05
-        self.robot['recovery_detour'] = True
-        self.lab = NavigationLab()
-        self.policy = RuleRecovery()
-        self.executor = RecoveryExecutor()
-        self.target = None
+        self.next_scan = 0.0
         self.depth_at = None
         self.last_tick = None
-        self.phase = 'idle'
-        self.events = []
-        self.started = None
+        self.last_xy = None
         self.expected_pose = None
-        self.goal_reached = False;self.override = None;self.last_xy = None;self.approach_active=False;self.approach_attempted=False;self.approach_started=None
+        self.goal_reached = False
+        self.approach_active = False
+        self.approach_attempted = False
+        self.approach_started = None
+        self.events = []
 
-    def reset(self, target=None):
-        self.lab.reset();self.policy = RuleRecovery();self.executor = RecoveryExecutor()
-        self.target = list(target) if target is not None else None
-        self.last_tick = None;self.started = None;self.expected_pose = None
-        self.goal_reached = False;self.override = None;self.last_xy = None;self.approach_active=False;self.approach_attempted=False;self.approach_started=None;self.phase = 'idle';self.events = [];self.depth_at = None
+    def owns_motion(self):
+        return self.scan is not None or self.executor.active is not None or self.approach_active
 
     def observe(self, depth, transform, camera, now):
-        self.lab.observe_depth(depth,transform,camera,self.robot)
+        self.map.observe(depth, transform, camera, self.robot, now)
         self.depth_at = now
-        # Clear evidence expires; unknown never becomes free from pose history.
-        self.lab.cells = {c:v for c,v in self.lab.cells.items()
-                          if now-self.lab.cell_observed_at[c]<=30 or v=='blocked'}
-        self.lab.cell_observed_at = {c:t for c,t in self.lab.cell_observed_at.items() if c in self.lab.cells}
 
-    def collision(self, xy, yaw):
-        return any(self.lab.cells.get(c)!='clear' for c in footprint_cells(xy,self.robot,self.lab.resolution))
-
-    def stop(self, reason):
-        owned = self.policy.scan is not None or self.executor.active is not None or self.approach_active
+    def stop(self, reason, now):
+        owned = self.owns_motion()
         if self.executor.active and self.target is not None:
-            self.executor.finish(reason,self.last_xy or self.executor.active['start_xy'],self.target,self.last_tick or 0)
-        if owned:self.events.append({'event':'recovery_stopped','reason':reason,'source':'rule'})
-        self.policy.scan = None;self.executor.active = None;self.expected_pose = None;self.override = None
-        self.lab.history.clear();self.policy.next_scan = (self.last_tick or 0)+8
-        self.phase = reason;self.approach_active=False
-        return (0,0) if owned else None
+            self.executor.finish(reason, self.last_xy or self.executor.active['start_xy'], self.target, now)
+        if owned:
+            self.events.append({'event': 'recovery_stopped', 'reason': reason})
+        self.scan = None
+        self.executor.active = None
+        self.expected_pose = None
+        self.tracker.reset()
+        self.next_scan = now + self.scan_interval_s
+        self.phase = reason
+        self.approach_active = False
+        return (0, 0) if owned else None
 
     def tick(self, xy, yaw, now, active, paused, pose_age):
-        if pose_age<=.5:self.last_xy=list(xy)
-        dt = now-self.last_tick if self.last_tick is not None else 0
+        if pose_age <= self.stale_s:
+            self.last_xy = list(xy)
+        dt = now - self.last_tick if self.last_tick is not None else 0
         self.last_tick = now
         if not active or paused or self.target is None:
-            return self.stop('paused' if paused else 'inactive')
+            return self.stop('paused' if paused else 'inactive', now)
         if self.goal_reached:
-            self.stop('arrived');return (0,0)
-        if pose_age>.5 or self.depth_at is None or now-self.depth_at>.5:
-            return self.stop('stale_sensor')
-        if math.dist(xy,self.target[:2])<=.35:
-            self.goal_reached = True;self.stop('arrived');return (0,0)
-        if dt>.25:
-            return self.stop('timer_gap')
+            self.stop('arrived', now)
+            return (0, 0)
+        if pose_age > self.stale_s or self.depth_at is None or now - self.depth_at > self.stale_s:
+            return self.stop('stale_sensor', now)
+        if math.dist(xy, self.target[:2]) <= self.goal_radius_m:
+            self.goal_reached = True
+            self.stop('arrived', now)
+            return (0, 0)
+        if dt > self.timer_gap_s:
+            return self.stop('timer_gap', now)
         if self.expected_pose is not None:
-            p,a=self.expected_pose
-            if math.dist(xy,p)>.25 or abs((yaw-a+180)%360-180)>20:
-                return self.stop('execution_pose_deviation')
-        self.lab.history.append((now,list(xy),yaw,math.dist(xy,self.target[:2])))
-        if self.started is None:self.started=now
-        recent=self.lab.recent(now)
-        if self.approach_active or (not self.approach_attempted and not self.executor.active and
-                math.dist(xy,self.target[:2])<=.65 and recent['window_s']>=6 and recent['moved_m']<.1):
-            command=self.goal_approach(xy,yaw,now)
-            if command is not None:return command
-        # RuleRecovery accepts a small adapter; it never publishes velocity itself.
-        self.lab.run = {'status':'running'}
-        self.lab.metrics = lambda:{'elapsed_s':round(now-self.started,3)}
-        node = SimpleNamespace(running=True,world_mode='observed',config={'target':self.target,'robot':self.robot},
-            lab=self.lab,plan_received_at=self.depth_at,collision=False,control_xy=xy,yaw_deg=yaw,
-            override=self.override,override_until=0,recovery=self.executor,experiment_events=self.events)
-        owned_before = self.policy.scan is not None or self.executor.active is not None
-        self.policy.step(node,now)
-        self.override = node.override
-        self.phase = self.policy.phase
-        if self.policy.scan:
-            if self.collision(xy,yaw):
-                return self.stop('scan_footprint_unknown_or_blocked') or (0,0)
-            self.expected_pose = None
-            if not node.override:return (0,0)
-            w=node.override['yaw_radps']
-            if w:w=math.copysign(min(self.robot['max_angular_vel'],max(abs(w),self.robot['min_angular_vel'])),w)
-            return node.override['linear_mps'],w
-        if self.executor.active:
-            stage = self.executor.active['plan']['stages'][self.executor.active['stage']]
-            remaining = {**stage,'duration_s':self.executor.active['remaining']}
-            # Recheck the entire remaining stage against the latest observed map.
-            if any(self.collision(p,a) for p,a in poses(xy,yaw,[remaining])):
-                self.executor.finish('updated_footprint_rejected',xy,self.target,now)
-                self.expected_pose = None;return (0,0)
-            command = self.executor.step(xy,yaw,self.target,max(0,dt),now,now-self.depth_at,self.collision)
-            if command:
-                v,w,_=command
-                self.expected_pose = (list(xy),yaw) if self.expected_pose is None else self.expected_pose
-                p,a=self.expected_pose
-                self.expected_pose = (list(poses(p,a,[{'linear_mps':v,'yaw_radps':w,'duration_s':max(0,dt)}]))[-1])
-                return v,w
-        self.expected_pose = None
-        return (0,0) if owned_before else None
+            p, a = self.expected_pose
+            if math.dist(xy, p) > self.pose_deviation_m or abs((yaw-a+180)%360-180) > self.pose_deviation_deg:
+                return self.stop('execution_pose_deviation', now)
+        self.tracker.update(xy, now)
+        window_s, moved_m = self.tracker.recent(now)
+        if self.approach_active or (not self.approach_attempted and self.executor.active is None
+                and math.dist(xy, self.target[:2]) <= self.approach_radius_m
+                and window_s >= self.stall_window_s and moved_m < self.stall_path_m):
+            command = self.goal_approach(xy, yaw, now)
+            if command is not None:
+                return command
+        owned_before = self.owns_motion()
+        command = self._recovery_step(xy, yaw, now, dt, window_s, moved_m)
+        if command is not None:
+            return command
+        return (0, 0) if owned_before else None
 
     def goal_approach(self, xy, yaw, now):
-        if self.approach_active and now-self.approach_started>15:
-            return self.stop('goal_approach_timeout')
-        if self.collision(xy,yaw):
-            return (0,0) if self.approach_active else None
-        bearing=math.atan2(self.target[1]-xy[1],self.target[0]-xy[0])
-        error=(bearing-math.radians(yaw)+math.pi)%(2*math.pi)-math.pi
-        v=0.0;w=0.0
-        if abs(error)>.15:
-            w=math.copysign(min(self.robot['max_angular_vel'],max(self.robot['min_angular_vel'],abs(error)*.8)),error)
+        if self.approach_active and now - self.approach_started > self.approach_timeout_s:
+            return self.stop('goal_approach_timeout', now)
+        if not self.map.footprint_clear(xy, yaw, self.robot):
+            return (0, 0) if self.approach_active else None
+        bearing = math.atan2(self.target[1]-xy[1], self.target[0]-xy[0])
+        error = (bearing-math.radians(yaw)+math.pi)%(2*math.pi)-math.pi
+        v = w = 0.0
+        if abs(error) > .15:
+            w = math.copysign(min(self.robot['max_angular_vel'], max(self.robot['min_angular_vel'], abs(error)*.8)), error)
         else:
-            v=self.robot['min_linear_vel']
-            if not 0<v<=self.robot['max_linear_vel']:return None
-            distance=math.dist(xy,self.target[:2])-.35
-            stage={'linear_mps':v,'yaw_radps':0,'duration_s':distance/v}
-            if any(self.collision(p,a) for p,a in poses(xy,yaw,[stage])):
-                return (0,0) if self.approach_active else None
+            v = self.robot['min_linear_vel']
+            if not 0 < v <= self.robot['max_linear_vel']:
+                return None
+            distance = math.dist(xy, self.target[:2]) - self.goal_radius_m
+            stage = {'linear_mps': v, 'yaw_radps': 0, 'duration_s': distance/v}
+            if any(not self.map.footprint_clear(p, a, self.robot) for p, a in poses(xy, yaw, [stage])):
+                return (0, 0) if self.approach_active else None
         if not self.approach_active:
-            self.policy.scan=None;self.override=None
-            self.approach_active=True;self.approach_attempted=True;self.approach_started=now
-            self.events.append({'event':'goal_approach_started','source':'rule'})
-        self.phase='goal_approach'
-        return v,w
+            self.scan = None
+            self.approach_active = True
+            self.approach_attempted = True
+            self.approach_started = now
+            self.events.append({'event': 'goal_approach_started'})
+        self.phase = 'goal_approach'
+        return v, w
+
+    def _release(self, phase, now):
+        self.scan = None
+        self.phase = phase
+        self.next_scan = now + self.scan_interval_s
+
+    def _recovery_step(self, xy, yaw, now, dt, window_s, moved_m):
+        depth_age = now - self.depth_at
+        # --- decision: scan state machine ---
+        if self.scan is not None:
+            self.expected_pose = None
+            scan = self.scan
+            if not self.map.footprint_clear(xy, yaw, self.robot):
+                return self.stop('scan_footprint_unknown_or_blocked', now) or (0, 0)
+            if (math.dist(scan['anchor_xy'], xy) > self.drift_tolerance_m
+                    or depth_age > self.stale_s or now - scan['started'] > self.scan_timeout_s):
+                self._release('scan_aborted', now)
+            else:
+                scan['rotation_deg'] += abs((yaw-scan['last_yaw']+180)%360-180)
+                scan['last_yaw'] = yaw
+                if scan['rotation_deg'] < self.scan_rotation_deg:
+                    w = min(.6, self.robot['max_angular_vel'], math.radians(360-scan['rotation_deg'])/.25)
+                    if w:
+                        w = math.copysign(min(self.robot['max_angular_vel'], max(abs(w), self.robot['min_angular_vel'])), w)
+                    return 0.0, w
+                if self.phase != 'fresh_report':
+                    self.phase = 'fresh_report'
+                    scan['finished'] = now
+                    self.events.append({'event': 'scan_completed', 'rotation_deg': round(scan['rotation_deg'], 1)})
+                elif self.depth_at > scan['finished']:
+                    self._select_and_start(xy, yaw, now)
+        elif self.executor.active is not None:
+            self.phase = 'executing'
+        elif now < self.executor.settle_until or now < self.next_scan:
+            self.phase = 'planner_resumed'
+        else:
+            self.phase = 'watching'
+            if self.scans >= self.max_scans:
+                self.phase = 'attempt_limit'
+            elif window_s >= self.stall_window_s and moved_m < self.stall_path_m:
+                if self.executor.memory:
+                    last = self.executor.memory[-1]
+                    if last.get('outcome') == 'completed' and min(math.dist(xy, last.get('end_xy', xy)),
+                            math.dist(xy, last['start_xy'])) < .8:
+                        last['outcome'] = 'reblocked'
+                        self.events.append({'event': 'recovery_reblocked', 'strategy_id': last['strategy_id'],
+                                            'retreat_m': last.get('retreat_m', 0)})
+                self.scan = {'anchor_xy': list(xy), 'last_yaw': yaw, 'rotation_deg': 0.0, 'started': now}
+                self.scans += 1
+                self.phase = 'scanning'
+                self.events.append({'event': 'scan_started'})
+                if not self.map.footprint_clear(xy, yaw, self.robot):
+                    return self.stop('scan_footprint_unknown_or_blocked', now) or (0, 0)
+                w = min(.6, self.robot['max_angular_vel'])
+                w = math.copysign(min(self.robot['max_angular_vel'], max(abs(w), self.robot['min_angular_vel'])), w)
+                return 0.0, w
+        # --- execution: fresh_report wait or active maneuver ---
+        if self.scan is not None:
+            return 0.0, 0.0
+        if self.executor.active is not None:
+            stage = self.executor.active['plan']['stages'][self.executor.active['stage']]
+            remaining = {**stage, 'duration_s': self.executor.active['remaining']}
+            # Recheck the entire remaining stage against the latest observed map.
+            if any(not self.map.footprint_clear(p, a, self.robot) for p, a in poses(xy, yaw, [remaining])):
+                self.executor.finish('updated_footprint_rejected', xy, self.target, now)
+                self.expected_pose = None
+                return (0.0, 0.0)
+            collision = lambda p, a: not self.map.footprint_clear(p, a, self.robot)
+            command = self.executor.step(xy, yaw, self.target, max(0, dt), now, depth_age, collision)
+            if command:
+                v, w, _ = command
+                self.expected_pose = (list(xy), yaw) if self.expected_pose is None else self.expected_pose
+                p, a = self.expected_pose
+                self.expected_pose = list(poses(p, a, [{'linear_mps': v, 'yaw_radps': w, 'duration_s': max(0, dt)}]))[-1]
+                return v, w
+        self.expected_pose = None
+        return None
+
+    def _select_and_start(self, xy, yaw, now):
+        cells, resolution = self.map.cells, self.map.resolution
+        offered = proposals(xy, yaw, self.target, self.robot, cells, resolution, self.executor.memory)
+        screened = recovery_candidates(offered, xy, yaw, self.robot, cells, resolution)
+        memory = [a for a in self.executor.memory if min(math.dist(xy, a['start_xy']),
+                math.dist(xy, a.get('end_xy', a['start_xy']))) < 1.0]
+        estimate_handoff(screened['plans'], xy, yaw, self.target, self.robot, cells, resolution)
+        plan = choose(screened, memory)
+        self.last_selection = {'eligible_ids': [p['id'] for p in screened['plans']],
+                               'excluded': screened['excluded'], 'coverage': screened['coverage'],
+                               'selected_id': plan['id'] if plan else None,
+                               'costs': {p['id']: route_cost(p, memory) for p in screened['plans']},
+                               'handoff_costs': {p['id']: p.get('handoff_cost_m') for p in screened['plans']}}
+        self._release('executing' if plan else 'no_observed_candidate', now)
+        if plan:
+            self.executor.start(plan, xy, yaw, self.target, now)
+            self.attempts += 1
 
     def status(self):
-        return {'phase':self.phase,'enabled':True,'decision_source':'rule','model_used':False,
-                'scan':self.policy.scan,'scan_attempts':self.policy.scans,'active_strategy':self.executor.active,'attempts':self.executor.memory,
-                'selection':self.policy.last_selection,'events':(self.events+self.executor.events)[-40:]}
+        return {'phase': self.phase, 'decision_source': 'rule',
+                'scan': self.scan, 'scan_attempts': self.scans, 'attempts': self.attempts,
+                'active_strategy': self.executor.active, 'memory': self.executor.memory,
+                'selection': self.last_selection,
+                'events': (self.events + self.executor.events)[-40:]}

@@ -1,15 +1,24 @@
 import unittest
 from types import SimpleNamespace
-from tinynav.core.planner_recovery import RuleRecovery, recovery_candidates
+
+import numpy as np
+
+from tinynav.core.planner_recovery import (
+    MotionTracker, ObservationMap, RecoveryExecutor, RecoveryRuntime,
+    advance, choose, proposals, recovery_candidates, shortlist,
+)
+from tinynav.core.robot_specs import GO2_CONFIG
+
+
+def ready_runtime():
+    r = RecoveryRuntime(GO2_CONFIG); r.reset([4, 0, 0])
+    r.map.cells = {(x, y): 'clear' for x in range(-50, 51) for y in range(-50, 51)}
+    r.depth_at = 10; r.last_tick = 9.9
+    r.tracker.history.extend((10-i/10, [0., 0.]) for i in range(80, 0, -1))
+    return r
 
 
 class RuleTest(unittest.TestCase):
-    def node(self):
-        return SimpleNamespace(running=True,world_mode='observed',config={'target':[4,0,0],'robot':{'max_angular_vel':.75}},
-            lab=SimpleNamespace(run={'status':'running'},metrics=lambda:{'elapsed_s':10},recent=lambda:{'window_s':8,'moved_m':0}),
-            plan_received_at=10,collision=False,control_xy=[0,0],yaw_deg=0,override=None,override_until=0,
-            recovery=SimpleNamespace(active=None,memory=[],settle_until=0),experiment_events=[])
-
     def test_unique_clear_progress_pivot_prevents_unnecessary_retreat(self):
         robot={'length':.4,'width':.3}
         cells={(i,j):'clear' for i in range(-30,31) for j in range(-20,21)}
@@ -31,39 +40,54 @@ class RuleTest(unittest.TestCase):
         cells.clear()
         self.assertEqual(recovery_candidates(plans,[0,0],0,robot,cells,.1)['plans'],[])
 
-    def test_scan_budget_includes_scans_without_execution(self):
-        node=self.node();p=RuleRecovery();p.scans=3;p.step(node,10.1)
-        self.assertEqual(p.phase,'attempt_limit');self.assertIsNone(p.scan)
 
-    def test_stale_report_cannot_start_scan(self):
-        node=self.node();p=RuleRecovery();p.step(node,11)
-        self.assertIsNone(p.scan);self.assertIsNone(node.override)
+class MotionTrackerTests(unittest.TestCase):
+    def test_stall_requires_stationary_anchor(self):
+        t=MotionTracker()
+        t.update([0,0],10)
+        self.assertFalse(t.stalled(11.9,2.0))
+        self.assertTrue(t.stalled(12.0,2.0))
+        t.update([.2,0],13)  # moved past the epsilon: anchor resets
+        self.assertFalse(t.stalled(14.5,2.0))
+        self.assertTrue(t.stalled(15.0,2.0))
 
-    def test_cancel_releases_scan_and_does_not_execute(self):
-        node=self.node();p=RuleRecovery();p.step(node,10.1)
-        self.assertEqual(p.phase,'scanning');self.assertEqual(node.override['linear_mps'],0)
-        node.running=False;p.step(node,10.2)
-        self.assertIsNone(p.scan);self.assertIsNone(node.override);self.assertIsNone(node.recovery.active)
+    def test_recent_reports_windowed_path_length(self):
+        t=MotionTracker()
+        for i in range(20):
+            t.update([i*.01,0],10+i*.2)   # 4 s of creeping, 0.19 m path
+        window,moved=t.recent(14)
+        self.assertGreaterEqual(window,3.8);self.assertAlmostEqual(moved,.19,places=1)
+        t.update([0,0],30)                # gap: old history falls out of the window
+        window,moved=t.recent(30)
+        self.assertEqual(window,0);self.assertEqual(moved,0)
 
-    def test_stale_report_aborts_active_scan(self):
-        node=self.node();p=RuleRecovery();p.step(node,10.1);p.step(node,11)
-        self.assertEqual(p.phase,'scan_aborted');self.assertIsNone(node.override)
+    def test_reset_clears_history_and_anchor(self):
+        t=MotionTracker();t.update([0,0],10)
+        t.reset()
+        self.assertEqual(len(t.history),0);self.assertIsNone(t.anchor);self.assertIsNone(t.anchor_since)
 
-    def test_drift_aborts_active_scan(self):
-        node=self.node();p=RuleRecovery();p.step(node,10.1);node.control_xy=[.03,0];p.step(node,10.2)
-        self.assertEqual(p.phase,'scan_aborted');self.assertIsNone(node.override)
 
-    def test_completed_scan_waits_for_new_report(self):
-        node=self.node();p=RuleRecovery();p.step(node,10.1);p.scan['rotation_deg']=360
-        p.step(node,10.2);self.assertEqual(p.phase,'fresh_report');self.assertEqual(node.override['yaw_radps'],0)
-        p.step(node,10.3);self.assertIsNone(p.last_selection);self.assertIsNone(node.recovery.active)
+class ObservationMapTests(unittest.TestCase):
+    def config(self):
+        return {'camera': {'fx': 1, 'fy': 1}, 'robot': {'obstacle': {'robot_z_bottom': -0.4, 'robot_z_top': 0.4}}}
 
-    def test_full_scene_cannot_start_scan(self):
-        node=self.node();node.world_mode='full_scene';p=RuleRecovery();p.step(node,10.1)
-        self.assertEqual(p.phase,'unsupported_scene');self.assertIsNone(node.override)
+    def test_measured_ray_carves_free_and_blocks_endpoint(self):
+        m=ObservationMap(); cfg=self.config()
+        self.assertFalse(m.cells)
+        T=np.array([[0,0,1,0],[1,0,0,0],[0,-1,0,0.4],[0,0,0,1]],float)
+        m.observe(np.array([[2.]],float),T,cfg['camera'],cfg['robot'],now=100.0)
+        self.assertEqual(m.cells[(20,0)],'blocked')
+        self.assertEqual(m.cells[(10,0)],'clear')
+        self.assertNotIn((25,0),m.cells)
+        m.observe(np.zeros((1,1)),T,cfg['camera'],cfg['robot'],now=100.1)  # blank frame adds nothing
+        self.assertNotIn((25,0),m.cells)
 
-import unittest
-from tinynav.core.planner_recovery import shortlist, choose
+    def test_clear_expires_but_blocked_is_retained(self):
+        m=ObservationMap(); cfg=self.config()
+        m.cells={(0,0):'clear',(1,0):'blocked'}; m.observed_at={(0,0):10.0,(1,0):10.0}
+        m.observe(np.zeros((1,1)),np.eye(4),cfg['camera'],cfg['robot'],now=41.0)
+        self.assertNotIn((0,0),m.cells)
+        self.assertEqual(m.cells[(1,0)],'blocked')
 
 
 class SelectionTest(unittest.TestCase):
@@ -76,7 +100,6 @@ class SelectionTest(unittest.TestCase):
     def test_keep_short_clear_retreats_for_cost_ranking(self):
         result = shortlist(self.plans,[0,0],0,self.robot,self.cells,.1)
         self.assertEqual(len(result['plans']),6)
-        self.assertIsNone(result['model_preference'])
         self.assertEqual(choose(result,[{'strategy_id':'retreat_60_left'}])['id'],'retreat_60_right')
 
     def test_single_unknown_cell_excludes_long_sweep(self):
@@ -91,9 +114,6 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(result['plans'],[])
         self.assertIsNone(choose(result))
 
-import copy
-import unittest
-from tinynav.core.planner_recovery import RecoveryExecutor, proposals, advance
 
 class RecoveryTests(unittest.TestCase):
     robot = {'max_linear_vel':1,'max_angular_vel':.75,'length':.4,'width':.3,'shape':'square'}
@@ -136,41 +156,39 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(e.step([0,0],0,[2,0],.1,.1,.1,collision),(0,0,.1))
         self.assertEqual(e.memory[-1]['outcome'],'stage_collision_rejected')
 
-import unittest
-from tinynav.core.robot_specs import GO2_CONFIG
-from tinynav.core.planner_recovery import RecoveryRuntime
-
 
 class RuntimeTests(unittest.TestCase):
     def ready(self):
-        r=RecoveryRuntime(GO2_CONFIG);r.reset([4,0,0])
-        r.lab.cells={(x,y):'clear' for x in range(-50,51) for y in range(-50,51)}
-        r.depth_at=10;r.last_tick=9.9
-        r.lab.history.extend((10-i/10,[0,0],0,4) for i in range(80,0,-1))
-        return r
+        return ready_runtime()
 
     def test_no_sensor_cannot_start_recovery(self):
         r=self.ready();r.depth_at=None
         self.assertIsNone(r.tick([0,0],0,10,True,False,0))
-        self.assertIsNone(r.policy.scan)
+        self.assertIsNone(r.scan)
 
     def test_stall_starts_scan_and_keeps_override(self):
-        r=self.ready();a=r.tick([0,0],0,10,True,False,0)
-        self.assertEqual(a,(0,.4))
-        r.depth_at=10.1;b=r.tick([0,0],2,10.1,True,False,0)
-        self.assertEqual(b,(0,.4))
-        self.assertEqual(r.policy.scans,1)
+        r=self.ready()
+        self.assertEqual(r.tick([0,0],0,10,True,False,0),(0,.4))
+        r.depth_at=10.1
+        self.assertEqual(r.tick([0,0],2,10.1,True,False,0),(0,.4))
+        self.assertEqual(r.scans,1)
+
+    def test_young_history_does_not_start_scan(self):
+        r=self.ready();r.tracker.history.clear()
+        self.assertIsNone(r.tick([0,0],0,10,True,False,0))
+        self.assertIsNone(r.scan)
+        self.assertEqual(r.phase,'watching')
 
     def test_final_scan_turn_remains_physically_executable(self):
         r=self.ready();r.tick([0,0],0,10,True,False,0)
-        r.policy.scan['rotation_deg']=359.0;r.depth_at=10.1
+        r.scan['rotation_deg']=359.0;r.depth_at=10.1
         self.assertEqual(r.tick([0,0],0,10.1,True,False,0),(0,.1))
 
     def test_pause_stops_owned_command(self):
         r=self.ready();r.tick([0,0],0,10,True,False,0)
         self.assertEqual(r.tick([0,0],0,10.1,True,True,0),(0,0))
-        self.assertIsNone(r.policy.scan)
-        self.assertEqual(len(r.lab.history),0)
+        self.assertIsNone(r.scan)
+        self.assertEqual(len(r.tracker.history),0)
 
     def test_stale_sensor_stops_scan(self):
         r=self.ready();r.tick([0,0],0,10,True,False,0)
@@ -178,57 +196,87 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(r.phase,'stale_sensor')
 
     def test_unknown_rotation_footprint_rejects_scan(self):
-        r=self.ready();r.lab.cells.clear()
+        r=self.ready();r.map.cells.clear()
         self.assertEqual(r.tick([0,0],0,10,True,False,0),(0,0))
-        self.assertIsNone(r.policy.scan)
+        self.assertEqual(r.phase,'scan_footprint_unknown_or_blocked')
 
-    def test_timer_gap_stops_scan(self):
+    def test_timer_gap_stops_recovery(self):
         r=self.ready();r.tick([0,0],0,10,True,False,0);r.depth_at=10.3
         self.assertEqual(r.tick([0,0],0,10.3,True,False,0),(0,0))
         self.assertEqual(r.phase,'timer_gap')
 
+    def test_cancel_releases_scan_and_does_not_execute(self):
+        r=self.ready()
+        self.assertEqual(r.tick([0,0],0,10,True,False,0),(0,.4))
+        self.assertEqual(r.phase,'scanning')
+        self.assertEqual(r.tick([0,0],0,10.1,False,False,0),(0,0))
+        self.assertIsNone(r.scan);self.assertIsNone(r.executor.active)
+
+    def test_drift_aborts_active_scan(self):
+        r=self.ready();r.tick([0,0],0,10,True,False,0)
+        self.assertEqual(r.tick([.03,0],0,10.1,True,False,0),(0,0))
+        self.assertEqual(r.phase,'scan_aborted');self.assertIsNone(r.scan)
+
+    def test_completed_scan_waits_for_new_report(self):
+        r=self.ready();r.tick([0,0],0,10,True,False,0)
+        r.scan['rotation_deg']=359.6
+        self.assertEqual(r.tick([0,0],0,10.1,True,False,0),(0,0))
+        self.assertEqual(r.phase,'fresh_report')
+        self.assertEqual(r.tick([0,0],0,10.2,True,False,0),(0,0))
+        self.assertIsNone(r.last_selection);self.assertIsNone(r.executor.active)
+        r.depth_at=10.25
+        r.tick([0,0],0,10.3,True,False,0)
+        self.assertIsNotNone(r.last_selection);self.assertIsNotNone(r.executor.active)
+
+    def test_scan_budget_limits_attempts(self):
+        r=self.ready();r.scans=3
+        self.assertIsNone(r.tick([0,0],0,10,True,False,0))
+        self.assertEqual(r.phase,'attempt_limit');self.assertIsNone(r.scan)
+
+    def test_stale_report_cannot_start_scan(self):
+        r=self.ready();r.depth_at=10
+        self.assertIsNone(r.tick([0,0],0,11,True,False,0))
+        self.assertIsNone(r.scan)
+
     def test_target_change_discards_previous_recovery(self):
         r=self.ready();r.tick([0,0],0,10,True,False,0);r.reset([8,0,0])
-        self.assertIsNone(r.policy.scan);self.assertEqual(r.policy.scans,0)
-        self.assertEqual(r.lab.cells,{})
+        self.assertIsNone(r.scan);self.assertEqual(r.scans,0)
+        self.assertEqual(r.map.cells,{})
 
     def test_arrival_owns_stop_without_later_restart(self):
         r=self.ready();r.target=[0,0,0]
         self.assertEqual(r.tick([0,0],0,10,True,False,0),(0,0))
         r.depth_at=10.1
         self.assertEqual(r.tick([.5,0],0,10.1,True,False,0),(0,0))
-        self.assertEqual(r.policy.scans,0)
+        self.assertEqual(r.scans,0)
         self.assertEqual(r.tick([.5,0],0,11,True,False,1),(0,0))
 
-    def test_scan_then_fresh_observation_executes_without_model(self):
-        r=self.ready();r.tick([0,0],0,10,True,False,0);r.policy.scan['rotation_deg']=360
+    def test_scan_then_fresh_observation_executes(self):
+        r=self.ready();r.tick([0,0],0,10,True,False,0);r.scan['rotation_deg']=360
         r.depth_at=10.1;self.assertEqual(r.tick([0,0],0,10.1,True,False,0),(0,0))
         r.depth_at=10.2
         cmd=r.tick([0,0],0,10.2,True,False,0)
         self.assertNotEqual(cmd,(0,0))
         self.assertIsNotNone(r.executor.active)
-        self.assertFalse(r.status()['model_used'])
+        self.assertEqual(r.status()['decision_source'],'rule')
 
     def test_long_detour_requires_every_swept_cell_observed(self):
-        from tinynav.core.planner_recovery import proposals, poses
-        from tinynav.core.planner_recovery import recovery_candidates
+        from tinynav.core.planner_recovery import poses
         r=self.ready()
-        offered=proposals([0,0],0,[4,0,0],r.robot,r.lab.cells,.1,[])
+        offered=proposals([0,0],0,[4,0,0],r.robot,r.map.cells,.1,[])
         plan=next(p for p in offered if p['id']=='retreat_300_left')
         endpoint=list(poses([0,0],0,plan['stages']))[-1][0]
         self.assertAlmostEqual(endpoint[0],-3)
         self.assertAlmostEqual(endpoint[1],1.8)
-        result=recovery_candidates([plan],[0,0],0,r.robot,r.lab.cells,.1)
+        result=recovery_candidates([plan],[0,0],0,r.robot,r.map.cells,.1)
         self.assertEqual(result['plans'],[plan])
-        r.lab.cells.pop((-30,18))
-        self.assertEqual(recovery_candidates([plan],[0,0],0,r.robot,r.lab.cells,.1)['plans'],[])
+        r.map.cells.pop((-30,18))
+        self.assertEqual(recovery_candidates([plan],[0,0],0,r.robot,r.map.cells,.1)['plans'],[])
 
     def test_shorter_clear_side_preferred_when_attempt_counts_equal(self):
-        from tinynav.core.planner_recovery import choose
         short={'id':'retreat_180_right','stages':[{'linear_mps':-.2,'duration_s':9}]}
         long={'id':'retreat_300_left','stages':[{'linear_mps':-.2,'duration_s':15}]}
         self.assertEqual(choose({'plans':[short,long]})['id'],short['id'])
-        self.assertEqual(choose({'plans':[short,long]},[{'strategy_id':long['id']}])['id'],short['id'])
 
     def test_near_goal_finish_uses_observed_footprint_and_original_goal(self):
         r=self.ready();r.target=[.44,0,0]
@@ -238,7 +286,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(r.tick([0,0],0,10.1,True,True,0),(0,0))
 
     def test_near_goal_finish_never_drives_into_unknown(self):
-        r=self.ready();r.target=[.44,0,0];r.lab.cells.clear()
+        r=self.ready();r.target=[.44,0,0];r.map.cells.clear()
         self.assertEqual(r.tick([0,0],0,10,True,False,0),(0,0))
         self.assertFalse(r.approach_active)
 
@@ -253,97 +301,9 @@ class RuntimeTests(unittest.TestCase):
         r=self.ready()
         p={'id':'retreat','duration_s':3,'stages':[{'name':'retreat','linear_mps':-.2,'yaw_radps':0,'duration_s':3}]}
         r.executor.start(p,[0,0],0,[4,0,0],9.9)
-        r.lab.cells[(-5,0)]='blocked'
+        r.map.cells[(-5,0)]='blocked'
         self.assertEqual(r.tick([0,0],0,10,True,False,0),(0,0))
         self.assertEqual(r.executor.memory[-1]['outcome'],'updated_footprint_rejected')
-
-import unittest
-import numpy as np
-from tinynav.core.planner_recovery import NavigationLab
-
-class LabTests(unittest.TestCase):
-    def config(self):
-        return {'target':[4,0,0], 'camera':{'fx':1,'fy':1}, 'robot':{'obstacle':{'robot_z_bottom':-0.4,'robot_z_top':0.4}}, 'objects':[]}
-
-    def test_unknown_and_observed_occlusion(self):
-        lab = NavigationLab(); cfg=self.config()
-        self.assertEqual(lab.world_state([0,0],0,cfg)['directions']['behind']['ends_in'],'unknown')
-        T=np.array([[0,0,1,0],[1,0,0,0],[0,-1,0,0.4],[0,0,0,1]],float)
-        lab.observe_depth(np.array([[2.]],float),T,cfg['camera'],cfg['robot'])
-        ray=lab.world_state([0,0],0,cfg)['directions']['ahead']
-        self.assertEqual(ray['ends_in'],'blocked')
-        self.assertLess(ray['known_clear_distance_m'],2)
-        self.assertNotIn((25,0),lab.cells)
-        blank=NavigationLab(); blank.observe_depth(np.zeros((1,1)),T,cfg['camera'],cfg['robot'])
-        self.assertFalse(blank.cells)
-
-    def test_body_band_and_relative_bearing(self):
-        cfg=self.config();cfg['objects']=[{'center':[1,0,2],'size':[.2,.2,.2]}]
-        lab=NavigationLab()
-        state=lab.world_state([0,0],90,cfg,'full_scene')
-        self.assertEqual(state['goal']['bearing'],'right')
-        self.assertEqual(state['directions']['right']['ends_in'],'range_limit')
-        cfg['objects'][0]['center'][2]=.4
-        self.assertEqual(lab.world_state([0,0],0,cfg,'full_scene')['directions']['ahead']['ends_in'],'blocked')
-
-    def test_metrics_outcomes_and_export(self):
-        cfg=self.config();lab=NavigationLab();lab.begin(cfg,[0,0],0,5);t=lab.started
-        lab.update([1,0],0,cfg['target'],False,t+1)
-        lab.update([3.8,0],0,cfg['target'],False,t+2)
-        self.assertEqual(lab.metrics()['status'],'arrived')
-        self.assertAlmostEqual(lab.metrics()['path_length_m'],3.8)
-        cfg['target'][0]=100
-        self.assertEqual(lab.export()['config']['target'][0],4)
-        lab.begin(cfg,[0,0],0,5);lab.update([0,0],0,cfg['target'],True,lab.started+1)
-        self.assertEqual(lab.metrics()['collision_events'],1)
-        self.assertEqual(lab.metrics()['status'],'collision')
-        lab.begin(cfg,[0,0],0,5);t=lab.started
-        lab.update([0,0],0,cfg['target'],False,t)
-        lab.update([0,0],0,cfg['target'],False,t+4)
-        self.assertEqual(lab.metrics()['stuck_events'],1)
-        lab.update([0,0],0,cfg['target'],False,t+5)
-        self.assertEqual(lab.metrics()['status'],'timeout')
-
-
-class PlannerIntegrationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        import rclpy
-        rclpy.init()
-
-    @classmethod
-    def tearDownClass(cls):
-        import rclpy
-        rclpy.shutdown()
-
-    def test_observed_scan_command_uses_existing_path_convention(self):
-        import time
-        import numpy as np
-        from scipy.spatial.transform import Rotation as R
-        from tinynav.core.planning_node import PlanningNode, generate_recovery_trajectory
-        node=PlanningNode()
-        try:
-            node.K=np.array([[100.,0.,80.],[0.,100.,50.],[0.,0.,1.]])
-            now=time.monotonic();r=node.recovery;r.reset([4.,0.,0.])
-            r.lab.cells={(x,y):'clear' for x in range(-50,51) for y in range(-50,51)}
-            r.lab.cell_observed_at={c:now for c in r.lab.cells}
-            r.lab.history.extend((now-i/10,[0.,0.],0.,4.) for i in range(80,0,-1))
-            T=np.eye(4);T[:3,:3]=np.array([[0.,0.,1.],[-1.,0.,0.],[0.,-1.,0.]])
-            # Set camera offset so the control center is exactly the history center.
-            from tinynav.core.robot_specs import ROBOT_CONFIG
-            T[:3,3]=T[:3,:3]@ROBOT_CONFIG.cam_offset_3d
-            stamp=node.get_clock().now().nanoseconds*1e-9
-            value=node.recovery_command(np.zeros((100,160),dtype=np.float32),T,stamp)
-            self.assertEqual(value,(0.,.4))
-            traj,_=generate_recovery_trajectory(node.camera_to_robot_center(T),R.from_matrix(T[:3,:3]).as_quat(),value[0],-value[1])
-            q0=R.from_quat(traj[0,3:]);q1=R.from_quat(traj[10,3:])
-            body=np.array([[0.,-1.,0.],[0.,0.,-1.],[1.,0.,0.]])
-            delta=R.from_matrix((q0.as_matrix()@body).T@(q1.as_matrix()@body)).as_rotvec()[2]
-            self.assertAlmostEqual(delta,.4)
-            node.paused_callback(type('Flag',(),{'data':True})())
-            self.assertIsNone(r.policy.scan)
-            self.assertIsNone(node.recovery_command(np.zeros((100,160),dtype=np.float32),T,stamp))
-        finally:node.destroy_node()
 
 
 class RankedRecoveryTests(unittest.TestCase):
@@ -364,10 +324,11 @@ class RankedRecoveryTests(unittest.TestCase):
         self.assertEqual(choose({'plans':[a,b]})['id'],b['id'])
 
     def test_reblocked_is_detected_after_settling(self):
-        node=RuleTest().node();node.recovery.memory=[{'strategy_id':'retreat_60_left',
+        r=ready_runtime()
+        r.executor.memory=[{'strategy_id':'retreat_60_left',
             'outcome':'completed','start_xy':[0,0],'end_xy':[-.6,0],'retreat_m':.6}]
-        p=RuleRecovery();p.step(node,10.1)
-        self.assertEqual(node.recovery.memory[-1]['outcome'],'reblocked')
+        r.tick([0,0],0,10,True,False,0)
+        self.assertEqual(r.executor.memory[-1]['outcome'],'reblocked')
 
     def test_failed_short_cannot_make_unknown_long_eligible(self):
         robot={'length':.4,'width':.3};cells={(x,y):'clear' for x in range(-10,11) for y in range(-10,11)}
@@ -396,3 +357,47 @@ class HandoffCostTests(unittest.TestCase):
         result=recovery_candidates(plans,[0,0],0,r.robot,cells,.1)
         estimate_handoff(result['plans'],[0,0],0,[0,4,0],r.robot,cells,.1)
         self.assertEqual(choose(result)['id'],'pivot_left')
+
+
+class PlannerIntegrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import rclpy
+        rclpy.init()
+
+    @classmethod
+    def tearDownClass(cls):
+        import rclpy
+        rclpy.shutdown()
+
+    def test_observed_scan_command_uses_existing_path_convention(self):
+        import time
+        from scipy.spatial.transform import Rotation as R
+        from tinynav.core.planning_node import PlanningNode, generate_recovery_trajectory
+        node=PlanningNode()
+        try:
+            node.K=np.array([[100.,0.,80.],[0.,100.,50.],[0.,0.,1.]])
+            now=time.monotonic();r=node.recovery;r.reset([4.,0.,0.])
+            r.map.cells={(x,y):'clear' for x in range(-50,51) for y in range(-50,51)}
+            r.map.observed_at={c:now for c in r.map.cells}
+            r.tracker.history.extend((now-i/10,[0.,0.]) for i in range(80,0,-1))
+            T=np.eye(4);T[:3,:3]=np.array([[0.,0.,1.],[-1.,0.,0.],[0.,-1.,0.]])
+            # Set camera offset so the control center is exactly the history center.
+            from tinynav.core.robot_specs import ROBOT_CONFIG
+            T[:3,3]=T[:3,:3]@ROBOT_CONFIG.cam_offset_3d
+            stamp=node.get_clock().now().nanoseconds*1e-9
+            value=node.recovery_command(np.zeros((100,160),dtype=np.float32),T,stamp)
+            self.assertEqual(value,(0.,.4))
+            traj,_=generate_recovery_trajectory(node.camera_to_robot_center(T),R.from_matrix(T[:3,:3]).as_quat(),value[0],-value[1])
+            q0=R.from_quat(traj[0,3:]);q1=R.from_quat(traj[10,3:])
+            body=np.array([[0.,-1.,0.],[0.,0.,-1.],[1.,0.,0.]])
+            delta=R.from_matrix((q0.as_matrix()@body).T@(q1.as_matrix()@body)).as_rotvec()[2]
+            self.assertAlmostEqual(delta,.4)
+            node.paused_callback(type('Flag',(),{'data':True})())
+            self.assertIsNone(r.scan)
+            self.assertIsNone(node.recovery_command(np.zeros((100,160),dtype=np.float32),T,stamp))
+        finally:node.destroy_node()
+
+
+if __name__ == '__main__':
+    unittest.main()
