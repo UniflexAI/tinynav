@@ -11,6 +11,7 @@ from tinynav.tinynav_cpp_bind import ba_solve
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
 from convert_to_colmap_format import convert_nerf_format
+from video_db import VideoDB
 
 
 extractor = SuperPoint(max_num_keypoints=2048).eval().cuda()  # load the extractor
@@ -350,7 +351,8 @@ def draw_image(image_left, image_right, keypoints0, keypoints1, matches):
 
 def main(tinynav_db_path: str):
     infra1_poses = np.load(os.path.join(tinynav_db_path, "poses.npy"), allow_pickle=True).item()
-    rgb_images = shelve.open(os.path.join(tinynav_db_path, "rgb_images"), flag='r')
+    # Same move to VideoDB as in convert_to_colmap_format (#126).
+    rgb_images = VideoDB(dir_path=os.path.join(tinynav_db_path, "rgb_images_db"), mode="read")
     T_rgb_to_infra1 = np.load(os.path.join(tinynav_db_path, "T_rgb_to_infra1.npy"), allow_pickle=True)
     rgb_intrinsics = np.load(os.path.join(tinynav_db_path, "rgb_camera_intrinsics.npy"), allow_pickle=True)
     edges = np.load(os.path.join(tinynav_db_path, "edges.npy"), allow_pickle=True)
@@ -362,8 +364,10 @@ def main(tinynav_db_path: str):
     landmark_tracker = LandmarkTracker()
     rgb_image_size = None
     for prev_timestamp, curr_timestamp in edges:
-        prev_rgb_image = rgb_images[str(prev_timestamp)]
-        curr_rgb_image = rgb_images[str(curr_timestamp)]
+        prev_rgb_image = rgb_images.read(prev_timestamp)
+        curr_rgb_image = rgb_images.read(curr_timestamp)
+        if prev_rgb_image is None or curr_rgb_image is None:
+            continue
         if rgb_image_size is None:
             rgb_image_size = prev_rgb_image.shape[:2]
         keypoints0, keypoints1, matches, descriptors0, descriptors1 = match_images(prev_rgb_image, curr_rgb_image)
