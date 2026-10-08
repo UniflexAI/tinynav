@@ -806,7 +806,6 @@ class PlanningNode(Node):
         self.w_turn_start = 40.0
         self.w_turn_reversal = 30.0
         self.last_yaw_rate = 0.0  # world yaw rate (rad/s) of the last selected trajectory
-        self._shadow_last = None  # (vx, omega) of the time cost's last pick
 
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
@@ -949,6 +948,7 @@ class PlanningNode(Node):
         cols = COLUMNS + ('steps',)
         payload = {k: r4(v) for k, v in ctx.items()}
         payload.update(stamp=stamp.sec + stamp.nanosec * 1e-9, sel=sel, shadow=shadow,
+                       driver='time',
                        cols=cols, rows=[[r4(r[c]) for c in cols] for r in rows])
         self.cost_pub.publish(String(data=json.dumps(payload, separators=(',', ':'))))
 
@@ -1402,16 +1402,13 @@ class PlanningNode(Node):
                 'last_yaw': float(self.last_yaw_rate), 'band': self.route_terminal_band,
                 'w': self._cost_weights(),
             }
-            top_indices = [rows[select(rows, ctx)]['i']]
-            # The time cost in shadow: picked and published, never driven.
             ctx.update(v_nom=max(float(v_allow), self._vx_min, 0.1),
-                       w_nom=float(ROBOT_CONFIG.max_angular_vel),
-                       shadow_last=self._shadow_last)
-            shadow = rows[select_time(rows, ctx)]
-            self._shadow_last = (shadow['vx'], shadow['omega'])
-            # RECORDING: removed once the time cost is decided.
+                       w_nom=float(ROBOT_CONFIG.max_angular_vel))
+            top_indices = [rows[select_time(rows, ctx)]['i']]
+            # RECORDING: the weighted pick, and the table, go once the cost is decided.
+            weighted = rows[select(rows, ctx)]
             if self.cost_pub.get_subscription_count() > 0:
-                self._publish_cost_terms(rows, ctx, top_indices[0], shadow['i'],
+                self._publish_cost_terms(rows, ctx, weighted['i'], top_indices[0],
                                          depth_msg.header.stamp)
 
             self.last_param = params[top_indices[0]]
@@ -1420,7 +1417,7 @@ class PlanningNode(Node):
             # anything else means stuck by cost with somewhere to go.
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
-                f'shadow vx={shadow["vx"]:.2f} omega={shadow["omega"]:.2f} '
+                f'weighted vx={weighted["vx"]:.2f} omega={weighted["omega"]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '

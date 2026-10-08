@@ -1,8 +1,9 @@
 """The trajectory cost, as a function of per-candidate features, plus a replay of it.
 
-planning_node computes the features (`COLUMNS`) for every candidate, picks with
-`select`, and publishes the same table on `/planning/cost_terms` -- so a recorded
-frame can be re-scored offline and must come out the same. That is what makes a cost
+planning_node computes the features (`COLUMNS`) for every candidate, drives the pick
+of `select_time`, and publishes the table with both costs' picks on
+`/planning/cost_terms` -- so a recorded frame can be re-scored offline and must come
+out the same. That is what makes a cost
 change testable against the frames it is meant to fix, instead of one rig walk at a
 time.
 
@@ -182,29 +183,32 @@ def select(rows, ctx):
 
 
 # ------------------------------------------------------------ time to go --- #
-# The cost under trial: seconds still to go, in shadow -- computed and published
-# beside the weighted cost above, which still drives.
+# The cost that drives: seconds still to go. The weighted cost above is computed
+# beside it for comparison.
 
 #: Rollout steps (of the 0.1 s lattice) the time cost samples, and what each sample
 #: holds; cam_d is the camera's distance to the target, the one arrival measures.
 STEP_SAMPLES = (5, 10, 15, 20, 25, 30)
 STEP_COLUMNS = ('t', 'remaining', 'path_dev', 'route_err', 'goal_err', 'goal_dxy', 'cam_d')
-#: map_node's _ARRIVE_M: arrival is its rule, so the time to go is the time until it
-#: fires. A test holds the two equal.
+#: map_node's _ARRIVE_M and _ARRIVE_TICKS at its 0.5 s nav tick: arrival is its rule,
+#: so the time to go is the time until it fires. A test holds them equal; one tick is
+#: one sample apart.
 ARRIVE_M = 0.5
+ARRIVE_TICKS = 2
 #: Metres of route one unit of clearance score is worth: the weighted cost's
 #: w_clearance / w_route_progress.
 CLEARANCE_M = 2.0
-#: The last pick keeps its slot unless something is this much faster.
-HYSTERESIS_S = 0.15
+#: Candidates this close to the fastest count as equally fast, and the least motion
+#: among them is picked.
+TIE_S = 0.15
 
 
 def time_to_go(r, ctx):
     """Seconds to the goal through candidate `r`.
 
-    If the rollout arrives -- the camera inside ARRIVE_M of the target where the route
-    has run out (the target is only the goal there; before, it is a carrot) -- the
-    time is the first sample that does. Otherwise it is the whole rollout plus the
+    If the rollout arrives -- the camera inside ARRIVE_M of the target, where the route
+    has run out (the target is only the goal there; before, it is a carrot), for
+    ARRIVE_TICKS samples running -- the time is the sample where map_node would fire. Otherwise it is the whole rollout plus the
     distance left at v_nom and the heading left at w_nom. Clearance adds the time its
     score is worth in route metres either way.
 
@@ -212,8 +216,10 @@ def time_to_go(r, ctx):
     """
     v, w, band = ctx['v_nom'], ctx['w_nom'], ctx['band']
     clearance = CLEARANCE_M * r['clr'] / v
+    inside = 0
     for t, rem, dev, rerr, gerr, gd, cam_d in r['steps']:
-        if cam_d < ARRIVE_M and (not ctx['has_route'] or rem <= band):
+        inside = inside + 1 if cam_d < ARRIVE_M and (not ctx['has_route'] or rem <= band) else 0
+        if inside >= ARRIVE_TICKS:
             return t + clearance
     t, rem, dev, rerr, gerr, gd, cam_d = r['steps'][-1]
     if ctx['has_route']:
@@ -231,20 +237,22 @@ def _time_allowed(r, ctx):
                                    ctx['can_move'], ctx['to_goal']) == 0.0)
 
 
+def motion(r, ctx):
+    """Speed and turn rate, each as a share of what the frame allows."""
+    return abs(r['vx']) / ctx['v_nom'] + abs(r['yaw']) / ctx['w_nom']
+
+
 def select_time(rows, ctx):
-    """Position in `rows` of the time cost's pick. The gates filter, falling back to
-    every row when they leave none; then hysteresis on (vx, omega) of the last pick,
-    `ctx['shadow_last']`."""
+    """Position in `rows` of the time cost's pick: the gates filter, falling back to
+    every row when they leave none; of what is left, the least motion among those
+    within TIE_S of the fastest. Near arrival many rows reach the goal on the same
+    tick, and that is what picks between them; the band is also what keeps two
+    near-equal rows from trading places frame to frame."""
     pool = [k for k, r in enumerate(rows) if _time_allowed(r, ctx)] or list(range(len(rows)))
     cost = {k: time_to_go(rows[k], ctx) for k in pool}
-    best = min(pool, key=cost.__getitem__)
-    last = ctx.get('shadow_last')
-    if last is not None:
-        for k in pool:
-            if (abs(rows[k]['vx'] - last[0]) < 1e-3 and abs(rows[k]['omega'] - last[1]) < 1e-3
-                    and cost[k] <= cost[best] + HYSTERESIS_S):
-                return k
-    return best
+    fastest = min(cost.values())
+    return min((k for k in pool if cost[k] <= fastest + TIE_S),
+               key=lambda k: (motion(rows[k], ctx), cost[k]))
 
 
 # ---------------------------------------------------------------- replay --- #
@@ -287,9 +295,11 @@ def _table(frame, top=8):
 
 
 def replay(paths, frame_no=None):
-    """Re-scores every frame with the cost as it is now, and says how often it picks
-    what the robot picked, what was picked, and -- whenever a turn or a standstill won
-    with a forward row open -- which term decided against the best forward row."""
+    """Re-scores every frame with the weighted cost as it is now, and says how often
+    it picks what the planner logged for it, what was picked, and -- whenever a turn
+    or a standstill won with a forward row open -- which term decided against the
+    best forward row. `sel` is the weighted pick, `shadow` the time cost's, whichever
+    drove (`driver`)."""
     n = agree = 0
     picked, decided = {}, {}
     for path in paths:
@@ -334,7 +344,7 @@ def replay(paths, frame_no=None):
 
 def shadow(paths):
     """The time cost against the weighted one on the same frames: how often its
-    replay reproduces the shadow pick the planner logged, and where the two costs
+    replay reproduces the time pick the planner logged, and where the two costs
     pick a different kind of row."""
     n = agree = 0
     flips = {}
@@ -351,7 +361,7 @@ def shadow(paths):
                 flips[(a, b)] = flips.get((a, b), []) + [n - 1]
     if not n:
         return
-    print(f'shadow: {n} frames, {agree} replayed to the logged shadow pick '
+    print(f'time cost: {n} frames, {agree} replayed to the logged pick '
           f'({100.0 * agree / n:.1f}%)')
     for (a, b), frames in sorted(flips.items(), key=lambda x: -len(x[1])):
         print(f'  weighted {a} -> time {b}: {len(frames)} frames, e.g. {frames[:12]}')

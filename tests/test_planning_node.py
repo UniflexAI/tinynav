@@ -15,7 +15,7 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between,
                            step_features, generate_predefined_trajectory_vocabularies)
-from planning_cost import (STEP_SAMPLES, ARRIVE_M, route_band_fade, route_heading_penalty, reverse_gate_penalty,
+from planning_cost import (STEP_SAMPLES, ARRIVE_M, ARRIVE_TICKS, route_band_fade, route_heading_penalty, reverse_gate_penalty,
                            turn_in_place_penalty, standstill_penalty, STANDSTILL_GOAL_M)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
@@ -332,6 +332,9 @@ def test_the_time_cost_arrives_where_map_node_does():
     node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
                 and getattr(n.targets[0], 'id', None) == '_ARRIVE_M')
     assert ast.literal_eval(node.value) == ARRIVE_M
+    assert "os.environ.get('TINYNAV_ARRIVE_TICKS', '%d')" % ARRIVE_TICKS in src
+    assert 'create_timer(0.5, self.nav_target_timer_callback)' in src
+    assert STEP_SAMPLES[1] - STEP_SAMPLES[0] == 5    # one 0.5 s tick, at the 0.1 s lattice
 
 
 if __name__ == "__main__":
