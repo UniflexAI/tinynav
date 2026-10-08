@@ -34,6 +34,7 @@ from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
+from tinynav.core.planning_cost import COLUMNS, can_move, select
 
 # === Helper functions ===
 @njit(cache=True)
@@ -322,36 +323,6 @@ def reverse_armed(front_clearance, resolution, engaged=False):
     return front_clearance <= threshold + resolution / 2
 
 
-#: Inside this of the goal the robot may stand still whatever else is open: that is
-#: arriving. The same 0.3 m inside which the heading terms stop ranking anything.
-STANDSTILL_GOAL_M = 0.3
-
-
-def standstill_penalty(is_standstill, can_move, dist_to_goal):
-    """Bans standing still while some other row is open, short of the goal.
-
-    Every freeze measured so far was a standstill winning on cost with rows clear
-    around it: on 2026-09-29, 18 forward and 15 turn-in-place rows collision-free,
-    and the robot stood for minutes, because a turn's start cost outweighed what the
-    heading term paid for it. A standstill is kept for when nothing else is open --
-    then it is the honest answer -- and for the goal itself.
-    """
-    if is_standstill and can_move and dist_to_goal > STANDSTILL_GOAL_M:
-        return 1e9
-    return 0.0
-
-
-def reverse_gate_penalty(vx, should_reverse):
-    """Keeps the armed family and bans the other one, as upstream's gate does.
-
-    The vx=0 rows are banned with the rest while reverse is armed. A fork-only
-    exemption for them was tried on 2026-09-18 and taken back out with this return
-    to upstream's shape; arming is rare enough at a 0.10 m entry (3.2% of frames
-    measured on 122) that the rows are available almost whenever they are wanted.
-    """
-    return 0.0 if (vx < 0.0) == should_reverse else 1e9
-
-
 @njit(cache=True)
 def footprint_lattice(front_len, rear_len, half_w, safety_radius):
     """Body-frame (forward, left) offsets covering the footprint, centre first.
@@ -546,53 +517,6 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
-def route_band_fade(end_remaining_m, terminal_band_m):
-    """How much of the route is still ahead, as 0..1 over the last `terminal_band_m`.
-
-    One encoding of the band, because two terms hand over across it: outside it the
-    route says which way to point and how much progress is left, inside it the route
-    has run out (remaining_map saturates at 0 and can rank nothing) and the goal --
-    its position and its bearing -- takes over. Written twice, the two would drift and
-    the robot would be pulled toward two different headings on arrival.
-    """
-    return min(1.0, end_remaining_m / max(terminal_band_m, 1e-6))
-
-
-def route_heading_penalty(weight, heading_err_rad, end_remaining_m, terminal_band_m):
-    """What a candidate pays for not pointing the way the route runs.
-
-    A separate function because it is the whole fix and it has to be assertable: the
-    cost it feeds is a closure inside a 200-line callback, so a test that only checked
-    the heading FIELD would go green with this term deleted from the cost.
-    """
-    return weight * heading_err_rad * route_band_fade(end_remaining_m, terminal_band_m)
-
-
-def turn_in_place_penalty(vx, yaw_rate, last_yaw_rate, w_turn, w_reversal,
-                          w_start=0.0, start_err_rad=0.0):
-    """What a rotating vx=0 row pays: a start cost that shrinks as the robot points
-    further from the target, then per rad/s of rotation, and more if it turns against
-    the last selected rotation. Moving rows and a standstill pay nothing here.
-
-    The start cost is `w_start * (1 - start_err_rad / pi)`: all of it facing the
-    target, none of it facing away. Facing the target a spin has little heading to
-    gain, so a small, noisy gain no longer outranks standing still; facing away the
-    spin is what the robot needs, and costs nothing extra.
-
-    Yaw rates are world-frame (rad/s), from the trajectory poses, not the lattice's
-    omega param -- the reverse vocabulary and the lattice do not share its sign.
-    `w_turn + w_reversal` has to stay under the heading term's reach per rad/s
-    (w_route_heading * rollout duration), or a standstill outranks the turn that
-    would clear a large heading error.
-    """
-    if abs(vx) > 1e-3 or abs(yaw_rate) < 1e-3:
-        return 0.0
-    cost = w_start * (1.0 - min(abs(start_err_rad), np.pi) / np.pi) + w_turn * abs(yaw_rate)
-    if yaw_rate * last_yaw_rate < 0.0:
-        cost += w_reversal * abs(yaw_rate)
-    return cost
-
-
 def build_route_fields(route_xy, shape, origin, resolution):
     """
     Rasterize a route into the lookup maps read by the DWA scoring, so scoring costs
@@ -692,6 +616,9 @@ class PlanningNode(Node):
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
+        # Every frame's candidate table, for planning_cost's replay. Built only while
+        # someone listens.
+        self.cost_pub = self.create_publisher(String, '/planning/cost_terms', 10)
         #: Upstream's hysteresis state: once reverse engages it stays engaged until the
         #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
         #: subject says it brings in #247's reverse gate.
@@ -954,6 +881,21 @@ class PlanningNode(Node):
     # Path, and its dt is planner_dt * path_pose_stride * step_idx -- publishing at a
     # different stride would scale both by that ratio.
     PATH_POSE_STRIDE = 10
+
+    def _cost_weights(self):
+        return {'clearance': self.w_clearance, 'route_progress': self.w_route_progress,
+                'path_follow': self.w_path_follow, 'goal_terminal': self.w_goal_terminal,
+                'route_heading': self.w_route_heading, 'turn_in_place': self.w_turn_in_place,
+                'turn_reversal': self.w_turn_reversal, 'turn_start': self.w_turn_start}
+
+    def _publish_cost_terms(self, rows, ctx, sel, stamp):
+        """Rounded to 1e-4: the replay then reproduces every pick but ties closer than
+        that, and a frame stays near 10 kB."""
+        r4 = lambda x: round(x, 4) if isinstance(x, float) else x
+        payload = {k: r4(v) for k, v in ctx.items()}
+        payload.update(stamp=stamp.sec + stamp.nanosec * 1e-9, sel=sel, cols=COLUMNS,
+                       rows=[[r4(r[c]) for c in COLUMNS] for r in rows])
+        self.cost_pub.publish(String(data=json.dumps(payload, separators=(',', ':'))))
 
     def publish_selected_path(self, trajectories, indices, header):
         path = Path()
@@ -1374,75 +1316,37 @@ class PlanningNode(Node):
 
             # From the robot's own pose, not a row's first pose: the lattice's rows are
             # already one step in, each turned by its own omega.
-            start_err = (_end_heading_error(np.concatenate([init_p, init_q]), target)
-                         if target is not None else 0.0)
+            start_err = _end_heading_error(np.concatenate([init_p, init_q]), target)
 
-            def _is_standstill(i):
-                return (abs(params[i][0]) <= 1e-3
-                        and abs(_yaw_rate(trajectories[i])) < 1e-3)
+            to_goal_m = float(np.linalg.norm(init_p[:2] - target[:2]))
 
-            # Open: collision-free, and not banned by the reverse gate.
-            can_move = any(scores[i] != float('inf') and not _is_standstill(i)
-                           and reverse_gate_penalty(params[i][0], should_reverse) == 0.0
-                           for i in range(len(trajectories)))
-            to_goal_m = (float(np.linalg.norm(init_p[:2] - target[:2]))
-                         if target is not None else 0.0)
-
-            def cost_function(i):
-                traj, param = trajectories[i], params[i]
-                turn_penalty = turn_in_place_penalty(
-                    param[0], _yaw_rate(traj), self.last_yaw_rate,
-                    self.w_turn_in_place, self.w_turn_reversal,
-                    self.w_turn_start, start_err)
-                gate_penalty = (reverse_gate_penalty(param[0], should_reverse)
-                                + standstill_penalty(_is_standstill(i), can_move, to_goal_m))
-                traj_end = np.array(traj[-1, :3])
-                target_end = target if target is not None else traj_end
-                dist = np.linalg.norm(traj_end - target_end)
-                smooth = abs(self.last_param[0] - param[0]) + abs(self.last_param[1] - param[1])
-                # Skipped within 0.3 m of the goal, where the bearing is noise and
-                # turning achieves nothing.
-                heading_penalty = 0.0
-                if dist > 0.3:
-                    # The two references hand over across the terminal band: the route's
-                    # direction while there is route left, the goal's bearing once there
-                    # is not. A hard switch would leave the vx=0 rows unranked in the
-                    # band -- which is the freeze this term was written to prevent.
-                    to_goal = self.w_route_heading * _end_heading_error(traj[-1], target_end)
-                    if has_route:
-                        fade = route_band_fade(end_remainings[i], self.route_terminal_band)
-                        heading_penalty = (
-                            route_heading_penalty(self.w_route_heading, end_heading_errs[i],
-                                                  end_remainings[i], self.route_terminal_band)
-                            + (1.0 - fade) * to_goal)
-                    else:
-                        heading_penalty = to_goal
-                if not has_route:
-                    # No route this cycle: both route maps are flat, so rank on the raw
-                    # target the way this planner did before the route existed.
-                    positional = 100 * dist
-                else:
-                    # The terminal term arms inside the last route_terminal_band metres,
-                    # where remaining_map has saturated at 0 and can no longer rank
-                    # anything -- without it smoothness picks the slowest of the tied
-                    # trajectories and the robot crawls the last stretch.
-                    terminal = 0.0
-                    if target is not None:
-                        terminal = (self.w_goal_terminal
-                                    * (1.0 - route_band_fade(end_remainings[i],
-                                                             self.route_terminal_band))
-                                    * float(np.linalg.norm(traj[-1, :2] - target[:2])))
-                    positional = (self.w_route_progress * end_remainings[i]
-                                  + self.w_path_follow * path_costs[i]
-                                  + terminal)
-                return (scores[i] * self.w_clearance
-                        + positional
-                        + 10 * smooth
-                        + heading_penalty
-                        + turn_penalty
-                        + gate_penalty)
-
-            top_indices = [min(range(len(trajectories)), key=cost_function)]
+            # The collision-free candidates as features; the cost reads nothing else,
+            # which is what lets a recorded frame be re-scored (planning_cost).
+            rows = []
+            for i in range(len(trajectories)):
+                if scores[i] == float('inf'):
+                    continue
+                traj = trajectories[i]
+                rows.append({
+                    'i': i, 'vx': float(params[i][0]), 'omega': float(params[i][1]),
+                    'yaw': _yaw_rate(traj), 'clr': float(scores[i]), 'occ': int(occ_points[i]),
+                    'remaining': float(end_remainings[i]), 'path_dev': float(path_costs[i]),
+                    'route_err': float(end_heading_errs[i]),
+                    'goal_err': float(_end_heading_error(traj[-1], target)),
+                    'goal_d': float(np.linalg.norm(traj[-1, :3] - target)),
+                    'goal_dxy': float(np.linalg.norm(traj[-1, :2] - target[:2])),
+                })
+            ctx = {
+                'has_route': bool(has_route), 'should_reverse': bool(should_reverse),
+                'can_move': can_move(rows, should_reverse), 'to_goal': to_goal_m,
+                'start_err': float(start_err),
+                'last_vx': float(self.last_param[0]), 'last_omega': float(self.last_param[1]),
+                'last_yaw': float(self.last_yaw_rate), 'band': self.route_terminal_band,
+                'w': self._cost_weights(),
+            }
+            top_indices = [rows[select(rows, ctx)]['i']]
+            if self.cost_pub.get_subscription_count() > 0:
+                self._publish_cost_terms(rows, ctx, top_indices[0], depth_msg.header.stamp)
 
             self.last_param = params[top_indices[0]]
 

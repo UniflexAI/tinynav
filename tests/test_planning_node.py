@@ -10,13 +10,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'cor
 from std_msgs.msg import Header
 from math_utils import matrix_to_quat
 from scipy.ndimage import distance_transform_edt
-from planning_node import (run_raycasting_loopy, build_route_fields, route_band_fade,
-                           route_heading_penalty, score_trajectories_by_ESDF,
+from planning_node import (run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
-                           reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M, reverse_gate_penalty,
-                           generate_trajectory_library_3d, turn_in_place_penalty,
-                           heading_of_pose7, angle_between, standstill_penalty,
-                           STANDSTILL_GOAL_M)
+                           reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
+                           generate_trajectory_library_3d, heading_of_pose7, angle_between)
+from planning_cost import (route_band_fade, route_heading_penalty, reverse_gate_penalty,
+                           turn_in_place_penalty, standstill_penalty, STANDSTILL_GOAL_M)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -286,7 +285,7 @@ def test_the_goal_takes_over_from_the_route_across_the_terminal_band():
 def test_carrying_straight_on_at_a_corner_costs_more_than_turning():
     """The penalty the cost actually adds, not just the field it reads.
 
-    Deleting the term from cost_function leaves the heading test above green -- this
+    Deleting the term from candidate_terms leaves the heading test above green -- this
     is the one that goes red, because it asserts the number that changes the choice.
     """
     w, band = 60.0, 0.5
