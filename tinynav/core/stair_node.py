@@ -42,6 +42,8 @@ class StairNode(Node):
         camera_height = args.camera_height if args.camera_height is not None else ROBOT_CONFIG.camera_height
         self.gen = StairTargetGenerator(StairConfig(camera_height=camera_height))
         self.gen.turn_side = TURN_SIDES[args.turn]
+        # stop on the landing that ends the last floor; 0: no limit (stop stair mode by hand)
+        self.landings_goal = max(0, args.floors) * max(1, args.landings_per_floor)
         self.bridge = CvBridge()
         self.K = None
         self.direction = args.direction  # None: stair mode inactive
@@ -126,6 +128,10 @@ class StairNode(Node):
             self.publish_status('odom_invalid')
             self.stop_robot('odometry stream stalled')
             return
+        if self.landings_goal and self.gen.landings >= self.landings_goal:
+            self.publish_status('arrived')
+            self.stop_robot(f'arrived: {self.gen.landings} landings')
+            return
         res = self.gen.compute(self.latest_T, self.direction, prior_dir=self.remembered_direction())
         self.guided = bool(res.get('guided', False))
         self.publish_status(res['status'])
@@ -151,6 +157,7 @@ class StairNode(Node):
 
     def publish_status(self, status):
         text = f'{self.direction} {status} well_side={self.gen.well_side:+.1f} cam_h={self.gen.camera_height:.2f} pitch={self.gen.pitch:+.0f}'
+        text += f' landings={self.gen.landings}' + (f'/{self.landings_goal}' if self.landings_goal else '')
         if self.memory is not None:
             text += f' memory={self.memory_similarity:.2f}{" guided" if self.guided else ""}'
         self.status_pub.publish(String(data=text))
@@ -171,6 +178,8 @@ def main():
                         help='initial camera height above the ground [m] (default: robot_specs for ROBOT_TYPE; refined on flat ground)')
     parser.add_argument('--direction', choices=['up', 'down'], default=None, help='start in stair mode right away')
     parser.add_argument('--turn', choices=list(TURN_SIDES), default='auto', help='U-turn side at landings (auto: estimate)')
+    parser.add_argument('--floors', type=int, default=0, help='floors to go, then stop with status arrived (0: no limit)')
+    parser.add_argument('--landings_per_floor', type=int, default=2, help='landings per floor (2 in a U-shaped stairwell)')
     parser.add_argument('--memory', default=None, help='stair memory built with tool/stair_memory.py (needs TensorRT)')
     parser.add_argument('--memory_min_similarity', type=float, default=0.8, help='trust the memory only above this')
     parser.add_argument('--image_topic', default='/camera/camera/infra1/image_rect_raw')

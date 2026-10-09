@@ -229,6 +229,8 @@ class BackendNode(Ros2NodeManager):
         self._stair_proc: subprocess.Popen | None = None
         self._stair_mode: str | None = None  # 'up' | 'down' | None
         self._stair_status: str = ''
+        self._stair_settings = self._load_stair_settings()
+        self._stair_exiting = False  # leaving stair mode after stair_node reported 'arrived'
         self._poi_change_pub = self.create_publisher(Odometry, '/mapping/poi_change', 10)
         self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
 
@@ -263,8 +265,21 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub.publish(Bool(data=bool(active)))
 
     def _on_stair_status(self, msg: String):
+        words = msg.data.split()
         with self._lock:
             self._stair_status = msg.data
+            arrived = len(words) > 1 and words[1] == 'arrived' and not self._stair_exiting
+            if arrived:
+                self._stair_exiting = True
+        if arrived:
+            # reached the floors set on the Stairs page: leave stair mode as the Stairs button does, off the ROS
+            # callback thread since that kills and launches processes
+            threading.Thread(target=self._exit_stair_on_arrival, daemon=True).start()
+
+    def _exit_stair_on_arrival(self):
+        if self.state == 'stair':
+            self.get_logger().info('Stair mode: arrived at the floor, leaving stair mode')
+            self.cmd_stair_stop()
 
     def _clear_planning_target(self):
         # planning_node drops its target on /mapping/poi_change, so the robot does not
@@ -904,6 +919,38 @@ class BackendNode(Ros2NodeManager):
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
 
+    # Stair mode settings (Stairs page in the app), kept in the db folder across restarts
+    STAIR_SETTINGS_DEFAULT = {
+        'camera_height': None,       # m above the ground; None: STAIR_CAMERA_HEIGHT or robot_specs (go2 0.45)
+        'floors': 0,                 # floors to go, then stop ('arrived') and leave stair mode; 0: no limit
+        'landings_per_floor': 2,     # 2 in a U-shaped stairwell
+    }
+
+    def _stair_settings_path(self) -> str:
+        return os.path.join(self.tinynav_db_path, 'stair_settings.json')
+
+    def _load_stair_settings(self) -> dict:
+        settings = dict(self.STAIR_SETTINGS_DEFAULT)
+        try:
+            with open(self._stair_settings_path()) as f:
+                settings.update({k: v for k, v in json.load(f).items() if k in settings})
+        except (OSError, ValueError):
+            pass
+        return settings
+
+    def stair_settings(self) -> dict:
+        with self._lock:
+            return dict(self._stair_settings)
+
+    def set_stair_settings(self, settings: dict) -> dict:
+        """Takes effect the next time stair mode starts."""
+        with self._lock:
+            self._stair_settings.update({k: v for k, v in settings.items() if k in self.STAIR_SETTINGS_DEFAULT})
+            current = dict(self._stair_settings)
+        with open(self._stair_settings_path(), 'w') as f:
+            json.dump(current, f, indent=1)
+        return current
+
     def cmd_stair_start(self, direction: str, turn: str = 'auto'):
         """Swap map_node for stair_node, which then publishes /control/target_pose."""
         self._set_nav_active(False)
@@ -912,8 +959,13 @@ class BackendNode(Ros2NodeManager):
         self._kill_stair_node()
         self._clear_planning_target()
         cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/stair_node.py', '--direction', direction, '--turn', turn]
-        if os.environ.get('STAIR_CAMERA_HEIGHT'):
-            cmd += ['--camera_height', os.environ['STAIR_CAMERA_HEIGHT']]
+        settings = self.stair_settings()
+        with self._lock:
+            self._stair_exiting = False
+        camera_height = settings['camera_height'] or os.environ.get('STAIR_CAMERA_HEIGHT')
+        if camera_height:
+            cmd += ['--camera_height', str(camera_height)]
+        cmd += ['--floors', str(int(settings['floors'])), '--landings_per_floor', str(int(settings['landings_per_floor']))]
         self._stair_proc = self._launch_proc('stair_node', cmd, env=self._nav_env())
         if self._cmd_vel_proc is None or self._cmd_vel_proc.poll() is not None:
             self._launch_cmd_vel()
@@ -929,7 +981,7 @@ class BackendNode(Ros2NodeManager):
         self._pub_state()
         # nothing moves until stair_node publishes a target and planning a path
         self._set_nav_active(True)
-        self.get_logger().info(f'Stair mode {direction} (turn {turn}): map_node stopped, stair_node started')
+        self.get_logger().info(f'Stair mode {direction} (turn {turn}, {settings}): map_node stopped, stair_node started')
 
     def cmd_stair_stop(self):
         """Leave stair mode: stair_node out, map_node back in (it relocalizes from scratch)."""

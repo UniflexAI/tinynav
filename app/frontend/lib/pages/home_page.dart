@@ -5,6 +5,7 @@ import '../core/providers.dart';
 import 'device_tab.dart';
 import 'map_tab.dart';
 import 'operate_tab.dart';
+import 'stair_tab.dart';
 
 // ── Top-level menu ────────────────────────────────────────────────────────────
 
@@ -67,6 +68,16 @@ class HomePage extends ConsumerWidget {
                     badge: status?.rawState == 'navigation' ? 'Navigating' : null,
                     badgeColor: const Color(0xFF45C95A),
                     onTap: () => _push(context, 'Operate', const OperateTab()),
+                  ),
+                  const SizedBox(height: 12),
+                  _MenuCard(
+                    icon: Icons.stairs,
+                    iconColor: const Color(0xFF7BD8FF),
+                    title: 'Stairs',
+                    subtitle: 'Camera height · Floors to go',
+                    badge: status?.stairMode != null ? 'Stairs' : null,
+                    badgeColor: const Color(0xFF2196F3),
+                    onTap: () => _push(context, 'Stairs', const StairTab()),
                   ),
                   const SizedBox(height: 24),
                   if (status != null) _QuickStatusCard(status: status),

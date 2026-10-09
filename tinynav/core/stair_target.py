@@ -65,6 +65,9 @@ class StairConfig:
     flight_min_s: float = 1.0
     level_min_s: float = 0.5
     landing_search: bool = True     # at the landing: look for the next flight (False: stop there, status 'landing')
+    landing_min_rise: float = 1.0   # a landing counts (self.landings) only this much lower (higher, going up) than
+                                    # the last one counted: a flight is ~1.45 m, and stepping back up a few steps or
+                                    # pitching on the next flight's top step must not count twice
     next_flight_lateral: float = 1.3  # a U-turn landing: the next flight starts this far to the turn side of where
     next_flight_back: float = 0.4     # we arrived and this far back (1.2-1.4 / 0.3-0.5 m on all recorded landings)
     auto_side_min: float = 3.0        # turn side 'auto': once |well_side| reaches this, U-turn like a given side. The
@@ -180,6 +183,9 @@ class StairTargetGenerator:
         self.uturn_entry = None   # turn side given: where this landing's U-turn heads (next_entry, else from here)
         self.uturn_at_entry = False  # ... reached it, now facing back along the next flight
         self.flight_end = None    # camera xy at the last pitched (on a flight) depth frame
+        self.landings = 0         # landings reached this run (see landing_min_rise)
+        self.landing_ref_z = None  # camera z where the run started or the last landing was counted
+        self.direction_sign = 0.0  # +1 up, -1 down, set by compute
         self.uturn_crossed = False  # crossed the landing sideways, now turning back toward the next flight
         self.was_on_flight = False
         self.camera_height = self.cfg.camera_height
@@ -199,6 +205,8 @@ class StairTargetGenerator:
             self.last_jump_stamp = stamp
             self.frames.clear()
             self.track.clear()
+            if self.landing_ref_z is not None and self.last_position is not None:
+                self.landing_ref_z += position[2] - self.last_position[2]  # the jump is not progress
         self.last_position = position
         self.last_pose_stamp = stamp
         self.latest_stamp = max(self.latest_stamp, stamp)
@@ -256,6 +264,10 @@ class StairTargetGenerator:
             if self.was_on_flight and stamp - self.level_since >= cfg.level_min_s and not self.flight_done:
                 self.flight_done, self.was_on_flight = True, False
                 self._predict_next_flight()
+                z = T_cam_to_world[2, 3]
+                if self.landing_ref_z is not None and self.direction_sign * (z - self.landing_ref_z) >= cfg.landing_min_rise:
+                    self.landings += 1
+                    self.landing_ref_z = z
         else:
             self.level_since = None
 
@@ -312,6 +324,7 @@ class StairTargetGenerator:
         self.next_entry = None
         self.uturn_entry, self.uturn_at_entry, self.uturn_crossed = None, False, False
         self.flight_end = None
+        self.landings, self.landing_ref_z = 0, None
 
     def reset(self):
         self.frames.clear()
@@ -383,6 +396,9 @@ class StairTargetGenerator:
             return out
         sx, sy = np.nonzero(seeds)
         sign = 1.0 if direction == 'up' else -1.0
+        self.direction_sign = sign
+        if self.landing_ref_z is None:
+            self.landing_ref_z = cam[2]
         max_drop = cfg.max_drop_down if direction == 'down' else cfg.max_step
         dist, parent = _dijkstra(np.nan_to_num(height), free, cost, sx.astype(np.int64), sy.astype(np.int64), cfg.max_step, max_drop, cfg.resolution)
         reachable = np.isfinite(dist)

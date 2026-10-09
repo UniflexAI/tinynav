@@ -200,7 +200,8 @@ def main():
                          target_x=None if res['target'] is None else res['target'][0],
                          target_y=None if res['target'] is None else res['target'][1],
                          guided=bool(res.get('guided', False)), mem_sim=mem_sim,
-                         uturn=bool(res.get('uturn', False)), turn_in_place=bool(res.get('turn_in_place', False))))
+                         uturn=bool(res.get('uturn', False)), turn_in_place=bool(res.get('turn_in_place', False)),
+                         landings=gen.landings))
         if not args.no_video:
             frame = render(res, cfg, T, poses, j, images[int(np.argmin(np.abs(img_t - t)))][1], t - t0, err)
             if writer is None:
@@ -214,6 +215,9 @@ def main():
         w.writerows(rows)
 
     status = np.array([r['status'] for r in rows])
+    counted = [r['t'] for a, r in zip(rows[:-1], rows[1:]) if r['landings'] > a['landings']]
+    print(f"landings counted: {gen.landings} at " + ' '.join(f'{x:.0f}s' for x in counted)
+          + f" | camera z drop over the run {rows[0]['cam_z'] - min(r['cam_z'] for r in rows):.2f} m")
     ct = np.array(compute_times[20:]) * 1000  # skip numba warmup
     if memory is not None:
         print(f"memory direction used in {np.mean([r['guided'] for r in rows]) * 100:.0f}% of frames")

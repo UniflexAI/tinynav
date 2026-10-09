@@ -1,7 +1,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..state import runner
 
@@ -25,6 +25,12 @@ class SendPoisRequest(BaseModel):
 class StairRequest(BaseModel):
     direction: Literal['up', 'down']
     turn: Literal['auto', 'left', 'right'] = 'auto'  # U-turn side at landings
+
+
+class StairSettings(BaseModel):
+    camera_height: float | None = Field(None, ge=0.2, le=1.2)  # None: robot default
+    floors: int = Field(0, ge=0, le=50)                         # 0: no limit
+    landings_per_floor: int = Field(2, ge=1, le=4)
 
 
 class ManualTargetRequest(BaseModel):
@@ -128,6 +134,18 @@ def nav_stair_start(req: StairRequest):
         raise HTTPException(409, f'Cannot enter stair mode while in state: {node.state}')
     node.cmd_stair_start(req.direction, req.turn)
     return {'ok': True, 'direction': req.direction, 'turn': req.turn}
+
+
+@router.get('/stair/settings')
+def nav_stair_settings():
+    return _require_node().stair_settings()
+
+
+@router.put('/stair/settings')
+def nav_stair_settings_set(req: StairSettings):
+    """Used the next time stair mode starts."""
+    return _require_node().set_stair_settings(
+        {'camera_height': req.camera_height, 'floors': req.floors, 'landings_per_floor': req.landings_per_floor})
 
 
 @router.post('/stair/stop')

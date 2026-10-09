@@ -1568,7 +1568,12 @@ class _StairButtonState extends ConsumerState<_StairButton> {
     final parts = (status?.stairStatus ?? '').split(' ');
     final detail = parts.length > 1 ? parts[1] : '';
     final stopped = detail == 'odom_invalid' || detail == 'no_seed';
-    final landed = detail == 'landing'; // walked the flight, stopped on the landing
+    // walked the flight and stopped on the landing, or reached the floor set in the Stairs page
+    final landed = detail == 'landing' || detail == 'arrived';
+    // "landings=2/4": landings counted / landings to go (no "/4" without a floor count)
+    final landings = parts
+        .firstWhere((p) => p.startsWith('landings='), orElse: () => '')
+        .replaceFirst('landings=', '');
 
     return FilledButton.icon(
       onPressed: _loading ? null : (active ? () => _post('/nav/stair/stop') : _start),
@@ -1589,7 +1594,7 @@ class _StairButtonState extends ConsumerState<_StairButton> {
               !active ? Icons.stairs : (mode == 'up' ? Icons.north_rounded : Icons.south_rounded),
               size: 16,
             ),
-      label: Text(active ? 'Stairs ${mode == 'up' ? '↑' : '↓'} $detail'.trim() : 'Stairs'),
+      label: Text(active ? 'Stairs ${mode == 'up' ? '↑' : '↓'} $detail $landings'.trim() : 'Stairs'),
     );
   }
 }
