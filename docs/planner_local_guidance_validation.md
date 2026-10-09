@@ -60,3 +60,24 @@ After adding slow candidates inside 1 m of the goal, isolated Websim retests rep
 | narrow_gate | timeout | 40.21 | 0.539 | No |
 
 Narrow gate still oscillates near the goal: the recorded commands include a reverse command as it approaches the end wall. This remains unresolved. The other scenes were not rerun after the slow-candidate change; their earlier results must not be treated as validation of the final revision. Physical robot validation remains pending.
+
+## L-turn regression: out-of-map goal selection
+
+The previous route search clipped an out-of-map target to the local grid boundary and treated that cell as a goal. In L-turn this could select the far side of the entry wall; its long detour was then rejected, leaving no waypoint. Prefer reachable progress using remaining goal distance plus half the route cost, and terminate at the goal only when the actual target lies inside the map. No clearance, controller, scene, or arrival settings changed.
+
+A new corridor test reproduces the failure: the previous code returns no waypoint, while the corrected code advances along the corridor. All 13 targeted tests passed. Two uninterrupted L-turn trials arrived in 70.40 s (0.290 m) and 58.37 s (0.273 m), without collisions.
+
+Additional isolated retests recorded:
+
+| Scene | Outcome | Elapsed (s) | Final goal distance (m) | Collision |
+|---|---|---:|---:|---|
+| straight | arrived | 13.08 | 0.294 | No |
+| s_bend | arrived | 47.25 | 0.336 | No |
+| s_bend_edited | arrived | 40.23 | 0.290 | No |
+| open_target | arrived | 38.21 | 0.304 | No |
+| back_target | arrived | 11.07 | 0.284 | No |
+| narrow_gate | threshold crossed; oscillation unresolved | 24.16 | 0.349979 | No |
+
+Narrow gate crossed the 0.35 m threshold while issuing a reverse command. This single crossing is not evidence of stable arrival or resolution of its near-goal oscillation. Dead-end recovery remains excluded.
+
+A third uninterrupted L-turn trial on the final source arrived in 58.34 s at 0.334 m, without collision. Dead end timed out after 120.73 s at 2.766 m, without collision. All eight scene geometries have now been rerun following the frontier-selection fix.

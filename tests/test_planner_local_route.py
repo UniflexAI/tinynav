@@ -5,6 +5,16 @@ from tinynav.core.planning_node import PlanningNode, local_detour_target, retain
 
 
 class GuideTests(unittest.TestCase):
+    def test_goal_outside_map_advances_along_corridor(self):
+        wall = np.zeros((100,100),dtype=bool)
+        wall[30:,62:70] = True
+        esdf = distance_transform_edt(~wall)*.05
+        waypoint = local_detour_target(esdf,np.array([-2.5,-2.5,0.]),.05,
+                                      np.array([0.,0.,.45]),np.array([3.9,4.4,0.]),.15)
+        self.assertIsNotNone(waypoint)
+        self.assertGreater(waypoint[0],.2)
+        self.assertLess(waypoint[1],.5)
+
     def test_wall_detour(self):
         wall = np.zeros((60,60),dtype=bool)
         wall[25:28,:35] = True

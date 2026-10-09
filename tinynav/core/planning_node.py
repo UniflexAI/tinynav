@@ -326,21 +326,26 @@ def local_detour_target(esdf, origin, resolution, xy, target, half_width):
         return None
     free[start] = True
     goal_xy = np.asarray(target)[:2]
-    goal = tuple(np.clip(np.floor((goal_xy - origin[:2]) / resolution).astype(int), 0, np.array(shape)-1))
+    goal_index = np.floor((goal_xy - origin[:2]) / resolution).astype(int)
+    goal_in_map = np.all((goal_index >= 0) & (goal_index < shape))
+    goal = tuple(np.clip(goal_index, 0, np.array(shape)-1))
     costs = {start: 0.0}
     parents = {}
     queue = [(0.0, start)]
     best = start
     best_distance = math.dist((np.array(start)+.5)*resolution+origin[:2], goal_xy)
+    best_priority = best_distance
     while queue:
         cost, cell = heapq.heappop(queue)
         if cost != costs[cell]:
             continue
         distance = math.dist((np.array(cell)+.5)*resolution+origin[:2], goal_xy)
-        if distance < best_distance:
+        # A clipped map boundary is not the goal; prefer useful, short local progress.
+        priority = distance + .5*cost
+        if priority < best_priority:
+            best, best_distance, best_priority = cell, distance, priority
+        if goal_in_map and cell == goal:
             best, best_distance = cell, distance
-        if cell == goal:
-            best = cell
             break
         for dx, dy in ((1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)):
             nxt = cell[0]+dx, cell[1]+dy
