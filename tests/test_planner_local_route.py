@@ -1,7 +1,7 @@
 import unittest
 import numpy as np
 from scipy.ndimage import distance_transform_edt
-from tinynav.core.planner_guide import local_detour_target, retained_esdf
+from tinynav.core.planning_node import PlanningNode, local_detour_target, retained_esdf
 
 
 class GuideTests(unittest.TestCase):
@@ -42,14 +42,14 @@ class GuideTests(unittest.TestCase):
 
 class LocalRouteTests(unittest.TestCase):
     def setUp(self):
-        from tinynav.core.planner_guide import LocalRoute
-        self.route = LocalRoute()
+        self.route = PlanningNode.__new__(PlanningNode)
+        self.route.reset_local_route()
         self.map = np.ones((80,80),dtype=np.float32)
         self.xy = np.array([.5,.5,0.])
         self.goal = np.array([2.,.5,0.])
 
     def update(self, now):
-        return self.route.update(self.xy,self.goal,now,self.map,np.zeros(3),.05,.15,0)
+        return self.route.update_local_route(self.xy,self.goal,now,self.map,np.zeros(3),.05,.15,0)
 
     def test_open_path_uses_original_planner(self):
         self.assertIsNone(self.update(10))
@@ -65,23 +65,23 @@ class LocalRouteTests(unittest.TestCase):
         self.assertIsNone(self.update(10.6))
 
     def test_reset_discards_observed_obstacles(self):
-        self.route.cells[(1,1)] = 'blocked'
-        self.route.reset()
-        self.assertEqual(self.route.cells,{})
-        self.assertIsNone(self.route.waypoint)
+        self.route.route_cells[(1,1)] = 'blocked'
+        self.route.reset_local_route()
+        self.assertEqual(self.route.route_cells,{})
+        self.assertIsNone(self.route.route_waypoint)
 
     def test_observation_retains_body_band_only(self):
         from types import SimpleNamespace
         robot = SimpleNamespace(obstacle=SimpleNamespace(robot_z_bottom=-.4,robot_z_top=.4))
         T = np.eye(4)
         K = np.eye(3)
-        self.route.observe(np.array([[1.]],dtype=np.float32),T,K,robot)
-        self.assertFalse(self.route.cells)
+        self.route.observe_route_obstacles(np.array([[1.]],dtype=np.float32),T,K,robot)
+        self.assertFalse(self.route.route_cells)
         T[:3,:3] = np.array([[0,0,1],[1,0,0],[0,1,0]])
-        self.route.observe(np.array([[1.]],dtype=np.float32),T,K,robot)
-        self.assertIn((10,0),self.route.cells)
-        self.route.observe(np.zeros((1,1),dtype=np.float32),T,K,robot)
-        self.assertIn((10,0),self.route.cells)
+        self.route.observe_route_obstacles(np.array([[1.]],dtype=np.float32),T,K,robot)
+        self.assertIn((10,0),self.route.route_cells)
+        self.route.observe_route_obstacles(np.zeros((1,1),dtype=np.float32),T,K,robot)
+        self.assertIn((10,0),self.route.route_cells)
 
     def test_navigation_changes_clear_route_cache_and_obstacles(self):
         from types import SimpleNamespace
@@ -90,22 +90,23 @@ class LocalRouteTests(unittest.TestCase):
                                  (PlanningNode.active_callback,SimpleNamespace(data=False)),
                                  (PlanningNode.poi_change_callback,None)]:
             with self.subTest(callback=callback.__name__):
-                self.route.cells[(1,1)] = 'blocked'
-                self.route.waypoint = self.goal.copy()
-                node = SimpleNamespace(local_route=self.route,nav_active=True,nav_paused=False,target_pose=self.goal)
+                self.route.route_cells[(1,1)] = 'blocked'
+                self.route.route_waypoint = self.goal.copy()
+                node = self.route
+                node.nav_active, node.nav_paused, node.target_pose = True, False, self.goal
                 callback(node,message)
-                self.assertFalse(self.route.cells)
-                self.assertIsNone(self.route.waypoint)
+                self.assertFalse(self.route.route_cells)
+                self.assertIsNone(self.route.route_waypoint)
 
     def test_new_target_invalidates_route_before_observing(self):
         from types import SimpleNamespace
         from tinynav.core.planning_node import PlanningNode
-        self.route.target = self.goal.copy()
-        self.route.cells[(1,1)] = 'blocked'
-        node = SimpleNamespace(local_route=self.route)
+        self.route.route_target = self.goal.copy()
+        self.route.route_cells[(1,1)] = 'blocked'
+        node = self.route
         message = SimpleNamespace(pose=SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.,y=2.,z=0.))))
         PlanningNode.target_pose_callback(node,message)
-        self.assertFalse(self.route.cells)
+        self.assertFalse(self.route.route_cells)
         np.testing.assert_array_equal(node.target_pose,[3.,2.,0.])
 
 
