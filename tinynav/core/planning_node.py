@@ -647,6 +647,11 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+            if self.stair_mode:
+                # stair mode checks the body center only: on landings the corners made every turn in place
+                # collide, the reverse gate backed up, stair_node sent the robot forward again, and so on.
+                # Scraping a wall while turning is accepted; walking into one is still stopped by the gate
+                front_len = rear_len = half_w = 0.0
             scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
