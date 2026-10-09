@@ -67,6 +67,9 @@ class StairConfig:
     landing_search: bool = True     # at the landing: look for the next flight (False: stop there, status 'landing')
     next_flight_lateral: float = 1.3  # a U-turn landing: the next flight starts this far to the turn side of where
     next_flight_back: float = 0.4     # we arrived and this far back (1.2-1.4 / 0.3-0.5 m on all recorded landings)
+    auto_side_min: float = 3.0        # turn side 'auto': once |well_side| reaches this, U-turn like a given side. The
+                                      # frontier search hugged the stairwell railing into the next flight and planning
+                                      # got stuck against it there (field_2026_10_09_15_26_00, 61-80 s, 148-161 s)
     uturn_align_deg: float = 45.0   # turn side given: turn in place until the U-turn aim point is within this of the
                                     # heading, then walk to it
     uturn_ahead: float = 1.0        # ... past the next flight's start, aim this far along it (back along the last flight)
@@ -267,6 +270,13 @@ class StairTargetGenerator:
         self.next_entry = self.last_position[:2] + side * self.cfg.next_flight_lateral * left - self.cfg.next_flight_back * f
 
     @property
+    def uturn_side(self):
+        """+1 left / -1 right when the U-turn side is known (given, or estimated firmly enough), else 0."""
+        if self.turn_side != 0:
+            return self.turn_side
+        return float(np.sign(self.well_side)) if abs(self.well_side) >= self.cfg.auto_side_min else 0
+
+    @property
     def on_flight(self):
         return abs(self.pitch) > self.cfg.flight_pitch
 
@@ -393,7 +403,7 @@ class StairTargetGenerator:
         if travel is not None and heading @ travel < -0.5:
             travel = -travel
         in_cone = reachable
-        if travel is not None and (self.on_flight or self.turn_side != 0):
+        if travel is not None and (self.on_flight or self.uturn_side != 0):
             in_cone = reachable & (((rel_xy @ travel) > np.cos(np.radians(cfg.flight_cone_deg)) * r_robot) | (r_robot < cfg.robot_radius))
         h = np.where(in_cone, height, np.nan)
         best = np.nanmax(sign * h)
@@ -460,7 +470,7 @@ class StairTargetGenerator:
             side = self.turn_side or np.sign(self.well_side)
             roomy = reachable & (clearance >= cfg.search_clearance)
             goal = None
-            if self.turn_side != 0 and self.flight_dir is not None:
+            if self.uturn_side != 0 and self.flight_dir is not None:
                 # turn side given: the next flight runs back beside the last one, on that side. Walk straight on into
                 # the landing, cross it sideways, then turn back along the next flight; 'ok' takes over once the
                 # U-turn is done and its steps show up ahead
@@ -576,8 +586,8 @@ class StairTargetGenerator:
         if abs(bearing) <= cfg.max_target_bearing:
             return target
         side = np.sign(bearing)
-        if abs(bearing) > 150 and self.turn_side != 0:
-            side = self.turn_side  # nearly behind: the U-turn way, the sign of the bearing flips with every step here
+        if abs(bearing) > 150 and self.uturn_side != 0:
+            side = self.uturn_side  # nearly behind: the U-turn way, the sign of the bearing flips with every step here
         cell_bearing = np.degrees(np.arctan2(heading[0] * rel_xy[..., 1] - heading[1] * rel_xy[..., 0], rel_xy @ heading))
         roomy = reachable & observed & (r_robot > 0.3) & (r_robot < 1.2) & (side * cell_bearing > 0) \
             & (np.abs(cell_bearing) <= cfg.max_target_bearing) & (clearance >= cfg.search_clearance)
