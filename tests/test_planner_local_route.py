@@ -27,7 +27,7 @@ class GuideTests(unittest.TestCase):
 
     def test_retained_obstacle_survives_map_decay(self):
         esdf = np.ones((40,40),dtype=np.float32)
-        merged = retained_esdf(esdf,np.zeros(3),.05,{(10,10):'blocked'},.1,2)
+        merged = retained_esdf(esdf,np.zeros(3),.05,{(10,10)},.1,2)
         self.assertEqual(merged[20,20],0)
         self.assertEqual(merged[18,20],0)
         self.assertGreater(merged[5,5],0)
@@ -75,9 +75,9 @@ class LocalRouteTests(unittest.TestCase):
         self.assertIsNone(self.update(10.6))
 
     def test_reset_discards_observed_obstacles(self):
-        self.route.route_cells[(1,1)] = 'blocked'
+        self.route.route_cells.add((1,1))
         self.route.reset_local_route()
-        self.assertEqual(self.route.route_cells,{})
+        self.assertEqual(self.route.route_cells,set())
         self.assertIsNone(self.route.route_waypoint)
 
     def test_observation_retains_body_band_only(self):
@@ -100,7 +100,7 @@ class LocalRouteTests(unittest.TestCase):
                                  (PlanningNode.active_callback,SimpleNamespace(data=False)),
                                  (PlanningNode.poi_change_callback,None)]:
             with self.subTest(callback=callback.__name__):
-                self.route.route_cells[(1,1)] = 'blocked'
+                self.route.route_cells.add((1,1))
                 self.route.route_waypoint = self.goal.copy()
                 node = self.route
                 node.nav_active, node.nav_paused, node.target_pose = True, False, self.goal
@@ -112,7 +112,7 @@ class LocalRouteTests(unittest.TestCase):
         from types import SimpleNamespace
         from tinynav.core.planning_node import PlanningNode
         self.route.route_target = self.goal.copy()
-        self.route.route_cells[(1,1)] = 'blocked'
+        self.route.route_cells.add((1,1))
         node = self.route
         message = SimpleNamespace(pose=SimpleNamespace(pose=SimpleNamespace(position=SimpleNamespace(x=3.,y=2.,z=0.))))
         PlanningNode.target_pose_callback(node,message)

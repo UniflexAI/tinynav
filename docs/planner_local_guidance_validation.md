@@ -81,3 +81,18 @@ Additional isolated retests recorded:
 Narrow gate crossed the 0.35 m threshold while issuing a reverse command. This single crossing is not evidence of stable arrival or resolution of its near-goal oscillation. Dead-end recovery remains excluded.
 
 A third uninterrupted L-turn trial on the final source arrived in 58.34 s at 0.334 m, without collision. Dead end timed out after 120.73 s at 2.766 m, without collision. All eight scene geometries have now been rerun following the frontier-selection fix.
+
+## Simplification: shared trajectory evaluation
+
+Normal and local candidates now share one ESDF scoring pass and one trajectory cost function. Slow candidates are generated once for either local routing or final approach, with normal candidates retained as fallback. Stable first-minimum selection replaces sorting the full cost array. Obstacle memory is a set rather than a dictionary whose values were always identical; target invalidation remains in the target callback instead of being repeated during route updates. This removes 25 runtime lines without introducing another module.
+
+All 13 targeted tests passed. A separate comparison checked 1,200 normal/local cost evaluations, including reverse gating and infinite collision costs, with exact agreement against the previous implementation. Compilation and whitespace checks passed. Four scene retests after simplification all arrived without collisions:
+
+| Scene | Elapsed (s) | Final goal distance (m) |
+|---|---:|---:|
+| l_turn | 57.36 | 0.308 |
+| s_bend | 49.29 | 0.304 |
+| s_bend_edited | 49.27 | 0.308 |
+| straight | 11.06 | 0.284 |
+
+The other four scenes were not rerun for this structural refactor. Previously reported narrow-gate oscillation and dead-end limitations remain unresolved.
