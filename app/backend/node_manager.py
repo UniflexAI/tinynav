@@ -9,6 +9,7 @@ import math
 import signal
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -953,8 +954,15 @@ class BackendNode(Ros2NodeManager):
         '/camera/camera/depth/image_rect_raw',
         '/camera/camera/imu',
         '/camera/camera/vio_100hz',
+        '/camera/camera/vio_status',
         '/camera/camera/vio_image',
         '/tf_static',
+        # Go2 leg odometry + EKF (scripts/go2_ekf, a separate container; absent when it is not running)
+        '/go2/joint_states',
+        '/go2/imu',
+        '/go2/leg_twist',
+        '/go2/vio_twist',
+        '/go2/ekf/odometry',
         # stair mode
         '/stair/cmd',
         '/stair/status',
@@ -994,7 +1002,19 @@ class BackendNode(Ros2NodeManager):
                 proc.wait(timeout=10)
             except Exception:
                 self._kill_proc(proc)
+        if path and os.path.isdir(path):
+            self._write_field_record_info(path)
         self.get_logger().info(f'Field recording stopped -> {path}')
+
+    def _write_field_record_info(self, path):
+        """Code version and robot next to the bag, so a replay can tell which stair/odometry code produced it."""
+        git = lambda *a: subprocess.run(['git', '-c', 'safe.directory=*', '-C', '/tinynav', *a],
+                                        capture_output=True, text=True).stdout.strip()
+        info = {'commit': git('rev-parse', 'HEAD'), 'branch': git('rev-parse', '--abbrev-ref', 'HEAD'),
+                'dirty_files': git('status', '--porcelain').splitlines(), 'robot_type': os.environ.get('ROBOT_TYPE', ''),
+                'hostname': socket.gethostname(), 'stair_mode': self._stair_mode, 'topics': self.FIELD_RECORD_TOPICS}
+        with open(os.path.join(path, 'info.json'), 'w') as f:
+            json.dump(info, f, indent=1)
 
     def field_record_state(self):
         with self._lock:
