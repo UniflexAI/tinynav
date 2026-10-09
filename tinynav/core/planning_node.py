@@ -17,7 +17,6 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
-from scipy.spatial.transform import Rotation
 from dataclasses import replace
 from numba import njit
 import cv2
@@ -35,7 +34,6 @@ from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
-from tinynav.core.planning_cost import COLUMNS, STEP_SAMPLES, can_move, select, select_time
 
 # === Helper functions ===
 @njit(cache=True)
@@ -200,7 +198,7 @@ def generate_trajectory_library_3d(
     # Sampling from 0 offered a creep band under the floor -- at vx_max 0.20 the
     # speeds were 0, 0.033, 0.067, ... and the cost minimum sat on 0.033, which
     # cmd_vel_control reads as a stop while `n_fwd_ok` counted it a way forward.
-    # vx=0 stays: the turn-in-place vocabulary the heading term ranks is built on it.
+    # vx=0 stays: it is the turn-in-place vocabulary.
     vx_lo = min_linear_vel if min_linear_vel < vx_max else vx_max
     vx_samples = np.empty(n_vx)
     vx_samples[0] = 0.0
@@ -305,13 +303,8 @@ REVERSE_EXIT_M = 0.15
 def reverse_armed(front_clearance, resolution, engaged=False):
     """The reverse family is armed by the wall being close enough to back off.
 
-    It also used to arm on `n_fwd_ok == 0` -- no forward trajectory clear of
-    collision -- added for 21 s of standstill on 122 on 2026-09-09. That arm is gone:
-    the standstill it answered came from the gate banning EVERY non-reverse row, vx=0
-    included, so backing out was the only motion left. `reverse_gate_penalty` now
-    leaves the vx=0 rows alone, and on 122 2026-09-18 eight of the ten `fwd_ok == 0`
-    readings had turn-in-place rows clear -- the robot can turn out instead of
-    reversing out.
+    Never on "no forward row is clear": with turn-in-place rows clear the robot turns
+    out instead of backing out.
 
     Half a cell of slack because `front_clearance` counts grid steps: it lands on
     multiples of `resolution` and so never exactly on a threshold in metres. 6 * 0.05
@@ -368,7 +361,10 @@ def footprint_lattice(front_len, rear_len, half_w, safety_radius):
 @njit(cache=True)
 def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
                                 route_heading_map, origin, resolution, safety_radius=0.1,
-                                front_len=0.35, rear_len=0.35, half_w=0.15):
+                                front_len=0.35, rear_len=0.35, half_w=0.15,
+                                target_x=0.0, target_y=0.0, cam_x=0.0, cam_y=0.0, cam_z=0.0,
+                                arrive_m=0.0, arrive_ticks=2, tick_steps=5, band=0.5,
+                                has_route=True, dt=0.1):
     """
     Score trajectories by ESDF clearance over the footprint, sampled on a lattice fine
     enough that no obstacle can hide between the samples (see below), plus two lookups
@@ -377,13 +373,22 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
     :return: per trajectory, the obstacle score (inf on collision), the step index of the
              minimum clearance, the worst (max) distance from the trajectory center to the
              route over the whole trajectory, the route arc length still ahead of its end
-             cell, and how far its end heading is from the route's own direction there.
+             cell, and how far its end heading is from the route's own direction there;
+             then for the time cost: when map_node's arrival would fire (inf if it does
+             not), and at the end the distance from the route, the heading off the bearing
+             to the target, and the xy distance to it. Arrival is the camera (`cam_*`, the
+             body offset of camera_to_robot_center) inside `arrive_m` of the target where
+             the route has run out, for `arrive_ticks` samples `tick_steps` apart.
     """
     scores = []
     occ_points = []
     path_costs = []
     end_heading_errs = []
     end_remainings = []
+    arrive_ts = []
+    end_devs = []
+    end_goal_errs = []
+    end_goal_dxys = []
     ESDF_rows, ESDF_cols = ESDF_map.shape
 
     off_fwd, off_lat = footprint_lattice(front_len, rear_len, half_w, safety_radius)
@@ -396,6 +401,13 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
         path_cost_max = 0.0
         path_cost_n = 0
         traveled_arc = 0.0
+        start_remaining = 1e3
+        start_x_img = int((traj[0, 0] - origin[0]) / resolution)
+        start_y_img = int((traj[0, 1] - origin[1]) / resolution)
+        if 0 <= start_x_img < ESDF_rows and 0 <= start_y_img < ESDF_cols:
+            start_remaining = float(remaining_map[start_x_img, start_y_img])
+        arrive_t = np.inf
+        inside_n = 0
 
         for i in range(len(traj)):
             x_world, y_world = traj[i, 0], traj[i, 1]
@@ -433,6 +445,26 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
                             path_cost_max = center_path_dist
                         path_cost_n += 1
 
+            if arrive_m > 0.0 and i > 0 and i % tick_steps == 0 and arrive_t == np.inf:
+                xi = int((x_world - origin[0]) / resolution)
+                yi = int((y_world - origin[1]) / resolution)
+                rem = 1e3
+                if 0 <= xi < ESDF_rows and 0 <= yi < ESDF_cols:
+                    rem = float(remaining_map[xi, yi])
+                if start_remaining < 1e3:
+                    rem = max(rem, start_remaining - traveled_arc)
+                cam_wx = (x_world + (1.0 - 2.0 * (qy * qy + qz * qz)) * cam_x
+                          + 2.0 * (qx * qy - qz * qw) * cam_y + 2.0 * (qx * qz + qy * qw) * cam_z)
+                cam_wy = (y_world + 2.0 * (qx * qy + qz * qw) * cam_x
+                          + (1.0 - 2.0 * (qx * qx + qz * qz)) * cam_y + 2.0 * (qy * qz - qx * qw) * cam_z)
+                if ((cam_wx - target_x) ** 2 + (cam_wy - target_y) ** 2 < arrive_m * arrive_m
+                        and (not has_route or rem <= band)):
+                    inside_n += 1
+                    if inside_n >= arrive_ticks:
+                        arrive_t = i * dt
+                else:
+                    inside_n = 0
+
         if path_cost_n > 0:
             path_costs.append(path_cost_max)
         else:
@@ -455,14 +487,18 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             end_heading_err = angle_between(heading_of_pose7(traj[-1]),
                                             route_heading_map[end_x_img, end_y_img])
         end_heading_errs.append(end_heading_err)
-
-        start_x_img = int((traj[0, 0] - origin[0]) / resolution)
-        start_y_img = int((traj[0, 1] - origin[1]) / resolution)
-        if 0 <= start_x_img < ESDF_rows and 0 <= start_y_img < ESDF_cols:
-            start_remaining = float(remaining_map[start_x_img, start_y_img])
-            if start_remaining < 1e3:
-                end_remaining = max(end_remaining, start_remaining - traveled_arc)
+        if start_remaining < 1e3:
+            end_remaining = max(end_remaining, start_remaining - traveled_arc)
         end_remainings.append(end_remaining)
+        arrive_ts.append(arrive_t)
+        end_dev = 1e3
+        if 0 <= end_x_img < ESDF_rows and 0 <= end_y_img < ESDF_cols:
+            end_dev = float(path_dist_map[end_x_img, end_y_img])
+        end_devs.append(end_dev)
+        to_x = target_x - traj[-1, 0]
+        to_y = target_y - traj[-1, 1]
+        end_goal_errs.append(angle_between(np.arctan2(to_y, to_x), heading_of_pose7(traj[-1])))
+        end_goal_dxys.append((to_x * to_x + to_y * to_y) ** 0.5)
 
         if min_dist_for_traj < 1e-3:  # collision
             scores.append(float('inf'))
@@ -473,16 +509,16 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
                 max_steps = len(traj)
                 decay_factor = (max_steps - closest_step_for_traj) / max_steps
                 # Zeroed at safety_radius so the term is CONTINUOUS across the margin.
-                # A bare 1/d steps from 0 to ~1/safety_radius there, and at w_clearance
-                # that step is larger than every other term in the cost combined -- so a
-                # single grid cell flickering at the margin decides the selection.
+                # A bare 1/d steps from 0 to ~1/safety_radius there, and that step outweighs
+                # every other term -- a cell flickering at the margin decides the pick.
                 base_score = (1.0 / (min_dist_for_traj + 1e-3)
                               - 1.0 / (safety_radius + 1e-3))
                 scores.append(decay_factor * base_score)
         else:
             scores.append(0.0)
         occ_points.append(closest_step_for_traj)
-    return scores, occ_points, path_costs, end_remainings, end_heading_errs
+    return (scores, occ_points, path_costs, end_remainings, end_heading_errs,
+            arrive_ts, end_devs, end_goal_errs, end_goal_dxys)
 
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
@@ -518,49 +554,41 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
-def step_features(trajs, path_dist_map, remaining_map, route_heading_map, origin,
-                  resolution, target, dt, cam_offset):
-    """Per trajectory, at each STEP_SAMPLES step: planning_cost.STEP_COLUMNS, shape
-    (n, len(STEP_SAMPLES), 7). `cam_offset` is ROBOT_CONFIG.cam_offset_3d: the
-    trajectory poses are the control centre in the camera's orientation.
+#: map_node's _ARRIVE_M, and _ARRIVE_TICKS at its 0.5 s nav tick: the time to go is
+#: the time until its arrival fires. A test holds them equal.
+ARRIVE_M = 0.5
+ARRIVE_TICKS = 2
+ARRIVE_TICK_S = 0.5
+#: Route metres one unit of clearance score is worth.
+CLEARANCE_M = 2.0
+#: Rows this close to the fastest count as equally fast; the least motion among them wins.
+TIE_S = 0.15
 
-    The lookups score_trajectories_by_ESDF makes at the end, made along the way:
-    remaining with the same arc-length floor, path_dev at that step rather than the
-    worst so far, and off-grid samples at 1e3 / 1e3 / 0 as there.
-    """
-    steps = np.asarray(STEP_SAMPLES)
-    rows, cols = remaining_map.shape
-    seg = np.linalg.norm(np.diff(trajs[:, :, :2], axis=1), axis=2)
-    arc = np.concatenate([np.zeros((len(trajs), 1)), np.cumsum(seg, axis=1)], axis=1)[:, steps]
 
-    def cells(xy):
-        xi = ((xy[..., 0] - origin[0]) / resolution).astype(int)
-        yi = ((xy[..., 1] - origin[1]) / resolution).astype(int)
-        ok = (xi >= 0) & (xi < rows) & (yi >= 0) & (yi < cols)
-        return np.where(ok, xi, 0), np.where(ok, yi, 0), ok
-
-    p = trajs[:, steps]
-    xi, yi, ok = cells(p[..., :2])
-    rem = np.where(ok, remaining_map[xi, yi], 1e3)
-    sx, sy, sok = cells(trajs[:, 0, :2])
-    start_rem = np.where(sok, remaining_map[sx, sy], 1e3)[:, None]
-    rem = np.where(start_rem < 1e3, np.maximum(rem, start_rem - arc), rem)
-    dev = np.where(ok, path_dist_map[xi, yi], 1e3)
-    qx, qy, qz, qw = p[..., 3], p[..., 4], p[..., 5], p[..., 6]
-    heading = np.arctan2(2.0 * (qy * qz - qw * qx), 2.0 * (qx * qz + qw * qy))
-
-    def fold(a):
-        return np.abs(np.arctan2(np.sin(a), np.cos(a)))
-
-    route_err = np.where(ok, fold(heading - route_heading_map[xi, yi]), 0.0)
-    to_goal = target[None, None, :2] - p[..., :2]
-    goal_err = fold(np.arctan2(to_goal[..., 1], to_goal[..., 0]) - heading)
-    goal_dxy = np.linalg.norm(to_goal, axis=2)
-    cam = p[..., :3] + Rotation.from_quat(p[..., 3:7].reshape(-1, 4)).apply(
-        cam_offset).reshape(p.shape[:-1] + (3,))
-    cam_d = np.linalg.norm(cam[..., :2] - target[None, None, :2], axis=2)
-    t = np.broadcast_to(steps * dt, rem.shape)
-    return np.stack([t, rem, dev, route_err, goal_err, goal_dxy, cam_d], axis=2)
+def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_gerr,
+                   end_gdxy, here_arrived, has_route, should_reverse, v, w, band, t_end):
+    """Index of the row with the least time to go: when map_node's arrival fires, or the
+    rollout plus the distance left at `v` and the heading left at `w`. The reverse gate
+    filters, and so does standing still while another row is open, unless the robot is
+    already inside the arrival radius. Arrays are per row; `scores` inf is a collision."""
+    free = np.isfinite(scores)
+    ok = free & ((vx < 0.0) == should_reverse)
+    still = (np.abs(vx) <= 1e-3) & (np.abs(yaw) < 1e-3)
+    if (ok & ~still).any() and not here_arrived:
+        ok &= ~still
+    if not ok.any():
+        ok = free
+    if has_route:
+        fade = np.clip(end_rem / band, 0.0, 1.0)
+        d = end_rem + end_dev + (1.0 - fade) * end_gdxy
+        h = fade * end_rerr + (1.0 - fade) * end_gerr
+    else:
+        d, h = end_gdxy, end_gerr
+    t = np.where(np.isfinite(arrive_t), arrive_t, t_end + d / v + h / w)
+    t = np.where(ok, t + CLEARANCE_M * np.where(free, scores, 0.0) / v, np.inf)
+    tied = np.flatnonzero(t <= t.min() + TIE_S)
+    motion = np.abs(vx[tied]) / v + np.abs(yaw[tied]) / w
+    return int(tied[np.lexsort((t[tied], motion))[0]])
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -662,10 +690,6 @@ class PlanningNode(Node):
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
-        # RECORDING: removed once the time cost is decided.
-        # Every frame's candidate table, for planning_cost's replay. Built only while
-        # someone listens.
-        self.cost_pub = self.create_publisher(String, '/planning/cost_terms', 10)
         #: Upstream's hysteresis state: once reverse engages it stays engaged until the
         #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
         #: subject says it brings in #247's reverse gate.
@@ -772,40 +796,8 @@ class PlanningNode(Node):
             Path, '/mapping/global_plan', self._on_global_route, 1
         )
         self._global_route_map_xy = None
-        # Per unit of ESDF clearance score, which is nonzero only inside safety_radius
-        # (a collision is inf and no weight reaches it). 200 against w_route_progress's
-        # 100/m is upstream #246's balance carried over: it moved 100000/100 to
-        # 2000/1000, a 500x drop in the clearance term's weight relative to progress,
-        # and the same ratio here is 200 because this fork's progress term already
-        # weighs 100/m. Grazing at safety_radius now costs about 20 m of route
-        # progress, where it used to cost 9900 m.
-        self.w_clearance = 200.0
-        # among survivors, progress drives speed and follow keeps the robot from
-        # cutting across to a closer route point
-        self.w_route_progress = 100.0
-        self.w_path_follow = 80.0
-        # pulls the last stretch onto the exact goal, since remaining_map alone
-        # saturates at 0 before reaching it
-        self.w_goal_terminal = 100.0
-        # The last metres of route, over which the goal takes over from the route: the
-        # goal's position arms w_goal_terminal and its bearing replaces the route's
-        # direction in the heading term (route_band_fade).
+        # The last metres of route, where the target is the goal rather than a carrot.
         self.route_terminal_band = 0.5
-        # Per radian the trajectory's end heading is off the route's own direction.
-        # Held to half the progress term's reach: at 60 a standstill row that rotates
-        # a radian saved as much as a forward row advancing 0.6 m earned, so the two
-        # tied and noise picked the winner -- 4.5 m of path for 0.02 m of progress on
-        # 122 2026-09-18, standing still with a median 36 clear forward rows.
-        self.w_route_heading = 30.0
-        # Per rad/s of a turn-in-place row, and on top of that per rad/s when it turns
-        # against the last selected rotation. The sum stays under w_route_heading's
-        # 90 per rad/s over a 3 s rollout (turn_in_place_penalty).
-        self.w_turn_in_place = 10.0
-        # A turn-in-place row's start cost with the robot pointing at the target,
-        # falling linearly to 0 pointing away (turn_in_place_penalty).
-        self.w_turn_start = 40.0
-        self.w_turn_reversal = 30.0
-        self.last_yaw_rate = 0.0  # world yaw rate (rad/s) of the last selected trajectory
 
         # Climb region: the capture-path points, in this grid's frame, that the map
         # says were climbed through. Cells near them relax the obstacle z-span filter
@@ -928,29 +920,6 @@ class PlanningNode(Node):
     # Path, and its dt is planner_dt * path_pose_stride * step_idx -- publishing at a
     # different stride would scale both by that ratio.
     PATH_POSE_STRIDE = 10
-
-    def _cost_weights(self):
-        return {'clearance': self.w_clearance, 'route_progress': self.w_route_progress,
-                'path_follow': self.w_path_follow, 'goal_terminal': self.w_goal_terminal,
-                'route_heading': self.w_route_heading, 'turn_in_place': self.w_turn_in_place,
-                'turn_reversal': self.w_turn_reversal, 'turn_start': self.w_turn_start}
-
-    # RECORDING: removed once the time cost is decided.
-    def _publish_cost_terms(self, rows, ctx, sel, shadow, stamp):
-        """Rounded to 1e-4: the replay then reproduces every pick but ties closer than
-        that. `steps` rides as one more column, a list per row."""
-        def r4(x):
-            if isinstance(x, float):
-                return round(x, 4)
-            if isinstance(x, (list, tuple)):
-                return [r4(y) for y in x]
-            return x
-        cols = COLUMNS + ('steps',)
-        payload = {k: r4(v) for k, v in ctx.items()}
-        payload.update(stamp=stamp.sec + stamp.nanosec * 1e-9, sel=sel, shadow=shadow,
-                       driver='time',
-                       cols=cols, rows=[[r4(r[c]) for c in cols] for r in rows])
-        self.cost_pub.publish(String(data=json.dumps(payload, separators=(',', ':'))))
 
     def publish_selected_path(self, trajectories, indices, header):
         path = Path()
@@ -1218,17 +1187,22 @@ class PlanningNode(Node):
         return trajectories, params
 
     def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
-                           route_heading_map):
+                           route_heading_map, target, has_route):
+        """score_trajectories_by_ESDF's columns, as arrays."""
         front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
+        cam = ROBOT_CONFIG.cam_offset_3d
 
         def score(trajs):
             return score_trajectories_by_ESDF(
                 np.ascontiguousarray(trajs), ESDF_map, path_dist_map, remaining_map,
                 route_heading_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
-                front_len, rear_len, half_w,
+                front_len, rear_len, half_w, float(target[0]), float(target[1]),
+                float(cam[0]), float(cam[1]), float(cam[2]), ARRIVE_M, ARRIVE_TICKS,
+                int(round(ARRIVE_TICK_S / self._traj_dt)), self.route_terminal_band,
+                bool(has_route), self._traj_dt,
             )
 
-        scores, occ_points, path_costs, end_remainings, end_heading_errs = score(trajectories)
+        cols = [np.array(c, dtype=float) for c in score(trajectories)]
         # **The pose every candidate starts from is not a choice any of them made.** One
         # footprint sample on an obstacle cell there makes every row inf, reverse included,
         # so the scores stop saying which way is out exactly when that is the question. The
@@ -1236,11 +1210,9 @@ class PlanningNode(Node):
         # checked as ever, so a rear that really is blocked is still inf and still refused.
         back = np.flatnonzero(params[:, 0] < 0.0)
         if len(back) and trajectories.shape[1] > 1:
-            moved = score(trajectories[back][:, 1:])
-            for j, i in enumerate(back):
-                (scores[i], occ_points[i], path_costs[i],
-                 end_remainings[i], end_heading_errs[i]) = (col[j] for col in moved)
-        return scores, occ_points, path_costs, end_remainings, end_heading_errs
+            for col, moved in zip(cols, score(trajectories[back][:, 1:])):
+                col[back] = moved
+        return cols
 
     @Timer(name="Planning Loop", text="\n\n[{name}] Elapsed time: {milliseconds:.0f} ms")
     def sync_callback(self, depth_msg, odom_msg):
@@ -1291,8 +1263,10 @@ class PlanningNode(Node):
             )
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            scores, occ_points, path_costs, end_remainings, end_heading_errs = self.score_trajectories(
-                trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map)
+            (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
+             end_devs, end_goal_errs, end_goal_dxys) = self.score_trajectories(
+                trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map,
+                self.target_pose, has_route)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
@@ -1338,78 +1312,24 @@ class PlanningNode(Node):
                 # relocalized motion). The fix for that is upstream of here.
                 return
 
-            # Single cost: clearance + route adherence/progress + smoothness, with the
-            # reverse gate as a large additive penalty rather than a hard filter. The
-            # penalty degrades gracefully on its own -- a colliding trajectory costs
-            # scores[i]*w_clearance == inf, which loses to any non-colliding gate violator --
-            # so it already gives the "never stall outright" fallback that a two-stage
-            # filter had to spell out, in one term. Clearance stays soft on purpose:
-            # safety_radius is a margin, not a collision boundary, and a corridor
-            # narrower than the band forces every forward trajectory to intrude into it.
-            # The heading term exists because no positional term can rank a heading.
-            # Two cases share that:
-            #
-            #   the vx=0 rows all END where they started, so smoothness picked whichever
-            #   rotation matched last cycle -- omega=0 from a standstill -- and with a
-            #   goal further behind than one arc can swing around, standing still was
-            #   the cost minimum and stayed it: a permanent freeze;
-            #
-            #   a MOVING arc through a corner ends within centimetres of where turning
-            #   into the corner ends, so remaining_map and path_dist cannot separate
-            #   them either, and the choice fell to smoothness and dithered. Measured on
-            #   118 (2026-08-31): goal_err sat at 61-65 degrees for tens of frames while
-            #   the selected omega alternated -0.21 / +0.43 frame to frame, and the
-            #   robot drove straight through a right turn it should have taken.
-            #
-            # What differs is WHICH heading is right, and that is the route's own
-            # direction wherever there is a route: pointing at the goal, at a corner, is
-            # what cutting the corner is. Without a route there is only the goal bearing,
-            # which is what this planner had before the route existed.
             def _yaw_rate(traj):
                 dh = _world_heading(traj[1]) - _world_heading(traj[0])
                 return float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
-            # From the robot's own pose, not a row's first pose: the lattice's rows are
-            # already one step in, each turned by its own omega.
-            start_err = _end_heading_error(np.concatenate([init_p, init_q]), target)
-
-            to_goal_m = float(np.linalg.norm(init_p[:2] - target[:2]))
-
-            # The collision-free candidates as features; the cost reads nothing else,
-            # which is what lets a recorded frame be re-scored (planning_cost).
-            rows = []
-            free = [i for i in range(len(trajectories)) if scores[i] != float('inf')]
-            steps = step_features(trajectories[free], path_dist_map, remaining_map,
-                                  route_heading_map, self.origin, self.resolution, target,
-                                  self._traj_dt, ROBOT_CONFIG.cam_offset_3d).tolist()
-            for j, i in enumerate(free):
-                traj = trajectories[i]
-                rows.append({
-                    'i': i, 'vx': float(params[i][0]), 'omega': float(params[i][1]),
-                    'yaw': _yaw_rate(traj), 'clr': float(scores[i]), 'occ': int(occ_points[i]),
-                    'remaining': float(end_remainings[i]), 'path_dev': float(path_costs[i]),
-                    'route_err': float(end_heading_errs[i]),
-                    'goal_err': float(_end_heading_error(traj[-1], target)),
-                    'goal_d': float(np.linalg.norm(traj[-1, :3] - target)),
-                    'goal_dxy': float(np.linalg.norm(traj[-1, :2] - target[:2])),
-                    'steps': steps[j],
-                })
-            ctx = {
-                'has_route': bool(has_route), 'should_reverse': bool(should_reverse),
-                'can_move': can_move(rows, should_reverse), 'to_goal': to_goal_m,
-                'start_err': float(start_err),
-                'last_vx': float(self.last_param[0]), 'last_omega': float(self.last_param[1]),
-                'last_yaw': float(self.last_yaw_rate), 'band': self.route_terminal_band,
-                'w': self._cost_weights(),
-            }
-            ctx.update(v_nom=max(float(v_allow), self._vx_min, 0.1),
-                       w_nom=float(ROBOT_CONFIG.max_angular_vel))
-            top_indices = [rows[select_time(rows, ctx)]['i']]
-            # RECORDING: the weighted pick, and the table, go once the cost is decided.
-            weighted = rows[select(rows, ctx)]
-            if self.cost_pub.get_subscription_count() > 0:
-                self._publish_cost_terms(rows, ctx, weighted['i'], top_indices[0],
-                                         depth_msg.header.stamp)
+            # The camera is where map_node measures arrival from; the route at the
+            # control centre is where scoring reads it.
+            xi, yi = ((init_p[:2] - self.origin[:2]) / self.resolution).astype(int)
+            rem_here = (remaining_map[xi, yi] if 0 <= xi < remaining_map.shape[0]
+                        and 0 <= yi < remaining_map.shape[1] else 1e3)
+            here_arrived = (np.linalg.norm(T[:2, 3] - target[:2]) < ARRIVE_M
+                            and (not has_route or rem_here <= self.route_terminal_band))
+            yaws = np.array([_yaw_rate(t) for t in trajectories])
+            v_nom = max(float(v_allow), self._vx_min, 0.1)
+            top_indices = [select_by_time(
+                params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
+                end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
+                should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
+                self.route_terminal_band, (trajectories.shape[1] - 1) * self._traj_dt)]
 
             self.last_param = params[top_indices[0]]
 
@@ -1417,7 +1337,6 @@ class PlanningNode(Node):
             # anything else means stuck by cost with somewhere to go.
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
-                f'weighted vx={weighted["vx"]:.2f} omega={weighted["omega"]:.2f} '
                 f'fwd_ok={n_fwd_ok} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '
@@ -1440,7 +1359,6 @@ class PlanningNode(Node):
             sel_vx = float(params[top_indices[0]][0])
 
             sel_omega = _yaw_rate(sel_traj)
-            self.last_yaw_rate = sel_omega
 
             # `turn_ok` is the one the log line could not answer: how many vx=0 rows
             # were collision-free when the gate banned every non-reverse row.
