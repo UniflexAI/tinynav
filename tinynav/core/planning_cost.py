@@ -208,19 +208,20 @@ def time_to_go(r, ctx):
 
     If the rollout arrives -- the camera inside ARRIVE_M of the target, where the route
     has run out (the target is only the goal there; before, it is a carrot), for
-    ARRIVE_TICKS samples running -- the time is the sample where map_node would fire. Otherwise it is the whole rollout plus the
-    distance left at v_nom and the heading left at w_nom. Clearance adds the time its
-    score is worth in route metres either way.
+    ARRIVE_TICKS samples running -- the time is the sample where map_node would fire.
+    Otherwise it is the whole rollout plus the distance left at v_nom and the heading
+    left at w_nom. Clearance adds the time its score is worth in route metres either
+    way.
 
     `ctx` adds v_nom (m/s) and w_nom (rad/s) to what candidate_terms reads.
     """
     v, w, band = ctx['v_nom'], ctx['w_nom'], ctx['band']
     clearance = CLEARANCE_M * r['clr'] / v
     inside = 0
-    for t, rem, dev, rerr, gerr, gd, cam_d in r['steps']:
-        inside = inside + 1 if cam_d < ARRIVE_M and (not ctx['has_route'] or rem <= band) else 0
+    for step in r['steps']:
+        inside = inside + 1 if _in_arrival(step, ctx) else 0
         if inside >= ARRIVE_TICKS:
-            return t + clearance
+            return step[0] + clearance
     t, rem, dev, rerr, gerr, gd, cam_d = r['steps'][-1]
     if ctx['has_route']:
         fade = route_band_fade(rem, band)
@@ -231,10 +232,20 @@ def time_to_go(r, ctx):
     return t + d / v + h / w + clearance
 
 
+def _in_arrival(step, ctx):
+    """map_node's radius around the target, where the route has run out."""
+    t, rem, dev, rerr, gerr, gd, cam_d = step
+    return cam_d < ARRIVE_M and (not ctx['has_route'] or rem <= ctx['band'])
+
+
 def _time_allowed(r, ctx):
-    return (reverse_gate_penalty(r['vx'], ctx['should_reverse']) == 0.0
-            and standstill_penalty(is_standstill(r['vx'], r['yaw']),
-                                   ctx['can_move'], ctx['to_goal']) == 0.0)
+    """The reverse gate, and no standstill while another row is open -- unless the
+    robot is inside map_node's arrival radius, where standing is waiting for it to
+    fire. A standstill's samples are all where the robot is now."""
+    if reverse_gate_penalty(r['vx'], ctx['should_reverse']) != 0.0:
+        return False
+    return not (is_standstill(r['vx'], r['yaw']) and ctx['can_move']
+                and not _in_arrival(r['steps'][0], ctx))
 
 
 def motion(r, ctx):
