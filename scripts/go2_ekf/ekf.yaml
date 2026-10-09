@@ -1,0 +1,21 @@
+# Go2 body IMU attitude/rates + leg body twist + VIO body twist. Output only (/go2/ekf/odometry); nothing consumes it yet.
+# No rejection thresholds: with the constant-acceleration model a hard stop pushed VIO innovations past the gate and
+# the rejected prediction ran to 1.38 m/s for 2 s; VIO outliers are gated upstream in go2_vio_twist_node.
+go2_ekf:
+  ros__parameters:
+    frequency: 50.0
+    sensor_timeout: 0.1
+    two_d_mode: false
+    publish_tf: false
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+    imu0: /go2/imu
+    imu0_config: [false, false, false, true, true, true, false, false, false, true, true, true, false, false, false]
+    imu0_queue_size: 50
+    twist0: /go2/leg_twist
+    twist0_config: [false, false, false, false, false, false, true, true, true, false, false, false, false, false, false]
+    twist0_queue_size: 20
+    twist1: /go2/vio_twist
+    twist1_config: [false, false, false, false, false, false, true, true, true, false, false, false, false, false, false]
+    twist1_queue_size: 20
