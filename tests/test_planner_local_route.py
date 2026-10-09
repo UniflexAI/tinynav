@@ -4,7 +4,7 @@ from scipy.ndimage import distance_transform_edt
 from tinynav.core.planning_node import PlanningNode, local_detour_target, retained_esdf
 
 
-class GuideTests(unittest.TestCase):
+class RouteSearchTests(unittest.TestCase):
     def test_goal_outside_map_advances_along_corridor(self):
         wall = np.zeros((100,100),dtype=bool)
         wall[30:,62:70] = True
@@ -14,6 +14,27 @@ class GuideTests(unittest.TestCase):
         self.assertIsNotNone(waypoint)
         self.assertGreater(waypoint[0],.2)
         self.assertLess(waypoint[1],.5)
+
+    def test_outside_goal_keeps_clearance_in_corridor(self):
+        wall = np.zeros((100,100),dtype=bool)
+        wall[30:,62:70] = True
+        wall[:,30:38] = True
+        esdf = distance_transform_edt(~wall)*.05
+        waypoint = local_detour_target(esdf,np.array([-2.5,-2.5,0.]),.05,
+                                      np.array([0.,0.,.45]),np.array([3.9,4.4,0.]),.15)
+        self.assertIsNotNone(waypoint)
+        self.assertGreater(waypoint[0],.3)
+        self.assertLess(abs(waypoint[1]),.15)
+
+    def test_rejected_long_route_keeps_short_progress(self):
+        wall = np.zeros((60,60),dtype=bool)
+        wall[25:28,:50] = True
+        esdf = distance_transform_edt(~wall)*.05
+        waypoint = local_detour_target(esdf,np.zeros(3),.05,
+                                      np.array([.3,1.,0.]),np.array([2.,1.,0.]),.15)
+        self.assertIsNotNone(waypoint)
+        self.assertGreater(waypoint[0],.5)
+        self.assertLess(waypoint[0],1.2)
 
     def test_wall_detour(self):
         wall = np.zeros((60,60),dtype=bool)

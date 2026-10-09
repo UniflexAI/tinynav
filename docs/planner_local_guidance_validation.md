@@ -1,98 +1,42 @@
-# Planner local guidance validation
+# Unified planner validation
 
-## Scope
+## Implementation
 
-Branch: `xiaole/planner-local-guidance`, based on `main` at `f43fc61`.
+Branch: `xiaole/planner-local-guidance`, based on main at `f43fc61`.
 
-This branch adds obstacle-aware local waypoint selection to normal planning. It has no independent stall/hold timer, recovery state machine, scan, retreat sequence, attempt memory, or near-goal finishing behavior. Only measured obstacle endpoints are retained for route selection. The existing live ESDF footprint scorer checks candidate motion; unknown space is handled as in the normal planner, not as observed-clear recovery coverage.
+All runtime changes are in `tinynav/core/planning_node.py`. The planner selects a current target (the task goal on a clear route, otherwise a short local waypoint), generates one trajectory library, and selects motion with one cost function. The final task goal does not change.
 
-Normal scoring and reverse hysteresis from current main remain intact. Inside 1 m of the goal, the normal candidate set also includes a slower lattice capped at 0.15 m/s, evaluated with the same original cost and footprint checks. A short local bypass uses finer trajectories capped at 0.15 m/s and the previously tested local clearance scoring. Large detours are rejected. ROS topics, controllers, Websim UI, and scenario definitions are unchanged.
+- Forward sampling always includes low speeds. Its upper limit decreases with the distance to the current target; reverse candidates remain in the same library.
+- All candidates use the same distance, heading, clearance, and velocity-change weights. There is no local mode, candidate-group switch, or dedicated guide trajectory library.
+- The previous front-distance reverse gate and its hysteresis state are removed. Forward and reverse candidates compete under the same cost and footprint collision checks.
+- Local routing retains measured obstacle endpoints, prefers clearance, and rejects long detours while searching. Targets outside the local map are treated as directions for useful local progress, not clipped terminal goals.
+- Target changes, POI changes, pause, and navigation changes invalidate route memory. Live occupancy decay, obstacle inflation, footprint checks, safety radius, ROS topics, controllers, Websim UI, and scenes are unchanged.
 
-Local route selection, observed-obstacle storage, and cache lifecycle are implemented directly in `planning_node.py`; there is no separate planner or guide object.
+This revision removes 47 runtime lines relative to the preceding shared-scoring implementation. It does not include a model, full-turn scan, retreat sequence, or a recovery state machine. Retained obstacles influence routing; candidate motion is still checked against the live ESDF. Unknown space is treated as in the existing planner.
 
-## Method
+## Method and results
 
-All seven presets from the existing recovery Websim were tested, plus the previously edited S-bend. Six presets exist in main; the dead-end geometry was supplied externally for validation. The edited S-bend changes upper_wall_entry center XY to [1.14, 0.7] and right_deflector center XY to [2.72, 1.04].
+Tests ran on Spark in isolated ROS domains, using GO2 and a 160x100 depth camera (fx=80, fy=50, mount height 0.45 m). Arrival means XY goal distance <=0.35 m; the timeout is 120 s. Each test resets its scene. These timings are simulation observations, not deterministic performance benchmarks or statistical success rates.
 
-Tests ran in isolated ROS domains on spark, using GO2, a 160x100 depth camera, fx=80, fy=50, and camera height 0.45 m. Each scene started from its configured initial pose. Arrival means XY goal distance <=0.35 m; failure means a geometric collision or a 120 s wall-clock timeout. Batches ran concurrently in separate simulator processes; timings are not deterministic benchmarks. This is one trial per case, not a statistical success-rate estimate.
-
-## Results
-
-| Scene | Outcome | Elapsed (s) | Final goal distance (m) | Collision |
+| Scene | Outcome | Elapsed (s) | Goal distance (m) | Collision |
 |---|---|---:|---:|---|
-| l_turn | arrived | 72.46 | 0.330 | No |
-| straight | timeout | 120.70 | 0.391 | No |
-| s_bend | arrived | 48.31 | 0.320 | No |
-| s_bend_edited | arrived | 40.25 | 0.314 | No |
-| narrow_gate | timeout | 120.70 | 0.544 | No |
-| open_target | arrived | 38.21 | 0.324 | No |
-| back_target | arrived | 10.05 | 0.319 | No |
-| dead_end | timeout | 120.72 | 2.774 | No |
+| l_turn | arrived | 48.26 | 0.340 | No |
+| straight | arrived | 11.07 | 0.269 | No |
+| s_bend | arrived | 47.29 | 0.345 | No |
+| s_bend_edited | arrived | 39.20 | 0.314 | No |
+| narrow_gate | arrived | 21.13 | 0.308 | No |
+| open_target | arrived | 41.22 | 0.313 | No |
+| back_target | arrived | 4.02 | 0.300 | No |
+| dead_end | timeout | 120.71 | 2.940 | No |
 
-Five cases arrived and three timed out; no collisions were recorded. Dead-end recovery is explicitly out of scope. Straight and narrow-gate trials reached the goal vicinity but did not meet the strict arrival threshold.
+L-turn also arrived in a separate uninterrupted trial in 55.31 s at 0.328 m, without collision. Narrow gate repeated in 22.12 s at 0.307 m; during a subsequent 20 s observation it remained inside the arrival threshold, ending at 0.179 m with zero velocity and no collision.
 
-## Main diagnostics
-
-Unmodified main was tested separately on Straight and Narrow gate for 40 s to check the near-goal stalls:
-
-- straight: stopped 0.391 m from the goal, no collision.
-- narrow_gate: stopped 0.520 m from the goal, no collision.
-
-These diagnostics reproduce the same category of near-goal behavior on main; they do not establish equivalence across all scenes. The initial branch did not address this issue. A subsequent planner-only fix adds slow near-goal candidates without changing the arrival threshold or restoring recovery actions. The original results above describe the initial implementation.
+An initial unified trial stalled in L-turn. Removing mode switching exposed route selection that could hug the entry wall or discard all progress after rejecting one long route. Clearance preference and rejection during search corrected this regression; the table reports the final revision. Dead-end escape remains unsupported and physical robot execution has not been validated.
 
 ## Automated checks
 
-- 12 targeted local-routing, observation, cache, and navigation-reset tests passed.
-- 6 existing main planning/heading checks passed.
+- 15 targeted routing, observation, navigation-reset, corridor-clearance, and long-route rejection tests passed.
+- 6 existing heading/planning checks passed.
 - Python compilation and `git diff --check` passed.
 
-Physical robot execution has not been validated. Raw per-second trajectories and configurations are retained with the local validation artifacts; they are not included in this small code change.
-
-## Follow-up: inline routing and slow goal approach
-
-Local routing now lives directly in PlanningNode, without a separate guide module or object. The 12 targeted tests passed again after this change. Routing and cache methods were checked for structural equivalence to their previous implementation.
-
-After adding slow candidates inside 1 m of the goal, isolated Websim retests reported:
-
-| Scene | Outcome | Elapsed (s) | Final goal distance (m) | Collision |
-|---|---|---:|---:|---|
-| straight | arrived | 13.07 | 0.294 | No |
-| narrow_gate | timeout | 40.21 | 0.539 | No |
-
-Narrow gate still oscillates near the goal: the recorded commands include a reverse command as it approaches the end wall. This remains unresolved. The other scenes were not rerun after the slow-candidate change; their earlier results must not be treated as validation of the final revision. Physical robot validation remains pending.
-
-## L-turn regression: out-of-map goal selection
-
-The previous route search clipped an out-of-map target to the local grid boundary and treated that cell as a goal. In L-turn this could select the far side of the entry wall; its long detour was then rejected, leaving no waypoint. Prefer reachable progress using remaining goal distance plus half the route cost, and terminate at the goal only when the actual target lies inside the map. No clearance, controller, scene, or arrival settings changed.
-
-A new corridor test reproduces the failure: the previous code returns no waypoint, while the corrected code advances along the corridor. All 13 targeted tests passed. Two uninterrupted L-turn trials arrived in 70.40 s (0.290 m) and 58.37 s (0.273 m), without collisions.
-
-Additional isolated retests recorded:
-
-| Scene | Outcome | Elapsed (s) | Final goal distance (m) | Collision |
-|---|---|---:|---:|---|
-| straight | arrived | 13.08 | 0.294 | No |
-| s_bend | arrived | 47.25 | 0.336 | No |
-| s_bend_edited | arrived | 40.23 | 0.290 | No |
-| open_target | arrived | 38.21 | 0.304 | No |
-| back_target | arrived | 11.07 | 0.284 | No |
-| narrow_gate | threshold crossed; oscillation unresolved | 24.16 | 0.349979 | No |
-
-Narrow gate crossed the 0.35 m threshold while issuing a reverse command. This single crossing is not evidence of stable arrival or resolution of its near-goal oscillation. Dead-end recovery remains excluded.
-
-A third uninterrupted L-turn trial on the final source arrived in 58.34 s at 0.334 m, without collision. Dead end timed out after 120.73 s at 2.766 m, without collision. All eight scene geometries have now been rerun following the frontier-selection fix.
-
-## Simplification: shared trajectory evaluation
-
-Normal and local candidates now share one ESDF scoring pass and one trajectory cost function. Slow candidates are generated once for either local routing or final approach, with normal candidates retained as fallback. Stable first-minimum selection replaces sorting the full cost array. Obstacle memory is a set rather than a dictionary whose values were always identical; target invalidation remains in the target callback instead of being repeated during route updates. This removes 25 runtime lines without introducing another module.
-
-All 13 targeted tests passed. A separate comparison checked 1,200 normal/local cost evaluations, including reverse gating and infinite collision costs, with exact agreement against the previous implementation. Compilation and whitespace checks passed. Four scene retests after simplification all arrived without collisions:
-
-| Scene | Elapsed (s) | Final goal distance (m) |
-|---|---:|---:|
-| l_turn | 57.36 | 0.308 |
-| s_bend | 49.29 | 0.304 |
-| s_bend_edited | 49.27 | 0.308 |
-| straight | 11.06 | 0.284 |
-
-The other four scenes were not rerun for this structural refactor. Previously reported narrow-gate oscillation and dead-end limitations remain unresolved.
+Raw scene configurations and per-second observations are preserved on Spark in `/tmp/local-guidance-unified-validation/`; they are not added to this small PR.

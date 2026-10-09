@@ -141,7 +141,8 @@ def generate_trajectory_library_3d(
 
     vx_max = max_linear_vel
     n_vx = max(3, int(num_samples / 2))
-    vx_samples = np.linspace(0.0, vx_max, n_vx)
+    vx_samples = np.unique(np.concatenate((
+        np.linspace(0.0, vx_max, n_vx), np.linspace(0.0, min(.15, vx_max), n_vx))))
     omega_y_samples = np.linspace(-max_angular_vel, max_angular_vel, num_samples)
 
     num_samples = len(vx_samples) * len(omega_y_samples)
@@ -303,10 +304,10 @@ def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     return rolled, updated_origin
 
 
-def generate_trajectories(init_p, init_q):
+def generate_trajectories(init_p, init_q, max_linear_vel=None):
     trajectories, params = generate_trajectory_library_3d(
         init_p=init_p, init_q=init_q,
-        max_linear_vel=ROBOT_CONFIG.max_linear_vel,
+        max_linear_vel=ROBOT_CONFIG.max_linear_vel if max_linear_vel is None else max_linear_vel,
         max_angular_vel=ROBOT_CONFIG.max_angular_vel,
     )
     vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
@@ -334,17 +335,19 @@ def local_detour_target(esdf, origin, resolution, xy, target, half_width):
     queue = [(0.0, start)]
     best = start
     best_distance = math.dist((np.array(start)+.5)*resolution+origin[:2], goal_xy)
-    best_priority = best_distance
+    best_priority = best_distance + .1/max(float(esdf[start]),.05)
     while queue:
         cost, cell = heapq.heappop(queue)
         if cost != costs[cell]:
             continue
-        distance = math.dist((np.array(cell)+.5)*resolution+origin[:2], goal_xy)
+        endpoint = (np.array(cell)+.5)*resolution+origin[:2]
+        distance = math.dist(endpoint, goal_xy)
+        short_route = cost <= 1.8*math.dist(xy[:2],endpoint)+.3
         # A clipped map boundary is not the goal; prefer useful, short local progress.
-        priority = distance + .5*cost
-        if priority < best_priority:
+        priority = distance + .5*cost + .1/max(float(esdf[cell]),.05)
+        if short_route and priority < best_priority:
             best, best_distance, best_priority = cell, distance, priority
-        if goal_in_map and cell == goal:
+        if goal_in_map and cell == goal and short_route:
             best, best_distance = cell, distance
             break
         for dx, dy in ((1,0),(-1,0),(0,1),(0,-1),(1,1),(1,-1),(-1,1),(-1,-1)):
@@ -359,9 +362,6 @@ def local_detour_target(esdf, origin, resolution, xy, target, half_width):
                 costs[nxt], parents[nxt] = new_cost, cell
                 heapq.heappush(queue, (new_cost, nxt))
     if best == start or best_distance >= math.dist(xy[:2], goal_xy)-.15:
-        return None
-    endpoint = (np.array(best)+.5)*resolution+origin[:2]
-    if costs[best] > 1.8*math.dist(xy[:2],endpoint)+.3:
         return None
     path = [best]
     while path[-1] != start:
@@ -434,14 +434,6 @@ class PlanningNode(Node):
 
         self.smoothed_velocity = 0.0
 
-        # Reverse gate hysteresis: engage reverse at reverse_enter_threshold, stay
-        # engaged until front_clearance climbs past the higher reverse_exit_threshold.
-        # A single threshold flip-flopped forward/backward every cycle when
-        # front_clearance jittered near the boundary.
-        self.reverse_enter_threshold = 0.30
-        self.reverse_exit_threshold = 0.45
-        self.reverse_engaged = False
-
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
         self.reset_local_route()
@@ -512,27 +504,6 @@ class PlanningNode(Node):
         msg.header.frame_id = "world"
         msg.points = points
         self.footprint_pub.publish(msg)
-
-    def _front_obstacle_dist(self, T, obstacle_mask, max_dist=0.5):
-        """Distance from the robot's front face to the nearest obstacle in the forward corridor.
-        Scans start at the front face so the returned value matches physical clearance."""
-        center = self.camera_to_robot_center(T)
-        fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-        n = (fwd[0] ** 2 + fwd[1] ** 2) ** 0.5
-        fx, fy = (fwd[0] / n, fwd[1] / n) if n > 1e-6 else (1.0, 0.0)
-        lx, ly = -fy, fx
-        fl, _, hw = ROBOT_CONFIG.footprint_from_control()
-        rows, cols = obstacle_mask.shape
-        steps = int(max_dist / self.resolution) + 1
-        for step in range(steps):
-            d_from_face = step * self.resolution
-            d_from_center = fl + d_from_face
-            for w in (-hw, 0.0, hw):
-                xi = int((center[0] + fx * d_from_center + lx * w - self.origin[0]) / self.resolution)
-                yi = int((center[1] + fy * d_from_center + ly * w - self.origin[1]) / self.resolution)
-                if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
-                    return d_from_face
-        return max_dist + 1.0
 
     def publish_obstacle_mask(self, mask, stamp):
         msg = OccupancyGrid()
@@ -639,9 +610,7 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-    def trajectory_cost(self, traj, param, score, target_pose, should_reverse, local=False):
-        reverse_gate_penalty = 1e9 if not local and should_reverse != (param[0] < 0.) else 0.
-
+    def trajectory_cost(self, traj, param, score, target_pose):
         # regular trajectory penalty
         traj_end = np.array(traj[-1,:3])
         target_end = target_pose if target_pose is not None else traj_end
@@ -651,12 +620,11 @@ class PlanningNode(Node):
         heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
 
         return (
-            score * (1 if local else 2000)
-            + (100 if local else 1000) * dist
+            score
+            + 100 * dist
             + 100 * heading
             + 10 * abs(self.last_param[0] - param[0])
             + 10 * abs(self.last_param[1] - param[1])
-            + reverse_gate_penalty
         )
 
     def reset_local_route(self):
@@ -762,16 +730,10 @@ class PlanningNode(Node):
                 self.observe_route_obstacles(depth,T,self.K,ROBOT_CONFIG)
                 waypoint = self.update_local_route(init_p,self.target_pose,time.monotonic(),ESDF_map,
                     self.origin,self.resolution,half_w,self.obstacle_config.dilation_cells)
-            trajectories, params = generate_trajectories(init_p, init_q)
-            regular_count = len(trajectories)
-            near_goal = self.target_pose is not None and np.linalg.norm(init_p[:2]-self.target_pose[:2]) < 1.0
-            if waypoint is not None or near_goal:
-                slow_trajs, slow_params = generate_trajectory_library_3d(
-                    init_p=init_p, init_q=init_q,
-                    max_linear_vel=min(.15, ROBOT_CONFIG.max_linear_vel),
-                    max_angular_vel=ROBOT_CONFIG.max_angular_vel)
-                trajectories = np.concatenate((trajectories, slow_trajs))
-                params = np.concatenate((params, slow_params))
+            target = self.target_pose if waypoint is None else waypoint
+            distance = np.linalg.norm(init_p[:2]-target[:2]) if target is not None else np.inf
+            max_speed = min(ROBOT_CONFIG.max_linear_vel,max(.15,distance/3.))
+            trajectories, params = generate_trajectories(init_p,init_q,max_speed)
             self.last_T = T
             self.last_stamp = stamp
 
@@ -779,17 +741,8 @@ class PlanningNode(Node):
             scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            threshold = self.reverse_exit_threshold if self.reverse_engaged else self.reverse_enter_threshold
-            should_reverse = front_clearance <= threshold
-            self.reverse_engaged = should_reverse
-
-            local = waypoint is not None and np.any(np.isfinite(scores[regular_count:]))
-            candidates = range(regular_count,len(trajectories)) if local else range(
-                len(trajectories) if near_goal else regular_count)
-            target = waypoint if local else self.target_pose
-            best = min(candidates, key=lambda i: self.trajectory_cost(
-                trajectories[i],params[i],scores[i],target,should_reverse,local))
+            best = min(range(len(trajectories)), key=lambda i: self.trajectory_cost(
+                trajectories[i],params[i],scores[i],target))
             top_indices = np.array([best])
             self.last_param = params[top_indices[0]]
 
