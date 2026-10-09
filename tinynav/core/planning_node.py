@@ -1,4 +1,5 @@
 import rclpy
+import time
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
@@ -12,7 +13,9 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, Bool
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from tinynav.core.planner_guide import LocalRoute
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -362,14 +365,34 @@ class PlanningNode(Node):
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
+        self.local_route = LocalRoute()
+        self.nav_active = True
+        self.nav_paused = False
+        qos = QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(Bool, "/nav/active", self.active_callback, qos)
+        self.create_subscription(Bool, "/nav/paused", self.paused_callback, qos)
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
+    def active_callback(self, msg):
+        if bool(msg.data) != self.nav_active:
+            self.local_route.reset()
+        self.nav_active = bool(msg.data)
+
+    def paused_callback(self, msg):
+        if bool(msg.data) != self.nav_paused:
+            self.local_route.reset()
+        self.nav_paused = bool(msg.data)
+
     def poi_change_callback(self, msg):
         self.target_pose = None
+        self.local_route.reset()
 
     def target_pose_callback(self, msg):
         self.target_pose = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z])
+        if self.local_route.target is None or np.linalg.norm(self.target_pose-self.local_route.target)>.25:
+            self.local_route.reset()
+            self.local_route.target = self.target_pose.copy()
 
     def info_callback(self, msg):
         if self.K is None:
@@ -563,6 +586,12 @@ class PlanningNode(Node):
             + reverse_gate_penalty
         )
 
+    def local_trajectory_cost(self, traj, param, score, waypoint):
+        distance = np.linalg.norm(traj[-1,:3]-waypoint)
+        heading = goal_heading_error(traj[-1],waypoint)*min(1.,distance/2.)
+        return (score+100*distance+100*heading+
+                10*abs(self.last_param[0]-param[0])+10*abs(self.last_param[1]-param[1]))
+
     def publish_selected_path(self, trajectories, top_indices, header):
         path = Path()
         path.header = header
@@ -633,6 +662,22 @@ class PlanningNode(Node):
 
             top_k = 1
             top_indices = np.argsort(np.array([self.trajectory_cost(trajectories[i], params[i], scores[i], self.target_pose, should_reverse) for i in range(len(trajectories))]), kind='stable')[:top_k]
+            age = self.get_clock().now().nanoseconds*1e-9-stamp
+            if self.target_pose is not None and self.nav_active and not self.nav_paused and -.1<=age<=.5:
+                self.local_route.observe(depth,T,self.K,ROBOT_CONFIG)
+                waypoint = self.local_route.update(init_p,self.target_pose,time.monotonic(),ESDF_map,
+                    self.origin,self.resolution,half_w,self.obstacle_config.dilation_cells)
+                if waypoint is not None:
+                    local_trajs,local_params = generate_trajectory_library_3d(init_p=init_p,init_q=init_q,
+                        max_linear_vel=min(self.local_route.max_linear_vel,ROBOT_CONFIG.max_linear_vel),
+                        max_angular_vel=ROBOT_CONFIG.max_angular_vel)
+                    local_scores,_ = score_trajectories_by_ESDF(local_trajs,ESDF_map,self.origin,
+                        self.resolution,ROBOT_CONFIG.safety_radius,front_len,rear_len,half_w)
+                    costs = np.array([self.local_trajectory_cost(t,p,s,waypoint)
+                                      for t,p,s in zip(local_trajs,local_params,local_scores)])
+                    if np.any(np.isfinite(costs)):
+                        trajectories,params,scores = local_trajs,local_params,local_scores
+                        top_indices = np.array([np.argmin(costs)])
             self.last_param = params[top_indices[0]]
 
             if self.target_pose is None:
