@@ -326,9 +326,10 @@ class StairPlanning:
     planned as a point there (scraping a wall while turning is accepted), and blocked ahead it turns in place,
     reversing only when no turn is collision free."""
     safety_radius: float = 0.1
-    dilation_cells: int = 0
+    dilation_cells: int = 2         # as in normal navigation: without it the robot ran into a wall on a wide
+                                    # landing (field_2026_10_09_13_36_59, 43-49 s)
     center_only: bool = True        # collision check at the body center, not the footprint corners
-    reverse_enter: float = 0.15     # reverse gate: blocked with the nose this close to an obstacle ...
+    reverse_enter: float = 0.20     # reverse gate: blocked with the nose this close to an (inflated) obstacle ...
     reverse_exit: float = 0.30      # ... until it is this far again
 
 

@@ -19,6 +19,9 @@ STAIR_MODE_TIMEOUT_S = 1.5
 # stair mode: any forward command walks at least this fast. Near a target planning slows down, and on the
 # last step of a flight go2 stood still at 0.14 m/s for 30 s (field_2026_10_09_10_53_38, 139-168 s)
 STAIR_MIN_LINEAR_VEL = 0.25
+# ... only for (nearly) straight commands: raising a slow turning arc widens it, and on a wide landing that
+# drove the robot into the wall (field_2026_10_09_13_36_59, 43-49 s: 0.17 m/s at 0.43 rad/s became 0.25 m/s)
+STAIR_MIN_LINEAR_MAX_TURN = 0.2  # rad/s
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -148,7 +151,8 @@ class CmdVelControlNode(Node):
             return
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
-        if self.stair_mode and age <= stale_slow_s and target_cmd.linear.x > self.linear_engage_threshold:
+        if self.stair_mode and age <= stale_slow_s and target_cmd.linear.x > self.linear_engage_threshold \
+                and abs(target_cmd.angular.z) < STAIR_MIN_LINEAR_MAX_TURN:
             target_cmd.linear.x = max(target_cmd.linear.x, STAIR_MIN_LINEAR_VEL)
         max_dv = self.max_linear_acc * dt
         # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
