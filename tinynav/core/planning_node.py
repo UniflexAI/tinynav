@@ -1,3 +1,4 @@
+import dataclasses
 import time
 
 import rclpy
@@ -318,6 +319,22 @@ def generate_trajectories(init_p, init_q):
 STAIR_MODE_TIMEOUT_S = 1.5
 
 
+@dataclasses.dataclass(frozen=True)
+class StairPlanning:
+    """Everything planning does differently in stair mode. Landings are ~1.1 m deep: with the default margins
+    every turn in place collided and the reverse gate backed the robot toward the steps, so the robot is
+    planned as a point there (scraping a wall while turning is accepted), and blocked ahead it turns in place,
+    reversing only when no turn is collision free."""
+    safety_radius: float = 0.1
+    dilation_cells: int = 0
+    center_only: bool = True        # collision check at the body center, not the footprint corners
+    reverse_enter: float = 0.15     # reverse gate: blocked with the nose this close to an obstacle ...
+    reverse_exit: float = 0.30      # ... until it is this far again
+
+
+STAIR = StairPlanning()
+
+
 # === PlanningNode class ===
 class PlanningNode(Node):
     def __init__(self):
@@ -354,6 +371,8 @@ class PlanningNode(Node):
         self.last_T = None
         self.last_param = (0.0, 0.0) # acc and gyro
         self.obstacle_config = ROBOT_CONFIG.obstacle
+        self.stair_obstacle_config = dataclasses.replace(ROBOT_CONFIG.obstacle, dilation_cells=STAIR.dilation_cells)
+        self.in_stair_mode = False  # stair_mode sampled once per planning cycle
         self.stamp = None
         self.current_pose = None  # Store the latest pose from odometry
 
@@ -557,9 +576,8 @@ class PlanningNode(Node):
         # predefined backward trajectory penalty
         is_backward_traj = param[0] < 0.0
         reverse_gate_penalty = 0.0
-        if should_reverse and self.stair_mode:
-            # stairwells are too tight to back up: when blocked in front, turn in place if that is
-            # collision free (the ESDF score rules out turns that clip a wall), reverse only otherwise
+        if should_reverse and self.in_stair_mode:
+            # blocked in front: turn in place if that is collision free, reverse only otherwise
             is_turn_in_place = param[0] == 0.0 and param[1] != 0.0
             if is_backward_traj:
                 reverse_gate_penalty = 1e6
@@ -618,6 +636,7 @@ class PlanningNode(Node):
             self.update_velocity_estimate(T, stamp)
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
+            self.in_stair_mode = stair = self.stair_mode
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
@@ -627,7 +646,7 @@ class PlanningNode(Node):
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(
                 self.occupancy_grid, self.origin, self.resolution,
-                robot_z=T[2, 3], config=self.obstacle_config,
+                robot_z=T[2, 3], config=self.stair_obstacle_config if stair else self.obstacle_config,
             )
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
@@ -647,20 +666,16 @@ class PlanningNode(Node):
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-            if self.stair_mode:
-                # stair mode checks the body center only: on landings the corners made every turn in place
-                # collide, the reverse gate backed up, stair_node sent the robot forward again, and so on.
-                # Scraping a wall while turning is accepted; walking into one is still stopped by the gate
+            if stair and STAIR.center_only:
                 front_len = rear_len = half_w = 0.0
-            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius, front_len, rear_len, half_w)
+            safety_radius = STAIR.safety_radius if stair else ROBOT_CONFIG.safety_radius
+            scores, occ_points = score_trajectories_by_ESDF(trajectories, ESDF_map, self.origin, self.resolution, safety_radius, front_len, rear_len, half_w)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             front_clearance = self._front_obstacle_dist(T, obstacle_mask)
-            # in stair mode the gate turns in place instead of reversing; keeping it engaged up to the exit
-            # threshold could leave the robot spinning with 0.30-0.45 m free ahead, so no hysteresis there
-            exit_threshold = self.reverse_enter_threshold if self.stair_mode else self.reverse_exit_threshold
-            threshold = exit_threshold if self.reverse_engaged else self.reverse_enter_threshold
-            should_reverse = front_clearance <= threshold
+            # the gate measures from the configured footprint's nose (0.2 m ahead of the center on go2), also in stair mode
+            enter, exit_ = (STAIR.reverse_enter, STAIR.reverse_exit) if stair else (self.reverse_enter_threshold, self.reverse_exit_threshold)
+            should_reverse = front_clearance <= (exit_ if self.reverse_engaged else enter)
             self.reverse_engaged = should_reverse
 
             top_k = 1
