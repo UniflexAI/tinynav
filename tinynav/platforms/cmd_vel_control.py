@@ -3,7 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
@@ -13,6 +13,12 @@ from tinynav.core.robot_specs import ROBOT_CONFIG
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
+
+# stair_node publishes /stair/status every 0.5 s while stair mode is on (same rule as planning_node)
+STAIR_MODE_TIMEOUT_S = 1.5
+# stair mode: any forward command walks at least this fast. Near a target planning slows down, and on the
+# last step of a flight go2 stood still at 0.14 m/s for 30 s (field_2026_10_09_10_53_38, 139-168 s)
+STAIR_MIN_LINEAR_VEL = 0.25
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -68,6 +74,8 @@ class CmdVelControlNode(Node):
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
+        self._stair_status_time = -float('inf')
+        self.create_subscription(String, '/stair/status', self._on_stair_status, 10)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _on_paused(self, msg: Bool):
@@ -86,6 +94,13 @@ class CmdVelControlNode(Node):
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
             self.cmd_pub.publish(Twist())
+
+    def _on_stair_status(self, msg):
+        self._stair_status_time = time.monotonic()
+
+    @property
+    def stair_mode(self):
+        return time.monotonic() - self._stair_status_time < STAIR_MODE_TIMEOUT_S
 
     def pose_callback(self, msg):
         self.pose = msg
@@ -133,6 +148,8 @@ class CmdVelControlNode(Node):
             return
 
         # Forward/turning commands still get acceleration limiting and robot minimum-speed locks.
+        if self.stair_mode and age <= stale_slow_s and target_cmd.linear.x > self.linear_engage_threshold:
+            target_cmd.linear.x = max(target_cmd.linear.x, STAIR_MIN_LINEAR_VEL)
         max_dv = self.max_linear_acc * dt
         # If we just left reverse mode, do not let acceleration limiting leak another reverse command.
         prev_linear_x = 0.0 if self.prev_cmd.linear.x < 0.0 else self.prev_cmd.linear.x
