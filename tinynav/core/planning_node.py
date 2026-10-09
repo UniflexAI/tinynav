@@ -176,9 +176,14 @@ def generate_trajectory_library_3d(
     num_samples=15, duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1]),
     max_linear_vel=0.5, max_angular_vel=np.pi / 3,
-    max_lat_acc=1e9, min_linear_vel=0.0, turn_slowdown=0.0,
+    max_lat_acc=1e9, min_linear_vel=0.0, turn_slowdown=0.0, min_angular_vel=0.0,
 ):
-    """Regular sampled lattice (forward-only).
+    """Regular sampled lattice (forward-only), plus one standstill row.
+
+    No turn-in-place rows: turning is generate_rotate_then_go's, which only offers a
+    turn that ends in a way forward. No row turns slower than `min_angular_vel`
+    either, the least the chassis executes: cmd_vel_control raises any slower turn
+    to it, so such a row would be scored as a curve the robot does not drive.
 
     `max_lat_acc` caps vx*omega, so the same steering that is fine at a crawl is not
     offered at speed. It binds only above max_lat_acc/max_angular_vel; below that the
@@ -198,7 +203,7 @@ def generate_trajectory_library_3d(
     # Sampling from 0 offered a creep band under the floor -- at vx_max 0.20 the
     # speeds were 0, 0.033, 0.067, ... and the cost minimum sat on 0.033, which
     # cmd_vel_control reads as a stop while `n_fwd_ok` counted it a way forward.
-    # vx=0 stays: it is the turn-in-place vocabulary.
+    # vx=0 stays for the standstill row.
     vx_lo = min_linear_vel if min_linear_vel < vx_max else vx_max
     vx_samples = np.empty(n_vx)
     vx_samples[0] = 0.0
@@ -219,8 +224,10 @@ def generate_trajectory_library_3d(
             omega_lim = max_lat_acc / vx
         omega_y_samples = np.linspace(-omega_lim, omega_lim, n_omega)
         for i_omega in range(n_omega):
-            k += 1
             omega_y = omega_y_samples[i_omega]
+            if abs(omega_y) > 1e-9 and (vx < 1e-6 or abs(omega_y) < min_angular_vel):
+                continue
+            k += 1
             vx = vx_samples[i_vx]
             if vx > 1e-6 and turn_slowdown > 0.0:
                 vx = max(vx_lo, vx * (1.0 - turn_slowdown * abs(omega_y) / max_angular_vel))
@@ -240,7 +247,55 @@ def generate_trajectory_library_3d(
             trajectories[k] = traj
             params[k, 0] = vx
             params[k, 1] = omega_y
-    return trajectories, params
+    return trajectories[:k + 1], params[:k + 1]
+
+
+#: Turns rotate-then-go offers: every 15 deg either way, 180 once.
+ROTATE_DEG = np.array([d for d in range(-165, 181, 15) if d != 0], dtype=np.float64)
+#: How far a turn in place has to be able to drive afterwards for it to be offered.
+ROTATE_THEN_GO_M = 0.5
+
+
+@njit(cache=True)
+def generate_rotate_then_go(init_p, init_q, deltas_rad, turn_rate, go_speed, go_m, dt, num_steps):
+    """Per delta: turn in place by it at `turn_rate`, then straight ahead `go_m` at
+    `go_speed`, then hold. Returns (trajectories, params, durations); params are
+    (go_speed, signed turn_rate) in the lattice's omega convention, durations the
+    seconds the motion takes before the hold."""
+    n = len(deltas_rad)
+    trajectories = np.empty((n, num_steps, 7))
+    params = np.empty((n, 2))
+    durations = np.empty(n)
+    for k in range(n):
+        d = deltas_rad[k]
+        sign = 1.0 if d > 0.0 else -1.0
+        p = init_p.copy()
+        q = quat_to_matrix(init_q)
+        turned, gone = 0.0, 0.0
+        for i in range(num_steps):
+            step = min(turn_rate * dt, abs(d) - turned)
+            if step > 1e-9:
+                q = q @ rotvec_to_matrix(np.array([0.0, sign * step, 0.0]))
+                turned += step
+            elif gone < go_m:
+                ds = min(go_speed * dt, go_m - gone)
+                p += q @ np.array([0.0, 0.0, ds])
+                gone += ds
+            trajectories[k, i, :3] = p
+            trajectories[k, i, 3:] = matrix_to_quat(q)
+            trajectories[k, i, 2] = init_p[2]
+        params[k, 0] = go_speed
+        params[k, 1] = sign * turn_rate
+        durations[k] = abs(d) / turn_rate + go_m / go_speed
+    return trajectories, params, durations
+
+
+def _hold_to(trajectories, num_steps):
+    """Pad each trajectory to `num_steps` by holding its last pose."""
+    extra = num_steps - trajectories.shape[1]
+    if extra <= 0:
+        return trajectories
+    return np.concatenate([trajectories, np.repeat(trajectories[:, -1:], extra, axis=1)], axis=1)
 
 
 def generate_predefined_trajectory_vocabularies(
@@ -568,7 +623,8 @@ TIE_S = 0.15
 def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_gerr,
                    end_gdxy, here_arrived, has_route, should_reverse, v, w, band, t_end):
     """Index of the row with the least time to go: when map_node's arrival fires, or the
-    rollout plus the distance left at `v` and the heading left at `w`. The reverse gate
+    row's own duration `t_end` plus the distance left at `v` and the heading left at
+    `w`. The reverse gate
     filters, and so does standing still while another row is open, unless the robot is
     already inside the arrival radius. Arrays are per row; `scores` inf is a collision."""
     free = np.isfinite(scores)
@@ -1173,18 +1229,30 @@ class PlanningNode(Node):
         return min_span_map, obstacle_mask, ESDF_map
 
     def generate_trajectories(self, init_p, init_q, v_allow):
-        trajectories, params = generate_trajectory_library_3d(
+        """(trajectories, params, durations): the lattice, rotate-then-go and the
+        reverse vocabulary, all held to the longest so they stack."""
+        dt, w = self._traj_dt, ROBOT_CONFIG.max_angular_vel
+        lattice, lattice_params = generate_trajectory_library_3d(
             init_p=init_p, init_q=init_q,
             max_linear_vel=v_allow,
-            max_angular_vel=ROBOT_CONFIG.max_angular_vel,
+            max_angular_vel=w,
             max_lat_acc=self._traj_max_lat_acc,
             min_linear_vel=self._vx_min,
             turn_slowdown=self._traj_turn_slowdown,
+            min_angular_vel=ROBOT_CONFIG.min_angular_vel,
         )
-        vocab_trajs, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
-        trajectories = np.concatenate([trajectories, vocab_trajs], axis=0)
-        params = np.concatenate([params, vocab_params], axis=0)
-        return trajectories, params
+        longest = np.pi / w + ROTATE_THEN_GO_M / self._vx_min
+        turns, turn_params, turn_durations = generate_rotate_then_go(
+            init_p, init_q, np.deg2rad(ROTATE_DEG), w, self._vx_min, ROTATE_THEN_GO_M, dt,
+            int(np.ceil(longest / dt)) + 1)
+        vocab, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
+        rollout = (lattice.shape[1] - 1) * dt
+        n = turns.shape[1]
+        trajectories = np.concatenate([_hold_to(lattice, n), turns, _hold_to(vocab, n)])
+        params = np.concatenate([lattice_params, turn_params, vocab_params])
+        durations = np.concatenate([np.full(len(lattice), rollout), turn_durations,
+                                    np.full(len(vocab), rollout)])
+        return trajectories, params, durations
 
     def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
                            route_heading_map, target, has_route):
@@ -1254,7 +1322,7 @@ class PlanningNode(Node):
             # and the speed cap above are maintained either way.
             if self.target_pose is None:
                 return
-            trajectories, params = self.generate_trajectories(init_p, init_q, v_allow)
+            trajectories, params, durations = self.generate_trajectories(init_p, init_q, v_allow)
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
@@ -1329,7 +1397,7 @@ class PlanningNode(Node):
                 params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
                 should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
-                self.route_terminal_band, (trajectories.shape[1] - 1) * self._traj_dt)]
+                self.route_terminal_band, durations)]
 
             self.last_param = params[top_indices[0]]
 

@@ -12,6 +12,7 @@ from math_utils import matrix_to_quat
 from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF,
                            select_by_time, ARRIVE_M, ARRIVE_TICKS, ARRIVE_TICK_S,
+                           generate_rotate_then_go, ROTATE_DEG, ROTATE_THEN_GO_M,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between)
@@ -779,15 +780,29 @@ def test_the_lattice_offers_no_speed_between_a_standstill_and_the_floor():
                 f'v_allow {v_allow} offered {vx}, under the floor and over a standstill'
 
 
-def test_but_the_standstill_rows_are_still_offered():
-    """The other half. The heading term ranks turning against them, and a goal the
-    robot has to swing around to has nothing else to rank -- dropping them is the
-    freeze the heading term was written to prevent."""
+# Camera convention, body +Z forward and level: identity would point +Z straight up.
+_LEVEL_Q = np.array([-0.5, 0.5, -0.5, 0.5])
+
+
+def test_the_lattice_turns_only_at_rates_the_chassis_executes():
+    """One standstill row and no turn in place; every turn at least min_angular_vel."""
     for v_allow in (0.2, 0.6):
         _, params = generate_trajectory_library_3d(
-            max_linear_vel=v_allow, min_linear_vel=0.2)
-        turning = [w for vx, w in params if vx == 0.0 and abs(w) > 1e-6]
-        assert len(turning) >= 2, f'v_allow {v_allow} left no turn-in-place rows'
+            max_linear_vel=v_allow, min_linear_vel=0.2, max_angular_vel=0.75,
+            max_lat_acc=0.5, min_angular_vel=0.2)
+        assert sum(1 for vx, w in params if vx == 0.0) == 1
+        assert all(w == 0.0 or abs(w) >= 0.2 for _, w in params)
+
+
+def test_every_turn_in_place_drives_on_after_it():
+    trajs, params, durations = generate_rotate_then_go(
+        np.zeros(3), _LEVEL_Q, np.deg2rad(ROTATE_DEG), 0.75, 0.2, ROTATE_THEN_GO_M, 0.1, 70)
+    start = heading_of_pose7(np.concatenate([np.zeros(3), _LEVEL_Q]))
+    for traj, dur, deg in zip(trajs, durations, ROTATE_DEG):
+        assert abs(np.linalg.norm(traj[-1, :2]) - ROTATE_THEN_GO_M) < 1e-6
+        turned = np.rad2deg(angle_between(heading_of_pose7(traj[-1]), start))
+        assert abs(turned - min(abs(deg), 360 - abs(deg))) < 1e-6
+        assert dur <= 69 * 0.1
 
 
 def test_and_the_top_speed_is_still_offered():
