@@ -321,14 +321,13 @@ STAIR_MODE_TIMEOUT_S = 1.5
 
 @dataclasses.dataclass(frozen=True)
 class StairPlanning:
-    """Everything planning does differently in stair mode. Landings are ~1.1 m deep: with the default margins
-    every turn in place collided and the reverse gate backed the robot toward the steps, so the robot is
-    planned as a point there (scraping a wall while turning is accepted), and blocked ahead it turns in place,
-    reversing only when no turn is collision free."""
+    """Everything planning does differently in stair mode. Landings are ~1.1 m deep and the default margins
+    left little room there; blocked ahead the robot turns in place, reversing (toward the steps it came down)
+    only when no turn is collision free."""
     safety_radius: float = 0.1
-    dilation_cells: int = 2         # as in normal navigation: without it the robot ran into a wall on a wide
-                                    # landing (field_2026_10_09_13_36_59, 43-49 s)
-    center_only: bool = True        # collision check at the body center, not the footprint corners
+    dilation_cells: int = 1         # 0 let the robot run into a wall on a wide landing (field_2026_10_09_13_36_59,
+                                    # 43-49 s), 2 (normal navigation) leaves little room on narrow ones
+    center_only: bool = False       # True: collision check at the body center only, not the footprint corners
     reverse_enter: float = 0.20     # reverse gate: blocked with the nose this close to an (inflated) obstacle ...
     reverse_exit: float = 0.30      # ... until it is this far again
 

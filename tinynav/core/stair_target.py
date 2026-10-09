@@ -76,17 +76,6 @@ class StairConfig:
     uturn_step_clearance: float = 0.3  # ... as long as the cell walked to keeps this far from walls
     uturn_cross_slack: float = 0.3  # ... then cross the landing sideways (in front of the railing post, not past it) until
                                     # this close to next_flight_lateral, then turn back along the next flight
-    stuck_s: float = 5.0            # searching on a landing without moving 0.1 m or turning 15 deg for this long: stuck
-    stuck_move: float = 0.20        # (the forward / back-up cycle moves 0.1-0.15 m)
-    stuck_turn_deg: float = 15.0
-    unstick_turn_deg: float = 45.0  # ... then only turn in place the U-turn way until turned this far ...
-    unstick_max_s: float = 6.0      # ... or for this long. A goal kept ahead against a wall left planning's reverse gate
-                                    # and stair_node taking turns, back and forth for 70 s (field_2026_10_09_09_41_05)
-    blocked_goal: float = 0.5       # U-turn: the nearest open cell to the aim this close while the aim is blocked_gap
-    blocked_gap: float = 0.2        # farther: blocked ahead (came off the flight already turned, nose in the corner),
-                                    # turn in place instead of creeping into planning's reverse gate
-    uturn_clearance: float = 0.45   # U-turn goals keep this far from walls: the camera is at the robot's nose and
-                                    # planning backs up with the nose 0.30 m from a wall
     flight_cone_deg: float = 25.0   # flights are straight: on one (or anywhere, turn side given) the next level only
                                     # counts within this of the last flight's direction, or of its reverse once we face
                                     # back along it (turned onto the next flight of a U-turn). A railing
@@ -188,9 +177,6 @@ class StairTargetGenerator:
         self.uturn_entry = None   # turn side given: where this landing's U-turn heads (next_entry, else from here)
         self.uturn_at_entry = False  # ... reached it, now facing back along the next flight
         self.flight_end = None    # camera xy at the last pitched (on a flight) depth frame
-        self.search_log = deque()  # (stamp, xy, yaw) of the camera while searching, for the stuck check
-        self.unstick = None       # (stamp, yaw) when a stuck turn started
-        self.search_last = -np.inf  # stamp of the last search call
         self.uturn_crossed = False  # crossed the landing sideways, now turning back toward the next flight
         self.was_on_flight = False
         self.camera_height = self.cfg.camera_height
@@ -316,8 +302,6 @@ class StairTargetGenerator:
         self.next_entry = None
         self.uturn_entry, self.uturn_at_entry, self.uturn_crossed = None, False, False
         self.flight_end = None
-        self.search_log.clear()
-        self.unstick = None
 
     def reset(self):
         self.frames.clear()
@@ -474,15 +458,6 @@ class StairTargetGenerator:
             fwd = self.flight_dir if self.flight_dir is not None else fwd
             lateral = lateral_to(fwd)
             side = self.turn_side or np.sign(self.well_side)
-            if self._stuck(cam, heading):
-                # the U-turn way; once facing back along the last flight, toward lining up with the next one
-                turn = side or 1.0
-                if self.flight_dir is not None and heading @ fwd < -0.5:
-                    turn = np.sign(heading[0] * -fwd[1] - heading[1] * -fwd[0]) or turn
-                self.last_status, self.search_goal = 'search', None
-                out.update(target=self._turn_in_place(cam, heading, turn, foot_z), turned=True, turn_in_place=True,
-                           unstick=True, well_side=self.well_side)
-                return out
             roomy = reachable & (clearance >= cfg.search_clearance)
             goal = None
             if self.turn_side != 0 and self.flight_dir is not None:
@@ -499,12 +474,7 @@ class StairTargetGenerator:
                 self.uturn_crossed |= crossed >= cfg.next_flight_lateral - cfg.uturn_cross_slack
                 if self.uturn_crossed and not self.uturn_at_entry and np.linalg.norm(entry - cam[:2]) <= cfg.search_reached:
                     self.uturn_at_entry = True
-                facing_back = heading @ fwd < -0.5
-                if facing_back:
-                    # already facing back along the last flight (on the next one's first steps, which pitch the body
-                    # and move flight_end there): the U-turn is done, do not start another one from here
-                    aim = cam[:2] + cfg.uturn_ahead * back
-                elif not self.uturn_crossed:
+                if not self.uturn_crossed:
                     aim = start + fwd * cfg.uturn_step_in + side * cfg.next_flight_lateral * left
                 elif not self.uturn_at_entry:
                     aim = entry
@@ -512,7 +482,7 @@ class StairTargetGenerator:
                     aim = entry + back * (max(0.0, (cam[:2] - entry) @ back) + cfg.uturn_ahead)
                 d = aim - cam[:2]
                 bearing = np.degrees(np.arctan2(heading[0] * d[1] - heading[1] * d[0], heading @ d))
-                cand = reachable & (clearance >= cfg.uturn_clearance) & (r_robot > 0.3)
+                cand = roomy & (r_robot > 0.3)
                 ahead = reachable & observed & (r_robot > 0.3) & (r_robot < 0.9) & (clearance >= cfg.uturn_step_clearance) \
                     & ((rel_xy @ fwd) > 0.94 * r_robot)  # within ~20 deg of the last flight's direction
                 if not self.uturn_crossed and in_from_flight < cfg.uturn_step_in and heading @ fwd > 0.7 and np.any(ahead):
@@ -528,12 +498,6 @@ class StairTargetGenerator:
                     return out
                 else:
                     goal = np.unravel_index(np.argmin(np.where(cand, np.linalg.norm(cell_xy - aim, axis=-1), np.inf)), cand.shape)
-                    goal_d, aim_d = np.linalg.norm(cell_xy[goal] - cam[:2]), np.linalg.norm(d)
-                    if not facing_back and goal_d < cfg.blocked_goal and aim_d > goal_d + cfg.blocked_gap:
-                        self.last_status, self.search_goal = 'search', None
-                        out.update(target=self._turn_in_place(cam, heading, side, foot_z), turned=True, turn_in_place=True,
-                                   uturn=True, blocked=True, well_side=self.well_side)
-                        return out
                 out['uturn'] = True
             if goal is None and self.search_goal is not None and self.latest_stamp - self.search_goal[1] < cfg.search_commit_s \
                     and np.linalg.norm(self.search_goal[0] - cam[:2]) > cfg.search_reached:
@@ -602,33 +566,6 @@ class StairTargetGenerator:
         target = self._keep_in_front(target, cam, heading, reachable, observed, clearance, cell_xy, height, rel_xy, r_robot, out)
         out.update(goal=path_xyz[-1], target=target, path=path_xyz)
         return out
-
-    def _stuck(self, cam, heading):
-        """Searching without getting anywhere for stuck_s: True while a stuck turn in place is on."""
-        cfg, now = self.cfg, self.latest_stamp
-        yaw = np.degrees(np.arctan2(heading[1], heading[0]))
-        log = self.search_log
-        if now - self.search_last > 1.0:  # a gap: not searching all along
-            log.clear()
-            self.unstick = None
-        self.search_last = now
-        if self.unstick is not None:
-            turned = abs((yaw - self.unstick[1] + 180) % 360 - 180)
-            if turned < cfg.unstick_turn_deg and now - self.unstick[0] < cfg.unstick_max_s:
-                return True
-            self.unstick = None
-            log.clear()
-        log.append((now, cam[:2].copy(), yaw))
-        while now - log[0][0] > cfg.stuck_s:
-            log.popleft()
-        if now - log[0][0] < cfg.stuck_s - 0.5:
-            return False
-        moved = max(np.linalg.norm(xy - cam[:2]) for _, xy, _ in log)
-        turned = max(abs((y - yaw + 180) % 360 - 180) for _, _, y in log)
-        if moved < cfg.stuck_move and turned < cfg.stuck_turn_deg:
-            self.unstick = (now, yaw)
-            return True
-        return False
 
     def _keep_in_front(self, target, cam, heading, reachable, observed, clearance, cell_xy, height, rel_xy, r_robot, out):
         """A target behind the robot makes planning back up or swing round in a stairwell: keep it within
