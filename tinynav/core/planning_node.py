@@ -656,23 +656,32 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
     return int(tied[np.lexsort((t[tied], flips, motion))[0]])
 
 
-def carry_forward(plan, k, init_p, init_q, num_steps):
-    """Last frame's chosen plan as it stands `k` steps of dt later, moved rigidly so
-    that step k sits on (init_p, init_q): the rest of a choice already under way, as
-    a row of this frame. `plan` is (L, 7) with the pose it was planned from at index 0.
-    Returns (num_steps, 7), held at its last pose, or None when nothing of it is left."""
-    if k < 0 or k + 1 >= len(plan):
+def carried_row(params, is_turn, vx, omega):
+    """Index of this frame's lattice or reverse row that is last frame's (vx, omega)
+    choice, or -1. A constant (vx, omega) row is the same motion from any pose, so
+    it is matched, not rebuilt: same direction of travel and of turn, then the
+    nearest omega, then the nearest vx (the speed cap moves the vx samples)."""
+    same = (~is_turn & (np.sign(params[:, 0]) == np.sign(vx))
+            & (np.sign(params[:, 1]) == np.sign(omega)))
+    idx = np.flatnonzero(same)
+    if not len(idx):
+        return -1
+    order = np.lexsort((np.abs(params[idx, 0] - vx), np.abs(params[idx, 1] - omega)))
+    return int(idx[order[0]])
+
+
+def turn_remainder(init_p, init_q, heading, turn_rate, go_speed, go_m, dt, num_steps):
+    """Rotate-then-go from here to the world `heading` a turn row was turning to:
+    (trajectory, param, duration), or None once within one step of it. Built whole,
+    so the remainder of a turn always ends in its full way forward."""
+    here = heading_of_pose7(np.concatenate([init_p, init_q]))
+    rem = np.arctan2(np.sin(heading - here), np.cos(heading - here))
+    if abs(rem) <= turn_rate * dt:
         return None
-    ref_R = quat_to_matrix(plan[k, 3:])
-    R = quat_to_matrix(init_q) @ ref_R.T
-    tail = plan[k + 1:k + 1 + num_steps]
-    out = np.empty((num_steps, 7))
-    for i in range(num_steps):
-        pose = tail[min(i, len(tail) - 1)]
-        out[i, :3] = init_p + R @ (pose[:3] - plan[k, :3])
-        out[i, 3:] = matrix_to_quat(R @ quat_to_matrix(pose[3:]))
-        out[i, 2] = init_p[2]
-    return out
+    trajs, params, durs = generate_rotate_then_go(
+        init_p, init_q, np.array([rem, -rem]), turn_rate, go_speed, go_m, dt, num_steps)
+    k = int(np.argmin([angle_between(heading_of_pose7(t[-1]), heading) for t in trajs]))
+    return trajs[k], params[k], durs[k]
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -867,7 +876,7 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
         self._last_yaw = 0.0  # its first step's world yaw rate
-        self._carry = None  # (plan from its start pose, param, duration, odom stamp)
+        self._carry = None  # ('turn', world heading it turns to) or ('row', vx, omega)
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -1259,8 +1268,8 @@ class PlanningNode(Node):
         return min_span_map, obstacle_mask, ESDF_map
 
     def generate_trajectories(self, init_p, init_q, v_allow):
-        """(trajectories, params, durations): the lattice, rotate-then-go and the
-        reverse vocabulary, all held to the longest so they stack."""
+        """(trajectories, params, durations, is_turn): the lattice, rotate-then-go and
+        the reverse vocabulary, all held to the longest so they stack."""
         dt, w = self._traj_dt, ROBOT_CONFIG.max_angular_vel
         lattice, lattice_params = generate_trajectory_library_3d(
             init_p=init_p, init_q=init_q,
@@ -1282,7 +1291,9 @@ class PlanningNode(Node):
         params = np.concatenate([lattice_params, turn_params, vocab_params])
         durations = np.concatenate([np.full(len(lattice), rollout), turn_durations,
                                     np.full(len(vocab), rollout)])
-        return trajectories, params, durations
+        is_turn = np.zeros(len(trajectories), dtype=bool)
+        is_turn[len(lattice):len(lattice) + len(turns)] = True
+        return trajectories, params, durations, is_turn
 
     def score_trajectories(self, trajectories, params, ESDF_map, path_dist_map, remaining_map,
                            route_heading_map, target, has_route):
@@ -1319,7 +1330,6 @@ class PlanningNode(Node):
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             T,_ = msg2np(odom_msg)
-            stamp_s = odom_msg.header.stamp.sec + odom_msg.header.stamp.nanosec * 1e-9
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
@@ -1353,21 +1363,27 @@ class PlanningNode(Node):
             # and the speed cap above are maintained either way.
             if self.target_pose is None:
                 return
-            trajectories, params, durations = self.generate_trajectories(init_p, init_q, v_allow)
+            trajectories, params, durations, is_turn = self.generate_trajectories(init_p, init_q, v_allow)
             # Every row is regenerated from here, and a choice half carried out --
             # a turn in place 7 deg into its 15 -- is none of them: offered only
             # 0 and 15, the next frame overshoots or undershoots and the one after
-            # turns back. Its remainder is offered as a row of its own.
-            carry = -1
-            if self._carry is not None:
-                plan, c_param, c_dur, c_stamp = self._carry
-                k = int(round((stamp_s - c_stamp) / self._traj_dt))
-                tail = carry_forward(plan, k, init_p, init_q, trajectories.shape[1])
-                if tail is not None and c_dur - k * self._traj_dt > self._traj_dt:
+            # turns back. Last frame's choice is offered again, rebuilt whole from
+            # here: a turn by what is left of it, a lattice row as itself.
+            carry, last = -1, self._carry
+            if last is not None and last[0] == 'turn':
+                rest = turn_remainder(init_p, init_q, last[1], ROBOT_CONFIG.max_angular_vel,
+                                      self._vx_min, ROTATE_THEN_GO_M, self._traj_dt,
+                                      trajectories.shape[1])
+                if rest is not None:
                     carry = len(trajectories)
-                    trajectories = np.concatenate([trajectories, tail[None]])
-                    params = np.concatenate([params, c_param[None]])
-                    durations = np.append(durations, c_dur - k * self._traj_dt)
+                    trajectories = np.concatenate([trajectories, rest[0][None]])
+                    params = np.concatenate([params, rest[1][None]])
+                    durations = np.append(durations, rest[2])
+                    is_turn = np.append(is_turn, True)
+                else:
+                    last = ('row', self._vx_min, 0.0)
+            if last is not None and last[0] == 'row':
+                carry = carried_row(params, is_turn, last[1], last[2])
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
@@ -1447,8 +1463,8 @@ class PlanningNode(Node):
             self.last_param = params[top_indices[0]]
             sel = top_indices[0]
             self._last_yaw = float(yaws[sel])
-            self._carry = (np.concatenate([np.concatenate([init_p, init_q])[None], trajectories[sel]]),
-                           params[sel].copy(), float(durations[sel]), stamp_s)
+            self._carry = (('turn', float(heading_of_pose7(trajectories[sel][-1]))) if is_turn[sel]
+                           else ('row', float(params[sel][0]), float(params[sel][1])))
 
             # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
             # anything else means stuck by cost with somewhere to go.
