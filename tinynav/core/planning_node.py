@@ -621,12 +621,18 @@ TIE_S = 0.15
 
 
 def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_gerr,
-                   end_gdxy, here_arrived, has_route, should_reverse, v, w, band, t_end):
+                   end_gdxy, here_arrived, has_route, should_reverse, v, w, band, t_end,
+                   carry=-1, last_yaw=0.0):
     """Index of the row with the least time to go: when map_node's arrival fires, or the
     row's own duration `t_end` plus the distance left at `v` and the heading left at
     `w`. The reverse gate
     filters, and so does standing still while another row is open, unless the robot is
-    already inside the arrival radius. Arrays are per row; `scores` inf is a collision."""
+    already inside the arrival radius. Arrays are per row; `scores` inf is a collision.
+
+    Among the rows within TIE_S of the fastest, the `carry` row (last frame's choice
+    carried forward, -1 for none) wins outright; otherwise the least motion, then a
+    yaw that does not reverse `last_yaw`, then the time. A tie is never settled by a
+    time difference alone while a choice that keeps the last one's direction is in it."""
     free = np.isfinite(scores)
     ok = free & ((vx < 0.0) == should_reverse)
     still = (np.abs(vx) <= 1e-3) & (np.abs(yaw) < 1e-3)
@@ -643,8 +649,30 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
     t = np.where(np.isfinite(arrive_t), arrive_t, t_end + d / v + h / w)
     t = np.where(ok, t + CLEARANCE_M * np.where(free, scores, 0.0) / v, np.inf)
     tied = np.flatnonzero(t <= t.min() + TIE_S)
+    if carry >= 0 and np.isfinite(t[carry]) and carry in tied:
+        return int(carry)
     motion = np.abs(vx[tied]) / v + np.abs(yaw[tied]) / w
-    return int(tied[np.lexsort((t[tied], motion))[0]])
+    flips = (yaw[tied] * last_yaw < 0.0).astype(np.float64)
+    return int(tied[np.lexsort((t[tied], flips, motion))[0]])
+
+
+def carry_forward(plan, k, init_p, init_q, num_steps):
+    """Last frame's chosen plan as it stands `k` steps of dt later, moved rigidly so
+    that step k sits on (init_p, init_q): the rest of a choice already under way, as
+    a row of this frame. `plan` is (L, 7) with the pose it was planned from at index 0.
+    Returns (num_steps, 7), held at its last pose, or None when nothing of it is left."""
+    if k < 0 or k + 1 >= len(plan):
+        return None
+    ref_R = quat_to_matrix(plan[k, 3:])
+    R = quat_to_matrix(init_q) @ ref_R.T
+    tail = plan[k + 1:k + 1 + num_steps]
+    out = np.empty((num_steps, 7))
+    for i in range(num_steps):
+        pose = tail[min(i, len(tail) - 1)]
+        out[i, :3] = init_p + R @ (pose[:3] - plan[k, :3])
+        out[i, 3:] = matrix_to_quat(R @ quat_to_matrix(pose[3:]))
+        out[i, 2] = init_p[2]
+    return out
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -838,6 +866,8 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
+        self._last_yaw = 0.0  # its first step's world yaw rate
+        self._carry = None  # (plan from its start pose, param, duration, odom stamp)
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -1289,6 +1319,7 @@ class PlanningNode(Node):
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             T,_ = msg2np(odom_msg)
+            stamp_s = odom_msg.header.stamp.sec + odom_msg.header.stamp.nanosec * 1e-9
             fx, fy = self.K[0, 0], self.K[1, 1]
             cx, cy = self.K[0, 2], self.K[1, 2]
 
@@ -1323,6 +1354,20 @@ class PlanningNode(Node):
             if self.target_pose is None:
                 return
             trajectories, params, durations = self.generate_trajectories(init_p, init_q, v_allow)
+            # Every row is regenerated from here, and a choice half carried out --
+            # a turn in place 7 deg into its 15 -- is none of them: offered only
+            # 0 and 15, the next frame overshoots or undershoots and the one after
+            # turns back. Its remainder is offered as a row of its own.
+            carry = -1
+            if self._carry is not None:
+                plan, c_param, c_dur, c_stamp = self._carry
+                k = int(round((stamp_s - c_stamp) / self._traj_dt))
+                tail = carry_forward(plan, k, init_p, init_q, trajectories.shape[1])
+                if tail is not None and c_dur - k * self._traj_dt > self._traj_dt:
+                    carry = len(trajectories)
+                    trajectories = np.concatenate([trajectories, tail[None]])
+                    params = np.concatenate([params, c_param[None]])
+                    durations = np.append(durations, c_dur - k * self._traj_dt)
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
@@ -1397,15 +1442,19 @@ class PlanningNode(Node):
                 params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
                 should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
-                self.route_terminal_band, durations)]
+                self.route_terminal_band, durations, carry, self._last_yaw)]
 
             self.last_param = params[top_indices[0]]
+            sel = top_indices[0]
+            self._last_yaw = float(yaws[sel])
+            self._carry = (np.concatenate([np.concatenate([init_p, init_q])[None], trajectories[sel]]),
+                           params[sel].copy(), float(durations[sel]), stamp_s)
 
             # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
             # anything else means stuck by cost with somewhere to go.
             self.get_logger().info(
                 f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
-                f'fwd_ok={n_fwd_ok} '
+                f'fwd_ok={n_fwd_ok} carried={int(top_indices[0] == carry)} '
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
