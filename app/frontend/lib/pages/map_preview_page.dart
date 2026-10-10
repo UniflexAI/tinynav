@@ -1,10 +1,11 @@
+import 'dart:math' as math;
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
-import 'map_viewport.dart';
 
 class MapPreviewPage extends ConsumerStatefulWidget {
   final String mapName;
@@ -154,10 +155,11 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
   Offset _viewportToImagePixel(Offset viewportPos, Size viewportSize) {
     final inv = Matrix4.inverted(_txCtrl.value);
     final childPoint = MatrixUtils.transformPoint(inv, viewportPos);
-    return MapViewport(
-      imageSize: Size(widget.info.width.toDouble(), widget.info.height.toDouble()),
-      viewportSize: viewportSize,
-    ).sceneToImage(childPoint);
+    final scale = math.min(viewportSize.width / widget.info.width,
+        viewportSize.height / widget.info.height);
+    final cx = (viewportSize.width - widget.info.width * scale) / 2;
+    final cy = (viewportSize.height - widget.info.height * scale) / 2;
+    return (childPoint - Offset(cx, cy)) / scale;
   }
 
   Future<void> _addPoi(Offset imagePixel) async {
@@ -207,10 +209,10 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
     }
   }
 
-  Future<void> _deletePoisNear(Offset imagePixel, double hitRadius) async {
-    // Keep the touch target usable even when the map is fitted or zoomed.
+  Future<void> _deletePoisNear(Offset imagePixel) async {
+    // Find nearest POI within 25 px (image-pixel space).
     Poi? nearest;
-    var nearestDist = hitRadius;
+    var nearestDist = 25.0;
     for (final poi in widget.info.pois) {
       final px = _worldToPixel(poi.x, poi.y);
       final d = (px - imagePixel).distance;
@@ -259,8 +261,7 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
         LayoutBuilder(
           builder: (_, constraints) {
             final vp = Size(constraints.maxWidth, constraints.maxHeight);
-            final layout = MapViewport(imageSize: Size(imageW, imageH), viewportSize: vp);
-            final scale = layout.scale;
+            final scale = math.min(vp.width / imageW, vp.height / imageH);
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
               // Long-press → add POI
@@ -277,10 +278,7 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
               onTap: () {
                 final px = _tapDownImagePixel;
                 _tapDownImagePixel = null;
-                if (px != null) {
-                  final zoom = _txCtrl.value.getMaxScaleOnAxis();
-                  _deletePoisNear(px, 16 / (scale * zoom));
-                }
+                if (px != null) _deletePoisNear(px);
               },
               child: InteractiveViewer(
                 transformationController: _txCtrl,

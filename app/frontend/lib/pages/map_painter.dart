@@ -131,7 +131,6 @@ class MapOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(MapOverlayPainter old) =>
-      old.mapInfo != mapInfo ||
       old.pose != pose ||
       old.pois != pois ||
       old.globalPath != globalPath ||
