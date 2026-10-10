@@ -74,7 +74,7 @@ class Go2VioTwistNode(Node):
         tm = 0.5 * (t0 + t1)
         self.vio_v.append((tm, v))
         legs = [x for tt, x in self.leg_v if tt > tm - 1.0]
-        if len(legs) > 25 and len(self.vio_v) > 10:
+        if len(legs) >= 5 and len(self.vio_v) > 10:   # leg twist is 10 Hz
             dv = np.linalg.norm(np.mean([x for _, x in self.vio_v], 0) - np.mean(legs, 0))
             if dv > self.gate:
                 self.hold(f'disagrees with legs by {dv:.2f} m/s')

@@ -1,11 +1,15 @@
 """Go2 leg odometry from rt/lowstate: stance-leg kinematics + body IMU -> body-frame velocity.
 
-Publishes /go2/leg_twist (50 Hz, a robot_localization twist input) and, decimated to ~200 Hz for recording and
+Publishes /go2/leg_twist (10 Hz, a robot_localization twist input) and, decimated to 100 Hz for recording and
 offline replay, /go2/imu and /go2/joint_states (12 joints, plus 4 *_foot entries whose effort is the foot force).
+Exits when rt/lowstate stops after having flowed, so that docker restarts the container and entry.sh waits for the
+link again; before the first message (body powered off) it just waits.
 """
 import argparse
 import collections
+import os
 import threading
+import time
 
 import numpy as np
 import rclpy
@@ -26,11 +30,19 @@ JOINT_NAMES = [f'{leg}_{j}_joint' for leg in LEGS for j in ('hip', 'thigh', 'cal
 FF_FLOOR = 30.0
 KNEE_LEGS = (1,)
 TAU_THR, TAU_GAIN = 9.0, 10.0
-# Velocity std by terrain (m/s), measured against VIO with the same 0.1 s averaging; descent legs under-count ~30%
-LEG_STD = {'flat': (0.12, 0.08, 0.05), 'up': (0.18, 0.12, 0.08), 'down': (0.6, 0.6, 0.6)}
+# Velocity std by terrain (m/s), measured against VIO with the same 0.1 s averaging; flat x1.3 because offline
+# leg-only EKF replays still gave velocity NEES ~5 (want 3); descent legs under-count ~30%
+LEG_STD = {'flat': (0.16, 0.10, 0.065), 'up': (0.18, 0.12, 0.08), 'down': (0.6, 0.6, 0.6)}
+# Leg/VIO horizontal distance on dog 1 (hybrid stance): flat 0.90-0.94, up 0.90-0.91; descent varies too much (2 flights)
+# so it stays 1. World-horizontal part only: going up, body x also carries the height, which is already right.
+LEG_SCALE_H = {'flat': 1.08, 'up': 1.10, 'down': 1.0}
 PITCH_STAIRS = np.radians(12.0)           # body pitch > +12 deg (1 s mean) = going down
-AVG_N, PUB_EVERY, PITCH_N = 50, 10, 500   # in 500 Hz lowstate samples: 0.1 s mean, 50 Hz output, 1 s pitch mean
-RAW_HZ, STATE_HZ = 200, 500
+# In 500 Hz lowstate samples: 0.1 s mean, 10 Hz output, 1 s pitch mean. Windows must not overlap: at 50 Hz each sample
+# reached the EKF 5 times (consecutive errors correlated 0.91) and it was over-confident (NEES 7.7 vs 5.1 at 10 Hz).
+AVG_N, PUB_EVERY, PITCH_N = 50, 50, 500
+LOWSTATE_TIMEOUT = 2.0                    # s; on 10-09 17:40 lowstate stopped mid-run and nothing recovered it
+# 100 Hz replays offline within 0.01 of 500 Hz (10-09 flat + stairs); 50 Hz adds ~0.2 m height drift per 50 m
+RAW_HZ, STATE_HZ = 100, 500
 
 
 def foot_pos(q):
@@ -53,6 +65,14 @@ def body_velocity(q, dq, gyro, foot_force, tau_knee, eps=1e-4):
     return v_legs.T @ w / s if s > 0 else np.zeros(3)
 
 
+def rpy_to_R(r, p, y):
+    """Extrinsic xyz (Unitree imu_state.rpy) -> body-to-world rotation matrix."""
+    cr, sr, cp, sp, cy, sy = np.cos(r), np.sin(r), np.cos(p), np.sin(p), np.cos(y), np.sin(y)
+    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                     [-sp, cp * sr, cp * cr]])
+
+
 def rpy_to_quat(r, p, y):
     """Extrinsic xyz (Unitree imu_state.rpy) -> x, y, z, w."""
     cr, sr, cp, sp, cy, sy = np.cos(r / 2), np.sin(r / 2), np.cos(p / 2), np.sin(p / 2), np.cos(y / 2), np.sin(y / 2)
@@ -69,6 +89,8 @@ class Go2LegOdomNode(Node):
         self.pitch = collections.deque(maxlen=PITCH_N)
         self.n = 0
         self.lock = threading.Lock()
+        self.last_rx = None
+        self.create_timer(0.5, self.check_lowstate)
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
         from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
         ChannelFactoryInitialize(0, network_interface)
@@ -76,7 +98,13 @@ class Go2LegOdomNode(Node):
         self.sub.Init(self.on_lowstate, 50)
         self.get_logger().info(f'go2_leg_odom on {network_interface}')
 
+    def check_lowstate(self):
+        if self.last_rx is not None and time.monotonic() - self.last_rx > LOWSTATE_TIMEOUT:
+            self.get_logger().error(f'no rt/lowstate for {LOWSTATE_TIMEOUT} s, exiting')
+            os._exit(1)
+
     def on_lowstate(self, m):
+        self.last_rx = time.monotonic()
         now = self.get_clock().now()
         ms = m.motor_state[:12]
         q = np.array([x.q for x in ms]).reshape(4, 3)
@@ -93,6 +121,8 @@ class Go2LegOdomNode(Node):
             pitch = np.mean(self.pitch)
         if v is not None:
             cls = 'down' if pitch > PITCH_STAIRS else 'up' if pitch < -PITCH_STAIRS else 'flat'
+            R = rpy_to_R(*m.imu_state.rpy)
+            v = R.T @ (np.array([LEG_SCALE_H[cls], LEG_SCALE_H[cls], 1.0]) * (R @ v))
             t = TwistWithCovarianceStamped()
             t.header.stamp = (now - Duration(nanoseconds=int(AVG_N / 2 / STATE_HZ * 1e9))).to_msg()  # window centre
             t.header.frame_id = 'base_link'
