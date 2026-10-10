@@ -31,7 +31,7 @@ from std_msgs.msg import Header, Float32, String
 from cv_bridge import CvBridge
 import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
-from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
+from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
 
@@ -631,8 +631,7 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
 
     Among the rows within TIE_S of the fastest, the `carry` row (last frame's choice
     carried forward, -1 for none) wins outright; otherwise the least motion, then a
-    yaw that does not reverse `last_yaw`, then the time. A tie is never settled by a
-    time difference alone while a choice that keeps the last one's direction is in it."""
+    yaw that does not reverse `last_yaw`, then the time."""
     free = np.isfinite(scores)
     ok = free & ((vx < 0.0) == should_reverse)
     still = (np.abs(vx) <= 1e-3) & (np.abs(yaw) < 1e-3)
@@ -649,10 +648,10 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
     t = np.where(np.isfinite(arrive_t), arrive_t, t_end + d / v + h / w)
     t = np.where(ok, t + CLEARANCE_M * np.where(free, scores, 0.0) / v, np.inf)
     tied = np.flatnonzero(t <= t.min() + TIE_S)
-    if carry >= 0 and np.isfinite(t[carry]) and carry in tied:
-        return int(carry)
+    if carry in tied and np.isfinite(t[carry]):
+        return carry
     motion = np.abs(vx[tied]) / v + np.abs(yaw[tied]) / w
-    flips = (yaw[tied] * last_yaw < 0.0).astype(np.float64)
+    flips = yaw[tied] * last_yaw < 0.0
     return int(tied[np.lexsort((t[tied], flips, motion))[0]])
 
 
@@ -670,18 +669,12 @@ def carried_row(params, is_turn, vx, omega):
     return int(idx[order[0]])
 
 
-def turn_remainder(init_p, init_q, heading, turn_rate, go_speed, go_m, dt, num_steps):
-    """Rotate-then-go from here to the world `heading` a turn row was turning to:
-    (trajectory, param, duration), or None once within one step of it. Built whole,
-    so the remainder of a turn always ends in its full way forward."""
-    here = heading_of_pose7(np.concatenate([init_p, init_q]))
-    rem = np.arctan2(np.sin(heading - here), np.cos(heading - here))
-    if abs(rem) <= turn_rate * dt:
-        return None
-    trajs, params, durs = generate_rotate_then_go(
-        init_p, init_q, np.array([rem, -rem]), turn_rate, go_speed, go_m, dt, num_steps)
-    k = int(np.argmin([angle_between(heading_of_pose7(t[-1]), heading) for t in trajs]))
-    return trajs[k], params[k], durs[k]
+def turn_remainder(init_q, heading, step):
+    """The turn still left from `init_q` to the world `heading` a turn row was turning
+    to, as a generate_rotate_then_go delta; None once within `step` of it. A delta
+    turns about camera +y, which is world yaw the other way, hence the sign."""
+    rem = wrap_angle(heading - heading_of_pose7(np.concatenate([np.zeros(3), init_q])))
+    return None if abs(rem) <= step else -rem
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -876,7 +869,7 @@ class PlanningNode(Node):
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
         self._last_yaw = 0.0  # its first step's world yaw rate
-        self._carry = None  # ('turn', world heading it turns to) or ('row', vx, omega)
+        self._turn_heading = None  # world heading the last choice turns to, if a turn row
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -1267,9 +1260,10 @@ class PlanningNode(Node):
         ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
         return min_span_map, obstacle_mask, ESDF_map
 
-    def generate_trajectories(self, init_p, init_q, v_allow):
+    def generate_trajectories(self, init_p, init_q, v_allow, extra_turn=None):
         """(trajectories, params, durations, is_turn): the lattice, rotate-then-go and
-        the reverse vocabulary, all held to the longest so they stack."""
+        the reverse vocabulary, all held to the longest so they stack. `extra_turn`
+        (rad) is one more rotate-then-go delta, the last of the turn rows."""
         dt, w = self._traj_dt, ROBOT_CONFIG.max_angular_vel
         lattice, lattice_params = generate_trajectory_library_3d(
             init_p=init_p, init_q=init_q,
@@ -1282,7 +1276,7 @@ class PlanningNode(Node):
         )
         longest = np.pi / w + ROTATE_THEN_GO_M / self._vx_min
         turns, turn_params, turn_durations = generate_rotate_then_go(
-            init_p, init_q, np.deg2rad(ROTATE_DEG), w, self._vx_min, ROTATE_THEN_GO_M, dt,
+            init_p, init_q, np.append(np.deg2rad(ROTATE_DEG), [] if extra_turn is None else [extra_turn]), w, self._vx_min, ROTATE_THEN_GO_M, dt,
             int(np.ceil(longest / dt)) + 1)
         vocab, vocab_params = generate_predefined_trajectory_vocabularies(init_p=init_p, init_q=init_q)
         rollout = (lattice.shape[1] - 1) * dt
@@ -1363,27 +1357,18 @@ class PlanningNode(Node):
             # and the speed cap above are maintained either way.
             if self.target_pose is None:
                 return
-            trajectories, params, durations, is_turn = self.generate_trajectories(init_p, init_q, v_allow)
-            # Every row is regenerated from here, and a choice half carried out --
-            # a turn in place 7 deg into its 15 -- is none of them: offered only
-            # 0 and 15, the next frame overshoots or undershoots and the one after
-            # turns back. Last frame's choice is offered again, rebuilt whole from
-            # here: a turn by what is left of it, a lattice row as itself.
-            carry, last = -1, self._carry
-            if last is not None and last[0] == 'turn':
-                rest = turn_remainder(init_p, init_q, last[1], ROBOT_CONFIG.max_angular_vel,
-                                      self._vx_min, ROTATE_THEN_GO_M, self._traj_dt,
-                                      trajectories.shape[1])
-                if rest is not None:
-                    carry = len(trajectories)
-                    trajectories = np.concatenate([trajectories, rest[0][None]])
-                    params = np.concatenate([params, rest[1][None]])
-                    durations = np.append(durations, rest[2])
-                    is_turn = np.append(is_turn, True)
-                else:
-                    last = ('row', self._vx_min, 0.0)
-            if last is not None and last[0] == 'row':
-                carry = carried_row(params, is_turn, last[1], last[2])
+            # Last frame's choice is offered again, rebuilt from here: a turn in place by
+            # what is left of it (the 15 deg grid has no row for a half-done turn), a
+            # lattice row as itself, and a finished turn as its straight go.
+            rem = None if self._turn_heading is None else turn_remainder(
+                init_q, self._turn_heading, ROBOT_CONFIG.max_angular_vel * self._traj_dt)
+            trajectories, params, durations, is_turn = self.generate_trajectories(
+                init_p, init_q, v_allow, rem)
+            if rem is not None:
+                carry = int(np.flatnonzero(is_turn)[-1])
+            else:
+                row = self.last_param if self._turn_heading is None else (self._vx_min, 0.0)
+                carry = carried_row(params, is_turn, row[0], row[1])
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
@@ -1460,19 +1445,18 @@ class PlanningNode(Node):
                 should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
                 self.route_terminal_band, durations, carry, self._last_yaw)]
 
-            self.last_param = params[top_indices[0]]
             sel = top_indices[0]
+            self.last_param = params[sel]
             self._last_yaw = float(yaws[sel])
-            self._carry = (('turn', float(heading_of_pose7(trajectories[sel][-1]))) if is_turn[sel]
-                           else ('row', float(params[sel][0]), float(params[sel][1])))
+            self._turn_heading = float(heading_of_pose7(trajectories[sel][-1])) if is_turn[sel] else None
 
             # `fwd_ok` is what tells the two standstills apart: 0 means blocked,
             # anything else means stuck by cost with somewhere to go.
             self.get_logger().info(
-                f'sel vx={params[top_indices[0]][0]:.2f} omega={params[top_indices[0]][1]:.2f} '
-                f'fwd_ok={n_fwd_ok} carried={int(top_indices[0] == carry)} '
-                f'goal_err={np.rad2deg(_end_heading_error(trajectories[top_indices[0]][0], target)):.0f}deg '
-                f'route_err={np.rad2deg(end_heading_errs[top_indices[0]]):.0f}deg '
+                f'sel vx={params[sel][0]:.2f} omega={params[sel][1]:.2f} '
+                f'fwd_ok={n_fwd_ok} carried={int(sel == carry)} '
+                f'goal_err={np.rad2deg(_end_heading_error(trajectories[sel][0], target)):.0f}deg '
+                f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
                 f'should_reverse={should_reverse} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
@@ -1488,8 +1472,8 @@ class PlanningNode(Node):
             # published Path: angular.z = d(world heading)/dt over the first step. This
             # stays consistent with the path by construction and is correct even if the
             # camera pitches (where -omega_y would be subtly wrong).
-            sel_traj = trajectories[top_indices[0]]
-            sel_vx = float(params[top_indices[0]][0])
+            sel_traj = trajectories[sel]
+            sel_vx = float(params[sel][0])
 
             sel_omega = _yaw_rate(sel_traj)
 

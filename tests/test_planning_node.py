@@ -11,7 +11,8 @@ from std_msgs.msg import Header
 from math_utils import matrix_to_quat
 from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF,
-                           select_by_time, carried_row, turn_remainder, generate_rotate_then_go, ARRIVE_M, ARRIVE_TICKS, ARRIVE_TICK_S,
+                           select_by_time, carried_row, turn_remainder,
+                           ARRIVE_M, ARRIVE_TICKS, ARRIVE_TICK_S,
                            generate_rotate_then_go, ROTATE_DEG, ROTATE_THEN_GO_M,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
@@ -910,15 +911,14 @@ def test_a_lattice_row_is_carried_as_itself_whatever_the_speed_cap():
     assert carried_row(params, is_turn, 0.2, 0.75) == 5     # never a turn in place
 
 
-def test_a_turn_in_place_carries_as_its_remainder_with_the_whole_way_forward():
-    """A 45 deg turn, 3 steps in: what is carried turns the same way to the same
-    heading, from wherever the robot now is, and still drives its full 0.5 m."""
+def test_a_turn_in_place_carries_as_its_remainder():
+    """A 45 deg turn, 3 steps in: the remainder, as a delta, turns the rest of the
+    way to the same heading."""
     d = np.deg2rad(45.0)
     traj, _, _ = generate_rotate_then_go(np.zeros(3), _LEVEL_Q, np.array([d]), 0.75, 0.2, 0.5, 0.1, 60)
     goal = heading_of_pose7(traj[0, -1])
-    here = np.array([1.0, 2.0, 0.0])
-    rest, _, dur = turn_remainder(here, traj[0, 2, 3:], goal, 0.75, 0.2, 0.5, 0.1, 60)
-    assert np.isclose(angle_between(heading_of_pose7(rest[-1]), goal), 0.0, atol=1e-6)
-    assert np.isclose(np.linalg.norm(rest[-1, :2] - here[:2]), 0.5, atol=1e-6)
-    assert np.isclose(dur, (d - 3 * 0.075) / 0.75 + 0.5 / 0.2, atol=1e-6)
-    assert turn_remainder(here, traj[0, -1, 3:], goal, 0.75, 0.2, 0.5, 0.1, 60) is None
+    rem = turn_remainder(traj[0, 2, 3:], goal, 0.075)
+    assert np.isclose(abs(rem), d - 3 * 0.075, atol=1e-6)
+    rest, _, _ = generate_rotate_then_go(np.zeros(3), traj[0, 2, 3:], np.array([rem]), 0.75, 0.2, 0.5, 0.1, 60)
+    assert np.isclose(angle_between(heading_of_pose7(rest[0, -1]), goal), 0.0, atol=1e-6)
+    assert turn_remainder(traj[0, -1, 3:], goal, 0.075) is None
