@@ -9,8 +9,9 @@ case "$1" in
   start)
     docker image inspect $IMG >/dev/null 2>&1 || docker build -t $IMG "$REPO/scripts/go2_ekf"
     if docker container inspect go2-ekf >/dev/null 2>&1; then docker start go2-ekf; else
-      # host network + host /dev/shm: FastDDS shared memory with the app container (which mounts /dev)
-      docker run -d --restart unless-stopped --name go2-ekf --net host -v /dev/shm:/dev/shm -e ROBOT_TYPE=go2 \
+      # host network + host /dev/shm: FastDDS shared memory with the app container (which mounts /dev).
+      # NET_ADMIN: entry.sh switches EEE off on the dog link and resets it when it stops receiving.
+      docker run -d --restart unless-stopped --name go2-ekf --net host --cap-add NET_ADMIN -v /dev/shm:/dev/shm -e ROBOT_TYPE=go2 \
         -v "$REPO":/tinynav --entrypoint bash $IMG /tinynav/scripts/go2_ekf/entry.sh
     fi ;;
   stop) docker stop go2-ekf ;;                        # stays stopped across reboots
