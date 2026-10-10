@@ -1,8 +1,11 @@
 """Looper VIO pose -> Go2 body-frame velocity (/go2/vio_twist, 20 Hz), a robot_localization twist input.
 
-VIO is withheld for 1 s after a gap or a non-tracking status, and while its 1 s mean velocity disagrees with the legs
-(/go2/leg_twist) by more than gate_mps: on 10-09 the stair-descent VIO drifted to 1-6.7 m/s while still reporting
-TRACKING, and robot_localization's own Mahalanobis gate let most of it through.
+VIO is withheld for 1 s after a gap, a non-tracking status or a single-frame position jump, while its 1 s mean velocity
+disagrees with the legs (/go2/leg_twist) by more than gate_mps, and when one 20 Hz sample is more than spike_mps off the
+latest leg velocity: on 10-09 the stair-descent VIO drifted to 1-6.7 m/s while still reporting TRACKING, and
+robot_localization's own Mahalanobis gate let most of it through; on 10-10 in a dark stairwell it jumped 0.36-1.12 m
+in one frame and the 1 s mean let ~0.2 m in before it tripped. The jump test needs no legs, so it still works when
+lowstate is gone. Angular rates are published too, so the EKF keeps its attitude without the dog IMU.
 """
 import collections
 
@@ -24,11 +27,14 @@ class Go2VioTwistNode(Node):
         self.lever = np.array(self.declare_parameter('lever_arm_m', [0.288, 0.01, 0.077]).value)
         self.std = self.declare_parameter('std_mps', 0.03).value
         self.gate = self.declare_parameter('gate_mps', 0.4).value
+        self.spike = self.declare_parameter('spike_mps', 1.0).value
+        self.w_std = self.declare_parameter('rate_std_rps', 0.05).value   # above the dog gyro's 0.02, so the IMU leads
         self.span = 0.1                                    # s of VIO poses per velocity
         self.poses = collections.deque(maxlen=200)         # (t, p, R_wc), 100 Hz
         self.vio_v = collections.deque(maxlen=20)          # (t, v_body), last 1 s
         self.leg_v = collections.deque(maxlen=50)
         self.hold_until = 0.0
+        self.last_tc = 0.0
         self.status = ''
         self.pub = self.create_publisher(TwistWithCovarianceStamped, '/go2/vio_twist', 20)
         self.create_subscription(PoseStamped, '/camera/camera/vio_100hz', self.on_pose, 50)
@@ -54,7 +60,14 @@ class Go2VioTwistNode(Node):
         if self.poses and t - self.poses[-1][0] > 0.2:
             self.hold(f'gap {t - self.poses[-1][0]:.2f} s')
         p, o = msg.pose.position, msg.pose.orientation
-        self.poses.append((t, np.array([p.x, p.y, p.z]), Rot.from_quat([o.x, o.y, o.z, o.w])))
+        pos, tc = np.array([p.x, p.y, p.z]), msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.poses:
+            # normal frames move <= 0.04 m (p99.9 over 3 runs); jumps were 0.24-1.12 m. Camera stamps, not receive time
+            step, dtc = np.linalg.norm(pos - self.poses[-1][1]), max(tc - self.last_tc, 0.0)
+            if step > 0.15 + 2.0 * dtc:
+                self.hold(f'jump {step:.2f} m in {dtc * 1e3:.0f} ms')
+        self.last_tc = tc
+        self.poses.append((t, pos, Rot.from_quat([o.x, o.y, o.z, o.w])))
 
     def on_leg(self, msg):
         v = msg.twist.twist.linear
@@ -78,15 +91,18 @@ class Go2VioTwistNode(Node):
             dv = np.linalg.norm(np.mean([x for _, x in self.vio_v], 0) - np.mean(legs, 0))
             if dv > self.gate:
                 self.hold(f'disagrees with legs by {dv:.2f} m/s')
+        if legs and np.linalg.norm(v - legs[-1]) > self.spike:
+            self.hold(f'sample {np.linalg.norm(v - legs[-1]):.2f} m/s off the legs')
         if self.now() < self.hold_until:
             return
         m = TwistWithCovarianceStamped()
         m.header.stamp = rclpy.time.Time(seconds=tm).to_msg()
         m.header.frame_id = 'base_link'
         m.twist.twist.linear.x, m.twist.twist.linear.y, m.twist.twist.linear.z = map(float, v)
+        m.twist.twist.angular.x, m.twist.twist.angular.y, m.twist.twist.angular.z = map(float, w_b)
         c = [0.0] * 36
         c[0] = c[7] = c[14] = self.std ** 2
-        c[21] = c[28] = c[35] = 1e6   # angular part unused
+        c[21] = c[28] = c[35] = self.w_std ** 2
         m.twist.covariance = c
         self.pub.publish(m)
 

@@ -2,8 +2,8 @@
 
 Publishes /go2/leg_twist (10 Hz, a robot_localization twist input) and, decimated to 100 Hz for recording and
 offline replay, /go2/imu and /go2/joint_states (12 joints, plus 4 *_foot entries whose effort is the foot force).
-Exits when rt/lowstate stops after having flowed, so that docker restarts the container and entry.sh waits for the
-link again; before the first message (body powered off) it just waits.
+Exits when rt/lowstate stops after having flowed, and entry.sh restarts it once the link is up; before the first
+message (body powered off) it just waits.
 """
 import argparse
 import collections
@@ -31,11 +31,13 @@ FF_FLOOR = 30.0
 KNEE_LEGS = (1,)
 TAU_THR, TAU_GAIN = 9.0, 10.0
 # Velocity std by terrain (m/s), measured against VIO with the same 0.1 s averaging; flat x1.3 because offline
-# leg-only EKF replays still gave velocity NEES ~5 (want 3); descent legs under-count ~30%
-LEG_STD = {'flat': (0.16, 0.10, 0.065), 'up': (0.18, 0.12, 0.08), 'down': (0.6, 0.6, 0.6)}
-# Leg/VIO horizontal distance on dog 1 (hybrid stance): flat 0.90-0.94, up 0.90-0.91; descent varies too much (2 flights)
-# so it stays 1. World-horizontal part only: going up, body x also carries the height, which is already right.
-LEG_SCALE_H = {'flat': 1.08, 'up': 1.10, 'down': 1.0}
+# leg-only EKF replays still gave velocity NEES ~5 (want 3). Descent was 0.6, which left the EKF coasting on its own
+# velocity while VIO was withheld (10-10 17:41, 449-458 s); 0.25 covers the 0.18 RMS plus the scale spread.
+LEG_STD = {'flat': (0.16, 0.10, 0.065), 'up': (0.18, 0.12, 0.08), 'down': (0.25, 0.2, 0.2)}
+# (world horizontal, vertical) scale from dog 1's leg/VIO ratios (hybrid stance): flat 0.90-0.94, up 0.90-0.91
+# horizontal with height already right; down = median of the 9 flights on 10-10 17:41 (0.75 / 0.885, spread +-10 %).
+# Split in the world frame because on stairs body x also carries height.
+LEG_SCALE = {'flat': (1.08, 1.0), 'up': (1.10, 1.0), 'down': (1.33, 1.13)}
 PITCH_STAIRS = np.radians(12.0)           # body pitch > +12 deg (1 s mean) = going down
 # In 500 Hz lowstate samples: 0.1 s mean, 10 Hz output, 1 s pitch mean. Windows must not overlap: at 50 Hz each sample
 # reached the EKF 5 times (consecutive errors correlated 0.91) and it was over-confident (NEES 7.7 vs 5.1 at 10 Hz).
@@ -122,7 +124,8 @@ class Go2LegOdomNode(Node):
         if v is not None:
             cls = 'down' if pitch > PITCH_STAIRS else 'up' if pitch < -PITCH_STAIRS else 'flat'
             R = rpy_to_R(*m.imu_state.rpy)
-            v = R.T @ (np.array([LEG_SCALE_H[cls], LEG_SCALE_H[cls], 1.0]) * (R @ v))
+            kh, kz = LEG_SCALE[cls]
+            v = R.T @ (np.array([kh, kh, kz]) * (R @ v))
             t = TwistWithCovarianceStamped()
             t.header.stamp = (now - Duration(nanoseconds=int(AVG_N / 2 / STATE_HZ * 1e9))).to_msg()  # window centre
             t.header.frame_id = 'base_link'
