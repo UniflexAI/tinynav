@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/models.dart';
 import '../core/providers.dart';
+import 'map_viewport.dart';
 
 class MapPreviewPage extends ConsumerStatefulWidget {
   final String mapName;
@@ -149,13 +150,14 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
   // Convert a position in the outer GestureDetector's local coordinates
   // (= InteractiveViewer viewport coords) to image-pixel coordinates.
   // InteractiveViewer applies _txCtrl.value to its child (Center(SizedBox)).
-  // Inverse transform gives us child coords; subtract the Center offset.
+  // Undo pan/zoom, then undo the fitted image scale and centered padding.
   Offset _viewportToImagePixel(Offset viewportPos, Size viewportSize) {
     final inv = Matrix4.inverted(_txCtrl.value);
     final childPoint = MatrixUtils.transformPoint(inv, viewportPos);
-    final cx = (viewportSize.width - widget.info.width) / 2;
-    final cy = (viewportSize.height - widget.info.height) / 2;
-    return childPoint - Offset(cx, cy);
+    return MapViewport(
+      imageSize: Size(widget.info.width.toDouble(), widget.info.height.toDouble()),
+      viewportSize: viewportSize,
+    ).sceneToImage(childPoint);
   }
 
   Future<void> _addPoi(Offset imagePixel) async {
@@ -205,10 +207,10 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
     }
   }
 
-  Future<void> _deletePoisNear(Offset imagePixel) async {
-    // Find nearest POI within 25 px (image-pixel space).
+  Future<void> _deletePoisNear(Offset imagePixel, double hitRadius) async {
+    // Keep the touch target usable even when the map is fitted or zoomed.
     Poi? nearest;
-    var nearestDist = 25.0;
+    var nearestDist = hitRadius;
     for (final poi in widget.info.pois) {
       final px = _worldToPixel(poi.x, poi.y);
       final d = (px - imagePixel).distance;
@@ -257,6 +259,8 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
         LayoutBuilder(
           builder: (_, constraints) {
             final vp = Size(constraints.maxWidth, constraints.maxHeight);
+            final layout = MapViewport(imageSize: Size(imageW, imageH), viewportSize: vp);
+            final scale = layout.scale;
             return GestureDetector(
               behavior: HitTestBehavior.opaque,
               // Long-press → add POI
@@ -273,7 +277,10 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
               onTap: () {
                 final px = _tapDownImagePixel;
                 _tapDownImagePixel = null;
-                if (px != null) _deletePoisNear(px);
+                if (px != null) {
+                  final zoom = _txCtrl.value.getMaxScaleOnAxis();
+                  _deletePoisNear(px, 16 / (scale * zoom));
+                }
               },
               child: InteractiveViewer(
                 transformationController: _txCtrl,
@@ -282,16 +289,16 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
                 boundaryMargin: const EdgeInsets.all(80),
                 child: Center(
                   child: SizedBox(
-                    width: imageW,
-                    height: imageH,
+                    width: imageW * scale,
+                    height: imageH * scale,
                     child: Stack(
                       clipBehavior: Clip.none,
                       children: [
                         // ── Occupancy map ─────────────────────────────────────
                         Image.network(
                           imageUrl,
-                          width: imageW,
-                          height: imageH,
+                          width: imageW * scale,
+                          height: imageH * scale,
                           fit: BoxFit.fill,
                           loadingBuilder: (_, child, progress) => progress == null
                               ? child
@@ -314,8 +321,8 @@ class _MapViewerState extends ConsumerState<_MapViewer> {
                         ...widget.info.pois.map((poi) {
                           final px = _worldToPixel(poi.x, poi.y);
                           return Positioned(
-                            left: px.dx - 10,
-                            top: px.dy - 10,
+                            left: px.dx * scale - 4,
+                            top: px.dy * scale - 4,
                             child: _PoiMarker(label: poi.name),
                           );
                         }),
@@ -368,18 +375,18 @@ class _PoiMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 20,
-          height: 20,
+          width: 8,
+          height: 8,
           decoration: BoxDecoration(
             color: const Color(0xFF4A90D9),
             shape: BoxShape.circle,
             border: Border.all(color: Colors.white, width: 1.5),
             boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 3)],
           ),
-          child: const Icon(Icons.place, color: Colors.white, size: 12),
         ),
         const SizedBox(height: 2),
         Container(

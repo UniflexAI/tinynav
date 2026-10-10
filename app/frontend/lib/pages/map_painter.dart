@@ -25,7 +25,7 @@ class MapOverlayPainter extends CustomPainter {
   /// Matches map_renderer.py: img = np.flipud(img) → row 0 = max-Y in world.
   Offset _worldToImage(double wx, double wy) {
     final px = (wx - mapInfo.originX) / mapInfo.resolution;
-    final py = mapInfo.height - (wy - mapInfo.originY) / mapInfo.resolution;
+    final py = (mapInfo.height - 1) - (wy - mapInfo.originY) / mapInfo.resolution;
     return Offset(px, py);
   }
 
@@ -59,8 +59,8 @@ class MapOverlayPainter extends CustomPainter {
 
     for (final poi in pois) {
       final c = _imageToCanvas(_worldToImage(poi.x, poi.y), size);
-      canvas.drawCircle(c, 7, fill);
-      canvas.drawCircle(c, 7, border);
+      canvas.drawCircle(c, 4, fill);
+      canvas.drawCircle(c, 4, border);
 
       final tp = TextPainter(
         text: TextSpan(text: poi.name, style: labelStyle),
@@ -131,6 +131,7 @@ class MapOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(MapOverlayPainter old) =>
+      old.mapInfo != mapInfo ||
       old.pose != pose ||
       old.pois != pois ||
       old.globalPath != globalPath ||
