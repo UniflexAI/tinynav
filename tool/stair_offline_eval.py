@@ -201,7 +201,7 @@ def main():
                          target_y=None if res['target'] is None else res['target'][1],
                          guided=bool(res.get('guided', False)), mem_sim=mem_sim,
                          uturn=bool(res.get('uturn', False)), turn_in_place=bool(res.get('turn_in_place', False)),
-                         landings=gen.landings))
+                         landings=gen.landings, wall_keep=bool(res.get('wall_keep', False))))
         if not args.no_video:
             frame = render(res, cfg, T, poses, j, images[int(np.argmin(np.abs(img_t - t)))][1], t - t0, err)
             if writer is None:
