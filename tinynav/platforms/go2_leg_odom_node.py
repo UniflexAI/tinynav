@@ -1,5 +1,10 @@
 """Go2 leg odometry from rt/lowstate: stance-leg kinematics + body IMU -> body-frame velocity.
 
+rt/lowstate (500 Hz) is polled for its latest sample at 200 Hz instead of taking every message: the Python decode was
+42 % of a core per 500 msg/s (22 % at 200), and with the app running the node only kept up with ~72 % of the stream
+(10-10 17:41). Unread samples are overwritten inside Cyclone DDS, never decoded. Replaying 10-08 lowstate both ways,
+distance and height agree within ~1 % on flat and stairs.
+
 Publishes /go2/leg_twist (10 Hz, a robot_localization twist input) and, decimated to 100 Hz for recording and
 offline replay, /go2/imu and /go2/joint_states (12 joints, plus 4 *_foot entries whose effort is the foot force).
 Exits when rt/lowstate stops after having flowed, and entry.sh restarts it once the link is up; before the first
@@ -39,12 +44,13 @@ LEG_STD = {'flat': (0.16, 0.10, 0.065), 'up': (0.18, 0.12, 0.08), 'down': (0.25,
 # Split in the world frame because on stairs body x also carries height.
 LEG_SCALE = {'flat': (1.08, 1.0), 'up': (1.10, 1.0), 'down': (1.33, 1.13)}
 PITCH_STAIRS = np.radians(12.0)           # body pitch > +12 deg (1 s mean) = going down
-# In 500 Hz lowstate samples: 0.1 s mean, 10 Hz output, 1 s pitch mean. Windows must not overlap: at 50 Hz each sample
-# reached the EKF 5 times (consecutive errors correlated 0.91) and it was over-confident (NEES 7.7 vs 5.1 at 10 Hz).
-AVG_N, PUB_EVERY, PITCH_N = 50, 50, 500
+STATE_HZ = 200                            # lowstate polling rate
+# In polled samples: 0.1 s mean, 10 Hz output, 1 s pitch mean. Windows must not overlap: at 50 Hz each sample reached
+# the EKF 5 times (consecutive errors correlated 0.91) and it was over-confident (NEES 7.7 vs 5.1 at 10 Hz).
+AVG_N, PUB_EVERY, PITCH_N = STATE_HZ // 10, STATE_HZ // 10, STATE_HZ
 LOWSTATE_TIMEOUT = 2.0                    # s; on 10-09 17:40 lowstate stopped mid-run and nothing recovered it
 # 100 Hz replays offline within 0.01 of 500 Hz (10-09 flat + stairs); 50 Hz adds ~0.2 m height drift per 50 m
-RAW_HZ, STATE_HZ = 100, 500
+RAW_HZ = 100
 
 
 def foot_pos(q):
@@ -97,8 +103,22 @@ class Go2LegOdomNode(Node):
         from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
         ChannelFactoryInitialize(0, network_interface)
         self.sub = ChannelSubscriber('rt/lowstate', LowState_)
-        self.sub.Init(self.on_lowstate, 50)
-        self.get_logger().info(f'go2_leg_odom on {network_interface}')
+        self.sub.Init()   # no handler: the reader keeps only the latest sample
+        threading.Thread(target=self.poll, daemon=True).start()
+        self.get_logger().info(f'go2_leg_odom on {network_interface}, lowstate polled at {STATE_HZ} Hz')
+
+    def poll(self):
+        period, nxt = 1.0 / STATE_HZ, time.monotonic()
+        while rclpy.ok():
+            m = self.sub.Read()   # blocks until a sample newer than the last one taken
+            if m is not None:
+                self.on_lowstate(m)
+            nxt += period
+            delay = nxt - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                nxt = time.monotonic()   # starved for CPU: skip ahead instead of bursting through stale ticks
 
     def check_lowstate(self):
         if self.last_rx is not None and time.monotonic() - self.last_rx > LOWSTATE_TIMEOUT:
