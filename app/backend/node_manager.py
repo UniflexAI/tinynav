@@ -54,7 +54,6 @@ _IMAGE_TOPICS_REALSENSE = [
 _IMAGE_TOPICS_LOOPER = [
     '/slam/image',
     '/slam/depth',
-    '/slam/disparity_vis',
     '/slam/keyframe_image',
 ]
 _IMAGE_TOPICS_ALL = _IMAGE_TOPICS_REALSENSE  # fallback
