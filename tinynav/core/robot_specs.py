@@ -90,7 +90,7 @@ B2_CONFIG = RobotConfig(
     name='b2',
     front_len=0.44, rear_len=0.44, half_width=0.175,
     camera_fwd=0.44, camera_left=0.0,
-    safety_radius=0.05,
+    safety_radius=0.075,
     # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
     # robot could barely move: cmd_vel_control DROPS a target below this rather than
     # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
