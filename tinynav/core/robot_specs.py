@@ -88,7 +88,7 @@ GO2W_CONFIG = replace(GO2_CONFIG, name='go2w', min_angular_vel=RobotConfig.min_a
 
 B2_CONFIG = RobotConfig(
     name='b2',
-    front_len=0.44, rear_len=0.44, half_width=0.175,
+    front_len=0.44, rear_len=0.44, half_width=0.2,
     camera_fwd=0.44, camera_left=0.0,
     safety_radius=0.075,
     # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
