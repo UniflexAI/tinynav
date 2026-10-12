@@ -485,16 +485,55 @@ class TestChassisWatch(unittest.TestCase):
 
 
 class TestConstructionOrder(unittest.TestCase):
-    """The lowstate callback publishes /battery from the SDK's reader thread as soon
-    as its subscription's Init returns, so the publisher has to exist first."""
+    """The lowstate reader publishes /battery from its own thread as soon as it
+    starts, so the publisher has to exist first."""
 
     def test_the_battery_publisher_exists_before_lowstate_is_subscribed(self):
         import inspect
         src = inspect.getsource(uc.Ros2UnitreeManagerNode.__init__)
         self.assertIn('self.publisher_battery = self.create_publisher(', src)
-        self.assertIn('lowstate_subscriber.Init(', src)
+        self.assertIn('self.lowstate_reader = newest_reader(', src)
         self.assertLess(src.index('self.publisher_battery = self.create_publisher('),
-                        src.index('lowstate_subscriber.Init('))
+                        src.index('self.lowstate_reader = newest_reader('))
+
+
+class TestNewestReader(unittest.TestCase):
+    def test_each_read_reaches_the_handler_and_a_raise_does_not_end_it(self):
+        reads = iter(['first', 'second'])
+        done = threading.Event()
+
+        class _Sub:
+            def __init__(self, name, msg_type):
+                pass
+
+            def Init(self, handler=None, queueLen=0):
+                assert handler is None, 'a handler decodes every sample'
+
+            def Read(self, timeout=None):
+                try:
+                    return next(reads)
+                except StopIteration:
+                    done.wait()
+
+        seen, log = [], _Log()
+
+        def handler(msg):
+            seen.append(msg)
+            if msg == 'first':
+                raise RuntimeError('boom')
+
+        real = uc.ChannelSubscriber
+        uc.ChannelSubscriber = _Sub
+        try:
+            uc.newest_reader('rt/x', object, handler, 200.0, log)
+            deadline = time.monotonic() + 2.0
+            while len(seen) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            uc.ChannelSubscriber = real
+            done.set()
+        self.assertEqual(seen, ['first', 'second'])
+        self.assertTrue(log.has('error', 'rt/x handling failed'))
 
 
 if __name__ == '__main__':

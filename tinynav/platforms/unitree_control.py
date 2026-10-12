@@ -155,6 +155,30 @@ def reliable_reader(name, msg_type, handler, depth):
     return channel
 
 
+def newest_reader(name, msg_type, handler, hz, log):
+    """`handler` on the newest `name` sample, `hz` times a second, on a thread of its
+    own. For the 150-500Hz chassis streams that are watched rather than acted on: the
+    SDK decodes every sample it hands a handler in pure Python, while a reader with no
+    handler keeps only the newest (DDS's default history) and decodes what is read.
+    `Read()` with no timeout waits without printing, so a topic this chassis does not
+    publish costs nothing."""
+    sub = ChannelSubscriber(name, msg_type)
+    sub.Init()
+
+    def run():
+        while True:
+            time.sleep(1.0 / hz)
+            try:
+                msg = sub.Read()
+                if msg is not None:
+                    handler(msg)
+            except Exception:
+                log.exception(f"{name} handling failed")
+
+    threading.Thread(target=run, name=f'read {name}', daemon=True).start()
+    return sub
+
+
 class ActionWorker:
     """Runs sits and stands off the rt/service/command reader thread, in order.
 
@@ -323,18 +347,18 @@ class Ros2UnitreeManagerNode(Node):
         self.action_subscriber = reliable_reader("rt/service/command", String_,
                                                  self.ActionMessageHandler, 10)
 
-        # Latched and sent only on change: lowstate arrives at ~500Hz, and every
-        # message costs the backend's Python executor whatever the callback does.
-        # Before the subscription below: its callback publishes here from the
-        # SDK's reader thread as soon as Init returns.
+        # Latched and sent only on change: every message costs the backend's Python
+        # executor whatever the callback does. Before the reader below: it publishes
+        # here from its own thread as soon as it starts.
         self.publisher_battery = self.create_publisher(
             Float32, '/battery',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         lowstate_type, lowstate_topic = _lowstate_type_and_topic(robot_model)
-        lowstate_subscriber = ChannelSubscriber(lowstate_topic, lowstate_type)
-        lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
+        # The SOC moves by a percent over minutes.
+        self.lowstate_reader = newest_reader(lowstate_topic, lowstate_type,
+                                             self.LowStateMessageHandler, 1.0, self.logger)
 
         # Chassis odometry, republished onto the ROS bus. rt/utlidar/robot_odom
         # is the leg odometry wrapped as nav_msgs/Odometry, not lidar odometry:
@@ -343,13 +367,15 @@ class Ros2UnitreeManagerNode(Node):
         if self.is_quadruped:
             from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
             self.publisher_chassis_odom = self.create_publisher(Odometry, '/unitree/odometry', 10)
-            self._last_chassis_odom_time = 0.0
-            self.chassis_odom_subscriber = ChannelSubscriber("rt/utlidar/robot_odom", Odometry_)
-            self.chassis_odom_subscriber.Init(self.ChassisOdomMessageHandler, 10)
+            self.chassis_odom_reader = newest_reader("rt/utlidar/robot_odom", Odometry_,
+                                                     self.ChassisOdomMessageHandler, 50.0,
+                                                     self.logger)
 
             from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
-            self.sport_state_subscriber = ChannelSubscriber("rt/sportmodestate", SportModeState_)
-            self.sport_state_subscriber.Init(self.SportStateMessageHandler, 10)
+            # ChassisWatch logs at 2Hz; 20Hz of state is ten samples per check.
+            self.sport_state_reader = newest_reader("rt/sportmodestate", SportModeState_,
+                                                    self.SportStateMessageHandler, 20.0,
+                                                    self.logger)
             self._watch_timer = self.create_timer(0.5, lambda: self.watch.check(time.monotonic()))
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
@@ -422,7 +448,6 @@ class Ros2UnitreeManagerNode(Node):
             self._move_failure_logged_at = now
 
     def SportStateMessageHandler(self, msg):
-        # 500Hz on the SDK reader thread: keep it to field copies.
         try:
             self.watch.on_sport_state(time.monotonic(), int(msg.mode), int(msg.gait_type),
                                       int(msg.error_code), msg.velocity, float(msg.yaw_speed),
@@ -491,11 +516,7 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_robot_status.publish(msg)
 
     def ChassisOdomMessageHandler(self, msg):
-        # Already a nav_msgs Odometry on the wire; cap it at 50Hz.
-        now = time.time()
-        if now - self._last_chassis_odom_time < 0.02:
-            return
-        self._last_chassis_odom_time = now
+        # Already a nav_msgs Odometry on the wire; read at 50Hz.
         try:
             odom = Odometry()
             # Restamped on the ROS clock: the chassis stamp is its own timebase.
