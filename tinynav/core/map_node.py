@@ -181,12 +181,11 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
 # Arrival radius, measured from the CAMERA (see nav_target_timer_callback).
 _ARRIVE_M = 0.5
 # How many consecutive ticks must agree that the robot is inside that radius.
-# A relocalization can move the pose metres in one step -- that is what an
-# accepted correction IS -- and a single tick taken right after one has ended
-# legs at places the robot was nowhere near. Two ticks is 1s at the nav timer's
-# 2Hz: long enough that a jump has to be confirmed by the pose that follows it,
-# short enough to cost nothing on a real arrival.
-_ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '2'))
+# One: the timer runs at ~0.8Hz under relocalization rather than its nominal 2Hz,
+# and a second tick came 1.2-2.4s later -- the robot drove through the radius and
+# turned back. A second tick guards against a fix jumping the pose into the radius;
+# raise this if that is seen.
+_ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '1'))
 # ...and for a POI that carries an arrival heading. The same radius: see poi_reached.
 _ARRIVE_HEADING_M = 0.5
 
