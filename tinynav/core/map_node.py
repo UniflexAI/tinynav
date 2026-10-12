@@ -1,33 +1,45 @@
-import rclpy
-import os
-import time
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path, Odometry
-from std_msgs.msg import Bool, String
-import numpy as np
-import sys
-import json
-
-import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
-from sensor_msgs.msg import Image, CameraInfo
-from message_filters import TimeSynchronizer, Subscriber
-from cv_bridge import CvBridge
-import cv2
-from codetiming import Timer
 import argparse
-
-from tinynav.tinynav_cpp_bind import pose_graph_solve
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
-import logging
 import asyncio
-from tf2_ros import TransformBroadcaster
-from tinynav.core.build_map_node import TinyNavDB
-from tinynav.core.build_map_node import find_loop, solve_pose_graph
-from tinynav.core.vlad import compute_vlad
+import heapq
+import json
+import logging
+import os
+import sys
+import time
+
+import cv2
 import einops
-from tinynav.core.build_map_node import OdomPoseRecorder
+import gtsam
+import numpy as np
+import rclpy
+from codetiming import Timer
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PoseStamped
+from message_filters import Subscriber, TimeSynchronizer
+from nav_msgs.msg import Odometry, Path
+from rclpy.node import Node
+from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Bool, String
+from tf2_ros import TransformBroadcaster
+from tinynav.tinynav_cpp_bind import pose_graph_solve
+
+from tinynav.core.build_map_node import (
+    OdomPoseRecorder,
+    TinyNavDB,
+    find_loop,
+    pose_graph_estimate,
+)
+from tinynav.core.math_utils import (
+    estimate_pose,
+    matrix_to_quat,
+    msg2np,
+    np2msg,
+    np2tf,
+    rerank_by_pnp_inliers,
+)
+from tinynav.core.models_trt import Dinov2TRT, LightGlueTRT, SuperPointTRT
+from tinynav.core.vlad import compute_vlad
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,11 +121,11 @@ def search_close_to_sdf_map(start_index:tuple, sdf_map:np.ndarray, occupancy_map
                     neighbor = (current[0] + dx, current[1] + dy, current[2] + dz)
                     if (0 <= neighbor[0] < sdf_map.shape[0] and
                             0 <= neighbor[1] < sdf_map.shape[1] and
-                            0 <= neighbor[2] < sdf_map.shape[2]):
-                        if neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2:
-                            open_heap_set.add(neighbor)
-                            heapq.heappush(open_heap, (sdf_map[neighbor], neighbor))
-                            parent[neighbor] = current
+                            0 <= neighbor[2] < sdf_map.shape[2] and
+                            neighbor not in open_heap_set and neighbor not in visited and occupancy_map[neighbor] != 2):
+                        open_heap_set.add(neighbor)
+                        heapq.heappush(open_heap, (sdf_map[neighbor], neighbor))
+                        parent[neighbor] = current
     return []
 
 def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupancy_map:np.ndarray, resolution: float):
@@ -144,7 +156,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
         if queue_idx == -1:
             break
 
-        current_cost, current = heapq.heappop(open_heaps[queue_idx])
+        _current_cost, current = heapq.heappop(open_heaps[queue_idx])
         open_sets[queue_idx].remove(current)
         if current in visited:
             continue
@@ -255,7 +267,16 @@ class MapNode(Node):
         self.odom = {}
         self.latest_odom_pose = None
         self.pose_graph_used_pose = {}
-        self.relative_pose_constraint = []
+        isam_params = gtsam.ISAM2Params()
+        isam_params.setFactorization("QR")
+        isam_params.setRelinearizeThreshold(0.001)
+        isam_params.relinearizeSkip = 1
+        isam_params.setOptimizationParams(gtsam.ISAM2DoglegParams())
+        self.isam = gtsam.ISAM2(isam_params)
+        self.odometry_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            np.array([1/30.0]*3 + [1/10.0]*3))
+        self.loop_noise = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Cauchy.Create(5.0), self.odometry_noise)
         self.last_keyframe_timestamp = None
 
         self.loop_similarity_threshold = 0.90
@@ -334,7 +355,7 @@ class MapNode(Node):
             self.pois = json.loads(msg.data)
 
             pois_dict = {}
-            keys = sorted([int (key) for key in self.pois.keys()])
+            keys = sorted([int (key) for key in self.pois])
             for index, key in enumerate(keys):
                 pois_dict[index] = np.array(self.pois[str(key)]["position"])
             self.pois = pois_dict
@@ -386,8 +407,8 @@ class MapNode(Node):
                 self.localization_data_saved_pub.publish(save_finished_msg)
                 self.get_logger().info("Published data save finished signal")
 
-            except Exception as e:
-                self.get_logger().error(f"Error during localization save: {e}")
+            except Exception:
+                logger.exception("Error during localization save")
                 # Still publish completion signal even if there was an error
                 save_finished_msg = Bool()
                 save_finished_msg.data = False
@@ -397,7 +418,7 @@ class MapNode(Node):
         self.keyframe_mapping(keyframe_image_msg, keyframe_odom_msg, depth_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
 
-        success, pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
+        success, _pose_in_world = self.keyframe_relocalization(keyframe_image_msg.header.stamp, image)
         if success:
             self.compute_transform_from_map_to_odom()
 
@@ -425,18 +446,28 @@ class MapNode(Node):
         features = asyncio.run(self.super_point_extractor.infer(image))
         self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
 
+        if self.isam.valueExists(keyframe_image_timestamp):
+            return
+        new_factors = gtsam.NonlinearFactorGraph()
+        new_values = gtsam.Values()
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
-            self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
+            new_values.insert(keyframe_odom_timestamp, gtsam.Pose3(odom))
+            new_factors.add(gtsam.NonlinearEqualityPose3(
+                keyframe_odom_timestamp, gtsam.Pose3(odom)))
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
             T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
-            self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+            initial_pose = self.pose_graph_used_pose[self.last_keyframe_timestamp] @ T_prev_curr
+            new_values.insert(keyframe_image_timestamp, gtsam.Pose3(initial_pose))
+            new_factors.add(gtsam.BetweenFactorPose3(
+                self.last_keyframe_timestamp, keyframe_image_timestamp,
+                gtsam.Pose3(T_prev_curr), self.odometry_noise))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
             def find_loop_and_pose_graph(timestamp):
                     target_embedding = self.nav_temp_db.get_embedding(timestamp)
-                    valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
+                    valid_timestamp = [t for t in self.pose_graph_used_pose if t + 10 * 1e9 < timestamp]
                     valid_embeddings = np.array([self.nav_temp_db.get_embedding(t) for t in valid_timestamp])
 
                     idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
@@ -446,17 +477,22 @@ class MapNode(Node):
                         for idx, similarity in loop_list:
                             prev_timestamp = idx_to_timestamp[idx]
                             curr_timestamp = timestamp
-                            prev_depth, _, prev_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(prev_timestamp)
+                            _prev_depth, _, prev_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(prev_timestamp)
                             curr_depth, _, curr_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(curr_timestamp)
-                            prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
+                            prev_matched_keypoints, curr_matched_keypoints, _matches = self.match_keypoints(prev_features, curr_features)
                             success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                             if success and len(inliers) >= 100:
-                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                                new_factors.add(gtsam.BetweenFactorPose3(
+                                    prev_timestamp, curr_timestamp,
+                                    gtsam.Pose3(T_prev_curr), self.loop_noise))
                                 #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
             find_loop_and_pose_graph(keyframe_image_timestamp)
-            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+        self.isam.update(new_factors, new_values)
+        if new_factors.size() > 1:
+            for _ in range(4):
+                self.isam.update()
+        self.pose_graph_used_pose = pose_graph_estimate(self.isam)
+        self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
@@ -469,7 +505,9 @@ class MapNode(Node):
         patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(image))
         return compute_vlad(patch_tokens, self.vlad_centres)
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict, image_shape: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if image_shape is None:
+            image_shape = np.array([848, 480], dtype=np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
@@ -599,8 +637,8 @@ class MapNode(Node):
         np.save(f"{self.tinynav_db_path}/failed_relocalizations.npy", self.failed_relocalizations, allow_pickle=True)
         np.save(f"{self.tinynav_db_path}/poses.npy", self.pose_graph_used_pose, allow_pickle=True)
 
-        logging.info(f"Saved {len(self.relocalization_poses)} relocalization poses to {self.tinynav_db_path}")
-        logging.info(f"Failed relocalizations count: {len(self.failed_relocalizations)}")
+        logger.info(f"Saved {len(self.relocalization_poses)} relocalization poses to {self.tinynav_db_path}")
+        logger.info(f"Failed relocalizations count: {len(self.failed_relocalizations)}")
 
         self._save_completed = True
 
@@ -611,8 +649,7 @@ class MapNode(Node):
             self.db.close()
             super().destroy_node()
         except Exception:
-            # Ignore errors during destruction as resources may already be freed
-            pass
+            logger.debug("Node cleanup failed; resources may already be freed", exc_info=True)
 
 
     def compute_transform_from_map_to_odom(self):
@@ -816,7 +853,7 @@ def main(args=None):
     parser.add_argument("--tinynav_map_path", type=str, required=True)
     parser.add_argument("--verbose_timer", action="store_true", default=True, help="Enable verbose timer output")
     parser.add_argument("--no_verbose_timer", dest="verbose_timer", action="store_false", help="Disable verbose timer output")
-    parsed_args, unknown_args = parser.parse_known_args(sys.argv[1:])
+    parsed_args, _unknown_args = parser.parse_known_args(sys.argv[1:])
     node = MapNode(tinynav_db_path=parsed_args.tinynav_db_path,
                    tinynav_map_path=parsed_args.tinynav_map_path,
                    verbose_timer=parsed_args.verbose_timer)
