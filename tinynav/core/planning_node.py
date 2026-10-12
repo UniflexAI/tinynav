@@ -301,26 +301,20 @@ def _hold_to(trajectories, num_steps):
 #: The reverse rows: straight back at REVERSE_SPEED for the rollout, and, for when that
 #: is in collision, straight back at REVERSE_CAREFUL_SPEED for REVERSE_CAREFUL_M and
 #: then holding. cmd_vel_control drives a reverse at the planned speed, capped at its
-#: fixed_reverse_speed.
+#: max_reverse_speed.
 REVERSE_SPEED = 0.3
 REVERSE_CAREFUL_SPEED = 0.15
 REVERSE_CAREFUL_M = 0.3
 
 
 def _straight_back(init_p, init_q, speed, length_m, dt, num_steps):
-    p = init_p.copy()
     q = quat_to_matrix(init_q)
     back = q @ np.array([0.0, 0.0, -1.0])
+    gone = np.minimum(speed * dt * np.arange(1, num_steps + 1), length_m)
     traj = np.empty((num_steps, 7), dtype=np.float64)
-    gone = 0.0
-    for i in range(num_steps):
-        step = min(speed * dt, length_m - gone)
-        if step > 0.0:
-            p = p + back * step
-            gone += step
-        traj[i, :3] = p
-        traj[i, 3:] = matrix_to_quat(q)
-        traj[i, 2] = init_p[2]
+    traj[:, :3] = init_p + gone[:, None] * back
+    traj[:, 2] = init_p[2]
+    traj[:, 3:] = matrix_to_quat(q)
     return traj
 
 
@@ -789,7 +783,7 @@ class PlanningNode(Node):
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         # Instantaneous (vx, omega) feedforward of the selected trajectory. cmd_vel_control
         # consumes this directly instead of reverse-engineering it from path poses.
-        # angular.x is a backward-segment flag (fixed-speed reverse vocabulary).
+        # angular.x is a backward-segment flag (the reverse vocabulary).
         # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
         # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
@@ -1486,7 +1480,7 @@ class PlanningNode(Node):
 
             # velocity feedforward for cmd_vel_control: (vx, omega) of the selected
             # trajectory. vx is the commanded body-forward speed (lattice param; its
-            # sign flags the fixed-speed reverse vocabulary via angular.x). omega is
+            # sign flags the reverse vocabulary via angular.x). omega is
             # NOT taken from the lattice param -- that omega is about the camera optical
             # axis and would need a hand-maintained sign/frame correction. Instead we
             # derive the yaw rate straight from the trajectory's own world poses, using

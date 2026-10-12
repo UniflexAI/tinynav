@@ -516,7 +516,7 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_robot_status.publish(msg)
 
     def ChassisOdomMessageHandler(self, msg):
-        # Already a nav_msgs Odometry on the wire; read at 50Hz.
+        # Already a nav_msgs Odometry on the wire.
         try:
             odom = Odometry()
             # Restamped on the ROS clock: the chassis stamp is its own timebase.

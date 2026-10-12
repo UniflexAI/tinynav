@@ -246,9 +246,9 @@ class ReverseSpeedTest(_NodeCase):
     def test_a_reverse_is_driven_at_its_planned_speed_capped_at_the_fixed_one(self):
         n = self.node
         per_pose = n.planner_dt * n.path_pose_stride
-        slow = self._reverse(0.5 * n.fixed_reverse_speed * per_pose)
-        fast = self._reverse(3.0 * n.fixed_reverse_speed * per_pose)
-        self.assertAlmostEqual(fast, -n.fixed_reverse_speed, places=3)
+        slow = self._reverse(0.5 * n.max_reverse_speed * per_pose)
+        fast = self._reverse(3.0 * n.max_reverse_speed * per_pose)
+        self.assertAlmostEqual(fast, -n.max_reverse_speed, places=3)
         self.assertLess(slow, 0.0)
         self.assertGreater(slow, fast + 0.05)
 

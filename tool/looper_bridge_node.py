@@ -158,10 +158,7 @@ class LooperBridgeNode(Node):
         return depth_out
 
     def publish_visual_odom(self, pose_msg: PoseStamped):
-        """The 20Hz image-rate pose, on both odometry topics. Not vio_100hz's IMU
-        propagation for /slam/odometry: nothing downstream reads a pose faster than a
-        few Hz (planning syncs on the visual one, cmd_vel_control steers from the
-        path), and 100Hz cost a callback in every subscriber."""
+        """The 20Hz image-rate pose, on both odometry topics."""
         odom_msg = self.build_odom(pose_msg2np(pose_msg), pose_msg.header.stamp)
         self.odom_visual_pub.publish(odom_msg)
         self.odom_pub.publish(odom_msg)

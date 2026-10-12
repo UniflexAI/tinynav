@@ -267,7 +267,7 @@ class MapNode(Node):
         self.depth_sub = Subscriber(self, Image, '/slam/keyframe_depth')
         self.keyframe_image_sub = Subscriber(self, Image, '/slam/keyframe_image')
         self.keyframe_odom_sub = Subscriber(self, Odometry, '/slam/keyframe_odom')
-        self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 100)
+        self.continuous_odom_sub = self.create_subscription(Odometry, '/slam/odometry', self.continuous_odom_callback, 1)
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
 
         # pubs

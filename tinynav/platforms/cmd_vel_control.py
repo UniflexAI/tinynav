@@ -59,12 +59,12 @@ class CmdVelControlNode(Node):
         # Below the planner's smallest turn (0.107 rad/s), so every turn it asks for
         # is raised to what the chassis executes rather than read as a stop.
         self.angular_engage_threshold = 0.05
-        self.fixed_reverse_speed = 0.3
+        self.max_reverse_speed = 0.3
         # How far back the differenced path has to point before it reads as reverse.
         # A turn-in-place rollout barely translates, so the sign of `raw_vx` there is
         # noise -- and answering it took the robot backwards at full speed with the
         # planner asking for no such thing: 37 of 38 reverses on 122 2026-09-18, and
-        # 9 more in one leg it never got through. The reverse vocabulary drives 0.3,
+        # 9 more in one leg it never got through. The reverse vocabulary drives 0.15 and 0.3,
         # so anything between separates them; this sits well clear of both.
         self.reverse_min_vx = 0.05
         # Hack: if path first segment points far away from robot heading,
@@ -223,7 +223,7 @@ class CmdVelControlNode(Node):
         if is_backward_segment:
             # The planned speed, capped: the planner slows a reverse that is in
             # collision (planning_node.REVERSE_CAREFUL_SPEED).
-            vx = -min(self.fixed_reverse_speed, -raw_vx)
+            vx = -min(self.max_reverse_speed, -raw_vx)
         else:
             vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
         vy = 0.0
