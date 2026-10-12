@@ -913,7 +913,7 @@ class PlanningNode(Node):
             if self._executor is None:
                 return
             self._lidar_node = Node('planning_lidar', use_global_arguments=False)
-            self.lidar_sub = message_filters.Subscriber(self._lidar_node, PointCloud2, '/lidar/points')
+            self.lidar_sub = message_filters.Subscriber(self._lidar_node, PointCloud2, '/unitree/slam_lidar/points1')
             self.lidar_pose_sub = message_filters.Subscriber(self._lidar_node, Odometry, '/slam/odometry_visual')
             self.lidar_ts = message_filters.ApproximateTimeSynchronizer(
                 [self.lidar_sub, self.lidar_pose_sub], queue_size=10, slop=0.2)
