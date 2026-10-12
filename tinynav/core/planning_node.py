@@ -338,7 +338,7 @@ class PlanningNode(Node):
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
         self.grid_shape = (100, 100, 10)
-        self.resolution = 0.05
+        self.resolution = 0.1
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
@@ -591,7 +591,7 @@ class PlanningNode(Node):
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
-            self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
+            # self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
 
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             obstacle_mask = build_obstacle_map(
@@ -601,7 +601,7 @@ class PlanningNode(Node):
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
+            # self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
             self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
