@@ -11,6 +11,7 @@ from typing import Callable, Dict, Optional
 
 import cv2
 import einops
+import gtsam
 import numpy as np
 import rclpy
 import tyro
@@ -39,7 +40,6 @@ from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPoi
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
-from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tool.video_db import VideoDB
 
 logger = logging.getLogger(__name__)
@@ -51,19 +51,19 @@ class BuildMapArgs:
     map_save_path: str = "tinynav_db"
     play_rate: float = 1.0
     verbose_timer: bool = True
-    # Minimum growth in keyframe count before running global pose-graph solve + TF republish.
+    # Minimum growth in keyframe count before full TF and trajectory publication.
     # Mirrors COLMAP IncrementalPipeline::ba_global_frames_ratio (default 1.1).
     global_frames_ratio: float = 1.1
 
 
 def check_global_frames_ratio(num_frames: int, prev_num_frames: int, frames_ratio: float) -> bool:
-    """Return whether to run global refinement (pose graph + TF), using COLMAP's frames-ratio rule.
+    """Return whether to publish the global map, using COLMAP's frames-ratio rule.
 
     Adapted from COLMAP ``IncrementalPipeline::CheckRunGlobalRefinement`` (frames branch only):
     ``NumRegFrames() >= ba_global_frames_ratio * ba_prev_num_reg_frames``.
 
     Here ``num_frames`` is the current keyframe count and ``prev_num_frames`` is the count at the
-    last global refinement. Set ``frames_ratio`` to 1.0 to refine on every keyframe.
+    last publication. Set ``frames_ratio`` to 1.0 to publish on every keyframe.
     """
     return num_frames >= frames_ratio * prev_num_frames
 
@@ -164,20 +164,24 @@ def merge_local_into_global(global_grid:np.ndarray, global_origin:np.ndarray, lo
 
     return global_grid, global_origin
 
-def solve_pose_graph(pose_graph_used_pose:dict, relative_pose_constraint:list, max_iteration_num:int = 1024) -> dict:
-    """
-    Solve the bundle adjustment problem.
-    """
-    if len(relative_pose_constraint) == 0:
-        return pose_graph_used_pose
-    min_timestamp = min(pose_graph_used_pose.keys())
-    constant_pose_index_dict = { min_timestamp : True }
+def pose_graph_estimate(isam):
+    values = isam.calculateEstimate()
+    return {int(key): values.atPose3(key).matrix() for key in sorted(values.keys())}
 
-    relative_pose_constraint = [
-        (curr_timestamp, prev_timestamp, T_prev_curr, np.array([10.0, 10.0, 10.0]), np.array([30.0, 30.0, 30.0]))
-        for curr_timestamp, prev_timestamp, T_prev_curr in relative_pose_constraint]
-    optimized_camera_poses = pose_graph_solve(pose_graph_used_pose, relative_pose_constraint, constant_pose_index_dict, max_iteration_num)
-    return {t: optimized_camera_poses[t] for t in sorted(optimized_camera_poses.keys())}
+
+def refine_pose_graph(isam, max_iterations=50):
+    previous = pose_graph_estimate(isam)
+    for _ in range(max_iterations):
+        isam.update()
+        current = pose_graph_estimate(isam)
+        change = max((np.linalg.norm(gtsam.Pose3.Logmap(
+            gtsam.Pose3(previous[t]).between(gtsam.Pose3(current[t]))))
+            for t in current), default=0.0)
+        previous = current
+        if change < 1e-7:
+            break
+    return previous
+
 
 def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarity_threshold:float, loop_top_k:int) -> list[tuple[int, float]]:
     if len(embeddings) == 0:
@@ -629,7 +633,16 @@ class BuildMapNode(Node):
         self.baseline = None
         self.odom = {}
         self.pose_graph_used_pose = {}
-        self.relative_pose_constraint = []
+        isam_params = gtsam.ISAM2Params()
+        isam_params.setFactorization("QR")
+        isam_params.setRelinearizeThreshold(0.001)
+        isam_params.relinearizeSkip = 1
+        isam_params.setOptimizationParams(gtsam.ISAM2DoglegParams())
+        self.isam = gtsam.ISAM2(isam_params)
+        self.odometry_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            np.array([1/30.0]*3 + [1/10.0]*3))
+        self.loop_noise = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Cauchy.Create(5.0), self.odometry_noise)
         self.last_keyframe_timestamp = None
         self.continuous_odom_recorder = OdomPoseRecorder(map_save_path, "mapping")
 
@@ -739,6 +752,8 @@ class BuildMapNode(Node):
             if keyframe_image_timestamp != keyframe_odom_timestamp or keyframe_image_timestamp != keyframe_depth_timestamp:
                 self.get_logger().error(f"Keyframe timestamp mismatch: {keyframe_image_timestamp} != {keyframe_odom_timestamp} != {keyframe_depth_timestamp}")
 
+            if self.isam.valueExists(keyframe_image_timestamp):
+                return
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
             odom, _ = msg2np(keyframe_odom_msg)
             infra1_image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
@@ -758,16 +773,31 @@ class BuildMapNode(Node):
             features = asyncio.run(self.super_point_extractor.infer(infra1_image))
             self.db.set_entry(keyframe_image_timestamp, features = features)
 
+        new_factors = gtsam.NonlinearFactorGraph()
+        new_values = gtsam.Values()
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_image_timestamp] = odom
-            self.pose_graph_used_pose[keyframe_image_timestamp] = odom
+            new_values.insert(keyframe_image_timestamp, gtsam.Pose3(odom))
+            new_factors.add(gtsam.NonlinearEqualityPose3(
+                keyframe_image_timestamp, gtsam.Pose3(odom)))
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
             T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
-            self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+            initial_pose = self.pose_graph_used_pose[self.last_keyframe_timestamp] @ T_prev_curr
+            new_values.insert(keyframe_image_timestamp, gtsam.Pose3(initial_pose))
+            new_factors.add(gtsam.BetweenFactorPose3(
+                self.last_keyframe_timestamp, keyframe_image_timestamp,
+                gtsam.Pose3(T_prev_curr), self.odometry_noise))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
-            self.detect_loop_closure(keyframe_image_timestamp)
+            self.detect_loop_closure(keyframe_image_timestamp, new_factors)
+
+        with self.stage_timer.timed("isam_update"):
+            self.isam.update(new_factors, new_values)
+            if new_factors.size() > 1:
+                for _ in range(4):
+                    self.isam.update()
+            self.pose_graph_used_pose = pose_graph_estimate(self.isam)
 
         refined = self.maybe_run_global_refinement()
 
@@ -784,7 +814,7 @@ class BuildMapNode(Node):
         # shape: (1, 768)
         return asyncio.run(self.dinov2_model.infer(image))
 
-    def detect_loop_closure(self, timestamp: int) -> None:
+    def detect_loop_closure(self, timestamp: int, new_factors: gtsam.NonlinearFactorGraph) -> None:
         target_embedding = self.db.get_embedding(timestamp)
         valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
         valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
@@ -801,24 +831,21 @@ class BuildMapNode(Node):
                 prev_matched_keypoints, curr_matched_keypoints, _matches = self.match_keypoints(prev_features, curr_features)
                 success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                 if success and len(inliers) >= 100:
-                    self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                    new_factors.add(gtsam.BetweenFactorPose3(
+                        prev_timestamp, curr_timestamp,
+                        gtsam.Pose3(T_prev_curr), self.loop_noise))
                     print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
 
     def maybe_run_global_refinement(self) -> bool:
-        """Run pose-graph optimization and full TF publish when the map has grown enough.
+        """Publish global TF at the configured map-growth interval.
 
-        Loop detection still runs every keyframe; this batches the expensive global steps using
-        COLMAP's ``ba_global_frames_ratio`` policy (see ``check_global_frames_ratio``).
-        A final full solve runs in ``save_mapping`` regardless of this gate.
+        iSAM2 is updated on every keyframe; the existing frames-ratio policy
+        controls expensive full TF and trajectory publication.
         """
         num_frames = len(self.pose_graph_used_pose)
         if not check_global_frames_ratio(num_frames, self._global_prev_num_frames, self.global_frames_ratio):
             return False
 
-        with self.stage_timer.timed("solve_pose_graph_online"):
-            self.pose_graph_used_pose = solve_pose_graph(
-                self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num=5
-            )
         with self.stage_timer.timed("tf_publish"):
             self.publish_all_transforms()
         self._global_prev_num_frames = num_frames
@@ -871,7 +898,7 @@ class BuildMapNode(Node):
         self.continuous_odom_recorder.save_to_disk()
 
         with self.stage_timer.timed("final_pose_graph"):
-            self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint)
+            self.pose_graph_used_pose = refine_pose_graph(self.isam)
 
         with self.stage_timer.timed("tf_publish"):
             self.publish_all_transforms()

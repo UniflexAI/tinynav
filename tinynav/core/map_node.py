@@ -1,4 +1,5 @@
 import rclpy
+import gtsam
 import os
 import time
 from rclpy.node import Node
@@ -24,7 +25,7 @@ import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
-from tinynav.core.build_map_node import find_loop, solve_pose_graph
+from tinynav.core.build_map_node import find_loop, pose_graph_estimate
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
@@ -255,7 +256,16 @@ class MapNode(Node):
         self.odom = {}
         self.latest_odom_pose = None
         self.pose_graph_used_pose = {}
-        self.relative_pose_constraint = []
+        isam_params = gtsam.ISAM2Params()
+        isam_params.setFactorization("QR")
+        isam_params.setRelinearizeThreshold(0.001)
+        isam_params.relinearizeSkip = 1
+        isam_params.setOptimizationParams(gtsam.ISAM2DoglegParams())
+        self.isam = gtsam.ISAM2(isam_params)
+        self.odometry_noise = gtsam.noiseModel.Diagonal.Sigmas(
+            np.array([1/30.0]*3 + [1/10.0]*3))
+        self.loop_noise = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Cauchy.Create(5.0), self.odometry_noise)
         self.last_keyframe_timestamp = None
 
         self.loop_similarity_threshold = 0.90
@@ -425,13 +435,23 @@ class MapNode(Node):
         features = asyncio.run(self.super_point_extractor.infer(image))
         self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
 
+        if self.isam.valueExists(keyframe_image_timestamp):
+            return
+        new_factors = gtsam.NonlinearFactorGraph()
+        new_values = gtsam.Values()
         if len(self.odom) == 0 and self.last_keyframe_timestamp is None:
             self.odom[keyframe_odom_timestamp] = odom
-            self.pose_graph_used_pose[keyframe_odom_timestamp] = odom
+            new_values.insert(keyframe_odom_timestamp, gtsam.Pose3(odom))
+            new_factors.add(gtsam.NonlinearEqualityPose3(
+                keyframe_odom_timestamp, gtsam.Pose3(odom)))
         else:
             last_keyframe_odom_pose = self.odom[self.last_keyframe_timestamp]
             T_prev_curr = np.linalg.inv(last_keyframe_odom_pose) @ odom
-            self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
+            initial_pose = self.pose_graph_used_pose[self.last_keyframe_timestamp] @ T_prev_curr
+            new_values.insert(keyframe_image_timestamp, gtsam.Pose3(initial_pose))
+            new_factors.add(gtsam.BetweenFactorPose3(
+                self.last_keyframe_timestamp, keyframe_image_timestamp,
+                gtsam.Pose3(T_prev_curr), self.odometry_noise))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
             def find_loop_and_pose_graph(timestamp):
@@ -451,12 +471,17 @@ class MapNode(Node):
                             prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
                             success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
                             if success and len(inliers) >= 100:
-                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
+                                new_factors.add(gtsam.BetweenFactorPose3(
+                                    prev_timestamp, curr_timestamp,
+                                    gtsam.Pose3(T_prev_curr), self.loop_noise))
                                 #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
             find_loop_and_pose_graph(keyframe_image_timestamp)
-            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+        self.isam.update(new_factors, new_values)
+        if new_factors.size() > 1:
+            for _ in range(4):
+                self.isam.update()
+        self.pose_graph_used_pose = pose_graph_estimate(self.isam)
+        self.pose_graph_trajectory_publish(keyframe_image_timestamp)
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
