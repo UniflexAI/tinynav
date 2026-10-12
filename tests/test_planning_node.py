@@ -11,7 +11,9 @@ from std_msgs.msg import Header
 from math_utils import matrix_to_quat
 from scipy.ndimage import distance_transform_edt
 from planning_node import (run_raycasting_loopy, build_route_fields, score_trajectories_by_ESDF,
-                           select_by_time, carried_row, turn_remainder,
+                           select_by_time, carried_row, turn_remainder, admit_reverse,
+                           generate_predefined_trajectory_vocabularies, REVERSE_SPEED,
+                           REVERSE_CAREFUL_SPEED, REVERSE_CAREFUL_M,
                            ARRIVE_M, ARRIVE_TICKS, ARRIVE_TICK_S,
                            generate_rotate_then_go, ROTATE_DEG, ROTATE_THEN_GO_M,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
@@ -922,3 +924,22 @@ def test_a_turn_in_place_carries_as_its_remainder():
     rest, _, _ = generate_rotate_then_go(np.zeros(3), traj[0, 2, 3:], np.array([rem]), 0.75, 0.2, 0.5, 0.1, 60)
     assert np.isclose(angle_between(heading_of_pose7(rest[0, -1]), goal), 0.0, atol=1e-6)
     assert turn_remainder(traj[0, -1, 3:], goal, 0.075) is None
+
+
+# --- reversing ---------------------------------------------------------------------
+
+def test_armed_the_careful_reverse_opens_only_when_the_full_one_is_blocked():
+    params = np.array([[0.4, 0.0], [-REVERSE_SPEED, 0.0], [-REVERSE_CAREFUL_SPEED, 0.0]])
+    inf = np.inf
+    assert list(admit_reverse([0.0, 0.0, inf], params, True)) == [0.0, 0.0, inf]
+    assert list(admit_reverse([inf, inf, inf], params, True)) == [inf, inf, 0.0]
+    assert list(admit_reverse([0.0, inf, 0.0], params, False)) == [0.0, inf, inf]
+
+
+def test_the_careful_reverse_stops_after_its_length():
+    trajs, params = generate_predefined_trajectory_vocabularies(init_q=_LEVEL_Q)
+    careful = trajs[np.flatnonzero(np.isclose(params[:, 0], -REVERSE_CAREFUL_SPEED))[0]]
+    full = trajs[np.flatnonzero(np.isclose(params[:, 0], -REVERSE_SPEED))[0]]
+    assert np.isclose(np.linalg.norm(careful[-1, :2]), REVERSE_CAREFUL_M)
+    assert np.linalg.norm(full[-1, :2]) > 2 * REVERSE_CAREFUL_M
+

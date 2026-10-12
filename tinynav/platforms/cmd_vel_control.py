@@ -221,7 +221,9 @@ class CmdVelControlNode(Node):
         raw_vx = float(linear_velocity_vec[0])
         is_backward_segment = raw_vx < -self.reverse_min_vx
         if is_backward_segment:
-            vx = -self.fixed_reverse_speed
+            # The planned speed, capped: the planner slows a reverse that is in
+            # collision (planning_node.REVERSE_CAREFUL_SPEED).
+            vx = -min(self.fixed_reverse_speed, -raw_vx)
         else:
             vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
         vy = 0.0

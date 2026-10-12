@@ -298,34 +298,59 @@ def _hold_to(trajectories, num_steps):
     return np.concatenate([trajectories, np.repeat(trajectories[:, -1:], extra, axis=1)], axis=1)
 
 
+#: The reverse rows: straight back at REVERSE_SPEED for the rollout, and, for when that
+#: is in collision, straight back at REVERSE_CAREFUL_SPEED for REVERSE_CAREFUL_M and
+#: then holding. cmd_vel_control drives a reverse at the planned speed, capped at its
+#: fixed_reverse_speed.
+REVERSE_SPEED = 0.3
+REVERSE_CAREFUL_SPEED = 0.15
+REVERSE_CAREFUL_M = 0.3
+
+
+def _straight_back(init_p, init_q, speed, length_m, dt, num_steps):
+    p = init_p.copy()
+    q = quat_to_matrix(init_q)
+    back = q @ np.array([0.0, 0.0, -1.0])
+    traj = np.empty((num_steps, 7), dtype=np.float64)
+    gone = 0.0
+    for i in range(num_steps):
+        step = min(speed * dt, length_m - gone)
+        if step > 0.0:
+            p = p + back * step
+            gone += step
+        traj[i, :3] = p
+        traj[i, 3:] = matrix_to_quat(q)
+        traj[i, 2] = init_p[2]
+    return traj
+
+
 def generate_predefined_trajectory_vocabularies(
     duration=3.0, dt=0.1,
     init_p=np.zeros(3), init_q=np.array([0, 0, 0, 1])
 ):
-    """
-    Predefined trajectory vocabularies.
-    """
+    """The reverse rows (REVERSE_SPEED, REVERSE_CAREFUL_SPEED): (trajectories, params)."""
     num_steps = int(duration / dt) + 1
-    trajectories = []
-    params = []
+    trajectories = np.stack([
+        _straight_back(init_p, init_q, REVERSE_SPEED, REVERSE_SPEED * duration, dt, num_steps),
+        _straight_back(init_p, init_q, REVERSE_CAREFUL_SPEED, REVERSE_CAREFUL_M, dt, num_steps),
+    ])
+    params = np.array([[-REVERSE_SPEED, 0.0], [-REVERSE_CAREFUL_SPEED, 0.0]])
+    return trajectories, params
 
-    # constant reverse trajectory
-    # vx = -0.3 m/s, omega = 0
-    reverse_speed = 0.3
-    p = init_p.copy()
-    q = quat_to_matrix(init_q)
-    traj = np.empty((num_steps, 7), dtype=np.float64)
-    for i in range(num_steps):
-        v_world = q @ np.array([0.0, 0.0, -reverse_speed])
-        p += v_world * dt
-        traj[i, :3] = p
-        traj[i, 3:] = matrix_to_quat(q)
-    for i in range(num_steps):
-        traj[i, 2] = traj[0, 2]
-    trajectories.append(traj)
-    params.append(np.array([-reverse_speed, 0.0], dtype=np.float64))
 
-    return np.asarray(trajectories), np.asarray(params)
+def admit_reverse(scores, params, should_reverse):
+    """`scores` with exactly one reverse row open while the gate is armed, and none
+    while it is not: the full reverse when it is clear, else the careful one, which
+    is open whatever it hits -- a robot armed to back off with its nose on an obstacle
+    cell otherwise has every row in collision and stands there (122, 2026-10-12)."""
+    scores = np.array(scores, dtype=float)
+    full = np.flatnonzero(np.isclose(params[:, 0], -REVERSE_SPEED))
+    careful = np.flatnonzero(np.isclose(params[:, 0], -REVERSE_CAREFUL_SPEED))
+    if not should_reverse or np.isfinite(scores[full]).all():
+        scores[careful] = np.inf
+    else:
+        scores[careful] = 0.0
+    return scores
 
 
 @njit(cache=True)
@@ -861,9 +886,6 @@ class PlanningNode(Node):
         # but it let the planner commit to trajectories it had not fully vetted, and the
         # freeze it was meant to prevent turned out to have other causes.
 
-        # Fixed-speed reverse fallback: driven when every trajectory is in collision
-        # but the blockage is ahead (not already under the footprint).
-
         self.occupancy_grid = np.zeros(self.grid_shape)
         self.K = None
         self.baseline = None
@@ -1388,6 +1410,7 @@ class PlanningNode(Node):
             should_reverse = reverse_armed(front_clearance, self.resolution,
                                            self.reverse_engaged)
             self.reverse_engaged = should_reverse
+            scores = admit_reverse(scores, params, should_reverse)
 
             target = self.target_pose
 
@@ -1414,11 +1437,10 @@ class PlanningNode(Node):
                     f'{self._hits_report(hits, n_samples)}'
                 )
                 # **Nothing is published, and that is the honest answer here.**
-                # Reaching this branch now means the reverse row is inf too, and it
-                # is scored from the pose after the current one (score_trajectories)
-                # -- so this is no longer a footprint sample underfoot vetoing every
-                # candidate alike, it is the way out being blocked as well. The
-                # report above names which part of the body is on an obstacle cell.
+                # Only with the reverse gate closed: armed, the careful reverse is
+                # always open (admit_reverse). So the front is not close enough to back
+                # off and every forward and turning row is blocked. The report above
+                # names which part of the body is on an obstacle cell.
                 #
                 # It is also where odometry drift lands: a stationary pose churning
                 # metres of phantom path smears the occupancy grid into cells under

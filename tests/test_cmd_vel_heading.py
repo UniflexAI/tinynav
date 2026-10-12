@@ -236,5 +236,22 @@ class DeadbandTest(_NodeCase):
             self.assertEqual(snap(0.01, engage * 0.9, min_exec, engage), 0.0)
 
 
+
+class ReverseSpeedTest(_NodeCase):
+    def _reverse(self, metres_per_pose):
+        n = self.node
+        poses = [(0, 0, -metres_per_pose * k) for k in range(n.lookahead_steps + 2)]
+        return self._drive(_path(*poses), ticks=60)[-1].linear.x
+
+    def test_a_reverse_is_driven_at_its_planned_speed_capped_at_the_fixed_one(self):
+        n = self.node
+        per_pose = n.planner_dt * n.path_pose_stride
+        slow = self._reverse(0.5 * n.fixed_reverse_speed * per_pose)
+        fast = self._reverse(3.0 * n.fixed_reverse_speed * per_pose)
+        self.assertAlmostEqual(fast, -n.fixed_reverse_speed, places=3)
+        self.assertLess(slow, 0.0)
+        self.assertGreater(slow, fast + 0.05)
+
+
 if __name__ == '__main__':
     unittest.main()
