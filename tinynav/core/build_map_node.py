@@ -4,10 +4,10 @@ import logging
 import os
 import shelve
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from math import inf
-from typing import Callable, Dict, Optional
 
 import cv2
 import einops
@@ -16,27 +16,33 @@ import numpy as np
 import rclpy
 import tyro
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped, TransformStamped, Point
-from message_filters import Subscriber, ApproximateTimeSynchronizer
-from nav_msgs.msg import Path, Odometry
+from geometry_msgs.msg import Point, PoseStamped, TransformStamped
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+from nav_msgs.msg import Odometry, Path
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.serialization import deserialize_message
-from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
+from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 from rosgraph_msgs.msg import Clock
 from rosidl_runtime_py.utilities import get_message
 from scipy.ndimage import distance_transform_edt
 from scipy.spatial.transform import Rotation as R
-from sensor_msgs.msg import Image, CameraInfo, CompressedImage, PointCloud2
-from std_msgs.msg import Bool, Float32, Header, ColorRGBA
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2
+from std_msgs.msg import Bool, ColorRGBA, Float32, Header
 from tabulate import tabulate
 from tf2_msgs.msg import TFMessage
 from tf2_ros import TransformBroadcaster
 from tqdm import tqdm
 from visualization_msgs.msg import Marker, MarkerArray
 
-from tinynav.core.math_utils import matrix_to_quat, msg2np, estimate_pose, tf2np, depth_to_cloud
-from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SigLIPTRT, SuperPointTRT
+from tinynav.core.math_utils import (
+    depth_to_cloud,
+    estimate_pose,
+    matrix_to_quat,
+    msg2np,
+    tf2np,
+)
+from tinynav.core.models_trt import Dinov2TRT, LightGlueTRT, SigLIPTRT, SuperPointTRT
 from tinynav.core.planning_node import run_raycasting_loopy
 from tinynav.core.semantic_retrieval import normalize_embedding
 from tinynav.core.vlad import compute_vlad, train_vocabulary_streaming
@@ -83,8 +89,8 @@ class StageStats:
 
 
 class StageTimer:
-    def __init__(self, verbose_logger: Optional[Callable[[str], None]] = None):
-        self._stats: Dict[str, StageStats] = {}
+    def __init__(self, verbose_logger: Callable[[str], None] | None = None):
+        self._stats: dict[str, StageStats] = {}
         self.verbose_logger = verbose_logger
 
     def record(self, name: str, duration_s: float) -> None:
@@ -194,7 +200,7 @@ def find_loop(target_embedding:np.ndarray, embeddings:np.ndarray, loop_similarit
             loop_list.append((idx, similarity_array[idx]))
     return loop_list[-loop_top_k:]
 
-def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100, stage_timer: Optional[StageTimer] = None):
+def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100, stage_timer: StageTimer | None = None):
     """
         Generate a occupancy grid map from the depth images.
         The occupancy grid map is a 3D grid with the following values:
@@ -206,7 +212,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     odom_pose_min_position = np.array([np.inf, np.inf, np.inf], dtype=np.float32)
     odom_pose_max_position = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
-    for timestamp, odom_pose in poses.items():
+    for odom_pose in poses.values():
         odom_translation = odom_pose[:3, 3]
         odom_pose_min_position = np.minimum(odom_pose_min_position, odom_translation)
         odom_pose_max_position = np.maximum(odom_pose_max_position, odom_translation)
@@ -277,7 +283,7 @@ def generate_occupancy_map(poses, db, K, baseline, resolution = 0.1, step = 100,
 
 class IntKeyShelf:
     def __init__(self, filename):
-        self.db = shelve.open(filename)
+        self.db = shelve.open(filename)  # noqa: SIM115 - owned until close()
 
     def __getitem__(self, key: int):
         return self.db[str(key)]
@@ -292,7 +298,7 @@ class IntKeyShelf:
         return str(key) in self.db
 
     def keys(self):
-        return [int(k) for k in self.db.keys()]
+        return [int(k) for k in self.db]
 
     def close(self):
         self.db.close()
@@ -308,7 +314,7 @@ class OdomPoseRecorder:
         self.save_path = save_path
         self.prefix = prefix
         self.file_save_path = os.path.join(save_path, f"{prefix}_continuous_odom.npy")
-        self.poses: Dict[int, np.ndarray] = {}  # timestamp_ns -> 4x4 pose matrix
+        self.poses: dict[int, np.ndarray] = {}  # timestamp_ns -> 4x4 pose matrix
 
         os.makedirs(save_path, exist_ok=True)
 
@@ -342,15 +348,15 @@ class OdomPoseRecorder:
                 f"[PoseRecorder] Loaded {len(self.poses)} poses from {self.file_save_path}"
             )
             return True
-        except Exception as e:
-            logger.error(f"Failed to load poses from {self.file_save_path}: {e}")
+        except Exception:
+            logger.exception(f"Failed to load poses from {self.file_save_path}")
             return False
 
     def clear(self) -> None:
         self.poses.clear()
 
 
-class TinyNavDB():
+class TinyNavDB:
     def __init__(self, map_save_path:str, is_scratch:bool = True):
         self.map_save_path = map_save_path
         self.is_scratch = is_scratch
@@ -374,9 +380,9 @@ class TinyNavDB():
         self.vlad_descriptors = IntKeyShelf(f"{map_save_path}/vlad_descriptors")
         self.patch_tokens = IntKeyShelf(f"{map_save_path}/patch_tokens")
         self.depths = IntKeyShelf(f"{map_save_path}/depths")
-        self.metadata = shelve.open(f"{map_save_path}/metadata")
+        self.metadata = shelve.open(f"{map_save_path}/metadata")  # noqa: SIM115 - owned until close()
 
-    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict = None, vlad_descriptor:np.ndarray = None, patch_tokens:np.ndarray = None, infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
+    def set_entry(self, key:int,   depth:np.ndarray = None, embedding:np.ndarray = None, semantic_embedding:np.ndarray = None, features:dict | None = None, vlad_descriptor:np.ndarray = None, patch_tokens:np.ndarray = None, infra1_image:np.ndarray = None, rgb_image:np.ndarray = None):
         if infra1_image is not None:
             self.infra1_video_db.write(key, infra1_image)
         if rgb_image is not None:
@@ -670,7 +676,7 @@ class BuildMapNode(Node):
         T_infra1_optical_to_infra1 = None
         T_rgb_to_link = None
         T_rgb_optical_to_rgb = None
-        tf_messages: Dict[int, Dict[str, np.ndarray]] = {}
+        tf_messages: dict[int, dict[str, np.ndarray]] = {}
         for t in msg.transforms:
             frame_id, child_frame_id, T = tf2np(t)
             timestamp_ns = int(t.header.stamp.sec * 1e9) + int(t.header.stamp.nanosec)
@@ -731,8 +737,8 @@ class BuildMapNode(Node):
                 self.mapping_save_finished_pub.publish(save_finished_msg)
                 self.get_logger().info("Published data save finished signal")
 
-            except Exception as e:
-                self.get_logger().error(f"Error during mapping save: {e}")
+            except Exception:
+                logger.exception("Error during mapping save")
                 # Still publish completion signal even if there was an error
                 save_finished_msg = Bool()
                 save_finished_msg.data = False
@@ -816,7 +822,7 @@ class BuildMapNode(Node):
 
     def detect_loop_closure(self, timestamp: int, new_factors: gtsam.NonlinearFactorGraph) -> None:
         target_embedding = self.db.get_embedding(timestamp)
-        valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
+        valid_timestamp = [t for t in self.pose_graph_used_pose if t + 10 * 1e9 < timestamp]
         valid_embeddings = np.array([self.db.get_embedding(t) for t in valid_timestamp])
         idx_to_timestamp = {i: t for i, t in enumerate(valid_timestamp)}
 
@@ -826,7 +832,7 @@ class BuildMapNode(Node):
             for idx, _similarity in loop_list:
                 prev_timestamp = idx_to_timestamp[idx]
                 curr_timestamp = timestamp
-                prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
+                _prev_depth, _, prev_features, _, _ = self.db.get_depth_embedding_features_images(prev_timestamp)
                 curr_depth, _, curr_features, _, _ = self.db.get_depth_embedding_features_images(curr_timestamp)
                 prev_matched_keypoints, curr_matched_keypoints, _matches = self.match_keypoints(prev_features, curr_features)
                 success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
@@ -851,7 +857,9 @@ class BuildMapNode(Node):
         self._global_prev_num_frames = num_frames
         return True
 
-    def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def match_keypoints(self, feats0:dict, feats1:dict, image_shape: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if image_shape is None:
+            image_shape = np.array([848, 480], dtype=np.int64)
         match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
@@ -1051,8 +1059,7 @@ class BuildMapNode(Node):
             self.save_mapping()
             super().destroy_node()
         except Exception:
-            # Ignore errors during destruction as resources may already be freed
-            pass
+            logger.debug("Node cleanup failed; resources may already be freed", exc_info=True)
 
 class ImageTransportsNode(Node):
     def __init__(self):
