@@ -253,5 +253,52 @@ class ReverseSpeedTest(_NodeCase):
         self.assertGreater(slow, fast + 0.05)
 
 
+def _odom_facing(heading):
+    """An odometry pose whose body +z -- this stack's forward -- points along
+    `heading` on world XY, as planning_node.heading_of_pose7 reads it."""
+    from scipy.spatial.transform import Rotation
+    c, s = math.cos(heading), math.sin(heading)
+    q = Rotation.from_matrix(np.array([[s, 0.0, c], [-c, 0.0, s], [0.0, -1.0, 0.0]])).as_quat()
+    odom = Odometry()
+    o = odom.pose.pose.orientation
+    o.x, o.y, o.z, o.w = (float(v) for v in q)
+    return odom
+
+
+class TurnToTest(_NodeCase):
+    """A turn row is turned to its heading on the measured yaw, standing still."""
+
+    #: What the path's 1 s average makes of "turn 15 degrees, then go": a slow arc.
+    ARC = ((0, 0, 0), (-0.03, 0, 0.13, 0.26))
+
+    def _turning(self, robot, target):
+        from std_msgs.msg import Float32
+        self.node.pose = _odom_facing(robot)
+        self.node._on_turn_to(Float32(data=float(target)))
+        return self._drive(_path(*self.ARC))[-1]
+
+    def test_it_stands_and_turns_towards_the_heading_either_way(self):
+        for robot, target, sign in ((1.0, 1.0 + math.radians(15), +1), (1.0, 1.0 - math.radians(15), -1),
+                                    (math.radians(175), math.radians(-170), +1)):
+            out = self._turning(robot, target)
+            self.assertEqual(out.linear.x, 0.0)
+            self.assertAlmostEqual(out.angular.z, sign * 2.0 * math.radians(15), places=3)
+
+    def test_the_rate_stays_between_what_the_chassis_executes_and_its_cap(self):
+        n = self.node
+        n.min_effective_angular_speed = 0.2
+        self.assertAlmostEqual(self._turning(0.0, math.radians(4)).angular.z, 0.2, places=6)
+        self.assertAlmostEqual(self._turning(0.0, math.radians(90)).angular.z, n.max_angular_speed, places=6)
+
+    def test_inside_the_tolerance_and_with_no_turn_asked_the_path_drives(self):
+        """The pair: without this a finished turn never hands back to the row's go."""
+        plain = self._drive(_path(*self.ARC))[-1]
+        self.assertGreater(plain.linear.x, 0.0)
+        done = self._turning(0.5, 0.5 + math.radians(2))
+        self.assertGreater(done.linear.x, 0.0)
+        none = self._turning(0.5, float('nan'))
+        self.assertGreater(none.linear.x, 0.0)
+
+
 if __name__ == '__main__':
     unittest.main()

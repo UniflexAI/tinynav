@@ -795,6 +795,10 @@ class PlanningNode(Node):
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
+        # The world heading the selected row turns to before it drives, NaN when it is
+        # not a turn row. cmd_vel_control turns to it; the path cannot say it (its 1s
+        # average reads a short turn as a slow arc that drives while it turns).
+        self.turn_to_pub = self.create_publisher(Float32, '/planning/turn_to', 10)
         #: Upstream's hysteresis state: once reverse engages it stays engaged until the
         #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
         #: subject says it brings in #247's reverse gate.
@@ -1409,6 +1413,8 @@ class PlanningNode(Node):
                 'sel_omega': round(sel_omega, 3),
             })))
 
+            self.turn_to_pub.publish(Float32(
+                data=float('nan') if self._turn_heading is None else self._turn_heading))
             self.publish_selected_path(trajectories, top_indices, depth_msg.header)
 
 

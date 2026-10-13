@@ -3,11 +3,12 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Path
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
 import logging
+import math
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
 
@@ -22,6 +23,7 @@ class CmdVelControlNode(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
+        self.create_subscription(Float32, '/planning/turn_to', self._on_turn_to, 10)
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
             [0, 0, -1, 0],
@@ -70,6 +72,10 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
+        # A turn row is turned TO its heading on the measured yaw, standing: rad/s per
+        # rad left, between the chassis's floor and its cap, done inside the tolerance.
+        self.turn_to_gain = 2.0
+        self.turn_to_tolerance = np.deg2rad(3.0)
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -77,6 +83,8 @@ class CmdVelControlNode(Node):
         self.last_path_update_time = None
         self._paused = False
         self._nav_active = False
+        #: The world heading the planner's row turns to before driving, or None.
+        self._turn_to = None
         _latched_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(Bool, '/nav/paused', self._on_paused, _latched_qos)
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
@@ -88,6 +96,19 @@ class CmdVelControlNode(Node):
             # Reset prev_cmd so resume starts from zero cleanly
             self.prev_cmd = Twist()
 
+    def _on_turn_to(self, msg: Float32):
+        self._turn_to = float(msg.data) if math.isfinite(msg.data) else None
+
+    def _turn_left(self):
+        """Signed yaw (rad, left positive) from the robot's heading to the turn row's,
+        or None with no turn asked or no pose. Heading is body +z on world XY, the
+        convention planning_node.heading_of_pose7 writes it in."""
+        if self._turn_to is None or self.pose is None:
+            return None
+        q = self.pose.pose.pose.orientation
+        heading = math.atan2(2.0 * (q.y * q.z - q.w * q.x), 2.0 * (q.x * q.z + q.w * q.y))
+        return math.atan2(math.sin(self._turn_to - heading), math.cos(self._turn_to - heading))
+
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
         self._nav_active = bool(msg.data)
@@ -95,6 +116,7 @@ class CmdVelControlNode(Node):
             self.latest_cmd = Twist()
             self.prev_cmd = Twist()
             self.last_path_update_time = None
+            self._turn_to = None
             # Send one stop when navigation is deactivated, then stay silent so
             # manual teleop can own /cmd_vel without being overwritten by zeros.
             self.cmd_pub.publish(Twist())
@@ -140,6 +162,12 @@ class CmdVelControlNode(Node):
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
         target_cmd.angular.z = self.latest_cmd.angular.z
+        left = self._turn_left()
+        if left is not None and abs(left) > self.turn_to_tolerance and target_cmd.linear.x >= 0.0:
+            target_cmd.linear.x = 0.0
+            target_cmd.angular.z = math.copysign(
+                min(max(self.turn_to_gain * abs(left), self.min_effective_angular_speed),
+                    self.max_angular_speed), left)
         if age > stale_stop_s:
             target_cmd.linear.x = 0.0
             target_cmd.angular.z = 0.0
