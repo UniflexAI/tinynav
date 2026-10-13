@@ -111,6 +111,9 @@ B2_CONFIG = RobotConfig(
     front_len=0.44, rear_len=0.44, half_width=0.175,
     camera_fwd=0.44, camera_left=0.0,
     safety_radius=0.05,
+    # The operator's call, 2026-10-13, as go2's: a 15-degree turn row reaches the chassis
+    # as 0.1-0.26 rad/s, and b2 yawed 0.06 rad/s on those (122, round r11, 90s stuck).
+    min_angular_vel=0.2,
     # min_linear_vel stays the 0.1 default. 0.2 was run on 122 on 2026-09-04 and the
     # robot could barely move: cmd_vel_control DROPS a target below this rather than
     # raising it, so [0.1, 0.2) went from creeping to standing still -- every /cmd_vel
