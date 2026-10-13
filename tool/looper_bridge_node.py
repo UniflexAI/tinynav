@@ -38,6 +38,13 @@ class LooperBridgeNode(Node):
         self._missing_input_counter = 0
 
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
+        # Best effort for the images: a frame lost on the Looper link is dropped, not
+        # retransmitted. Reliable held every later frame behind the retransmit and then
+        # released them together -- depth arrived in pairs 10ms apart with gaps to 0.8s
+        # on 65, while the Looper captures it at a steady ~10Hz.
+        self.image_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST, depth=5, reliability=ReliabilityPolicy.BEST_EFFORT
+        )
         self.tf_static_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -48,9 +55,9 @@ class LooperBridgeNode(Node):
         self.camera_info_sub = self.create_subscription(CameraInfo, "/camera/camera/infra1/camera_info", self.camera_info_callback, self.sensor_qos)
         self.tf_static_sub = self.create_subscription(TFMessage, "/tf_static", self.tf_callback, self.tf_static_qos)
 
-        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.sensor_qos)
+        self.depth_sub = message_filters.Subscriber(self, Image, "/camera/camera/depth/image_rect_raw", qos_profile=self.image_qos)
         self.pose_sub = message_filters.Subscriber(self, PoseStamped, "/camera/camera/vio_image")
-        self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.sensor_qos)
+        self.image_sub = message_filters.Subscriber(self, Image, "/camera/camera/infra1/image_rect_raw", qos_profile=self.image_qos)
         self.pose_sub.registerCallback(self.publish_visual_odom)
         self.sync = message_filters.TimeSynchronizer(
             [self.depth_sub, self.pose_sub, self.image_sub], queue_size=20
