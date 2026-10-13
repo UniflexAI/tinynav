@@ -794,8 +794,10 @@ class PlanningNode(Node):
         #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
         #: subject says it brings in #247's reverse gate.
         self.reverse_engaged = False
+        # Two, not one: the Looper sends depth in pairs ~10ms apart, and a queue of one
+        # drops the first of each pair while a frame (~70ms) is being planned.
         latest_depth_only = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE
+            history=HistoryPolicy.KEEP_LAST, depth=2, reliability=ReliabilityPolicy.RELIABLE
         )
         poses_covering_one_depth_frame = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE
