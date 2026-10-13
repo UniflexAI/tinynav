@@ -10,7 +10,7 @@ import sys
 import json
 
 import heapq
-from tinynav.core.math_utils import matrix_to_quat, msg2np, np2msg, estimate_pose, np2tf, rerank_by_pnp_inliers
+from tinynav.core.math_utils import msg2np, np2msg, np2tf, rerank_by_pnp_inliers
 from sensor_msgs.msg import Image, CameraInfo, PointCloud
 from message_filters import TimeSynchronizer, Subscriber
 from cv_bridge import CvBridge
@@ -24,7 +24,7 @@ import logging
 import asyncio
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
-from tinynav.core.build_map_node import find_loop, solve_pose_graph
+from tinynav.core.build_map_node import find_loop
 from tinynav.core.vlad import compute_vlad
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
@@ -271,7 +271,6 @@ class MapNode(Node):
         self.pois_sub = self.create_subscription(String, '/mapping/cmd_pois', self.pois_callback, 10)
 
         # pubs
-        self.pose_graph_trajectory_pub = self.create_publisher(Path, "/mapping/pose_graph_trajectory", 10)
         self.relocation_pub = self.create_publisher(Odometry, '/map/relocalization', 10)
         self.current_pose_in_map_pub = self.create_publisher(Odometry, "/mapping/current_pose_in_map", 10)
         # Capture-speed prior: the operator's local speed (path_speed.npy) at the
@@ -299,9 +298,6 @@ class MapNode(Node):
         self.pose_graph_used_pose = {}
         self.relative_pose_constraint = []
         self.last_keyframe_timestamp = None
-
-        self.loop_similarity_threshold = 0.90
-        self.loop_top_k = 1
 
         self.relocalization_loop_top_k = 3
 
@@ -561,29 +557,8 @@ class MapNode(Node):
             self.relative_pose_constraint.append((keyframe_image_timestamp, self.last_keyframe_timestamp, T_prev_curr))
             self.pose_graph_used_pose[keyframe_image_timestamp] = odom
             self.odom[keyframe_image_timestamp] = odom
-            def find_loop_and_pose_graph(timestamp):
-                    target_embedding = self.nav_temp_db.get_embedding(timestamp)
-                    valid_timestamp = [t for t in self.pose_graph_used_pose.keys() if t + 10 * 1e9 < timestamp]
-                    valid_embeddings = np.array([self.nav_temp_db.get_embedding(t) for t in valid_timestamp])
-
-                    idx_to_timestamp = {i:t for i, t in enumerate(valid_timestamp)}
-                    with Timer(name = "find loop", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        loop_list = find_loop(target_embedding, valid_embeddings, self.loop_similarity_threshold, self.loop_top_k)
-                    with Timer(name = "Relative pose estimation", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        for idx, similarity in loop_list:
-                            prev_timestamp = idx_to_timestamp[idx]
-                            curr_timestamp = timestamp
-                            prev_depth, _, prev_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(prev_timestamp)
-                            curr_depth, _, curr_features, _, _ = self.nav_temp_db.get_depth_embedding_features_images(curr_timestamp)
-                            prev_matched_keypoints, curr_matched_keypoints, matches = self.match_keypoints(prev_features, curr_features)
-                            success, T_prev_curr, _, _, inliers = estimate_pose(prev_matched_keypoints, curr_matched_keypoints, curr_depth, self.K)
-                            if success and len(inliers) >= 100:
-                                self.relative_pose_constraint.append((curr_timestamp, prev_timestamp, T_prev_curr))
-                                #print(f"Added loop relative pose constraint: {curr_timestamp} -> {prev_timestamp}")
-                    with Timer(name = "solve pose graph", text="[{name}] Elapsed time: {milliseconds:.0f} ms", logger=self.timer_logger):
-                        self.pose_graph_used_pose = solve_pose_graph(self.pose_graph_used_pose, self.relative_pose_constraint, max_iteration_num = 5)
-            find_loop_and_pose_graph(keyframe_image_timestamp)
-            self.pose_graph_trajectory_publish(keyframe_image_timestamp)
+            # No session loop closure: map->odom is solved against raw odom, and a solve
+            # over the whole session grew to seconds per keyframe after an hour on one map.
         self.last_keyframe_timestamp = keyframe_odom_timestamp
         self.last_keyframe_image = image
 
@@ -607,26 +582,6 @@ class MapNode(Node):
             if index != -1:
                 matches.append([i, index])
         return keypoints0, keypoints1, np.array(matches, dtype=np.int64)
-
-    def pose_graph_trajectory_publish(self, timestamp):
-        path_msg = Path()
-        path_msg.header.stamp.sec = int(timestamp / 1e9)
-        path_msg.header.stamp.nanosec = int(timestamp % 1e9)
-        path_msg.header.frame_id = "world"
-        for t, pose_in_world in self.pose_graph_used_pose.items():
-            pose = PoseStamped()
-            pose.header = path_msg.header
-            t = pose_in_world[:3, 3]
-            quat = matrix_to_quat(pose_in_world[:3, :3])
-            pose.pose.position.x = t[0]
-            pose.pose.position.y = t[1]
-            pose.pose.position.z = t[2]
-            pose.pose.orientation.x = quat[0]
-            pose.pose.orientation.y = quat[1]
-            pose.pose.orientation.z = quat[2]
-            pose.pose.orientation.w = quat[3]
-            path_msg.poses.append(pose)
-        self.pose_graph_trajectory_pub.publish(path_msg)
 
     def select_relocalization_candidates(self, query_vlad: np.ndarray) -> list[tuple[int, float]]:
         """(map keyframe timestamp, VLAD similarity) to try PnP against, best last.
