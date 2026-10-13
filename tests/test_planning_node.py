@@ -862,6 +862,31 @@ def test_the_time_cost_arrives_where_map_node_does():
     assert 'create_timer(%s, self.nav_target_timer_callback)' % ARRIVE_TICK_S in src
 
 
+def test_the_time_cost_arrives_on_the_tick_map_node_does():
+    """Driving straight at a target, the scorer's arrival lands on the first sample
+    whose camera pose map_node's rule (RobotConfig.arrival_distance) calls arrived."""
+    origin, resolution, dt = np.array([0.0, 0.0]), 0.1, 0.1
+    zeros = np.zeros((50, 50))
+    target = np.array([3.0, 2.5])
+    centres = np.linspace(1.0, 3.0, 41)
+    traj = np.array([[_pose_facing(x, 2.5, 0.0) for x in centres]])
+    front, rear = ROBOT_CONFIG.arrival_centres(ARRIVE_M)
+    arrive_t = score_trajectories_by_ESDF(
+        traj, np.full((50, 50), 5.0, dtype=np.float32), zeros, zeros, zeros, origin,
+        resolution, 0.1, *ROBOT_CONFIG.footprint_from_control(), target[0], target[1],
+        front, rear, ARRIVE_M, 1, 1, 0.5, False, dt)[5][0]
+    R = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+    first = None
+    for i, x in enumerate(centres[1:], start=1):
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3] = np.array([x, 2.5, 0.0]) + R @ ROBOT_CONFIG.cam_offset_3d
+        if ROBOT_CONFIG.arrival_distance(T, target, ARRIVE_M) < ARRIVE_M:
+            first = i
+            break
+    assert first is not None and arrive_t == first * dt
+
+
 def test_standing_still_is_banned_while_another_row_is_open():
     """A standstill, a slow turn and a forward row, none of them arriving."""
     vx, yaw = np.array([0.0, 0.0, 0.3]), np.array([0.0, 0.11, 0.0])

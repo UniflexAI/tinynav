@@ -26,6 +26,7 @@ from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop
 from tinynav.core.vlad import compute_vlad
+from tinynav.core.robot_specs import ROBOT_CONFIG
 import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 from tinynav.core.path_speed import (
@@ -178,16 +179,14 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
-# Arrival radius, measured from the CAMERA (see nav_target_timer_callback).
-_ARRIVE_M = 0.5
+# Arrival radius of the two circles along the body (RobotConfig.arrival_centres).
+_ARRIVE_M = 0.3
 # How many consecutive ticks must agree that the robot is inside that radius.
 # One: the timer runs at ~0.8Hz under relocalization rather than its nominal 2Hz,
 # and a second tick came 1.2-2.4s later -- the robot drove through the radius and
 # turned back. A second tick guards against a fix jumping the pose into the radius;
 # raise this if that is seen.
 _ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '1'))
-# ...and for a POI that carries an arrival heading. The same radius: see poi_reached.
-_ARRIVE_HEADING_M = 0.5
 
 # The target pose is a carrot at a TIME horizon, so how far along the path it sits rides
 # the speed actually driven: the capture-speed prior this node publishes, times the same
@@ -786,23 +785,13 @@ class MapNode(Node):
         self.global_plan_pub.publish(path_msg)
 
     def poi_reached(self, poi, pos):
-        """Arrival is measured from the CAMERA pose, not the control center. Shifting it
-        back to the control center is more literally correct ("did the body reach the
-        POI") but it costs cam_offset (0.30 m) of extra approach before arrival fires,
-        and that margin is what keeps the robot out of the planner's near-goal dead
-        zone: with a camera reference, arrival triggers while the control center is
-        still ~0.8 m out, well before the trajectory lattice starts selecting vx=0.
-        Measuring from the camera declares arrival early; that is the point.
-
-        A POI with an authored heading gets the same radius as any other. Parking ON
-        it would put the turn in the right place, but 0.2m from the camera is not
-        reachable on b2 -- its camera leads the control centre by 0.5m and the planner
-        drives the control centre onto the goal, so the tighter radius only ever
-        withheld an arrival that pilot's footprint rule then had to declare
-        (pilot/nav/arrive.py). The operator's call, 2026-09-08."""
-        arrive_m = (_ARRIVE_HEADING_M if self.poi_index in self.poi_has_heading
-                    else _ARRIVE_M)
-        inside = (np.linalg.norm(poi[:2] - pos[:2]) < arrive_m
+        """Arrival is the POI inside either of two `_ARRIVE_M` circles along the body,
+        which reach its nose and its tail, so it reads the same on every robot whatever
+        its camera offset. `pos` is the camera's; the heading comes from the pose the
+        caller built it from. planning_node predicts arrival with the same circles, so
+        the time cost and this rule agree on when a leg ends."""
+        pose = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
+        inside = (ROBOT_CONFIG.arrival_distance(pose, poi, _ARRIVE_M) < _ARRIVE_M
                   and abs(poi[2] - pos[2]) < 2.0)
         # Confirmed, not sampled: see _ARRIVE_TICKS.
         self._arrive_ticks = (self._arrive_ticks + 1) if inside else 0
