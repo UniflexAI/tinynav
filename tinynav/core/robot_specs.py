@@ -75,29 +75,17 @@ class RobotConfig:
 
     @property
     def arrival_radius(self):
-        """The arrival circles' radius: three half-widths."""
+        """Radius of the two arrival circles (arrival_distance): three half-widths."""
         return 3.0 * self.half_width
 
-    def arrival_centres(self, radius):
-        """(front, rear) forward offsets from the control centre of the two circles
-        arrival is judged on: each `radius` in from its end of the body, so the circles
-        reach the nose and the tail. One circle at the middle when the body is shorter
-        than two radii."""
-        front, rear = self.front_len - radius, radius - self.rear_len
-        if front < rear:
-            front = rear = (self.front_len - self.rear_len) / 2
-        return front, rear
-
-    def arrival_distance(self, T_camera, target_xy, radius):
-        """XY distance from `target_xy` to the nearer arrival circle centre, for a
-        camera pose (camera convention: +z forward)."""
-        R = T_camera[:3, :3]
-        centre = (T_camera[:3, 3] - R @ self.cam_offset_3d)[:2]
-        fwd = (R @ np.array([0.0, 0.0, 1.0]))[:2]
-        fwd = fwd / max(float(np.linalg.norm(fwd)), 1e-6)
+    def arrival_distance(self, T_camera, target_xy):
+        """XY distance from `target_xy` to the nearer of the two arrival circle
+        centres, the camera and the control centre, for a camera pose."""
+        camera = T_camera[:3, 3]
+        control = camera - T_camera[:3, :3] @ self.cam_offset_3d
         target = np.asarray(target_xy, dtype=float)[:2]
-        return min(float(np.linalg.norm(centre + fwd * c - target))
-                   for c in self.arrival_centres(radius))
+        return min(float(np.linalg.norm(camera[:2] - target)),
+                   float(np.linalg.norm(control[:2] - target)))
 
 
 GO2_CONFIG = RobotConfig(

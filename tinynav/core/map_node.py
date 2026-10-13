@@ -179,7 +179,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
-# Arrival radius of the two circles along the body (RobotConfig.arrival_centres).
+# Arrival radius of the two circles, on the camera and on the control centre.
 _ARRIVE_M = ROBOT_CONFIG.arrival_radius
 # How many consecutive ticks must agree that the robot is inside that radius.
 # One: the timer runs at ~0.8Hz under relocalization rather than its nominal 2Hz,
@@ -785,13 +785,14 @@ class MapNode(Node):
         self.global_plan_pub.publish(path_msg)
 
     def poi_reached(self, poi, pos):
-        """Arrival is the POI inside either of two `_ARRIVE_M` circles along the body,
-        which reach its nose and its tail, so it reads the same on every robot whatever
-        its camera offset. `pos` is the camera's; the heading comes from the pose the
-        caller built it from. planning_node predicts arrival with the same circles, so
-        the time cost and this rule agree on when a leg ends."""
+        """Arrival is the POI inside either of two `_ARRIVE_M` circles, one on the
+        camera and one on the control centre: the camera's fires early on a straight
+        approach, the control centre's when the planner has parked the body on a POI
+        the camera has passed. `pos` is the camera's; the control centre comes from
+        the pose the caller built it from. planning_node predicts arrival with the
+        same circles, so the time cost and this rule agree on when a leg ends."""
         pose = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
-        inside = (ROBOT_CONFIG.arrival_distance(pose, poi, _ARRIVE_M) < _ARRIVE_M
+        inside = (ROBOT_CONFIG.arrival_distance(pose, poi) < _ARRIVE_M
                   and abs(poi[2] - pos[2]) < 2.0)
         # Confirmed, not sampled: see _ARRIVE_TICKS.
         self._arrive_ticks = (self._arrive_ticks + 1) if inside else 0
