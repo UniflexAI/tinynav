@@ -182,10 +182,8 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
 # Arrival radius of the two circles, on the camera and on the control centre.
 _ARRIVE_M = ROBOT_CONFIG.arrival_radius
 # How many consecutive ticks must agree that the robot is inside that radius.
-# One: the timer runs at ~0.8Hz under relocalization rather than its nominal 2Hz,
-# and a second tick came 1.2-2.4s later -- the robot drove through the radius and
-# turned back. A second tick guards against a fix jumping the pose into the radius;
-# raise this if that is seen.
+# One. A second tick guards against a fix jumping the pose into the radius; raise
+# this if that is seen.
 _ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '1'))
 
 # The target pose is a carrot at a TIME horizon, so how far along the path it sits rides
@@ -319,7 +317,8 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
-        self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
+        self.nav_target_timer = self.create_timer(0.1, self.nav_target_timer_callback)
+        self._nav_skip_said = None
         # Its own timer, not nav_target_timer_callback: that one returns early without
         # POIs, and the planner needs the climb region whenever it is planning at all.
         self.map_prior_timer = self.create_timer(1.0 / MAP_PRIOR_HZ, self.tick_map_priors)
@@ -852,13 +851,16 @@ class MapNode(Node):
             or self.T_from_map_to_odom is None
             or self.latest_odom_pose is None
         ):
-            self.get_logger().info(
-                f"[nav_timer] skip: poi_index={self.poi_index}, "
-                f"n_pois={len(self.pois)}, "
-                f"T={'set' if self.T_from_map_to_odom is not None else 'None'}, "
-                f"odom={'set' if self.latest_odom_pose is not None else 'None'}"
-            )
+            why = (f"[nav_timer] skip: poi_index={self.poi_index}, "
+                   f"n_pois={len(self.pois)}, "
+                   f"T={'set' if self.T_from_map_to_odom is not None else 'None'}, "
+                   f"odom={'set' if self.latest_odom_pose is not None else 'None'}")
+            # Said when it changes: the timer ticks at 10Hz.
+            if why != self._nav_skip_said:
+                self._nav_skip_said = why
+                self.get_logger().info(why)
             return
+        self._nav_skip_said = None
 
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
@@ -917,10 +919,7 @@ class MapNode(Node):
         self._publish_global_plan(paths)
         closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
 
-        remaining_length = sum(
-            np.linalg.norm(paths[i + 1] - paths[i])
-            for i in range(closest_idx, len(paths) - 1)
-        ) if closest_idx < len(paths) - 1 else 0.0
+        remaining_length = float(np.linalg.norm(np.diff(paths[closest_idx:], axis=0), axis=1).sum())
 
         percent, estimated_remaining_s = self.update_leg_progress(remaining_length)
 

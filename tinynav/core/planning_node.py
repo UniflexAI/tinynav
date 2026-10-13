@@ -631,11 +631,11 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
-#: map_node's arrival circles at a tighter radius, and its _ARRIVE_TICKS at its 0.5 s
+#: map_node's arrival circles at a tighter radius, and its _ARRIVE_TICKS at its 0.1 s
 #: nav tick: a row counts as arriving only well inside where map_node ends the leg.
 ARRIVE_M = ROBOT_CONFIG.planned_arrival_radius
 ARRIVE_TICKS = 1
-ARRIVE_TICK_S = 0.5
+ARRIVE_TICK_S = 0.1
 #: Route metres one unit of clearance score is worth.
 CLEARANCE_M = 2.0
 #: Rows this close to the fastest count as equally fast; the least motion among them wins.
