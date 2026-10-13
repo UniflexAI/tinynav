@@ -16,5 +16,5 @@ tmux new-session \; \
   select-pane -t 3 \; send-keys "uv run python tinynav/core/perception_node.py" C-m \; \
   select-pane -t 4 \; send-keys "uv run python tinynav/core/planning_node.py" C-m \; \
   select-pane -t 5 \; send-keys "uv run python tinynav/platforms/simulator_control.py" C-m \; \
-  select-pane -t 6 \; send-keys "rviz2 -d /tinynav/docs/vis.rviz" C-m
+  select-pane -t 6 \; send-keys "uv run python tinynav/core/planning_vis_node.py & rviz2 -d /tinynav/docs/vis.rviz" C-m
 

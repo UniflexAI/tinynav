@@ -12,24 +12,22 @@ import json
 import rclpy
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
-from sensor_msgs.msg import Image, CameraInfo, PointField
+from sensor_msgs.msg import Image, CameraInfo
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
 from dataclasses import replace
 from numba import njit
-import cv2
 import rclpy
 import message_filters
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
-from sensor_msgs.msg import Image, CameraInfo, PointField, PointCloud2, PointCloud
+from sensor_msgs.msg import Image, CameraInfo, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
-from geometry_msgs.msg import PoseStamped, Point32
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Header, Float32, String
 from cv_bridge import CvBridge
-import sensor_msgs_py.point_cloud2 as pc2
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
@@ -786,12 +784,9 @@ class PlanningNode(Node):
         # angular.x is a backward-segment flag (the reverse vocabulary).
         # Open-space forward-speed target (capture-speed prior or vx_max fallback), so
         # cmd_vel_control caps to the same prior-driven ceiling instead of a static one.
-        self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
-        self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
-        self.occupancy_cloud_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels', 10)
-        self.occupancy_cloud_esdf_pub = self.create_publisher(PointCloud2, '/planning/occupied_voxels_with_esdf', 10)
-        self.occupancy_grid_pub = self.create_publisher(OccupancyGrid, '/planning/occupancy_grid', 10)
+        # the raw grid, for planning_vis_node's views
+        self.occupancy_3d_pub = self.create_publisher(Image, '/planning/occupancy_3d', 10)
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
@@ -1072,32 +1067,6 @@ class PlanningNode(Node):
         """World control-center position derived from camera pose T_cam->world."""
         return T[:3, 3] - T[:3, :3] @ ROBOT_CONFIG.cam_offset_3d
 
-    def publish_footprint(self, T, stamp):
-        """Publish robot footprint rectangle as a PointCloud for RViz."""
-        forward = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-        left    = T[:3, :3] @ np.array([1.0, 0.0, 0.0])
-        center  = self.camera_to_robot_center(T)
-        fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
-        corners = [
-            center + forward * fl + left * hw,
-            center + forward * fl - left * hw,
-            center - forward * rl - left * hw,
-            center - forward * rl + left * hw,
-        ]
-        points = []
-        for i in range(4):
-            a, b = corners[i], corners[(i + 1) % 4]
-            for k in range(21):
-                t = k / 20
-                p = (1.0 - t) * a + t * b
-                points.append(Point32(x=float(p[0]), y=float(p[1]), z=float(p[2])))
-        msg = PointCloud()
-        msg.header = Header()
-        msg.header.stamp = stamp
-        msg.header.frame_id = "world"
-        msg.points = points
-        self.footprint_pub.publish(msg)
-
     def _footprint_hits(self, T, obstacle_mask):
         """Which footprint samples are standing on obstacle cells, as body-frame
         (forward, left) offsets. Sampled on the same lattice
@@ -1175,73 +1144,6 @@ class PlanningNode(Node):
         msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
         self.obstacle_mask_pub.publish(msg)
 
-    def publish_height_map(self, origin, esdf_map, header):
-        height_normalized = np.clip(esdf_map / 2.0 * 255, 0, 255).astype(np.uint8)
-        color_image = cv2.applyColorMap(height_normalized, cv2.COLORMAP_JET)
-        img_msg = self.bridge.cv2_to_imgmsg(color_image, encoding="bgr8")
-        img_msg.header = header
-        self.height_map_pub.publish(img_msg)
-
-    def publish_2d_occupancy_grid(self, ESDF_map, origin, resolution, stamp, z_offset=0.0):
-        occupancy_grid_msg = OccupancyGrid()
-        occupancy_grid_msg.header = Header()
-        occupancy_grid_msg.header.stamp = stamp
-        occupancy_grid_msg.header.frame_id = "world"
-        occupancy_grid_msg.info.resolution = resolution
-        occupancy_grid_msg.info.width = ESDF_map.shape[1]
-        occupancy_grid_msg.info.height = ESDF_map.shape[0]
-        occupancy_grid_msg.info.origin.position.x = origin[0]
-        occupancy_grid_msg.info.origin.position.y = origin[1]
-        occupancy_grid_msg.info.origin.position.z = origin[2] + z_offset
-        occupancy_grid_msg.info.origin.orientation.w = 1.0
-        flat_data = np.where(ESDF_map <= 0.00, 100, np.clip(((1-ESDF_map/0.5) * 120).astype(int), 0, 120)).ravel(order="F").tolist()
-        occupancy_grid_msg.data = flat_data
-        self.occupancy_grid_pub.publish(occupancy_grid_msg)
-
-    def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
-        occupied = np.argwhere(grid3d > 0.1)
-        # vectorized operation to avoid for loop
-        if len(occupied) == 0:
-            points = []
-        else:
-            origin_np = np.array(origin)
-            world_coords = origin_np + occupied * resolution
-            points = world_coords.tolist()
-
-        header = Header()
-        header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = "world"
-        pc2_msg = pc2.create_cloud_xyz32(header, points)
-        self.occupancy_cloud_pub.publish(pc2_msg)
-
-    def publish_3d_occupancy_cloud_with_esdf(self, grid3d, ESDF_map, resolution=0.1, origin=(0, 0, 0), max_dist=1.0):
-        X, Y, Z = grid3d.shape
-        # ground
-        gx, gy = np.meshgrid(np.arange(X), np.arange(Y), indexing='ij')
-        ground = np.stack([gx.ravel(), gy.ravel(), np.zeros_like(gx).ravel()+2], axis=-1)
-        coords = ground * resolution + np.asarray(origin)
-        # query ESDF
-        ix, iy = ground[:, 0].astype(int), ground[:, 1].astype(int)
-        valid = (0 <= ix) & (ix < ESDF_map.shape[0]) & (0 <= iy) & (iy < ESDF_map.shape[1])
-        dist = np.full(len(ground), max_dist, dtype=np.float32)
-        dist[valid] = np.clip(ESDF_map[ix[valid], iy[valid]], 0, max_dist)
-        # map color
-        v = np.uint8((1 - dist / max_dist) * 255)
-        colors = cv2.applyColorMap(v.reshape(-1, 1), cv2.COLORMAP_JET).reshape(-1, 3)
-        rgb = (colors[:, 2].astype(np.uint32) << 16) | (colors[:, 1].astype(np.uint32) << 8) | colors[:, 0].astype(np.uint32)
-        # build point cloud
-        dtype = np.dtype([('x', np.float32), ('y', np.float32), ('z', np.float32), ('rgb', np.uint32)])
-        points = np.zeros(coords.shape[0], dtype=dtype)
-        points['x'], points['y'], points['z'] = coords[:, 0], coords[:, 1], coords[:, 2]
-        points['rgb'] = rgb
-        header = Header(stamp=self.get_clock().now().to_msg(), frame_id="world")
-        fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.UINT32, count=1),
-        ]
-        self.occupancy_cloud_esdf_pub.publish(pc2.create_cloud(header, fields, points))
 
     def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
         center = self.origin + np.array(self.grid_shape) * self.resolution / 2
@@ -1346,20 +1248,13 @@ class PlanningNode(Node):
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
-            # Building the cloud costs more than the raycasting that produced it,
-            # and its only consumer is a view that is usually closed.
-            if self.occupancy_cloud_pub.get_subscription_count() > 0:
-                self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
-
         with Timer(name='obstacle map', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             min_span_map, obstacle_mask, ESDF_map = self.build_obstacle_and_esdf(T)
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
-            self.publish_3d_occupancy_cloud_with_esdf(self.occupancy_grid, ESDF_map, self.resolution, self.origin)
-            self.publish_height_map(T[:3,3], ESDF_map, depth_msg.header)
-            self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
-            self.publish_footprint(T, depth_msg.header.stamp)
+            if self.occupancy_3d_pub.get_subscription_count() > 0:
+                self.occupancy_3d_pub.publish(self.bridge.cv2_to_imgmsg(self.occupancy_grid, header=depth_msg.header))
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
