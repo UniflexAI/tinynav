@@ -75,8 +75,8 @@ class RobotConfig:
 
     @property
     def arrival_radius(self):
-        """The arrival circles' radius: the body's width."""
-        return 2.0 * self.half_width
+        """The arrival circles' radius: three half-widths."""
+        return 3.0 * self.half_width
 
     def arrival_centres(self, radius):
         """(front, rear) forward offsets from the control centre of the two circles
