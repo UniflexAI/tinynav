@@ -630,7 +630,7 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
 
 #: map_node's _ARRIVE_M, and _ARRIVE_TICKS at its 0.5 s nav tick: the time to go is
 #: the time until its arrival fires. A test holds them equal.
-ARRIVE_M = 0.3
+ARRIVE_M = ROBOT_CONFIG.arrival_radius
 ARRIVE_TICKS = 1
 ARRIVE_TICK_S = 0.5
 #: Route metres one unit of clearance score is worth.

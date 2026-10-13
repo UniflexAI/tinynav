@@ -73,6 +73,11 @@ class RobotConfig:
         """Returns (front_len, rear_len, half_w) relative to control center."""
         return self.front_len, self.rear_len, self.half_width
 
+    @property
+    def arrival_radius(self):
+        """The arrival circles' radius: the body's width."""
+        return 2.0 * self.half_width
+
     def arrival_centres(self, radius):
         """(front, rear) forward offsets from the control centre of the two circles
         arrival is judged on: each `radius` in from its end of the body, so the circles

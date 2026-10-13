@@ -857,7 +857,8 @@ def test_the_time_cost_arrives_where_map_node_does():
     src = open(os.path.join(os.path.dirname(__file__), '..', 'tinynav', 'core', 'map_node.py')).read()
     node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
                 and getattr(n.targets[0], 'id', None) == '_ARRIVE_M')
-    assert ast.literal_eval(node.value) == ARRIVE_M
+    assert ast.unparse(node.value) == 'ROBOT_CONFIG.arrival_radius'
+    assert ARRIVE_M == ROBOT_CONFIG.arrival_radius
     assert "os.environ.get('TINYNAV_ARRIVE_TICKS', '%d')" % ARRIVE_TICKS in src
     assert 'create_timer(%s, self.nav_target_timer_callback)' % ARRIVE_TICK_S in src
 

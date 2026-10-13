@@ -180,7 +180,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
     return []
 
 # Arrival radius of the two circles along the body (RobotConfig.arrival_centres).
-_ARRIVE_M = 0.3
+_ARRIVE_M = ROBOT_CONFIG.arrival_radius
 # How many consecutive ticks must agree that the robot is inside that radius.
 # One: the timer runs at ~0.8Hz under relocalization rather than its nominal 2Hz,
 # and a second tick came 1.2-2.4s later -- the robot drove through the radius and
