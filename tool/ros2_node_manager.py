@@ -20,6 +20,9 @@ class Ros2NodeManager(Node):
         
         self.state_timer = self.create_timer(1.0, self._pub_state)
         self.process_monitor_timer = self.create_timer(2.0, self._check_processes)
+        # The planning views (the nav bag records one), for this manager's lifetime rather
+        # than per mode: the node idles while planning is down.
+        self._planning_vis_proc = self._spawn(['uv', 'run', 'python', '/tinynav/tinynav/core/planning_vis_node.py'])
         self._pub_state()
     
     def _cmd_cb(self, msg):
@@ -182,6 +185,8 @@ class Ros2NodeManager(Node):
     
     def destroy_node(self):
         self._stop_all()
+        if self._planning_vis_proc.poll() is None:
+            os.killpg(os.getpgid(self._planning_vis_proc.pid), 15)
         super().destroy_node()
 
 def main(args=None):
