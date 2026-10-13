@@ -38,12 +38,11 @@ class LooperBridgeNode(Node):
         self._missing_input_counter = 0
 
         self.sensor_qos = QoSProfile(depth=50, reliability=ReliabilityPolicy.RELIABLE)
-        # Best effort for the images: a frame lost on the Looper link is dropped, not
-        # retransmitted. Reliable held every later frame behind the retransmit and then
-        # released them together -- depth arrived in pairs 10ms apart with gaps to 0.8s
-        # on 65, while the Looper captures it at a steady ~10Hz.
+        # Reliable, but only the newest two. With fifty queued the bridge throttled the
+        # Looper's writer, and depth reached every reader in pairs 10ms apart with gaps
+        # to 0.8s on 65; best effort lost half the frames, a fragment at a time.
         self.image_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST, depth=5, reliability=ReliabilityPolicy.BEST_EFFORT
+            history=HistoryPolicy.KEEP_LAST, depth=2, reliability=ReliabilityPolicy.RELIABLE
         )
         self.tf_static_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
