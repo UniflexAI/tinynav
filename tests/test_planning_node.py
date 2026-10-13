@@ -858,14 +858,14 @@ def test_the_time_cost_arrives_where_map_node_does():
     node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
                 and getattr(n.targets[0], 'id', None) == '_ARRIVE_M')
     assert ast.unparse(node.value) == 'ROBOT_CONFIG.arrival_radius'
-    assert ARRIVE_M == ROBOT_CONFIG.arrival_radius
+    assert ARRIVE_M == ROBOT_CONFIG.planned_arrival_radius < ROBOT_CONFIG.arrival_radius
     assert "os.environ.get('TINYNAV_ARRIVE_TICKS', '%d')" % ARRIVE_TICKS in src
     assert 'create_timer(%s, self.nav_target_timer_callback)' % ARRIVE_TICK_S in src
 
 
 def test_the_time_cost_arrives_on_the_tick_map_node_does():
     """Closing on a target, the scorer's arrival lands on the first sample whose
-    camera pose map_node's rule (RobotConfig.arrival_distance) calls arrived: nose
+    camera pose is inside map_node's circles (RobotConfig.arrival_distance) at ARRIVE_M: nose
     first, where the camera's circle leads, and tail first, where the control
     centre's does."""
     origin, resolution, dt = np.array([0.0, 0.0]), 0.1, 0.1

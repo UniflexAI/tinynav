@@ -790,7 +790,7 @@ class MapNode(Node):
         approach, the control centre's when the planner has parked the body on a POI
         the camera has passed. `pos` is the camera's; the control centre comes from
         the pose the caller built it from. planning_node predicts arrival with the
-        same circles, so the time cost and this rule agree on when a leg ends."""
+        same circles at a tighter radius (RobotConfig.planned_arrival_radius)."""
         pose = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         inside = (ROBOT_CONFIG.arrival_distance(pose, poi) < _ARRIVE_M
                   and abs(poi[2] - pos[2]) < 2.0)

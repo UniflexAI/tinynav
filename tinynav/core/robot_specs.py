@@ -78,6 +78,12 @@ class RobotConfig:
         """Radius of the two arrival circles (arrival_distance): three half-widths."""
         return 3.0 * self.half_width
 
+    @property
+    def planned_arrival_radius(self):
+        """The radius planning rolls its trajectories into: two half-widths, tighter
+        than arrival_radius, so a row has to head for the target, not graze the circle."""
+        return 2.0 * self.half_width
+
     def arrival_distance(self, T_camera, target_xy):
         """XY distance from `target_xy` to the nearer of the two arrival circle
         centres, the camera and the control centre, for a camera pose."""
