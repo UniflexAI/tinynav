@@ -64,6 +64,87 @@ class PncControlTest(unittest.TestCase):
         ns=lambda t:t.sec*1000000000+t.nanosec
         self.assertEqual(ns(msg.poses[1].header.stamp)-ns(msg.poses[0].header.stamp),100000000)
 
+    def test_update_period_learning_survives_a_stop(self):
+        with patch('tinynav.platforms.cmd_vel_control.time.monotonic',return_value=100.):
+            self.node.path_callback(self.path(.3))
+            self.node._stop()
+        with patch('tinynav.platforms.cmd_vel_control.time.monotonic',return_value=100.45):
+            self.node.path_callback(self.path(.3))
+        self.assertGreater(self.node.path_period_ema*3.5,.4)
+        self.node.last_pose_update_time=100.85
+        self.node.prev_cmd.linear.x=.3
+        with patch('tinynav.platforms.cmd_vel_control.time.monotonic',return_value=100.85):
+            self.node.cmd_timer_callback()
+        self.assertGreater(self.sent[-1].linear.x,0.)
+
+    def test_command_advances_along_timed_trajectory(self):
+        msg=self.path(.3)
+        basis=np.array([[0,0,1],[-1,0,0],[0,-1,0]])
+        for i,pose in enumerate(msg.poses):
+            q=Rotation.from_matrix(Rotation.from_euler('z',max(0,i-4)*.05).as_matrix()@basis).as_quat()
+            pose.pose.orientation.x,pose.pose.orientation.y,pose.pose.orientation.z,pose.pose.orientation.w=map(float,q)
+        self.node.path_period_ema=.2
+        self.node.path_callback(msg)
+        self.assertAlmostEqual(self.node.latest_cmd.angular.z,0.)
+        now=time.monotonic()
+        self.node.last_path_update_time=now-.45
+        self.node.last_pose_update_time=now
+        self.node.prev_cmd.linear.x=.3
+        with patch('tinynav.platforms.cmd_vel_control.time.monotonic',return_value=now):
+            self.node.cmd_timer_callback()
+        self.assertAlmostEqual(self.sent[-1].angular.z,.5,places=5)
+
+    def test_deadzone_tolerates_velocity_conversion_roundoff(self):
+        self.node.path_callback(self.path(.1))
+        self.node.timed_commands[0,0]=self.node.min_effective_linear_speed-1e-12
+        self.node.cmd_timer_callback()
+        self.assertAlmostEqual(self.sent[-1].linear.x,self.node.min_effective_linear_speed,places=6)
+
+    def test_rate_adaptation_preserves_minimum_forward_speed(self):
+        self.node.path_period_ema=.5
+        self.node.path_callback(self.path(self.node.robot.min_linear_vel))
+        self.node.cmd_timer_callback()
+        self.assertAlmostEqual(self.sent[-1].linear.x,self.node.robot.min_linear_vel,places=5)
+
+    def test_slow_planner_period_survives_point_four_seconds(self):
+        self.node.path_period_ema=.4
+        self.node.path_callback(self.path(.3,.5))
+        now=time.monotonic()
+        self.node.last_path_update_time=now-.4
+        self.node.last_pose_update_time=now
+        self.node.prev_cmd.linear.x=.3
+        with patch('tinynav.platforms.cmd_vel_control.time.monotonic',return_value=now):
+            self.node.cmd_timer_callback()
+        self.assertGreater(self.sent[-1].linear.x,0.)
+        self.assertAlmostEqual(self.sent[-1].angular.z,.25,places=5)
+
+    def test_watchdog_still_caps_gap_at_point_eight_seconds(self):
+        self.node.path_period_ema=.6
+        self.node.path_callback(self.path(.3))
+        now=time.monotonic()
+        self.node.last_path_update_time=now-.81
+        self.node.last_pose_update_time=now
+        with patch('tinynav.platforms.cmd_vel_control.time.monotonic',return_value=now):
+            self.node.cmd_timer_callback()
+        self.assertEqual(self.sent[-1].linear.x,0.)
+
+    def test_timed_reverse_stops_at_planned_end(self):
+        from tinynav.core.continuous_planner import ContinuousPlanner
+        q=Rotation.from_matrix(np.array([[0,0,1],[-1,0,0],[0,-1,0]])).as_quat()
+        trajectory,_=ContinuousPlanner.reverse(np.zeros(3),q,np.full((100,100),10.),np.array([-2.5,-2.5,0.]),.05,self.node.robot,np.ones((100,100),bool))
+        messages=[]
+        header=Header(frame_id='world',stamp=self.node.get_clock().now().to_msg())
+        PlanningNode.publish_selected_path(SimpleNamespace(path_pub=SimpleNamespace(publish=messages.append)),np.array([trajectory]),[0],header,stride=1)
+        self.node.path_period_ema=.4
+        self.node.path_callback(messages[0])
+        self.assertLessEqual(self.node.timed_valid_receive_s,.8)
+        now=time.monotonic()
+        self.node.last_path_update_time=now-.8
+        self.node.last_pose_update_time=now
+        with patch('tinynav.platforms.cmd_vel_control.time.monotonic',return_value=now):
+            self.node.cmd_timer_callback()
+        self.assertEqual(self.sent[-1].linear.x,0.)
+
     def test_dense_timing_and_turn(self):
         self.node.path_callback(self.path(.3,.5))
         self.assertTrue(self.node.timed_path)

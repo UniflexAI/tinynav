@@ -13,15 +13,23 @@ simulator controller. GO2 SDK transport is not launched on spark.
 ### Trajectory contract
 
 Continuous paths publish every 0.1-second pose with a distinct future timestamp.
-The first pose timestamp is the source depth/odometry time. Frame is `world`;
+Path and pose timestamps use the ROS publication clock; sensor timestamps may
+use a separate hardware epoch. Non-increasing sensor timestamps do not refresh a
+trajectory. The first two sensor frames build occupancy before motion is enabled. Frame is `world`;
 position is control-center position and orientation retains the existing camera
 axis convention. Controller derives velocity from adjacent poses and timestamp
 difference, without depending on a planner environment variable. Old DWA paths
 with identical timestamps retain the 1.0-second legacy interpretation.
 
 Timed paths older than 0.25 seconds, invalid intervals, invalid poses or unexpected
-frames stop control. Timed-path silence for 0.35 seconds stops, rather than emitting
-sub-deadzone slow commands. Odometry silence and legacy-path expiry also stop.
+frames stop control. Timed-path silence stops at a period-adaptive deadline: at least 0.35 seconds,
+scaled by observed receive period, capped at 0.8 seconds and the first planned
+stationary segment (minus publication age). Receive-period learning survives
+stops. Commands advance through the timed sequence, rather than indefinitely
+holding its first segment. For slower updates, forward playback rate is reduced
+using a 0.2-second reference period, without dropping below the forward deadzone.
+Reverse playback remains at its validated 0.3 m/s. No extrapolation is allowed
+beyond the validated horizon. Odometry silence and legacy-path expiry also stop.
 Navigation deactivation sends one stop then releases /cmd_vel for manual control.
 Pause and resume discard prior commands; resume requires a new path. A stationary
 path commands an immediate stop, without leaving an acceleration-limited tail.
@@ -95,3 +103,14 @@ physical stopping distance, sensor delays and planner latency on the target robo
 B2 L-turn behavior and Nano performance are not solved by this interface change.
 Map dimensions and optimization length have not yet been scaled by length/speed.
 Acceleration/jerk-constrained trajectory optimization is not implemented.
+
+## Low-rate controller regression
+
+33 targeted tests pass (23 control, 7 continuous-planner, 3 mapping/timing).
+With WebSim sensor_period_s=0.4 (approximately 0.5 s between frames on its
+8 Hz timer), final L turn reached in 52.6 s with 0.091 m target error and no
+collision. Raw samples: `docs/pnc-rate-adaptive-final.json`. Initial low-rate
+trials exposed unsafe startup mapping and endpoint deadzone roundoff; the final
+version waits for three sensor frames before moving and tolerates 1e-6 velocity
+roundoff at the minimum-speed boundary. These are simulation regressions, not
+physical GO2 validation.

@@ -1,0 +1,2069 @@
+{
+  "elapsed": 52.58627855498344,
+  "distance": 0.09052197338721749,
+  "collision": false,
+  "samples": [
+    {
+      "robot_xy": [
+        0.0,
+        0.0
+      ],
+      "selected_param": [
+        0.0,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {}
+    },
+    {
+      "robot_xy": [
+        0.0,
+        0.0
+      ],
+      "selected_param": [
+        0.0,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "map_warmup",
+        "frames": 1
+      }
+    },
+    {
+      "robot_xy": [
+        0.0,
+        0.0
+      ],
+      "selected_param": [
+        0.0,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "map_warmup",
+        "frames": 2
+      }
+    },
+    {
+      "robot_xy": [
+        0.0,
+        0.0
+      ],
+      "selected_param": [
+        0.0,
+        0.6616112135942789
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 89.58085207268596,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 62,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.0,
+        0.0
+      ],
+      "selected_param": [
+        0.0,
+        0.5700107746342485
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 62.49424791894853,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 63,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.0,
+        0.0
+      ],
+      "selected_param": [
+        0.0,
+        0.5032036211020585
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 59.635784942656755,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 62,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.027820132258689224,
+        0.032386445676677096
+      ],
+      "selected_param": [
+        0.12490380480447123,
+        0.45394737505252103
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 73.69904615916312,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 69,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.046188816587934965,
+        0.06104642540329548
+      ],
+      "selected_param": [
+        0.0,
+        -0.4211158262984194
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 75.8674789685756,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 79,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.06336520881024002,
+        0.08057284810766359
+      ],
+      "selected_param": [
+        0.10799421274640061,
+        -0.4147464357704885
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 75.82712592557073,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 81,
+        "recovery_count": 0,
+        "stalled": true
+      }
+    },
+    {
+      "robot_xy": [
+        0.10854509275398,
+        0.11822204503369058
+      ],
+      "selected_param": [
+        0.12273571871937544,
+        -0.37953001666113584
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 69.70373494550586,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 78,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.17318247075705887,
+        0.15333725427678646
+      ],
+      "selected_param": [
+        0.16661307329988043,
+        -0.36419568271216235
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 75.24181390181184,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 78,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.25985967818807887,
+        0.18171594728980656
+      ],
+      "selected_param": [
+        0.19833934000477194,
+        -0.303552174414538
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 64.66562300920486,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 77,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.3577423579488257,
+        0.19785918393408541
+      ],
+      "selected_param": [
+        0.20059576207785101,
+        -0.20619766361039
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 58.253049151971936,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 74,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.45733979280287695,
+        0.20335971751064985
+      ],
+      "selected_param": [
+        0.20044101320451482,
+        -0.12604092616807339
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 55.11560896411538,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 78,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.5565503236540253,
+        0.20290146255541078
+      ],
+      "selected_param": [
+        0.19832160367304905,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 58.29746508970857,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 76,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.654421176685542,
+        0.20206156563815397
+      ],
+      "selected_param": [
+        0.19525392128552876,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 58.70428099296987,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 74,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.7512938296864025,
+        0.20123023496000295
+      ],
+      "selected_param": [
+        0.19338606053822346,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 56.774825090542436,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 73,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.8451811891403588,
+        0.19884790311839373
+      ],
+      "selected_param": [
+        0.18747018579786934,
+        -0.15085428660397524
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 55.34280906431377,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 71,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        0.9392352019139096,
+        0.19068846101454842
+      ],
+      "selected_param": [
+        0.1892955215564729,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 57.63042508624494,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 73,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.0328865379796093,
+        0.1821256563666187
+      ],
+      "selected_param": [
+        0.1877440891232284,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 55.02023291774094,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 70,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.1257295738021547,
+        0.17363675687978727
+      ],
+      "selected_param": [
+        0.1861783834690675,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 51.87137005850673,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 68,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.2177068039618872,
+        0.1661771928186072
+      ],
+      "selected_param": [
+        0.1844243758607925,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 50.80316192470491,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 67,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.3095602667298447,
+        0.16030611173796971
+      ],
+      "selected_param": [
+        0.1830865460188161,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 64.2112409695983,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 65,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.423288480496779,
+        0.15477386107557145
+      ],
+      "selected_param": [
+        0.18284920975932104,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 47.629259061068296,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 63,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.5147351546283183,
+        0.15171365835933798
+      ],
+      "selected_param": [
+        0.1831541225308686,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 46.77167488262057,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 61,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.6056038340107994,
+        0.15014220237172682
+      ],
+      "selected_param": [
+        0.1821775134474783,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 45.81177094951272,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 59,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.6953684085078975,
+        0.15177975597358753
+      ],
+      "selected_param": [
+        0.17969532460182364,
+        0.13491195340677622
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 44.24829897470772,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 57,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.7861777701992647,
+        0.1573015067024537
+      ],
+      "selected_param": [
+        0.18199151331900282,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 53.41660184785724,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 72,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.8769911477714187,
+        0.16282350162082024
+      ],
+      "selected_param": [
+        0.1819503289179709,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 53.90028189867735,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 74,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        1.967385737788888,
+        0.16832003175843896
+      ],
+      "selected_param": [
+        0.18106992747932277,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 56.69975304044783,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 72,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.057498012329818,
+        0.17379939543150694
+      ],
+      "selected_param": [
+        0.18052291917206065,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 58.270809007808566,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 71,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.147802297442888,
+        0.17929043449240845
+      ],
+      "selected_param": [
+        0.18101042279287483,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 47.32953105121851,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 69,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.2378694300837902,
+        0.18476705326875276
+      ],
+      "selected_param": [
+        0.18055269835897234,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 46.76004219800234,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 70,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.327599161896217,
+        0.1902231560626493
+      ],
+      "selected_param": [
+        0.18009630590535017,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 42.23583498969674,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 67,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.417316374684669,
+        0.19413362674048987
+      ],
+      "selected_param": [
+        0.1799012289199106,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 42.15037892572582,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 66,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.505694828021288,
+        0.19439377825889903
+      ],
+      "selected_param": [
+        0.17756975392397611,
+        -0.14028454073271712
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 39.70658709295094,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 69,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.5960029332715524,
+        0.19049094234393624
+      ],
+      "selected_param": [
+        0.18079136763452658,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 39.70658709295094,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 69,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.6841244699170126,
+        0.18533610561141256
+      ],
+      "selected_param": [
+        0.17584742553690252,
+        -0.14076667307546187
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 63.16946493461728,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 65,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.7725327078234367,
+        0.175125153317402
+      ],
+      "selected_param": [
+        0.17891560620124694,
+        0.11181289121534811
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 32.47793298214674,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 63,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.861676270294452,
+        0.1660118584661839
+      ],
+      "selected_param": [
+        0.17760196447194904,
+        0.10629245690531514
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 59.590808814391494,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 61,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        2.9503842072514517,
+        0.15936515899043677
+      ],
+      "selected_param": [
+        0.18003191920263054,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 29.294332023710012,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 59,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.040391500464886,
+        0.15352086936522807
+      ],
+      "selected_param": [
+        0.17588458304587593,
+        0.16861040162261828
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 28.19745196029544,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 58,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.1283536175434983,
+        0.1505700226104707
+      ],
+      "selected_param": [
+        0.1760477517943337,
+        0.17255244353707785
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 24.752749130129814,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 56,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.2167643667896653,
+        0.1548370984507929
+      ],
+      "selected_param": [
+        0.17514273458623805,
+        0.18132301066660483
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 26.69689292088151,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 54,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.3030530539230374,
+        0.16605674698334305
+      ],
+      "selected_param": [
+        0.16934410919880666,
+        0.23348503756980143
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 53.69893787428737,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.405731663006084,
+        0.19243325519126853
+      ],
+      "selected_param": [
+        0.17091899906582964,
+        0.2390707449551393
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 23.593388963490725,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 52,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.485728879121855,
+        0.22468991347804454
+      ],
+      "selected_param": [
+        0.1745434452973883,
+        0.1830322729653596
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 23.03395001217723,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 52,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.5632050813973555,
+        0.2650457744125323
+      ],
+      "selected_param": [
+        0.17338301334334566,
+        0.20157716094371195
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 21.009309915825725,
+        "speed_limit": 0.45,
+        "optimizer_success": false,
+        "guide_points": 51,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.636491664907745,
+        0.31246925390969826
+      ],
+      "selected_param": [
+        0.17590757387340103,
+        0.16524036850844068
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 16.74151816405356,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.7041373252461627,
+        0.3653754500491962
+      ],
+      "selected_param": [
+        0.16449037691333135,
+        0.3014109538266537
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 15.248237876221538,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 51,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.7619159044167785,
+        0.42422941994170715
+      ],
+      "selected_param": [
+        0.16748080205667437,
+        0.2708909968453296
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 15.869101975113153,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.8105989583205626,
+        0.4906015050290531
+      ],
+      "selected_param": [
+        0.1630428221933703,
+        0.3015476347072187
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 14.958494110032916,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 52,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.848511589015248,
+        0.5629598189355234
+      ],
+      "selected_param": [
+        0.16349600840793554,
+        0.3008099938359575
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 15.69379004649818,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 55,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.875667090349273,
+        0.6413497709597767
+      ],
+      "selected_param": [
+        0.1681679927549568,
+        0.2651612907502919
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 13.204365968704224,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.892726322529022,
+        0.7250984802375916
+      ],
+      "selected_param": [
+        0.17304236794501035,
+        0.20498117642329938
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 12.964702909812331,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 54,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9011512687469385,
+        0.812154665995832
+      ],
+      "selected_param": [
+        0.17627679377129216,
+        0.14569850325954473
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 15.70068602450192,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9030233373461547,
+        0.9010073661904745
+      ],
+      "selected_param": [
+        0.17899259972318243,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 19.420766038820148,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 55,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9029601287310904,
+        0.9906861700023373
+      ],
+      "selected_param": [
+        0.1793493018375008,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 18.608094891533256,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9028968901204864,
+        1.0804075307365164
+      ],
+      "selected_param": [
+        0.17899436132801494,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 18.72177398763597,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 54,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9028337825327877,
+        1.1699429994457553
+      ],
+      "selected_param": [
+        0.17895559161416214,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 18.603087170049548,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9027706137876463,
+        1.2595652368065946
+      ],
+      "selected_param": [
+        0.17896151955670067,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 18.794046016409993,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 55,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.902707410567164,
+        1.3492363869200052
+      ],
+      "selected_param": [
+        0.17931242811725237,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 17.712782137095928,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.902644159919273,
+        1.4389748258566863
+      ],
+      "selected_param": [
+        0.17920574220484312,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 18.319230061024427,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 54,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.902580923457092,
+        1.528693138461795
+      ],
+      "selected_param": [
+        0.1789142740928761,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 17.932877875864506,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 54,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9025178659053386,
+        1.61815761742256
+      ],
+      "selected_param": [
+        0.17889966980864677,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 18.258397933095694,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.902439012714919,
+        1.7300325538748196
+      ],
+      "selected_param": [
+        0.17912535620400338,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 18.80526216700673,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 55,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.902375768046435,
+        1.8197625093782144
+      ],
+      "selected_param": [
+        0.17918339072256292,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 17.778319073840976,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 53,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9023125563715624,
+        1.9094456543698806
+      ],
+      "selected_param": [
+        0.17920046120304375,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 17.219437984749675,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 51,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9022493456131375,
+        1.9991274991279118
+      ],
+      "selected_param": [
+        0.17914761308268476,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 17.106238985434175,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 50,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.902186192370521,
+        2.088727741895
+      ],
+      "selected_param": [
+        0.1788275826146691,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 16.492926981300116,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 49,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.902123234406228,
+        2.178050928653844
+      ],
+      "selected_param": [
+        0.17783156647398662,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 16.649789875373244,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 46,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9020602576033916,
+        2.2674008430684913
+      ],
+      "selected_param": [
+        0.17906964462984878,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 14.930414967238903,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 44,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9019970056088473,
+        2.3571411926022128
+      ],
+      "selected_param": [
+        0.1793729142807334,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 14.600943075492978,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 43,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.90193394737394,
+        2.446606640805098
+      ],
+      "selected_param": [
+        0.17809952622029068,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 32.34225302003324,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 40,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9018708854660296,
+        2.536077300171586
+      ],
+      "selected_param": [
+        0.17948739602839256,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 13.30441515892744,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 39,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.901807531970212,
+        2.6259616571758784
+      ],
+      "selected_param": [
+        0.1794126430295602,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 12.307710945606232,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 37,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9017442434333236,
+        2.7157538520748576
+      ],
+      "selected_param": [
+        0.17941247976878857,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 11.242638807743788,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 35,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9016809106415664,
+        2.8056088346761685
+      ],
+      "selected_param": [
+        0.1793606245428994,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 10.9712949488312,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 34,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.901617904134314,
+        2.895000892973471
+      ],
+      "selected_param": [
+        0.1779722902705761,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 25.144621962681413,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 32,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9015550746185887,
+        2.9841418401146296
+      ],
+      "selected_param": [
+        0.17871323103554287,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 23.94839795306325,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 31,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.901491950545152,
+        3.0737006983770447
+      ],
+      "selected_param": [
+        0.18013881381639257,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 9.447439108043909,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 29,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9014286088643413,
+        3.163568292544736
+      ],
+      "selected_param": [
+        0.1796978437243638,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 9.149759076535702,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 27,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.901365338924321,
+        3.2533341026719023
+      ],
+      "selected_param": [
+        0.17974578798473081,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.196000009775162,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 25,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9013021799715837,
+        3.3429424468147237
+      ],
+      "selected_param": [
+        0.17962246158754636,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 7.845646934583783,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 24,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.901238976811907,
+        3.432613510659025
+      ],
+      "selected_param": [
+        0.17972496702847132,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 6.844416027888656,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 21,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.901175840202608,
+        3.52219015449025
+      ],
+      "selected_param": [
+        0.17900153917759068,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 15.609550988301635,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 19,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9010967432801436,
+        3.6344108918782307
+      ],
+      "selected_param": [
+        0.17979881077027515,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 5.543710896745324,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 17,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.901033450143971,
+        3.724209612126808
+      ],
+      "selected_param": [
+        0.18012460726181267,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 4.934752127155662,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 15,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.900970208480444,
+        3.8139353042712716
+      ],
+      "selected_param": [
+        0.17971252731083368,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 4.658736055716872,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 14,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9009070036212314,
+        3.903608779374075
+      ],
+      "selected_param": [
+        0.17969979639230046,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 4.11512004211545,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 12,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9008445999331687,
+        3.9921455728665984
+      ],
+      "selected_param": [
+        0.1708444849714813,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 10.02006302587688,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 10,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.900790254338483,
+        4.069249744804192
+      ],
+      "selected_param": [
+        0.13924343912272735,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 9.235279867425561,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 8,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9007459452438207,
+        4.132114381266983
+      ],
+      "selected_param": [
+        0.11270517829531655,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.745918981730938,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 7,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9007182010915056,
+        4.171477091395234
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.81726318039,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 6,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9007005787209255,
+        4.196479270486672
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.488687919452786,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 5,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.900691703070426,
+        4.2090718216607
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.045342983677983,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 5,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.900682829967471,
+        4.221660758442563
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 7.98095902428031,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 4,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9006740002484217,
+        4.234188143222719
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.541486924514174,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 4,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9006651711665334,
+        4.246714624014842
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.01444798707962,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 4,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9006563033390367,
+        4.259296076108278
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.803119882941246,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 4,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.900647470007784,
+        4.271828585792307
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 7.9015991650521755,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 3,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.900638623822688,
+        4.284379332188085
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 8.048336021602154,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 3,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.9006297655629605,
+        4.2969472097694235
+      ],
+      "selected_param": [
+        0.0,
+        -0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 2.7626240625977516,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 3,
+        "recovery_count": 0,
+        "stalled": false
+      }
+    },
+    {
+      "robot_xy": [
+        3.900620931923827,
+        4.309480156266916
+      ],
+      "selected_param": [
+        0.0,
+        0.0
+      ],
+      "collision": false,
+      "planner_status": {
+        "reason": "ok",
+        "solve_ms": 7.9308319836854935,
+        "speed_limit": 0.45,
+        "optimizer_success": true,
+        "guide_points": 3,
+        "recovery_count": 0,
+        "stalled": true
+      }
+    }
+  ]
+}

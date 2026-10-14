@@ -57,6 +57,11 @@ class CmdVelControlNode(Node):
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = self.robot.reverse_speed
         self.timed_path = False
+        self.last_path_receive_time = None
+        self.timed_valid_receive_s = .35
+        self.timed_commands = None
+        self.timed_publication_age = 0.
+        self.timed_dt = .1
         self._stop_log_times = {}
         self.last_pose_update_time = None
         # Hack: if path first segment points far away from robot heading,
@@ -127,10 +132,20 @@ class CmdVelControlNode(Node):
         stale_slow_s = max(self.path_stale_slow_s, self.path_period_ema * self.path_stale_slow_factor)
         stale_stop_s = max(self.path_stale_stop_s, self.path_period_ema * self.path_stale_stop_factor)
         if self.timed_path:
-            stale_slow_s = .35
+            stale_slow_s = min(.8, stale_slow_s, self.timed_valid_receive_s)
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
         target_cmd.angular.z = self.latest_cmd.angular.z
+        if self.timed_path and self.timed_commands is not None and self.last_path_update_time is not None:
+            elapsed = now - self.last_path_update_time + self.timed_publication_age
+            scale = 1. if self.latest_cmd.linear.x < 0. else min(1., .2/max(self.path_period_ema,.001))
+            if self.latest_cmd.linear.x > 1e-6:
+                scale = max(scale,min(1.,self.min_effective_linear_speed/self.latest_cmd.linear.x))
+            index = min(len(self.timed_commands)-1, max(0, int(elapsed*scale/self.timed_dt)))
+            target_cmd.linear.x, target_cmd.angular.z = self.timed_commands[index]*scale
+        if self.timed_path and self.timed_commands is not None and self.timed_valid_receive_s <= 0.:
+            self._stop("zero_trajectory planner requested stop")
+            return
         pose_age = float("inf") if self.last_pose_update_time is None else now - self.last_pose_update_time
         if age > min(stale_stop_s, .8) or pose_age > .8:
             self._stop(f"input_timeout path_age={age:.3f}s odometry_age={pose_age:.3f}s")
@@ -170,13 +185,13 @@ class CmdVelControlNode(Node):
         # Linear x: robot cannot execute tiny non-zero speeds reliably.
         # When engaging forward motion, snap to +min; when stopping/decaying, snap to 0.
         if 0.0 < out.linear.x < self.min_effective_linear_speed:
-            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed else 0.0
+            out.linear.x = self.min_effective_linear_speed if target_cmd.linear.x >= self.min_effective_linear_speed - 1e-6 else 0.0
         elif abs(out.linear.x) < self.min_effective_linear_speed:
             out.linear.x = 0.0
 
         # Angular z: same idea; tiny requested turns snap to executable min, decays snap to 0.
         if 0.0 < abs(out.angular.z) < self.min_effective_angular_speed:
-            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed:
+            if abs(target_cmd.angular.z) >= self.min_effective_angular_speed - 1e-6:
                 out.angular.z = float(np.sign(target_cmd.angular.z) * self.min_effective_angular_speed)
             else:
                 out.angular.z = 0.0
@@ -202,10 +217,11 @@ class CmdVelControlNode(Node):
         ros_now = self.get_clock().now().to_msg()
         self.last_path_time = ros_now.sec + ros_now.nanosec * 1e-9
         now_mono = time.monotonic()
-        if self.last_path_update_time is not None:
-            period = np.clip(now_mono - self.last_path_update_time, 0.05, 0.5)
+        if self.last_path_receive_time is not None:
+            period = np.clip(now_mono - self.last_path_receive_time, 0.05, .8)
             self.path_period_ema = 0.85 * self.path_period_ema + 0.15 * float(period)
         self.last_path_update_time = now_mono
+        self.last_path_receive_time = now_mono
 
         def msg2np(msg):
             T = np.eye(4)
@@ -242,6 +258,32 @@ class CmdVelControlNode(Node):
                 return
         else:
             dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
+        self.timed_commands = None
+        if self.timed_path:
+            poses = msg.poses
+            positions = np.array([[v.pose.position.x,v.pose.position.y,v.pose.position.z] for v in poses])
+            quats = np.array([[v.pose.orientation.x,v.pose.orientation.y,v.pose.orientation.z,v.pose.orientation.w] for v in poses])
+            stamps = np.array([ns(v.header.stamp) for v in poses],dtype=np.int64)
+            intervals = np.diff(stamps)*1e-9
+            if not np.all(np.isfinite(positions)) or not np.all(np.isfinite(quats)) or np.any(np.linalg.norm(quats,axis=1)<1e-6) or not np.allclose(intervals,dt,atol=1e-6):
+                self._stop("invalid_timed_sequence")
+                return
+            rotations = R.from_quat(quats)
+            forwards = rotations.as_matrix()[:-1,:,2]
+            speeds = np.sum(np.diff(positions,axis=0)*forwards,axis=1)/dt
+            yaws = -(rotations[:-1].inv()*rotations[1:]).as_rotvec()[:,1]/dt
+            if np.any((speeds < -1e-6) & (np.abs(speeds+self.fixed_reverse_speed)>.001)):
+                self._stop("reverse_speed_mismatch in timed sequence")
+                return
+            speeds[np.abs(speeds)<1e-6] = 0.
+            self.timed_commands = np.column_stack([np.clip(speeds,-self.fixed_reverse_speed,self.max_forward_speed),np.clip(yaws,-self.max_angular_speed,self.max_angular_speed)])
+            stationary = np.flatnonzero((np.abs(speeds)<1e-6)&(np.abs(yaws)<1e-6))
+            valid_s = len(intervals)*dt
+            if len(stationary):
+                valid_s = min(valid_s,int(stationary[0])*dt)
+            self.timed_valid_receive_s = max(0.,valid_s-max(age_ros,0.))
+            self.timed_publication_age = max(age_ros,0.)
+            self.timed_dt = dt
         linear_velocity_vec = p / dt
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt

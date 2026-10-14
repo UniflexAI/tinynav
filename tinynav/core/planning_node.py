@@ -330,6 +330,7 @@ class PlanningNode(Node):
             raise ValueError(f"Unknown planner: {self.planner_type}")
         self.continuous_planner = ContinuousPlanner()
         self.last_sensor_stamp_ns = None
+        self.sensor_frame_count = 0
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.status_pub = self.create_publisher(String, '/planning/status', 10)
@@ -609,6 +610,7 @@ class PlanningNode(Node):
                 self.get_logger().warning("Repeated or backwards sensor stamp; withholding trajectory", throttle_duration_sec=2.)
                 return
             self.last_sensor_stamp_ns = sensor_stamp_ns
+            self.sensor_frame_count += 1
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
@@ -641,7 +643,9 @@ class PlanningNode(Node):
             init_q = R.from_matrix(T[:3, :3]).as_quat()
             self.last_T, self.last_stamp = T.copy(), stamp
             output, info = (None, {"reason": "no_target"})
-            if self.target_pose is not None:
+            if self.sensor_frame_count < 3:
+                info = {"reason": "map_warmup", "frames": self.sensor_frame_count}
+            elif self.target_pose is not None:
                 output, info = self.continuous_planner.step(
                     init_p, init_q, self.target_pose, ESDF_map, self.origin,
                     self.resolution, ROBOT_CONFIG, stamp,

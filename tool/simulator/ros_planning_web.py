@@ -236,6 +236,7 @@ class RosPlanningSimNode(Node):
         self.control_xy = list(self.config["start"]["xy"])
         self.yaw_deg = float(self.config["start"]["yaw_deg"])
         self.last_update = time.monotonic()
+        self.last_sensor_publish = -float("inf")
         self.last_depth = np.zeros((100, 160), dtype=np.float32)
         self.last_cmd = Twist()
         self.last_path: list[list[float]] = []
@@ -414,7 +415,8 @@ class RosPlanningSimNode(Node):
         depth_msg.header.stamp = stamp
         depth_msg.header.frame_id = "camera"
         odom_msg = odom_from_T(T_cam, stamp)
-        if config.get("sensor_enabled", True):
+        if config.get("sensor_enabled", True) and time.monotonic() - self.last_sensor_publish >= float(config.get("sensor_period_s", 0.)):
+            self.last_sensor_publish = time.monotonic()
             self.depth_pub.publish(depth_msg)
             self.odom_visual_pub.publish(odom_msg)
             self.odom_pub.publish(odom_msg)
