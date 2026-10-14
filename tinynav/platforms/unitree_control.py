@@ -35,7 +35,8 @@ _SWITCH_GAIT_ROBOT_MODELS = ('b2', 'b2w')
 # e.g. the remote, leaves 100: Move walks there, but a slow turn in place does not.
 _WALKING_STATE = {'go2': 2010, 'go2w': 2010}
 #: The gait a quadruped walks in, asserted at every stand and motion start: ClassicWalk
-#: or FreeWalk. go2 holds about 0.8 of a commanded forward speed in classic (65,
+#: or FreeWalk. `play gait <name>` on rt/service/command changes it, and /chassis/gait
+#: (latched) says which one the sport service last accepted. go2 holds about 0.8 of a commanded forward speed in classic (65,
 #: 2026-10-13) and turns in place slowly; outside it a slow turn in place does not
 #: execute (_WALKING_STATE).
 _GAITS = ('classic', 'free')
@@ -319,10 +320,11 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        gait_name, gait_call = (('ClassicWalk', lambda: self.sport_client.ClassicWalk(True))
-                                if self.classic_walk else ('FreeWalk', self.sport_client.FreeWalk))
+        self._gait_steps = {'classic': ('ClassicWalk', lambda: self.sport_client.ClassicWalk(True)),
+                            'free': ('FreeWalk', lambda: self.sport_client.FreeWalk())}
+        self.walk_gait = 'classic' if self.classic_walk else 'free'
         if self.is_quadruped:
-            gait_call()
+            self._gait_steps[self.walk_gait][1]()
         # Whether the walking gait is known to be set: a motion start's ClassicWalk
         # returned 0 and no sit or stand has run since. While it is, a motion start
         # asks for nothing -- a repeat is redundant (code -1), and each is a reply RPC
@@ -347,8 +349,9 @@ class Ros2UnitreeManagerNode(Node):
         self.gait = None
         self.stand_gait = None
         if self.is_quadruped:
-            self.stand_gait = (gait_name, gait_call)
-            self.gait = GaitWorker(gait_call, self.logger, name=gait_name,
+            self.stand_gait = self._gait_steps[self.walk_gait]
+            # The gait in force when the request runs, not the one at startup.
+            self.gait = GaitWorker(lambda: self.stand_gait[1](), self.logger, name='walk gait',
                                    on_result=self._note_gait)
             self.gait.start()
 
@@ -368,6 +371,11 @@ class Ros2UnitreeManagerNode(Node):
             Float32, '/battery',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
+        self.publisher_gait = self.create_publisher(
+            String, '/chassis/gait',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        if self.is_quadruped:
+            self._say_gait()
 
         lowstate_type, lowstate_topic = _lowstate_type_and_topic(robot_model)
         # The SOC moves by a percent over minutes.
@@ -503,6 +511,28 @@ class Ros2UnitreeManagerNode(Node):
                 steps = [('Damp', self.sport_client.Damp),
                          ('Squat2StandUp', self._squat_to_stand)]
             self._play_steps('Standing', steps, RobotStatus.STANDUP)
+        elif action_key == "gait" and self.is_quadruped and words[2:] and words[2] in _GAITS:
+            self._switch_gait(words[2])
+
+    def _switch_gait(self, name):
+        """Walk in `name` from now on: every later stand and motion start asserts it.
+        Said on /chassis/gait once the sport service accepts it. A refusal keeps the
+        gait and says it again, so a caller waiting for `name` hears an answer."""
+        step = self._gait_steps[name]
+        code = step[1]()
+        if code == 0:
+            self.walk_gait, self.classic_walk, self.stand_gait = name, name == 'classic', step
+            # Called standing, so it holds -- unlike the call before the robot is up.
+            self._gait_held, self._reasserted_in = True, None
+            self.logger.info(f"gait: {step[0]} code=0, walking in {name}")
+        else:
+            self.logger.error(f"gait: {step[0]} REFUSED code={code}, still {self.walk_gait}")
+        self._say_gait()
+
+    def _say_gait(self):
+        msg = String()
+        msg.data = self.walk_gait
+        self.publisher_gait.publish(msg)
 
     def _squat_to_stand(self):
         """The biped's FSM needs a moment after Damp before the stand takes."""

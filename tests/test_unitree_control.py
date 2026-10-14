@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import threading
+import types
 import time
 import unittest
 
@@ -61,7 +62,9 @@ class _Sport:
 
     def FreeWalk(self):
         self.calls.append('FreeWalk')
-        return 0
+        return self.free_code
+
+    free_code = 0
 
     def Move(self, vx, vy, wz):
         self.calls.append('Move' if (vx, vy, wz) != (0.0, 0.0, 0.0) else 'Move0')
@@ -92,7 +95,12 @@ def _node(sport=None, gait=None):
     node.is_quadruped = True
     node.classic_walk = True
     node.has_switch_gait = False
-    node.stand_gait = ('ClassicWalk', lambda: node.sport_client.ClassicWalk(True))
+    node._gait_steps = {'classic': ('ClassicWalk', lambda: node.sport_client.ClassicWalk(True)),
+                        'free': ('FreeWalk', lambda: node.sport_client.FreeWalk())}
+    node.walk_gait = 'classic'
+    node.stand_gait = node._gait_steps['classic']
+    node.said_gaits = []
+    node.publisher_gait = types.SimpleNamespace(publish=lambda m: node.said_gaits.append(m.data))
     node._robot_status = None
     node.last_twist_time = None
     node._walking = False
@@ -224,15 +232,23 @@ class TestTwistPath(unittest.TestCase):
         _drive(node, 0.0, 10, 0.5)
         self.assertEqual(node.gait.requests, 0)
 
-    def test_the_free_gait_is_part_of_a_stand_and_never_classic(self):
+    def test_a_gait_switched_to_is_said_and_is_the_one_a_stand_asserts(self):
         node = _node()
-        node.classic_walk = False
-        node.stand_gait = ('FreeWalk', node.sport_client.FreeWalk)
+        node._play_action('play gait free')
+        self.assertEqual(node.said_gaits, ['free'])
         node._play_action('play stand')
         _drive(node, 0.0, 10, 0.5)
-        self.assertEqual(node.sport_client.calls[:3], ['StandUp', 'BalanceStand', 'FreeWalk'])
+        self.assertEqual(node.sport_client.calls[:4], ['FreeWalk', 'StandUp', 'BalanceStand', 'FreeWalk'])
         self.assertEqual(node.sport_client.count('ClassicWalk'), 0)
         self.assertEqual(node.gait.requests, 1)
+
+    def test_a_refused_switch_keeps_the_gait_and_says_so(self):
+        node = _node()
+        node.sport_client.free_code = -1
+        node._play_action('play gait free')
+        self.assertEqual(node.said_gaits, ['classic'])
+        node._play_action('play stand')
+        self.assertEqual(node.sport_client.calls[-1], 'ClassicWalk')
 
     def test_the_free_gait_is_not_judged_by_the_classic_state(self):
         node = _node()
