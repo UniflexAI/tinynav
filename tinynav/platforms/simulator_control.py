@@ -1,4 +1,5 @@
 
+import os
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -22,7 +23,7 @@ class SimulatorControlNode(Node):
             [0, 0, 0, 1]]
         )
         self.planner_dt = 0.1
-        self.path_pose_stride = 10
+        self.path_pose_stride = 1 if os.environ.get("TINYNAV_PLANNER") == "continuous" else 10
         self.lookahead_steps = 1
         self.max_forward_speed = ROBOT_CONFIG.max_linear_vel
         self.max_angular_speed = ROBOT_CONFIG.max_angular_vel

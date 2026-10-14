@@ -1,3 +1,4 @@
+from tinynav.core.navigation_guidance import select_target_position
 import rclpy
 import os
 import time
@@ -196,18 +197,6 @@ def select_fusion_constraints(constraints):
 def poi_reached(poi, pos):
     return np.linalg.norm(poi[:2] - pos[:2]) < 0.5 and abs(poi[2] - pos[2]) < 2.0
 
-def select_target_position(paths, closest_idx, pos):
-    max_speed = 0.5
-    accumulated_distance = 0.0
-    start_point = pos[:3]
-    target_position = paths[-1]
-    for i in range(closest_idx, len(paths) - 1):
-        accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
-        if accumulated_distance > max_speed * 5:
-            target_position = paths[i]
-            break
-        start_point = paths[i]
-    return target_position
 
 class MapNode(Node):
     def __init__(self, tinynav_db_path: str, tinynav_map_path: str, verbose_timer: bool = True):

@@ -761,6 +761,7 @@ function drawRealtimeFrame(frame) {
 }
 
 function refreshFields() {
+  $("plannerSelect").value = config.planner || "dwa";
   const obj = selectedObject();
   config.start = config.start || { xy: [0, 0], yaw_deg: 0 };
   if (config.robot?.name) fields.robotPreset.value = config.robot.name;
@@ -790,6 +791,7 @@ function refreshFields() {
 }
 
 function syncConfigFromFields() {
+  config.planner = $("plannerSelect").value;
   const obj = selectedObject();
   config.start = config.start || { xy: [0, 0], yaw_deg: 0 };
   config.map_name = fields.mapSelect.value.trim() || null;
@@ -922,7 +924,9 @@ async function realtimeTick() {
     realtimePath.push(frame.robot_xy);
     if (realtimePath.length > 300) realtimePath = realtimePath.slice(-300);
     drawRealtimeFrame(frame);
-    statusEl.textContent = "Realtime running";
+    const phase = frame.planner_status?.reason;
+    const labels = {ok: "Moving", short_horizon: "Adjusting around obstacle", recover_reverse: "Backing up to recover", arrived: "Arrived", rollout_collision: "Stopped: path blocked", no_local_route: "Stopped: no clear route", recovery_exhausted: "Stopped: recovery limit reached"};
+    statusEl.textContent = labels[phase] || "Realtime running";
   } catch (error) {
     statusEl.textContent = "Realtime error";
     stopRealtime();
@@ -1293,3 +1297,5 @@ if (typeof ResizeObserver !== "undefined") {
   }).observe(canvas);
   new ResizeObserver(() => drawPerceptionMap()).observe(mapCanvas);
 }
+
+$("plannerSelect").addEventListener("change", () => { stopRealtimeForEdit(); config.planner = $("plannerSelect").value; refreshFields(); });

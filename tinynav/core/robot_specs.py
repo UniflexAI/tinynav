@@ -1,4 +1,5 @@
 import os
+import json
 import numpy as np
 from dataclasses import dataclass, field
 
@@ -40,6 +41,7 @@ class RobotConfig:
     # real per-platform min/max linear & angular speeds are measured.
     min_linear_vel: float = 0.1
     max_linear_vel: float = 1.0
+    reverse_speed: float = 0.3
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
@@ -112,3 +114,9 @@ try:
     ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
 except KeyError:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
+
+# WebSim child processes receive the edited geometry and obstacle settings.
+if os.environ.get("TINYNAV_ROBOT_CONFIG"):
+    _sim_config = json.loads(os.environ["TINYNAV_ROBOT_CONFIG"])
+    _sim_config["obstacle"] = ObstacleConfig(**_sim_config.get("obstacle", {}))
+    ROBOT_CONFIG = RobotConfig(**_sim_config)

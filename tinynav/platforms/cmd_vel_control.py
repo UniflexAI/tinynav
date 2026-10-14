@@ -54,7 +54,9 @@ class CmdVelControlNode(Node):
         self.min_effective_linear_speed = self.robot.min_linear_vel
         self.min_effective_angular_speed = self.robot.min_angular_vel
         self.linear_engage_threshold = 0.04
-        self.fixed_reverse_speed = 0.3
+        self.fixed_reverse_speed = self.robot.reverse_speed
+        self.timed_path = False
+        self.last_pose_update_time = None
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
@@ -70,11 +72,17 @@ class CmdVelControlNode(Node):
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
+    def _stop(self):
+        self.latest_cmd = Twist()
+        self.prev_cmd = Twist()
+        self.last_path_update_time = None
+        if self._nav_active:
+            self.cmd_pub.publish(Twist())
+
     def _on_paused(self, msg: Bool):
-        self._paused = msg.data
-        if not self._paused:
-            # Reset prev_cmd so resume starts from zero cleanly
-            self.prev_cmd = Twist()
+        if self._paused != bool(msg.data):
+            self._stop()
+        self._paused = bool(msg.data)
 
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
@@ -89,13 +97,14 @@ class CmdVelControlNode(Node):
 
     def pose_callback(self, msg):
         self.pose = msg
+        self.last_pose_update_time = time.monotonic()
 
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
     def cmd_timer_callback(self):
         now = time.monotonic()
-        dt = max(1e-3, now - self.last_cmd_pub_time)
+        dt = min(.2, max(1e-3, now - self.last_cmd_pub_time))
         self.last_cmd_pub_time = now
 
         if not self._nav_active:
@@ -110,15 +119,25 @@ class CmdVelControlNode(Node):
         age = float('inf') if self.last_path_update_time is None else (now - self.last_path_update_time)
         stale_slow_s = max(self.path_stale_slow_s, self.path_period_ema * self.path_stale_slow_factor)
         stale_stop_s = max(self.path_stale_stop_s, self.path_period_ema * self.path_stale_stop_factor)
+        if self.timed_path:
+            stale_slow_s = .35
         target_cmd = Twist()
         target_cmd.linear.x = self.latest_cmd.linear.x
         target_cmd.angular.z = self.latest_cmd.angular.z
-        if age > stale_stop_s:
-            target_cmd.linear.x = 0.0
-            target_cmd.angular.z = 0.0
+        pose_age = float("inf") if self.last_pose_update_time is None else now - self.last_pose_update_time
+        if age > min(stale_stop_s, .8) or pose_age > .8:
+            self._stop()
+            return
         elif age > stale_slow_s:
+            if self.timed_path:
+                self._stop()
+                return
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
+
+        if abs(target_cmd.linear.x) < 1e-6 and abs(target_cmd.angular.z) < 1e-6:
+            self._stop()
+            return
 
         out = Twist()
         out.linear.y = 0.0
@@ -161,9 +180,13 @@ class CmdVelControlNode(Node):
     def path_callback(self, msg):
         if not self._nav_active:
             return
-        if msg is None or self.pose is None:
+        if self._paused:
             return
-        if len(msg.poses) < 2:
+        if msg is None or self.pose is None or len(msg.poses) < 2:
+            self._stop()
+            return
+        if msg.header.frame_id != "world":
+            self._stop()
             return
         self.path = msg
 
@@ -184,6 +207,12 @@ class CmdVelControlNode(Node):
             T[:3, 3] = np.array([position.x, position.y, position.z]).ravel()
             return T
         
+        for pose in self.path.poses[:2]:
+            q = pose.pose.orientation
+            p0 = pose.pose.position
+            if not np.all(np.isfinite([p0.x,p0.y,p0.z,q.x,q.y,q.z,q.w])) or np.linalg.norm([q.x,q.y,q.z,q.w]) < 1e-6:
+                self._stop()
+                return
         T1 = msg2np(self.path.poses[0])
         step_idx = int(min(self.lookahead_steps, len(self.path.poses) - 1))
         T2 = msg2np(self.path.poses[step_idx])
@@ -193,13 +222,31 @@ class CmdVelControlNode(Node):
         p = T_robot_2_to_1[:3, 3]
         heading_err = float(np.arctan2(p[1], p[0]))
         # dt must match actual spacing between published Path poses, not raw trajectory dt.
-        dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
+        ns = lambda stamp: stamp.sec * 1000000000 + stamp.nanosec
+        delta_ns = ns(msg.poses[step_idx].header.stamp) - ns(msg.poses[0].header.stamp)
+        self.timed_path = delta_ns != 0
+        if self.timed_path:
+            dt = delta_ns * 1e-9
+            age_ros = (ns(ros_now) - ns(msg.poses[0].header.stamp)) * 1e-9
+            if not .01 <= dt <= 2. or not -.1 <= age_ros <= .25:
+                self._stop()
+                return
+        else:
+            dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
         linear_velocity_vec = p / dt
         r = R.from_matrix(T_robot_2_to_1[:3, :3])
         angular_velocity_vec = r.as_rotvec() / dt
 
         raw_vx = float(linear_velocity_vec[0])
+        if abs(raw_vx) < 1e-6:
+            raw_vx = 0.
+        if not np.all(np.isfinite(np.r_[linear_velocity_vec, angular_velocity_vec])):
+            self._stop()
+            return
         if raw_vx < 0.0:
+            if self.timed_path and abs(raw_vx + self.fixed_reverse_speed) > .001:
+                self._stop()
+                return
             vx = -self.fixed_reverse_speed
         else:
             vx = float(np.clip(raw_vx, 0.0, self.max_forward_speed))
@@ -212,11 +259,11 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points >80 deg away from robot heading,
         # force an in-place turn. Skip explicit backward segments because reverse
         # naturally has heading_err close to +/-pi.
-        if (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
+        if (not self.timed_path) and (not is_backward_segment) and abs(heading_err) > self.force_turn_heading_threshold:
             vx = 0.0
             vyaw = float(np.clip(heading_err, -self.max_angular_speed, self.max_angular_speed))
         # Minimal rotate-first gate: apply only for forward motion.
-        elif vx > 0.0 and abs(heading_err) > 0.45:
+        elif (not self.timed_path) and vx > 0.0 and abs(heading_err) > 0.45:
             vx = 0.0
             vyaw = float(np.clip(1.6 * heading_err, -0.6, 0.6))
 

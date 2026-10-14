@@ -66,6 +66,8 @@ class Ros2UnitreeManagerNode(Node):
         self._robot_status = RobotStatus.SITTING
         self.battery = None
         self.last_twist_time = None
+        self._moving = False
+        self._last_move_mono = None
         self.logger = self.get_logger()
 
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
@@ -86,6 +88,12 @@ class Ros2UnitreeManagerNode(Node):
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+        self._cmd_watchdog = self.create_timer(.1, self._check_cmd_timeout)
+
+    def _check_cmd_timeout(self):
+        if self._moving and self._last_move_mono is not None and time.monotonic() - self._last_move_mono > .5:
+            self.sport_client.StopMove()
+            self._moving = False
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
@@ -94,6 +102,8 @@ class Ros2UnitreeManagerNode(Node):
             time_interval = current_time - self.last_twist_time
             self.logger.debug(f"cmd_vel callback time interval: {time_interval*1000:.2f} ms")
         self.last_twist_time = current_time
+        self._last_move_mono = time.monotonic()
+        self._moving = bool(msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0)
 
         if  (msg.linear.x != 0 or msg.linear.y != 0 or msg.angular.z != 0):
             self.logger.debug(f"Moving with velocity: {msg.linear.x}, {msg.linear.y}, {msg.angular.z}")

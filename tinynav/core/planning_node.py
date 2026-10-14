@@ -1,3 +1,5 @@
+import json
+import os
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -12,11 +14,12 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
+from tinynav.core.continuous_planner import ContinuousPlanner
 
 # === Helper functions ===
 @njit(cache=True)
@@ -322,8 +325,13 @@ class PlanningNode(Node):
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
+        self.planner_type = os.environ.get("TINYNAV_PLANNER", "dwa")
+        if self.planner_type not in ("dwa", "continuous"):
+            raise ValueError(f"Unknown planner: {self.planner_type}")
+        self.continuous_planner = ContinuousPlanner()
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
+        self.status_pub = self.create_publisher(String, '/planning/status', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
         self.obstacle_mask_pub = self.create_publisher(OccupancyGrid, '/planning/obstacle_mask', 10)
         self.footprint_pub = self.create_publisher(PointCloud, '/planning/footprint', 10)
@@ -533,7 +541,8 @@ class PlanningNode(Node):
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-        self.occupancy_grid *= 0.99
+        if self.planner_type != "continuous":
+            self.occupancy_grid *= 0.99
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
@@ -563,16 +572,21 @@ class PlanningNode(Node):
             + reverse_gate_penalty
         )
 
-    def publish_selected_path(self, trajectories, top_indices, header):
+    def publish_selected_path(self, trajectories, top_indices, header, stride=10):
         path = Path()
         path.header = header
         path.header.frame_id = "world"
 
         for i in top_indices:
-            for j in range(0, len(trajectories[i]), 10):
+            for j in range(0, len(trajectories[i]), stride):
                 x,y,z,qx,qy,qz,qw = trajectories[i][j]
                 pose = PoseStamped()
-                pose.header = header
+                pose.header = Header()
+                pose.header.frame_id = 'world'
+                ns = header.stamp.sec * 1000000000 + header.stamp.nanosec
+                if stride == 1:
+                    ns += j * 100000000
+                pose.header.stamp.sec, pose.header.stamp.nanosec = divmod(ns, 1000000000)
                 pose.pose.position.x = x
                 pose.pose.position.y = y
                 pose.pose.position.z = z
@@ -613,6 +627,26 @@ class PlanningNode(Node):
             self.publish_2d_occupancy_grid(ESDF_map, self.origin, self.resolution, depth_msg.header.stamp, z_offset=self.grid_shape[2]*self.resolution/2)
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
             self.publish_footprint(T, depth_msg.header.stamp)
+
+        if self.planner_type == "continuous":
+            init_p = self.camera_to_robot_center(T)
+            init_q = R.from_matrix(T[:3, :3]).as_quat()
+            self.last_T, self.last_stamp = T.copy(), stamp
+            output, info = (None, {"reason": "no_target"})
+            if self.target_pose is not None:
+                output, info = self.continuous_planner.step(
+                    init_p, init_q, self.target_pose, ESDF_map, self.origin,
+                    self.resolution, ROBOT_CONFIG, stamp,
+                    np.any(self.occupancy_grid < -.02, axis=2))
+            if output is None:
+                trajectory = np.tile(np.r_[init_p, init_q], (31, 1))
+                self.last_param = (0., 0.)
+            else:
+                trajectory, self.last_param = output
+            self.status_pub.publish(String(data=json.dumps(info)))
+            self.get_logger().info(f"continuous: {info}", throttle_duration_sec=2.)
+            self.publish_selected_path(np.asarray([trajectory]), [0], depth_msg.header, stride=1)
+            return
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)

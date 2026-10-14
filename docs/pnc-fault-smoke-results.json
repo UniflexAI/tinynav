@@ -1,0 +1,819 @@
+[
+  {
+    "case": "forward",
+    "cmd": [
+      0.44998345292370734,
+      0.0
+    ]
+  },
+  {
+    "case": "pause",
+    "cmd": [
+      0.0,
+      0.0
+    ]
+  },
+  {
+    "case": "resume",
+    "cmd": [
+      0.4492325483342563,
+      -0.10169611973577013
+    ]
+  },
+  {
+    "case": "sensor_loss_stop",
+    "cmd": [
+      0.0,
+      0.0
+    ]
+  },
+  {
+    "case": "sensor_recovery",
+    "cmd": [
+      0.4499963909729643,
+      0.0
+    ]
+  },
+  {
+    "case": "nav_deactivation_stop",
+    "cmd": [
+      0.0,
+      0.0
+    ]
+  },
+  {
+    "case": "map_guided_l_turn",
+    "elapsed": 19.697455626912415,
+    "distance": 0.0779062153794631,
+    "collision": false,
+    "samples": [
+      {
+        "xy": [
+          0.0,
+          0.0
+        ],
+        "cmd": [
+          0.0,
+          0.0
+        ],
+        "status": {},
+        "collision": false
+      },
+      {
+        "xy": [
+          0.08131737210649545,
+          0.0003626956889856075
+        ],
+        "cmd": [
+          0.3500728732906282,
+          0.15348535169981184
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 16.920176101848483,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 49,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          0.2935088982535027,
+          0.007816496218130742
+        ],
+        "cmd": [
+          0.44986563003919844,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 15.877631027251482,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          0.5182985403523753,
+          0.016604520683501225
+        ],
+        "cmd": [
+          0.449936763670723,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 15.626446809619665,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          0.7429554210271494,
+          0.025387354915762474
+        ],
+        "cmd": [
+          0.4492456978227799,
+          -0.10082062088730588
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 15.434271190315485,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          0.9675609213717419,
+          0.032035585384098356
+        ],
+        "cmd": [
+          0.44943830724257117,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 14.858670067042112,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 49,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          1.1922162775926184,
+          0.03485261990756143
+        ],
+        "cmd": [
+          0.4495574807213276,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 16.158174956217408,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          1.4171536066568793,
+          0.03470335924595547
+        ],
+        "cmd": [
+          0.44957287010233493,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 15.647279098629951,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          1.697937020553488,
+          0.034517041046568386
+        ],
+        "cmd": [
+          0.44958467915066747,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 17.20281597226858,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 48,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          1.9227809202134842,
+          0.03436784238149609
+        ],
+        "cmd": [
+          0.4495920654744956,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 18.822770100086927,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 43,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          2.1476572764830997,
+          0.0342186221793359
+        ],
+        "cmd": [
+          0.4496040786538247,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 18.722897861152887,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 39,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          2.3723776973352813,
+          0.034069505450546135
+        ],
+        "cmd": [
+          0.4496597286549031,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 17.568640876561403,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 34,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          2.597144167164884,
+          0.03242669107443134
+        ],
+        "cmd": [
+          0.4499345334677818,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 26.414904976263642,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 36,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          2.8221861195396363,
+          0.029287649084101166
+        ],
+        "cmd": [
+          0.44999037545232934,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 29.159883968532085,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 38,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.0469111413225036,
+          0.02615302786254522
+        ],
+        "cmd": [
+          0.44935369062992336,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 25.419127894565463,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 38,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.2671825709807067,
+          0.029102038684081892
+        ],
+        "cmd": [
+          0.42912790546750124,
+          0.5345024744069262
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 23.45107914879918,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 38,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.4683286811925798,
+          0.08278928242054398
+        ],
+        "cmd": [
+          0.42383921592985985,
+          0.5996565612019356
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 20.257459953427315,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 38,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.655446712355139,
+          0.19621320274330065
+        ],
+        "cmd": [
+          0.44450931227357326,
+          0.27250719650369054
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 17.55507313646376,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 38,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.8267555945185223,
+          0.3354378226319935
+        ],
+        "cmd": [
+          0.4402177963067322,
+          0.3643361093789295
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 20.720195956528187,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 47,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.9571304792522466,
+          0.4974019545907885
+        ],
+        "cmd": [
+          0.4052444803059796,
+          0.749999999999998
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 29.277036897838116,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 52,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.020923268762955,
+          0.6925774205684415
+        ],
+        "cmd": [
+          0.44342284172871116,
+          0.2983770108559376
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 17.763169016689062,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.040036639340932,
+          0.9140592928825526
+        ],
+        "cmd": [
+          0.4471693017338474,
+          0.19546460979481706
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 18.09411309659481,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 51,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.034721931371493,
+          1.1377705411574073
+        ],
+        "cmd": [
+          0.4499963157500797,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 17.708688974380493,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 51,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.026811529219624,
+          1.3624106699898848
+        ],
+        "cmd": [
+          0.4497693186572782,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 16.386670991778374,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.019640752423068,
+          1.587093330533107
+        ],
+        "cmd": [
+          0.44943694322831185,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 16.223312122747302,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 50,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.016213793761905,
+          1.8117088728544668
+        ],
+        "cmd": [
+          0.449435986164477,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 16.54231990687549,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 51,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.015012771981918,
+          2.036403121332403
+        ],
+        "cmd": [
+          0.44961870561094575,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 18.341682152822614,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 49,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.015925785109268,
+          2.2612352506624345
+        ],
+        "cmd": [
+          0.44969356251238324,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 17.113456968218088,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 44,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.016838644718006,
+          2.486029575589338
+        ],
+        "cmd": [
+          0.44977384512012275,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 16.17595204152167,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 40,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.017752950959577,
+          2.711180138044523
+        ],
+        "cmd": [
+          0.44983028773758704,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 13.915261020883918,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 35,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.01866546634525,
+          2.935889697043648
+        ],
+        "cmd": [
+          0.44988677203635863,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 12.665196089074016,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 31,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.01957890419919,
+          3.1608264165278017
+        ],
+        "cmd": [
+          0.4499102135360067,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 10.320346103981137,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 26,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.020720802827293,
+          3.4420222639307307
+        ],
+        "cmd": [
+          0.44994329286242696,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 8.274072082713246,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 22,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.021634257504152,
+          3.66696312610725
+        ],
+        "cmd": [
+          0.4499718894159077,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 6.264518015086651,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 17,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.022548053407513,
+          3.8919880162990514
+        ],
+        "cmd": [
+          0.4499930282355624,
+          0.0
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 5.003557074815035,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 13,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          4.022070428397667,
+          4.099286710174482
+        ],
+        "cmd": [
+          0.34835356841083964,
+          0.5397891559900849
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 3.6512520164251328,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 8,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.996429497810234,
+          4.225969102028194
+        ],
+        "cmd": [
+          0.21955793205724383,
+          0.4170905658617677
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 3.0754590407013893,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 5,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.963138534475294,
+          4.300493581561224
+        ],
+        "cmd": [
+          0.13366864188284255,
+          0.19498762186266166
+        ],
+        "status": {
+          "reason": "ok",
+          "solve_ms": 2.822321839630604,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 3,
+          "recovery_count": 0,
+          "stalled": false
+        },
+        "collision": false
+      },
+      {
+        "xy": [
+          3.9431571811473347,
+          4.335139872724706
+        ],
+        "cmd": [
+          0.10000000000000231,
+          0.0
+        ],
+        "status": {
+          "reason": "arrived",
+          "recovery_count": 0
+        },
+        "collision": false
+      }
+    ]
+  }
+]

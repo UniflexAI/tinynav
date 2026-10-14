@@ -8,6 +8,7 @@ real planning_node + simulator_control loop.
 
 from __future__ import annotations
 
+import json
 import base64
 import copy
 import math
@@ -34,8 +35,9 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
+from tinynav.core.navigation_guidance import select_target_position
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
 from tool.simulator.map_volume import MapVolume
@@ -80,6 +82,12 @@ ROBOT_PRESETS = {
 }
 
 
+# WebSim defaults only; production robot presets remain unchanged.
+for _name in ('go2', 'go2w'):
+    ROBOT_PRESETS[_name]['safety_radius'] = .08
+    ROBOT_PRESETS[_name]['obstacle']['dilation_cells'] = 1
+
+
 def l_corridor_objects() -> list[dict[str, Any]]:
     """L-shaped corridor used as the default web-sim planning scene."""
     return [
@@ -103,6 +111,7 @@ def default_config(robot_name: str | None = None) -> dict[str, Any]:
     robot = _robot_dict(robot_name)
     return {
         "name": "ros_planning_sim",
+        "planner": "dwa",
         "robot": robot,
         "obstacle": copy.deepcopy(robot.get("obstacle") or {}),
         "camera": copy.deepcopy(CAMERA_DEFAULTS),
@@ -230,6 +239,7 @@ class RosPlanningSimNode(Node):
         self.last_depth = np.zeros((100, 160), dtype=np.float32)
         self.last_cmd = Twist()
         self.last_path: list[list[float]] = []
+        self.planner_status = {}
         self.last_footprint: list[list[float]] = []
         self.last_obstacle_mask: dict[str, Any] | None = None
         self.last_esdf_grid: dict[str, Any] | None = None
@@ -247,6 +257,7 @@ class RosPlanningSimNode(Node):
         self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched)
 
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)
+        self.create_subscription(String, "/planning/status", self.status_callback, 10)
         self.create_subscription(RosPath, "/planning/trajectory_path", self.path_callback, 10)
         self.create_subscription(PointCloud, "/planning/footprint", self.footprint_callback, 10)
         self.create_subscription(OccupancyGrid, "/planning/obstacle_mask", self.obstacle_callback, 10)
@@ -291,11 +302,16 @@ class RosPlanningSimNode(Node):
                 self.yaw_deg = float(self.config.get("start", {}).get("yaw_deg", 0.0))
                 self.last_cmd = Twist()
                 self.last_path = []
+                self.planner_status = {}
                 self.last_footprint = []
                 self.last_obstacle_mask = None
                 self.last_esdf_grid = None
                 self.collision = False
                 self.geom_footprint = []
+
+    def status_callback(self, msg: String) -> None:
+        with self.lock:
+            self.planner_status = json.loads(msg.data)
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -338,6 +354,12 @@ class RosPlanningSimNode(Node):
 
     def publish_target(self, stamp, config: dict[str, Any]) -> None:
         target = config.get("target", [4.0, 0.0, 0.0])
+        guide = config.get("guide_path")
+        if guide:
+            points = np.asarray(guide, dtype=float)
+            pos = np.r_[self.control_xy, 0.]
+            closest = int(np.argmin(np.linalg.norm(points[:,:2]-pos[:2], axis=1)))
+            target = select_target_position(points, closest, pos)
         msg = Odometry()
         msg.header.stamp = stamp
         msg.header.frame_id = "world"
@@ -392,13 +414,14 @@ class RosPlanningSimNode(Node):
         depth_msg.header.stamp = stamp
         depth_msg.header.frame_id = "camera"
         odom_msg = odom_from_T(T_cam, stamp)
-        self.depth_pub.publish(depth_msg)
-        self.odom_visual_pub.publish(odom_msg)
-        self.odom_pub.publish(odom_msg)
+        if config.get("sensor_enabled", True):
+            self.depth_pub.publish(depth_msg)
+            self.odom_visual_pub.publish(odom_msg)
+            self.odom_pub.publish(odom_msg)
         self.publish_camera_info(stamp, config)
         self.publish_target(stamp, config)
-        self.nav_active_pub.publish(Bool(data=True))
-        self.nav_paused_pub.publish(Bool(data=False))
+        self.nav_active_pub.publish(Bool(data=bool(config.get("nav_active", True))))
+        self.nav_paused_pub.publish(Bool(data=bool(config.get("paused", False))))
 
     def frame(self) -> dict[str, Any]:
         with self.lock:
@@ -411,6 +434,7 @@ class RosPlanningSimNode(Node):
                 "selected_trajectory_xy": copy.deepcopy(self.last_path),
                 "selected_param": [float(self.last_cmd.linear.x), float(self.last_cmd.angular.z)],
                 "collision": bool(self.collision),
+                "planner_status": copy.deepcopy(self.planner_status),
                 "depth_u8": image_u8_payload(self.last_depth, 0.0, float(self.config["camera"]["max_range"])),
                 "obstacle_u8": self.last_obstacle_mask,
                 "esdf_u8": self.last_esdf_grid,
@@ -437,7 +461,7 @@ EXECUTOR: MultiThreadedExecutor | None = None
 PROCS: list[subprocess.Popen] = []
 CHILD_SCRIPTS = (
     "tinynav/core/planning_node.py",
-    "tinynav/platforms/simulator_control.py",
+    "tinynav/platforms/cmd_vel_control.py",
 )
 _LAST_PLANNING_RESET = 0.0
 _PLANNING_RESET_COOLDOWN_S = 1.0
@@ -471,6 +495,9 @@ def _child_env() -> dict[str, str]:
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(key, "1")
     env["ROBOT_TYPE"] = _active_robot_type()
+    if SIM_NODE is not None:
+        env["TINYNAV_ROBOT_CONFIG"] = json.dumps(SIM_NODE.config["robot"])
+    env["TINYNAV_PLANNER"] = str(SIM_NODE.config.get("planner", "dwa")) if SIM_NODE else "dwa"
     return env
 
 
@@ -512,6 +539,7 @@ def ensure_ros_loop(reset_planning: bool = False, force: bool = False) -> int:
         now = time.monotonic()
         if force or (now - _LAST_PLANNING_RESET) >= _PLANNING_RESET_COOLDOWN_S:
             _stop_script("tinynav/core/planning_node.py")
+            _stop_script("tinynav/platforms/cmd_vel_control.py")
             _LAST_PLANNING_RESET = now
     for script in CHILD_SCRIPTS:
         _spawn_if_needed(script)
@@ -609,20 +637,30 @@ def update_config(request: RunRequest) -> dict[str, Any]:
     node = _require_sim()
     if not isinstance(request.config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
-    reset = bool(request.reset)
-    prev_robot = node.config.get("robot", {}).get("name")
+    if request.config.get("planner", "dwa") not in ("dwa", "continuous"):
+        raise HTTPException(status_code=400, detail="Unknown planner")
+    planner_changed = node.config.get("planner", "dwa") != request.config.get("planner", "dwa")
+    reset = bool(request.reset) or planner_changed
+    prev_robot = copy.deepcopy(node.config.get("robot", {}))
     node.set_config(copy.deepcopy(request.config), reset=reset)
-    robot_changed = prev_robot != node.config.get("robot", {}).get("name")
-    if robot_changed:
-        _stop_script("tinynav/platforms/simulator_control.py")
+    robot_changed = prev_robot != node.config.get("robot", {})
+    if robot_changed or planner_changed:
+        _stop_script("tinynav/platforms/cmd_vel_control.py")
     if reset or robot_changed:
-        ensure_ros_loop(reset_planning=True, force=robot_changed)
+        ensure_ros_loop(reset_planning=True, force=robot_changed or planner_changed)
     return {"ok": True, "robot_changed": robot_changed}
 
 
 @app.post("/api/start-ros-loop")
 def start_ros_loop() -> dict[str, Any]:
     return {"ok": True, "process_count": ensure_ros_loop(reset_planning=True, force=True)}
+
+
+@app.get("/api/current-config")
+def current_config() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        return copy.deepcopy(node.config)
 
 
 @app.get("/api/sim-state")

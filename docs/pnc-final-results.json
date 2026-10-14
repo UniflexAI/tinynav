@@ -1,0 +1,1554 @@
+[
+  {
+    "planner": "continuous",
+    "scene": "l_turn",
+    "safety_radius": 0.08,
+    "dilation": 1,
+    "reached": true,
+    "final_distance": 0.08786244010733277,
+    "collision": false,
+    "elapsed": 21.21813329588622,
+    "samples": [
+      {
+        "t": 0.5033542208839208,
+        "xy": [
+          0.0,
+          0.0
+        ],
+        "cmd": [
+          0.0,
+          0.0
+        ],
+        "collision": false,
+        "distance": 5.87962583843564,
+        "planner_status": {}
+      },
+      {
+        "t": 1.0079825879074633,
+        "xy": [
+          0.0,
+          0.0
+        ],
+        "cmd": [
+          0.0,
+          0.7499999999999991
+        ],
+        "collision": false,
+        "distance": 5.87962583843564,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 62.395840883255005,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 63,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 1.512355722952634,
+        "xy": [
+          0.0,
+          0.0
+        ],
+        "cmd": [
+          0.0,
+          0.749999999999998
+        ],
+        "collision": false,
+        "distance": 5.87962583843564,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 77.6046731043607,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 71,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 2.016773513983935,
+        "xy": [
+          0.023062603931382986,
+          0.02309224626623068
+        ],
+        "cmd": [
+          0.21162800928683093,
+          -0.7499999999999963
+        ],
+        "collision": false,
+        "distance": 5.847047550493334,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 75.14859107322991,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 77,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 2.5223424748983234,
+        "xy": [
+          0.15458642324306912,
+          0.09416639413828853
+        ],
+        "cmd": [
+          0.387086715362977,
+          -0.75
+        ],
+        "collision": false,
+        "distance": 5.7068665572556725,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 60.33039907924831,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 75,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 3.0271795159205794,
+        "xy": [
+          0.3652022899365823,
+          0.13170329922381782
+        ],
+        "cmd": [
+          0.4447821059757695,
+          -0.26562361511468763
+        ],
+        "collision": false,
+        "distance": 5.541944746830883,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 54.503656923770905,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 76,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 3.532964013982564,
+        "xy": [
+          0.5888062587125845,
+          0.13815828879536488
+        ],
+        "cmd": [
+          0.449360018008238,
+          0.0
+        ],
+        "collision": false,
+        "distance": 5.396971258373034,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 57.03487596474588,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 72,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 4.037722910987213,
+        "xy": [
+          0.8134272400694269,
+          0.13650391941839687
+        ],
+        "cmd": [
+          0.4498589408582121,
+          0.0
+        ],
+        "collision": false,
+        "distance": 5.2634903088616145,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 51.02890101261437,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 67,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 4.542864257935435,
+        "xy": [
+          1.0382872401909753,
+          0.1348477896300797
+        ],
+        "cmd": [
+          0.44976615188964786,
+          0.0
+        ],
+        "collision": false,
+        "distance": 5.136236296869256,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 52.55468096584082,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 68,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 5.047817844897509,
+        "xy": [
+          1.3194691395098053,
+          0.13277684006525803
+        ],
+        "cmd": [
+          0.44986546509658387,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.9868159198656725,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 53.147688042372465,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 69,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 5.552014454966411,
+        "xy": [
+          1.5443569232708816,
+          0.13112050564600145
+        ],
+        "cmd": [
+          0.44995492539431137,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.87569343193949,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 51.94346304051578,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 70,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 6.05678905104287,
+        "xy": [
+          1.7692840668019532,
+          0.1294638813357571
+        ],
+        "cmd": [
+          0.4499862595600179,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.772570494901032,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 52.71315900608897,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 67,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 6.561310013988987,
+        "xy": [
+          1.994431588038939,
+          0.12780563390853664
+        ],
+        "cmd": [
+          0.44999865052312904,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.677909327287933,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 50.38856482133269,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 69,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 7.0659920189064,
+        "xy": [
+          2.219271457869215,
+          0.12614965238302744
+        ],
+        "cmd": [
+          0.4499891471414852,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.592455250316414,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 46.73070600256324,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 67,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 7.572231160942465,
+        "xy": [
+          2.4443331659403844,
+          0.1244920369834689
+        ],
+        "cmd": [
+          0.449917144288583,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.516517936818021,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 42.5362850073725,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 66,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 8.076846590032801,
+        "xy": [
+          2.66918552416818,
+          0.12283596347891883
+        ],
+        "cmd": [
+          0.44997109941183666,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.4507343741484355,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 39.0913849696517,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 68,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 8.582800932927057,
+        "xy": [
+          2.8940988014654936,
+          0.12117944129569913
+        ],
+        "cmd": [
+          0.44984374978092045,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.39546841585783,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 38.03255199454725,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 65,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 9.08925446192734,
+        "xy": [
+          3.119069521171867,
+          0.11952249603996896
+        ],
+        "cmd": [
+          0.44993173057028546,
+          0.0
+        ],
+        "collision": false,
+        "distance": 4.351130896062613,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 34.10827601328492,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 60,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 9.5979859768413,
+        "xy": [
+          3.342788920669305,
+          0.11873502888302641
+        ],
+        "cmd": [
+          0.44081722804594214,
+          0.3529148969263367
+        ],
+        "collision": false,
+        "distance": 4.31737350015517,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 30.843585031107068,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 55,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 10.103304399875924,
+        "xy": [
+          3.5552285492117615,
+          0.14170979096271402
+        ],
+        "cmd": [
+          0.411539060774313,
+          0.7306971555444941
+        ],
+        "collision": false,
+        "distance": 4.272224579497366,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 27.659373823553324,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 51,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 10.60795746394433,
+        "xy": [
+          3.7409586507176242,
+          0.2006988943252357
+        ],
+        "cmd": [
+          0.397189784406935,
+          0.75
+        ],
+        "collision": false,
+        "distance": 4.202311736045157,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 25.20885900594294,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 51,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 11.11201705597341,
+        "xy": [
+          3.9014266688442474,
+          0.3207631547820363
+        ],
+        "cmd": [
+          0.4067713084939317,
+          0.75
+        ],
+        "collision": false,
+        "distance": 4.079237094698934,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 23.82826479151845,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 52,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 11.61637210403569,
+        "xy": [
+          4.004638672827613,
+          0.48604425275566965
+        ],
+        "cmd": [
+          0.39870675347807527,
+          0.7499999999999996
+        ],
+        "collision": false,
+        "distance": 3.915354242369144,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 20.541846053674817,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 12.120792608940974,
+        "xy": [
+          4.049860683862231,
+          0.6954316289172943
+        ],
+        "cmd": [
+          0.4380870000385073,
+          0.4023958337334155
+        ],
+        "collision": false,
+        "distance": 3.707598284684309,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 22.80813711695373,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 55,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 12.624947353964671,
+        "xy": [
+          4.054957250486063,
+          0.9179432778171466
+        ],
+        "cmd": [
+          0.44560815331854187,
+          0.24361545909349222
+        ],
+        "collision": false,
+        "distance": 3.485502943045236,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 23.474265122786164,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 54,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 13.129461379954591,
+        "xy": [
+          4.0426802402484805,
+          1.142282799724678
+        ],
+        "cmd": [
+          0.4499601438802958,
+          0.0
+        ],
+        "collision": false,
+        "distance": 3.260840230358894,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 21.20229508727789,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 13.635404767934233,
+        "xy": [
+          4.022075528851522,
+          1.364096934491597
+        ],
+        "cmd": [
+          0.4489786773803284,
+          0.11732820301634113
+        ],
+        "collision": false,
+        "distance": 3.038356440233387,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 20.556854084134102,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 14.14054345106706,
+        "xy": [
+          4.003244571821727,
+          1.5840771653028016
+        ],
+        "cmd": [
+          0.44791048363582275,
+          -0.16788854767291606
+        ],
+        "collision": false,
+        "distance": 2.8178149074379886,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 21.950358990579844,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 54,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 14.646502534858882,
+        "xy": [
+          4.009456228561954,
+          1.808477905190042
+        ],
+        "cmd": [
+          0.44995987288858785,
+          0.0
+        ],
+        "collision": false,
+        "distance": 2.5938325762969363,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 20.525302039459348,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 15.154206469887868,
+        "xy": [
+          4.018441159508305,
+          2.0332519755845624
+        ],
+        "cmd": [
+          0.44984279227046287,
+          0.0
+        ],
+        "collision": false,
+        "distance": 2.3697097964392286,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 18.698804080486298,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 49,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 15.657941025914624,
+        "xy": [
+          4.027420204089177,
+          2.2578787880495104
+        ],
+        "cmd": [
+          0.44944365088390725,
+          0.0
+        ],
+        "collision": false,
+        "distance": 2.1459075457946373,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 16.63105795159936,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 44,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 16.16185151785612,
+        "xy": [
+          4.032151613489637,
+          2.4825022392638543
+        ],
+        "cmd": [
+          0.449351433368399,
+          0.0
+        ],
+        "collision": false,
+        "distance": 1.9220462302910533,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 15.35076810978353,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 40,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 16.66718263598159,
+        "xy": [
+          4.034044738163012,
+          2.707205710353233
+        ],
+        "cmd": [
+          0.4495095916704672,
+          0.0
+        ],
+        "collision": false,
+        "distance": 1.6980931949954612,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 31.55713714659214,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 35,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 17.173457466997206,
+        "xy": [
+          4.034508438593304,
+          2.931990833529376
+        ],
+        "cmd": [
+          0.4495080709895438,
+          0.0
+        ],
+        "collision": false,
+        "distance": 1.4741585507992638,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 28.017261996865273,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 31,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 17.678538938052952,
+        "xy": [
+          4.035087733102885,
+          3.2128117670134455
+        ],
+        "cmd": [
+          0.44939427448225544,
+          0.0
+        ],
+        "collision": false,
+        "distance": 1.1948491939054964,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 22.63992791995406,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 26,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 18.183194727869704,
+        "xy": [
+          4.03555150852319,
+          3.4376332426242144
+        ],
+        "cmd": [
+          0.4493222030654742,
+          0.0
+        ],
+        "collision": false,
+        "distance": 0.9718662393379539,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 20.906101912260056,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 22,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 18.687861878890544,
+        "xy": [
+          4.036014822402397,
+          3.6622309798773673
+        ],
+        "cmd": [
+          0.44946725486929573,
+          0.0
+        ],
+        "collision": false,
+        "distance": 0.750202078753362,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 16.149378148838878,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 17,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 19.193619190948084,
+        "xy": [
+          4.03535798778794,
+          3.8856540421496977
+        ],
+        "cmd": [
+          0.4405495473870058,
+          0.3580588270320426
+        ],
+        "collision": false,
+        "distance": 0.5318585800896187,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 12.949693948030472,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 13,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 19.70021072891541,
+        "xy": [
+          4.013200352768001,
+          4.0948329738564055
+        ],
+        "cmd": [
+          0.37215965434289944,
+          0.19371104716459855
+        ],
+        "collision": false,
+        "distance": 0.32548614980076396,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 9.686185978353024,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 8,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 20.205546922050416,
+        "xy": [
+          3.9836043128755145,
+          4.2243261874306155
+        ],
+        "cmd": [
+          0.21842781238993414,
+          0.29861737484403056
+        ],
+        "collision": false,
+        "distance": 0.19455325634399004,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 9.548377944156528,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 5,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 20.710771275917068,
+        "xy": [
+          3.953694894811711,
+          4.298682324334785
+        ],
+        "cmd": [
+          0.1305303876123709,
+          0.14070478937813088
+        ],
+        "collision": false,
+        "distance": 0.11466653012558835,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 8.926569018512964,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 4,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 21.21812804788351,
+        "xy": [
+          3.9420855536493153,
+          4.3228727379220215
+        ],
+        "cmd": [
+          0.0,
+          0.0
+        ],
+        "collision": false,
+        "distance": 0.08786244010733277,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 8.73730517923832,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 3,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      }
+    ],
+    "recovery_count": 0,
+    "blocked_samples": 0
+  },
+  {
+    "planner": "continuous",
+    "scene": "s_bend",
+    "safety_radius": 0.08,
+    "dilation": 1,
+    "reached": true,
+    "final_distance": 0.09968390716665709,
+    "collision": false,
+    "elapsed": 14.130005132872611,
+    "samples": [
+      {
+        "t": 0.5042822719551623,
+        "xy": [
+          0.0,
+          -0.7
+        ],
+        "cmd": [
+          0.0,
+          0.0
+        ],
+        "collision": false,
+        "distance": 5.385164807134504,
+        "planner_status": {}
+      },
+      {
+        "t": 1.0097712518181652,
+        "xy": [
+          0.03737622914276069,
+          -0.6976594719582017
+        ],
+        "cmd": [
+          0.2500045881140977,
+          0.75
+        ],
+        "collision": false,
+        "distance": 5.3484704541555335,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 42.051742086187005,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 54,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 1.5141887259669602,
+        "xy": [
+          0.20340339493678572,
+          -0.6372311182102715
+        ],
+        "cmd": [
+          0.44999450718364015,
+          0.0
+        ],
+        "collision": false,
+        "distance": 5.172442817203408,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 37.2579290997237,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 52,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 2.020299004856497,
+        "xy": [
+          0.40077167212020387,
+          -0.5343877676897969
+        ],
+        "cmd": [
+          0.43307568197337526,
+          -0.4805604086584221
+        ],
+        "collision": false,
+        "distance": 4.955431939210356,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 36.156279034912586,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 54,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 2.5256942068226635,
+        "xy": [
+          0.6606971809894259,
+          -0.4620985655034647
+        ],
+        "cmd": [
+          0.43759761070829906,
+          -0.4106560526792957
+        ],
+        "collision": false,
+        "distance": 4.68569558962408,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 34.1181808616966,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 3.0315609970130026,
+        "xy": [
+          0.8827370883419082,
+          -0.45316702491872285
+        ],
+        "cmd": [
+          0.44805624225394913,
+          -0.1619179695394181
+        ],
+        "collision": false,
+        "distance": 4.468618716755593,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 34.05925305560231,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 3.5363133209757507,
+        "xy": [
+          1.107270581172788,
+          -0.4619827387624263
+        ],
+        "cmd": [
+          0.4491797908188633,
+          0.10513563013573002
+        ],
+        "collision": false,
+        "distance": 4.254484455361843,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 35.0019431207329,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 54,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 4.039868732914329,
+        "xy": [
+          1.3294367610780622,
+          -0.46265142207626386
+        ],
+        "cmd": [
+          0.441518918305992,
+          0.3390711794121391
+        ],
+        "collision": false,
+        "distance": 4.041412886077076,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 38.32133812829852,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 54,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 4.544204273959622,
+        "xy": [
+          1.54080925404551,
+          -0.42704360196167673
+        ],
+        "cmd": [
+          0.42526540884881614,
+          0.5827512690793939
+        ],
+        "collision": false,
+        "distance": 3.8288254329496048,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 39.025306003168225,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 55,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 5.049074584851041,
+        "xy": [
+          1.7308652519242702,
+          -0.33293801800531136
+        ],
+        "cmd": [
+          0.4369973542123562,
+          0.4205744378304738
+        ],
+        "collision": false,
+        "distance": 3.6196487190537145,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 34.76936602964997,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 54,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 5.554128158837557,
+        "xy": [
+          1.905119510561072,
+          -0.19423396694686101
+        ],
+        "cmd": [
+          0.44458853860829484,
+          0.2705257784120535
+        ],
+        "collision": false,
+        "distance": 3.4140726160008414,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 32.409970881417394,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 6.059445895021781,
+        "xy": [
+          2.0697445357267807,
+          -0.05017106361672527
+        ],
+        "cmd": [
+          0.4292855997501688,
+          -0.5324463608446243
+        ],
+        "collision": false,
+        "distance": 3.218890475971526,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 30.330576933920383,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 52,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 6.563952861819416,
+        "xy": [
+          2.257980319202944,
+          0.048708480434059315
+        ],
+        "cmd": [
+          0.4266000297999062,
+          -0.5665112330612472
+        ],
+        "collision": false,
+        "distance": 3.013247491603656,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 24.755323072895408,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 7.0688569019548595,
+        "xy": [
+          2.468415035571895,
+          0.09279221438257358
+        ],
+        "cmd": [
+          0.4372485927924208,
+          -0.41645069052249606
+        ],
+        "collision": false,
+        "distance": 2.7982597650690173,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 20.439431071281433,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 53,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 7.574265646981075,
+        "xy": [
+          2.692914991825923,
+          0.10492423214802259
+        ],
+        "cmd": [
+          0.4499044382027817,
+          0.0
+        ],
+        "collision": false,
+        "distance": 2.5767402677988,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 22.77989685535431,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 51,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 8.078045350965112,
+        "xy": [
+          2.917508862007758,
+          0.11470725237487152
+        ],
+        "cmd": [
+          0.4499909246673983,
+          0.0
+        ],
+        "collision": false,
+        "distance": 2.35633898143618,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 23.430841974914074,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 47,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 8.581869357964024,
+        "xy": [
+          3.1419042609104006,
+          0.12568694992431462
+        ],
+        "cmd": [
+          0.44948608195536366,
+          0.0
+        ],
+        "collision": false,
+        "distance": 2.136724959077794,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 22.648727986961603,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 43,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 9.085826967842877,
+        "xy": [
+          3.363451034441227,
+          0.1458237449665518
+        ],
+        "cmd": [
+          0.447138100069,
+          0.19654126982315007
+        ],
+        "collision": false,
+        "distance": 1.9183387147576145,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 21.252951119095087,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 38,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 9.589568272931501,
+        "xy": [
+          3.5794932972480447,
+          0.19123548786937317
+        ],
+        "cmd": [
+          0.44398308692727984,
+          0.2853247152311069
+        ],
+        "collision": false,
+        "distance": 1.6984944222656515,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 23.944074986502528,
+          "speed_limit": 0.45,
+          "optimizer_success": false,
+          "guide_points": 33,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 10.09294661693275,
+        "xy": [
+          3.7797496277300606,
+          0.27372945494108886
+        ],
+        "cmd": [
+          0.43974077549930435,
+          0.3731826112200308
+        ],
+        "collision": false,
+        "distance": 1.4828410897725093,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 14.162063132971525,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 29,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 10.596809156006202,
+        "xy": [
+          3.9656558446278156,
+          0.3968917048994987
+        ],
+        "cmd": [
+          0.43728585048684376,
+          -0.41583581213448073
+        ],
+        "collision": false,
+        "distance": 1.2710153942656257,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 11.637804796919227,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 25,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 11.10079601383768,
+        "xy": [
+          4.152865861604316,
+          0.5003570103943459
+        ],
+        "cmd": [
+          0.4225150418845214,
+          -0.6149701354742905
+        ],
+        "collision": false,
+        "distance": 1.0659958851198041,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 8.232056861743331,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 21,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 11.604569145012647,
+        "xy": [
+          4.3620907384512515,
+          0.5465974317031214
+        ],
+        "cmd": [
+          0.44180671157409535,
+          -0.33323152829152614
+        ],
+        "collision": false,
+        "distance": 0.8518358284019567,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 6.478742929175496,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 17,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 12.108263347996399,
+        "xy": [
+          4.585468196979988,
+          0.5562756035801734
+        ],
+        "cmd": [
+          0.44989579285071635,
+          0.0
+        ],
+        "collision": false,
+        "distance": 0.6311149174669143,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 4.906949121505022,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 13,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 12.614113010000437,
+        "xy": [
+          4.809833627352178,
+          0.5657664006608655
+        ],
+        "cmd": [
+          0.39717538384290096,
+          0.5298433187024537
+        ],
+        "collision": false,
+        "distance": 0.41261175157367835,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 3.62878805026412,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 8,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 13.12013411289081,
+        "xy": [
+          4.973225468456989,
+          0.5920906411358047
+        ],
+        "cmd": [
+          0.2469968383149368,
+          0.31709078163411814
+        ],
+        "collision": false,
+        "distance": 0.25113963822350677,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 3.130611963570118,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 5,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 13.62512894300744,
+        "xy": [
+          5.069602836374518,
+          0.628914236104259
+        ],
+        "cmd": [
+          0.14796951813978332,
+          0.14924698491274657
+        ],
+        "collision": false,
+        "distance": 0.14851466631350538,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 2.8050749097019434,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 3,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      },
+      {
+        "t": 14.130002012941986,
+        "xy": [
+          5.113516993881355,
+          0.6504261056533477
+        ],
+        "cmd": [
+          0.0,
+          0.0
+        ],
+        "collision": false,
+        "distance": 0.09968390716665709,
+        "planner_status": {
+          "reason": "ok",
+          "solve_ms": 2.469650935381651,
+          "speed_limit": 0.45,
+          "optimizer_success": true,
+          "guide_points": 2,
+          "recovery_count": 0,
+          "stalled": false
+        }
+      }
+    ],
+    "recovery_count": 0,
+    "blocked_samples": 0
+  }
+]
