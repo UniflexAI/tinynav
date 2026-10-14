@@ -16,6 +16,7 @@ from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 from std_msgs.msg import Float32, String
 from nav_msgs.msg import Odometry
 from enum import Enum
+from tinynav.core.robot_specs import CHASSIS_GAIT, GAITS
 import time
 
 # go2/b2 are quadrupeds sharing the same SportClient gait API (Move/StandUp/
@@ -34,15 +35,11 @@ _SWITCH_GAIT_ROBOT_MODELS = ('b2', 'b2w')
 # the state machine's mode, not an error). A sit and stand from outside this node,
 # e.g. the remote, leaves 100: Move walks there, but a slow turn in place does not.
 _WALKING_STATE = {'go2': 2010, 'go2w': 2010}
-#: The gait a quadruped walks in, asserted at every stand and motion start: ClassicWalk
-#: or FreeWalk. `play gait <name>` on rt/service/command changes it, and /chassis/gait
-#: (latched) says which one the sport service last accepted. go2 holds about 0.8 of a commanded forward speed in classic (65,
-#: 2026-10-13) and turns in place slowly; outside it a slow turn in place does not
-#: execute (_WALKING_STATE).
-_GAITS = ('classic', 'free')
-CHASSIS_GAIT = os.environ.get('CHASSIS_GAIT', 'classic').strip().lower()
-if CHASSIS_GAIT not in _GAITS:
-    raise ValueError(f"Unsupported CHASSIS_GAIT: {CHASSIS_GAIT!r}, expected one of {_GAITS}")
+# The gait a quadruped walks in (CHASSIS_GAIT), asserted at every stand and motion
+# start. `play gait <name>` on rt/service/command changes it, and /chassis/gait
+# (latched) says which one the sport service last accepted. go2 holds about 0.8 of a
+# commanded forward speed in classic and turns in place slowly; in free a slow turn in
+# place does not execute.
 ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
 if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
@@ -314,7 +311,6 @@ class Ros2UnitreeManagerNode(Node):
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
         self.has_switch_gait = robot_model in _SWITCH_GAIT_ROBOT_MODELS
-        self.classic_walk = self.is_quadruped and gait == 'classic'
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = _build_sport_client(robot_model)
@@ -322,7 +318,7 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_client.Init()
         self._gait_steps = {'classic': ('ClassicWalk', lambda: self.sport_client.ClassicWalk(True)),
                             'free': ('FreeWalk', lambda: self.sport_client.FreeWalk())}
-        self.walk_gait = 'classic' if self.classic_walk else 'free'
+        self.walk_gait = gait if self.is_quadruped else 'free'
         if self.is_quadruped:
             self._gait_steps[self.walk_gait][1]()
         # Whether the walking gait is known to be set: a motion start's ClassicWalk
@@ -347,11 +343,10 @@ class Ros2UnitreeManagerNode(Node):
         self._move_failure_logged_at = None
         self.watch = ChassisWatch(self.logger)
         self.gait = None
-        self.stand_gait = None
         if self.is_quadruped:
-            self.stand_gait = self._gait_steps[self.walk_gait]
             # The gait in force when the request runs, not the one at startup.
-            self.gait = GaitWorker(lambda: self.stand_gait[1](), self.logger, name='walk gait',
+            self.gait = GaitWorker(lambda: self._gait_steps[self.walk_gait][1](), self.logger,
+                                   name='walk gait',
                                    on_result=self._note_gait)
             self.gait.start()
 
@@ -445,7 +440,7 @@ class Ros2UnitreeManagerNode(Node):
         per state reported, so a ClassicWalk that does not reach it is not repeated
         at every motion start."""
         # The state is ClassicWalk's: in another gait nothing says it was left.
-        walking = _WALKING_STATE.get(self.robot_model) if self.classic_walk else None
+        walking = _WALKING_STATE.get(self.robot_model) if self.walk_gait == 'classic' else None
         state = self.watch.state
         if walking is None or state is None:
             return False
@@ -504,14 +499,14 @@ class Ros2UnitreeManagerNode(Node):
             if self.is_quadruped:
                 steps = [('StandUp', self.sport_client.StandUp),
                          ('BalanceStand', self.sport_client.BalanceStand)]
-                steps.append(self.stand_gait)
+                steps.append(self._gait_steps[self.walk_gait])
                 if self.has_switch_gait:
                     steps.append(('SwitchGait', lambda: self.sport_client.SwitchGait(1)))
             else:
                 steps = [('Damp', self.sport_client.Damp),
                          ('Squat2StandUp', self._squat_to_stand)]
             self._play_steps('Standing', steps, RobotStatus.STANDUP)
-        elif action_key == "gait" and self.is_quadruped and words[2:] and words[2] in _GAITS:
+        elif action_key == "gait" and self.is_quadruped and words[2:] and words[2] in GAITS:
             self._switch_gait(words[2])
 
     def _switch_gait(self, name):
@@ -521,7 +516,7 @@ class Ros2UnitreeManagerNode(Node):
         step = self._gait_steps[name]
         code = step[1]()
         if code == 0:
-            self.walk_gait, self.classic_walk, self.stand_gait = name, name == 'classic', step
+            self.walk_gait = name
             # Called standing, so it holds -- unlike the call before the robot is up.
             self._gait_held, self._reasserted_in = True, None
             self.logger.info(f"gait: {step[0]} code=0, walking in {name}")

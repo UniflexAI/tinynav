@@ -168,12 +168,14 @@ except KeyError:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
 
 
-#: classic | free, the gait unitree_control walks in (docker-compose.d/drivers.yml).
+GAITS = ('classic', 'free')
+#: The gait unitree_control walks in between pilot's switches (docker-compose.d/drivers.yml).
 CHASSIS_GAIT = os.environ.get("CHASSIS_GAIT", "classic").strip().lower()
+if CHASSIS_GAIT not in GAITS:
+    raise ValueError(f"Unsupported CHASSIS_GAIT: {CHASSIS_GAIT!r}, expected one of {GAITS}")
 
-#: In the free gait a slow turn in place only sways the body: the legs do not step.
-#: go2, measured on 65 on 2026-10-14 holding the rate for 8s: 0.40 rad/s turning right
-#: never stepped (twice), 0.45 stepped at ~0.2 rad/s, 0.50 stepped both ways.
+#: Below this a turn in place in the free gait sways the body and never steps
+#: (docs/gotchas.md, pilot's).
 FREE_GAIT_SPIN_VEL = {'go2': 0.5}
 
 

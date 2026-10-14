@@ -93,12 +93,10 @@ def _node(sport=None, gait=None):
     node.logger = _Log()
     node.sport_client = sport or _Sport()
     node.is_quadruped = True
-    node.classic_walk = True
     node.has_switch_gait = False
     node._gait_steps = {'classic': ('ClassicWalk', lambda: node.sport_client.ClassicWalk(True)),
                         'free': ('FreeWalk', lambda: node.sport_client.FreeWalk())}
     node.walk_gait = 'classic'
-    node.stand_gait = node._gait_steps['classic']
     node.said_gaits = []
     node.publisher_gait = types.SimpleNamespace(publish=lambda m: node.said_gaits.append(m.data))
     node._robot_status = None
@@ -252,7 +250,7 @@ class TestTwistPath(unittest.TestCase):
 
     def test_the_free_gait_is_not_judged_by_the_classic_state(self):
         node = _node()
-        node.classic_walk = False
+        node.walk_gait = 'free'
         node._note_gait(0)
         self._chassis_at(node, 100)
         _drive(node, 0.0, 10, 0.5)
