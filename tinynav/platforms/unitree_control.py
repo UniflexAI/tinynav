@@ -314,13 +314,13 @@ class Ros2UnitreeManagerNode(Node):
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
         self.has_switch_gait = robot_model in _SWITCH_GAIT_ROBOT_MODELS
         self.classic_walk = self.is_quadruped and gait == 'classic'
-        gait_name, gait_call = (('ClassicWalk', lambda: self.sport_client.ClassicWalk(True))
-                                if self.classic_walk else ('FreeWalk', self.sport_client.FreeWalk))
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
+        gait_name, gait_call = (('ClassicWalk', lambda: self.sport_client.ClassicWalk(True))
+                                if self.classic_walk else ('FreeWalk', self.sport_client.FreeWalk))
         if self.is_quadruped:
             gait_call()
         # Whether the walking gait is known to be set: a motion start's ClassicWalk
