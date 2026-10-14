@@ -72,7 +72,8 @@ class CmdVelControlNode(Node):
         self.create_subscription(Bool, '/nav/active', self._on_nav_active, _latched_qos)
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
-    def _stop(self):
+    def _stop(self, reason="stop_requested"):
+        self.logger.warning(f"control_stop: {reason}", throttle_duration_sec=2.)
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self.last_path_update_time = None
@@ -126,17 +127,17 @@ class CmdVelControlNode(Node):
         target_cmd.angular.z = self.latest_cmd.angular.z
         pose_age = float("inf") if self.last_pose_update_time is None else now - self.last_pose_update_time
         if age > min(stale_stop_s, .8) or pose_age > .8:
-            self._stop()
+            self._stop(f"input_timeout path_age={age:.3f}s odometry_age={pose_age:.3f}s")
             return
         elif age > stale_slow_s:
             if self.timed_path:
-                self._stop()
+                self._stop(f"timed_path_timeout receive_age={age:.3f}s limit={stale_slow_s:.3f}s")
                 return
             target_cmd.linear.x *= 0.3
             target_cmd.angular.z *= 0.5
 
         if abs(target_cmd.linear.x) < 1e-6 and abs(target_cmd.angular.z) < 1e-6:
-            self._stop()
+            self._stop("zero_trajectory planner requested stop")
             return
 
         out = Twist()
@@ -179,14 +180,16 @@ class CmdVelControlNode(Node):
         
     def path_callback(self, msg):
         if not self._nav_active:
+            self.logger.warning("control_hold: navigation inactive (/nav/active)", throttle_duration_sec=5.)
             return
         if self._paused:
+            self.logger.warning("control_hold: navigation paused (/nav/paused)", throttle_duration_sec=5.)
             return
         if msg is None or self.pose is None or len(msg.poses) < 2:
-            self._stop()
+            self._stop(f"missing_input odometry={self.pose is not None} path_points={len(msg.poses) if msg is not None else 0}")
             return
         if msg.header.frame_id != "world":
-            self._stop()
+            self._stop(f"wrong_frame frame={msg.header.frame_id}")
             return
         self.path = msg
 
@@ -229,7 +232,7 @@ class CmdVelControlNode(Node):
             dt = delta_ns * 1e-9
             age_ros = (ns(ros_now) - ns(msg.poses[0].header.stamp)) * 1e-9
             if not .01 <= dt <= 2. or not -.1 <= age_ros <= .25:
-                self._stop()
+                self._stop(f"trajectory_time_rejected point_dt={dt:.3f}s source_age={age_ros:.3f}s allowed_age=[-0.100,0.250]s")
                 return
         else:
             dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)
@@ -245,7 +248,7 @@ class CmdVelControlNode(Node):
             return
         if raw_vx < 0.0:
             if self.timed_path and abs(raw_vx + self.fixed_reverse_speed) > .001:
-                self._stop()
+                self._stop(f"reverse_speed_mismatch planned={raw_vx:.3f} required={-self.fixed_reverse_speed:.3f}")
                 return
             vx = -self.fixed_reverse_speed
         else:
