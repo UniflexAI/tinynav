@@ -53,6 +53,8 @@ class CmdVelControlNode(Node):
         # Static-friction compensation: very small vx often cannot move the robot.
         self.min_effective_linear_speed = self.robot.min_linear_vel
         self.min_effective_angular_speed = self.robot.min_angular_vel
+        # A turn in place has a floor of its own: some gaits step only above it.
+        self.min_effective_spin_speed = max(self.robot.min_angular_vel, self.robot.min_spin_vel)
         # How small a REQUEST means the planner is stopping rather than driving -- not
         # the same quantity as the speed the chassis can execute. See `_snap`.
         self.linear_engage_threshold = 0.04
@@ -171,8 +173,9 @@ class CmdVelControlNode(Node):
         out.linear.x = self._snap(out.linear.x, target_cmd.linear.x,
                                   self.min_effective_linear_speed,
                                   self.linear_engage_threshold)
-        out.angular.z = self._snap(out.angular.z, target_cmd.angular.z,
-                                   self.min_effective_angular_speed,
+        spin_floor = (self.min_effective_spin_speed if out.linear.x == 0.0
+                      else self.min_effective_angular_speed)
+        out.angular.z = self._snap(out.angular.z, target_cmd.angular.z, spin_floor,
                                    self.angular_engage_threshold)
 
         self.cmd_pub.publish(out)
