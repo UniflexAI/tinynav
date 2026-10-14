@@ -21,6 +21,7 @@ class CmdVelControlNode(Node):
         self.logger = self.get_logger()  # Use ROS2 logger
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.pose_sub = self.create_subscription(Odometry, '/slam/odometry', self.pose_callback, 10)
+        self.visual_pose_sub = self.create_subscription(Odometry, '/slam/odometry_visual', self.pose_callback, 10)
         self.create_subscription(Path, '/planning/trajectory_path', self.path_callback, 10)
         self.T_robot_to_camera = np.array([
             [0, -1, 0, 0],
@@ -56,6 +57,7 @@ class CmdVelControlNode(Node):
         self.linear_engage_threshold = 0.04
         self.fixed_reverse_speed = self.robot.reverse_speed
         self.timed_path = False
+        self._stop_log_times = {}
         self.last_pose_update_time = None
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
@@ -73,7 +75,11 @@ class CmdVelControlNode(Node):
         self.cmd_timer = self.create_timer(1.0 / self.cmd_rate_hz, self.cmd_timer_callback)
 
     def _stop(self, reason="stop_requested"):
-        self.logger.warning(f"control_stop: {reason}", throttle_duration_sec=2.)
+        code = reason.split()[0]
+        now = time.monotonic()
+        if now - self._stop_log_times.get(code, -float("inf")) >= 2.:
+            self.logger.warning(f"control_stop: {reason}")
+            self._stop_log_times[code] = now
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
         self.last_path_update_time = None

@@ -37,6 +37,11 @@ class PncControlTest(unittest.TestCase):
         header=Header(frame_id='world',stamp=self.node.get_clock().now().to_msg())
         PlanningNode.publish_selected_path(SimpleNamespace(path_pub=SimpleNamespace(publish=messages.append)),np.array([np.column_stack([xyz,quat])]),[0],header,stride=stride)
         return messages[0]
+    def test_visual_odometry_subscription_matches_planner(self):
+        topics = {subscription.topic_name for subscription in self.node.subscriptions}
+        self.assertIn("/slam/odometry_visual", topics)
+        self.assertIn("/slam/odometry", topics)
+
     def test_dense_timing_and_turn(self):
         self.node.path_callback(self.path(.3,.5))
         self.assertTrue(self.node.timed_path)
