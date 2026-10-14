@@ -6,6 +6,15 @@ import numpy as np
 from tinynav.core.planning_node import PlanningNode
 
 class ObstacleMemoryTest(unittest.TestCase):
+    def test_repeated_sensor_stamp_does_not_refresh_control_path(self):
+        from nav_msgs.msg import Odometry
+        warnings=[]
+        node=SimpleNamespace(K=np.eye(3),planner_type='continuous',last_sensor_stamp_ns=6000000000000,
+            get_logger=lambda:SimpleNamespace(warning=lambda *args,**kwargs:warnings.append(args[0])))
+        odom=Odometry();odom.header.stamp.sec=6000
+        PlanningNode.sync_callback(node,None,odom)
+        self.assertEqual(len(warnings),1)
+
     def test_unobserved_obstacle_persists_and_free_rays_clear_it(self):
         node = SimpleNamespace(origin=np.array([-.1,-.1,-.1]), grid_shape=(4,4,4),
                                resolution=.05, step=1, planner_type='continuous',

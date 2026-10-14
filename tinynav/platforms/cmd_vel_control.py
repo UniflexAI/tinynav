@@ -236,9 +236,9 @@ class CmdVelControlNode(Node):
         self.timed_path = delta_ns != 0
         if self.timed_path:
             dt = delta_ns * 1e-9
-            age_ros = (ns(ros_now) - ns(msg.poses[0].header.stamp)) * 1e-9
+            age_ros = (ns(ros_now) - ns(msg.header.stamp)) * 1e-9
             if not .01 <= dt <= 2. or not -.1 <= age_ros <= .25:
-                self._stop(f"trajectory_time_rejected point_dt={dt:.3f}s source_age={age_ros:.3f}s allowed_age=[-0.100,0.250]s")
+                self._stop(f"trajectory_time_rejected point_dt={dt:.3f}s publication_age={age_ros:.3f}s allowed_age=[-0.100,0.250]s")
                 return
         else:
             dt = self.planner_dt * self.path_pose_stride * max(1, step_idx)

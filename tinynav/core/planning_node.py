@@ -329,6 +329,7 @@ class PlanningNode(Node):
         if self.planner_type not in ("dwa", "continuous"):
             raise ValueError(f"Unknown planner: {self.planner_type}")
         self.continuous_planner = ContinuousPlanner()
+        self.last_sensor_stamp_ns = None
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.status_pub = self.create_publisher(String, '/planning/status', 10)
@@ -572,9 +573,10 @@ class PlanningNode(Node):
             + reverse_gate_penalty
         )
 
-    def publish_selected_path(self, trajectories, top_indices, header, stride=10):
+    def publish_selected_path(self, trajectories, top_indices, header, stride=10, publication_stamp=None):
         path = Path()
-        path.header = header
+        path.header = Header()
+        path.header.stamp = publication_stamp if publication_stamp is not None else header.stamp
         path.header.frame_id = "world"
 
         for i in top_indices:
@@ -583,7 +585,7 @@ class PlanningNode(Node):
                 pose = PoseStamped()
                 pose.header = Header()
                 pose.header.frame_id = 'world'
-                ns = header.stamp.sec * 1000000000 + header.stamp.nanosec
+                ns = path.header.stamp.sec * 1000000000 + path.header.stamp.nanosec
                 if stride == 1:
                     ns += j * 100000000
                 pose.header.stamp.sec, pose.header.stamp.nanosec = divmod(ns, 1000000000)
@@ -601,6 +603,12 @@ class PlanningNode(Node):
     def sync_callback(self, depth_msg, odom_msg):
         if self.K is None:
             return
+        sensor_stamp_ns = Time.from_msg(odom_msg.header.stamp).nanoseconds
+        if self.planner_type == "continuous":
+            if self.last_sensor_stamp_ns is not None and sensor_stamp_ns <= self.last_sensor_stamp_ns:
+                self.get_logger().warning("Repeated or backwards sensor stamp; withholding trajectory", throttle_duration_sec=2.)
+                return
+            self.last_sensor_stamp_ns = sensor_stamp_ns
         with Timer(name='preprocess', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             stamp = Time.from_msg(odom_msg.header.stamp).nanoseconds / 1e9
@@ -645,7 +653,8 @@ class PlanningNode(Node):
                 trajectory, self.last_param = output
             self.status_pub.publish(String(data=json.dumps(info)))
             self.get_logger().info(f"continuous: {info}", throttle_duration_sec=2.)
-            self.publish_selected_path(np.asarray([trajectory]), [0], depth_msg.header, stride=1)
+            self.publish_selected_path(np.asarray([trajectory]), [0], depth_msg.header, stride=1,
+                                       publication_stamp=self.get_clock().now().to_msg())
             return
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):

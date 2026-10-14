@@ -42,6 +42,28 @@ class PncControlTest(unittest.TestCase):
         self.assertIn("/slam/odometry_visual", topics)
         self.assertIn("/slam/odometry", topics)
 
+    def test_sensor_clock_epoch_is_independent_of_publication_age(self):
+        msg=self.path(.3)
+        for pose in msg.poses:
+            pose.header.stamp.sec-=1791940963
+        self.node.path_callback(msg)
+        self.assertAlmostEqual(self.node.latest_cmd.linear.x,.3,places=5)
+
+    def test_publisher_uses_ros_time_without_mutating_sensor_header(self):
+        header=Header(frame_id='camera')
+        header.stamp.sec=6000
+        quat=Rotation.from_matrix(np.array([[0,0,1],[-1,0,0],[0,-1,0]])).as_quat()
+        trajectory=np.tile(np.r_[np.zeros(3),quat],(31,1))
+        published=[]
+        stamp=self.node.get_clock().now().to_msg()
+        PlanningNode.publish_selected_path(SimpleNamespace(path_pub=SimpleNamespace(publish=published.append)),np.array([trajectory]),[0],header,stride=1,publication_stamp=stamp)
+        msg=published[0]
+        self.assertEqual(msg.header.stamp.sec,stamp.sec)
+        self.assertEqual(msg.poses[0].header.stamp.sec,stamp.sec)
+        self.assertEqual(header.stamp.sec,6000)
+        ns=lambda t:t.sec*1000000000+t.nanosec
+        self.assertEqual(ns(msg.poses[1].header.stamp)-ns(msg.poses[0].header.stamp),100000000)
+
     def test_dense_timing_and_turn(self):
         self.node.path_callback(self.path(.3,.5))
         self.assertTrue(self.node.timed_path)
@@ -88,6 +110,7 @@ class PncControlTest(unittest.TestCase):
         self.node.path_callback(Path())
         self.assertEqual(self.sent[-1].linear.x,0.)
         msg=self.path(.3)
+        msg.header.stamp.sec-=2
         for pose in msg.poses:pose.header.stamp.sec-=2
         self.node.path_callback(msg)
         self.assertEqual(self.sent[-1].linear.x,0.)
