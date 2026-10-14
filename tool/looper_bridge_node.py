@@ -158,6 +158,18 @@ class StreamHealth:
     def good(self, now_mono: float) -> bool:
         return self.alive(now_mono) and not self.frozen(now_mono)
 
+    def state_reason(self, now_mono: float) -> str:
+        if not self.has_data():
+            return "no_data"
+        if self.dropout(now_mono):
+            age = now_mono - float(self.recv_mono)
+            return f"dropout age={age:.2f}s"
+        if self._jump or self.reason == "nan":
+            return self.reason
+        if self.frozen(now_mono):
+            return "frozen"
+        return self.reason
+
     def motion_delta(self, now_mono: float, window_s: float = 0.5) -> np.ndarray | None:
         if self.T is None or len(self._poses) < 2:
             return None
@@ -329,8 +341,12 @@ class LooperBridgeNode(Node):
         self._T_rear_lock: np.ndarray | None = None
         self._rear_alignment_history = deque(maxlen=400)
         self._rear_alignment_guard_s = 0.8
+        self._front_freeze_since: float | None = None
+        self._front_freeze_confirm_s = 1.0
+        self._rear_entered_mono: float | None = None
+        self._rear_min_hold_s = 2.0
         self._front_recovery_good_since: float | None = None
-        self._front_recovery_confirm_s = 1.0
+        self._front_recovery_confirm_s = 1.5
         self._recover_T_pub_lock: np.ndarray | None = None
         self._recover_T_front_100_raw_lock: np.ndarray | None = None
         self._recover_T_front_img_raw_lock: np.ndarray | None = None
@@ -461,6 +477,8 @@ class LooperBridgeNode(Node):
 
         if source == "rear":
             self._activate_rear_alignment(now_mono)
+            self._rear_entered_mono = now_mono
+            self._front_freeze_since = None
             self._recover_T_pub_lock = None
             self._recover_T_front_100_raw_lock = None
             self._recover_T_front_img_raw_lock = None
@@ -474,6 +492,8 @@ class LooperBridgeNode(Node):
                 )
             self._T_front_lock = None
             self._T_rear_lock = None
+            self._rear_entered_mono = None
+            self._front_freeze_since = None
             self._front_recovery_good_since = None
 
         self._vio_source = source
@@ -481,7 +501,8 @@ class LooperBridgeNode(Node):
         self._publish_nav_paused(source)
         self.get_logger().warn(
             f"VIO source {prev} -> {source} "
-            f"front({self._front_100.reason}) rear({self._rear_100.reason}) "
+            f"front({self._front_100.state_reason(now_mono)}) "
+            f"rear({self._rear_100.state_reason(now_mono)}) "
             f"visual({self._front_visual.reason})"
         )
 
@@ -537,7 +558,7 @@ class LooperBridgeNode(Node):
         rotation_error = rot_angle(
             delta_front[:3, :3].T @ delta_rear_front[:3, :3]
         )
-        return translation_error <= 0.15 and rotation_error <= np.deg2rad(10.0)
+        return translation_error <= 0.03 and rotation_error <= np.deg2rad(3.0)
 
     def _evaluate_source(self, now_mono: float) -> str:
         if not self._rear_fallback_enabled:
@@ -554,22 +575,41 @@ class LooperBridgeNode(Node):
         rear_100_unavailable = (
             not self._rear_100.has_data() or self._rear_100.dropout(now_mono)
         )
-        front_good = self._front_100.good(now_mono) or (
-            front_100_unavailable and self._front_img.good(now_mono)
-        )
+        active_front = self._front_img if front_100_unavailable else self._front_100
         front_alive = self._front_100.alive(now_mono) or (
             front_100_unavailable and self._front_img.alive(now_mono)
         )
         rear_alive = self._rear_100.alive(now_mono) or (
             rear_100_unavailable and self._rear_img.alive(now_mono)
         )
+        front_frozen = front_alive and active_front.frozen(now_mono)
+        front_moving = active_front.moving(now_mono)
         rear_moving = self._rear_100.moving(now_mono) or self._rear_img.moving(now_mono)
+
+        if self._vio_source != "rear":
+            if front_frozen and rear_alive and rear_moving:
+                if self._front_freeze_since is None:
+                    self._front_freeze_since = now_mono
+            else:
+                self._front_freeze_since = None
+        front_stalled = (
+            self._front_freeze_since is not None
+            and (now_mono - self._front_freeze_since) >= self._front_freeze_confirm_s
+        )
 
         # While rear owns odometry, keep the robot paused until front has been
         # numerically healthy and agrees with rear relative motion for a full
         # confirmation interval. Image/depth appearance never changes VIO source.
         if self._vio_source == "rear":
-            front_recovered = self._front_100.alive(now_mono) and self._front_rear_motion_agree(now_mono)
+            rear_held_long_enough = (
+                self._rear_entered_mono is not None
+                and (now_mono - self._rear_entered_mono) >= self._rear_min_hold_s
+            )
+            both_stationary = front_alive and rear_alive and not front_moving and not rear_moving
+            front_recovered = rear_held_long_enough and front_alive and (
+                both_stationary
+                or (not front_frozen and self._front_rear_motion_agree(now_mono))
+            )
             if front_recovered:
                 if self._front_recovery_good_since is None:
                     self._front_recovery_good_since = now_mono
@@ -584,10 +624,8 @@ class LooperBridgeNode(Node):
         # Stay on front while it is still producing poses. Otherwise switch to
         # rear when front is dead/jumping, or frozen while rear is clearly moving.
         # A standing robot must not count as fallback or failed.
-        if front_good:
-            desired = "front"
-        elif front_alive:
-            desired = "rear" if (rear_alive and rear_moving) else "front"
+        if front_alive:
+            desired = "rear" if front_stalled else "front"
         elif rear_alive:
             desired = "rear"
         else:

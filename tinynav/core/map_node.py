@@ -577,6 +577,9 @@ class MapNode(Node):
         self.relocalization_threshold = 0.70
         self.relocalization_loop_top_k = 3
         self.relocalization_min_inlier_count = 40
+        self.first_relocalization_min_match_count = 25
+        self.first_relocalization_min_landmark_count = 30
+        self.first_relocalization_min_inlier_count = 25
         self.night_relocalization_min_match_count = 30
         self.night_relocalization_min_landmark_count = 50
         self.night_relocalization_min_inlier_count = 30
@@ -1982,10 +1985,10 @@ class MapNode(Node):
 
     def _first_lock_map_views_agree(self, pnp_candidates: list) -> bool:
         """Same query must PnP to a consistent pose from at least two map keyframes."""
-        min_inlier_count = self._get_relocalization_pnp_thresholds()[2]
+        _, min_landmark_count, min_inlier_count = self._get_relocalization_pnp_thresholds()
         worlds: list[np.ndarray] = []
         for points_3d, points_2d, _timestamp_in_map in pnp_candidates:
-            if len(points_2d) <= 80:
+            if len(points_2d) <= min_landmark_count:
                 continue
             success, rvec, tvec, inliers = cv2.solvePnPRansac(
                 points_3d, points_2d, self.map_K, None
@@ -2147,16 +2150,10 @@ class MapNode(Node):
         now_hour = datetime.now().hour
         is_night = now_hour >= 18 or now_hour < 6
         if self.enable_first_done and not self.first_done:
-            if is_night:
-                return (
-                    self.night_relocalization_min_match_count,
-                    self.night_relocalization_min_landmark_count,
-                    self.night_relocalization_min_inlier_count,
-                )
             return (
-                self.night_relocalization_min_match_count,
-                self.night_relocalization_min_landmark_count,
-                self.night_relocalization_min_inlier_count,
+                self.first_relocalization_min_match_count,
+                self.first_relocalization_min_landmark_count,
+                self.first_relocalization_min_inlier_count,
             )
         if is_night:
             return (
