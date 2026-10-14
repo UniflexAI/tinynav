@@ -51,6 +51,14 @@ class _Sport:
         self.calls.append('ClassicWalk')
         return 0
 
+    def StandUp(self):
+        self.calls.append('StandUp')
+        return 0
+
+    def BalanceStand(self):
+        self.calls.append('BalanceStand')
+        return 0
+
     def Move(self, vx, vy, wz):
         self.calls.append('Move' if (vx, vy, wz) != (0.0, 0.0, 0.0) else 'Move0')
         return 0
@@ -78,6 +86,9 @@ def _node(sport=None, gait=None):
     node.logger = _Log()
     node.sport_client = sport or _Sport()
     node.is_quadruped = True
+    node.classic_walk = True
+    node.has_switch_gait = False
+    node._robot_status = None
     node.last_twist_time = None
     node._walking = False
     node._gait_due = False
@@ -207,6 +218,20 @@ class TestTwistPath(unittest.TestCase):
         self._chassis_at(node, 100)
         _drive(node, 0.0, 10, 0.5)
         self.assertEqual(node.gait.requests, 0)
+
+    def test_the_default_gait_asserts_nothing(self):
+        node = _node()
+        node.classic_walk, node.gait = False, None
+        node._play_action('play stand')
+        _drive(node, 0.0, 10, 0.5)
+        self.assertEqual(node.sport_client.calls[:2], ['StandUp', 'BalanceStand'])
+        self.assertEqual(node.sport_client.count('ClassicWalk'), 0)
+        self.assertEqual(node.sport_client.count('Move'), 10)
+
+    def test_the_classic_gait_is_part_of_a_stand(self):
+        node = _node()
+        node._play_action('play stand')
+        self.assertEqual(node.sport_client.calls, ['StandUp', 'BalanceStand', 'ClassicWalk'])
 
     def test_a_sit_clears_the_gait(self):
         node = _node()

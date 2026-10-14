@@ -34,6 +34,14 @@ _SWITCH_GAIT_ROBOT_MODELS = ('b2', 'b2w')
 # the state machine's mode, not an error). A sit and stand from outside this node,
 # e.g. the remote, leaves 100: Move walks there, but a slow turn in place does not.
 _WALKING_STATE = {'go2': 2010, 'go2w': 2010}
+#: The gait a quadruped walks in. 'classic' asserts ClassicWalk at every stand and
+#: motion start: go2 holds about 0.8 of a commanded forward speed in it (65, 2026-10-13),
+#: and turns in place slowly. 'default' asserts nothing and walks in what BalanceStand
+#: leaves, which holds the speed and does not turn in place slowly (_WALKING_STATE).
+_GAITS = ('classic', 'default')
+CHASSIS_GAIT = os.environ.get('CHASSIS_GAIT', 'classic').strip().lower()
+if CHASSIS_GAIT not in _GAITS:
+    raise ValueError(f"Unsupported CHASSIS_GAIT: {CHASSIS_GAIT!r}, expected one of {_GAITS}")
 ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
 if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
@@ -297,19 +305,21 @@ class ChassisWatch:
 
 
 class Ros2UnitreeManagerNode(Node):
-    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
+    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE,
+                 gait: str = CHASSIS_GAIT):
         super().__init__('ros2_unitree_manager')
         if robot_model not in _SUPPORTED_ROBOT_MODELS:
             raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
         self.has_switch_gait = robot_model in _SWITCH_GAIT_ROBOT_MODELS
+        self.classic_walk = self.is_quadruped and gait == 'classic'
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = _build_sport_client(robot_model)
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        if self.is_quadruped:
+        if self.classic_walk:
             self.sport_client.ClassicWalk(True)
         # Whether the walking gait is known to be set: a motion start's ClassicWalk
         # returned 0 and no sit or stand has run since. While it is, a motion start
@@ -333,7 +343,7 @@ class Ros2UnitreeManagerNode(Node):
         self._move_failure_logged_at = None
         self.watch = ChassisWatch(self.logger)
         self.gait = None
-        if self.is_quadruped:
+        if self.classic_walk:
             self.gait = GaitWorker(lambda: self.sport_client.ClassicWalk(True), self.logger,
                                    on_result=self._note_gait)
             self.gait.start()
@@ -480,8 +490,9 @@ class Ros2UnitreeManagerNode(Node):
         elif action_key == "stand":
             if self.is_quadruped:
                 steps = [('StandUp', self.sport_client.StandUp),
-                         ('BalanceStand', self.sport_client.BalanceStand),
-                         ('ClassicWalk', lambda: self.sport_client.ClassicWalk(True))]
+                         ('BalanceStand', self.sport_client.BalanceStand)]
+                if self.classic_walk:
+                    steps.append(('ClassicWalk', lambda: self.sport_client.ClassicWalk(True)))
                 if self.has_switch_gait:
                     steps.append(('SwitchGait', lambda: self.sport_client.SwitchGait(1)))
             else:
