@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CycloneDDS localhost unicast profile — proven in the gsplat-probe
+  container: on hosts whose default route is hijacked by a
+  TUN-style VPN (clash/mihomo `Meta` interface), ALL multicast and any
+  traffic routed before source selection gets sucked into the TUN and
+  DDS delivery dies silently (best-effort publishes then block ~166 ms
+  per 261 KB frame on a full socket buffer). Pinning Cyclone to lo with
+  multicast disabled and an explicit 127.0.0.1 peer keeps every DDS
+  packet on loopback, which the TUN rules never intercept.
+
+  Use for: multiple ROS processes / host-network containers on ONE host.
+  Do NOT use for: cross-machine links (use src/tinynav_cpp/config/
+  cyclonedds_x86.xml-style interface pinning instead).
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface name="lo" multicast="false"/>
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <Peers>
+        <Peer address="127.0.0.1"/>
+      </Peers>
+      <ParticipantIndex>auto</ParticipantIndex>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
