@@ -63,6 +63,8 @@ class _NodeCase(unittest.TestCase):
 
     def setUp(self):
         self.node = CmdVelControlNode()
+        # The classic gait's floors, whatever CHASSIS_GAIT the host has.
+        self.node.min_effective_spin_speed = self.node.min_effective_angular_speed
         self.sent: list[Twist] = []
         self.node.cmd_pub.publish = self.sent.append
         self.node._nav_active = True
@@ -156,12 +158,12 @@ class TurnInPlaceTest(_NodeCase):
         self.assertEqual(out.angular.z, 0.0)
 
     def test_a_slow_turn_in_place_is_raised_to_what_the_chassis_executes(self):
-        # A go2 does not yaw at all below 0.2; the planner's smallest turn is 0.107.
+        # A go2 in the free gait does not step below 0.5; the planner's smallest turn is 0.107.
         n = self.node
-        n.min_effective_angular_speed = 0.2
+        n.min_effective_angular_speed, n.min_effective_spin_speed = 0.2, 0.5
         for yaw in (+0.107, -0.107):
             out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, yaw)))[-1]
-            self.assertAlmostEqual(out.angular.z, math.copysign(0.2, yaw), places=6)
+            self.assertAlmostEqual(out.angular.z, math.copysign(0.5, yaw), places=6)
         # The pair: a request below the engage threshold is still a stop.
         out = self._drive(_path((0, 0, 0), (0, 0, self.NOISE, 0.03)))[-1]
         self.assertEqual(out.angular.z, 0.0)

@@ -62,6 +62,9 @@ class RobotConfig:
     max_linear_vel: float = 1.0
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
+    #: The slowest turn in place, where the gait needs more than min_angular_vel to
+    #: take a step at all (`FREE_GAIT_SPIN_VEL`); 0 is no floor beyond it.
+    min_spin_vel: float = 0.0
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
 
     @property
@@ -168,15 +171,21 @@ except KeyError:
 
 GAITS = ('classic', 'free')
 #: The gait unitree_control walks in between pilot's switches (docker-compose.d/drivers.yml).
-#: Every command is passed on as it is: no floor of its own in free (pilot's docs/gotchas.md).
 CHASSIS_GAIT = os.environ.get("CHASSIS_GAIT", "classic").strip().lower()
 if CHASSIS_GAIT not in GAITS:
     raise ValueError(f"Unsupported CHASSIS_GAIT: {CHASSIS_GAIT!r}, expected one of {GAITS}")
 
+#: Below this a turn in place in the free gait sways the body and never steps
+#: (docs/gotchas.md, pilot's).
+FREE_GAIT_SPIN_VEL = {'go2': 0.5}
 
-def robot_config(path=CAMERA_OFFSET_PATH):
-    """This ROBOT_TYPE's config with the rig's measurement, read from disk now."""
-    return with_measured_camera(_TYPE_CONFIG, path)
+
+def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT):
+    """This ROBOT_TYPE's config in `gait`, with the rig's measurement read from disk now."""
+    config = _TYPE_CONFIG
+    if gait == 'free' and config.name in FREE_GAIT_SPIN_VEL:
+        config = replace(config, min_spin_vel=FREE_GAIT_SPIN_VEL[config.name])
+    return with_measured_camera(config, path)
 
 
 #: Read once, at import: a process picks up a new measurement at its next launch.
