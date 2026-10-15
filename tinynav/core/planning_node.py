@@ -32,6 +32,7 @@ from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
 from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
+from tinynav.core import local_route as lr
 
 # === Helper functions ===
 @njit(cache=True)
@@ -795,6 +796,9 @@ class PlanningNode(Node):
         # What the reverse gate decided, and what it cost. Published rather than only
         # logged so a tracer can keep it: container logs do not survive the round.
         self.gate_pub = self.create_publisher(String, '/planning/gate', 10)
+        # What the scoring followed this frame: the local route, or the global one when
+        # it is off or found nothing. In world.
+        self.local_route_pub = self.create_publisher(Path, '/planning/local_route', 1)
         #: Upstream's hysteresis state: once reverse engages it stays engaged until the
         #: corridor opens past REVERSE_EXIT_M. It was lost in merge `3a69dbc`, whose
         #: subject says it brings in #247's reverse gate.
@@ -868,6 +872,12 @@ class PlanningNode(Node):
         self.declare_parameter('traj_turn_slowdown', 0.5)
         # Extra per-frame decay on cells under the footprint, on top of the global 0.99.
         self.declare_parameter('footprint_decay', 0.9)
+        # The scoring follows a path through what the camera has seen (local_route.py)
+        # instead of the global route itself.
+        self.declare_parameter('local_route', True)
+        self.declare_parameter('local_route_unknown_cost', lr.UNKNOWN_COST)
+        self.declare_parameter('local_route_clear_m', lr.CLEAR_M)
+        self.declare_parameter('local_route_clear_weight', lr.CLEAR_WEIGHT)
         self._vx_max = float(self.get_parameter('vx_max').value)
         self._vx_hard_max = float(self.get_parameter('vx_hard_max').value)
         self._vx_min = float(self.get_parameter('vx_min').value)
@@ -878,6 +888,11 @@ class PlanningNode(Node):
         self._traj_max_lat_acc = float(self.get_parameter('traj_max_lat_acc').value)
         self._traj_turn_slowdown = float(self.get_parameter('traj_turn_slowdown').value)
         self._footprint_decay = float(self.get_parameter('footprint_decay').value)
+        self._local_route = bool(self.get_parameter('local_route').value)
+        self._local_route_knobs = dict(
+            unknown_cost=float(self.get_parameter('local_route_unknown_cost').value),
+            clear_m=float(self.get_parameter('local_route_clear_m').value),
+            clear_weight=float(self.get_parameter('local_route_clear_weight').value))
 
         # Collision is checked over the WHOLE 3 s rollout, as upstream does. A
         # receding-horizon "commit" window was tried here -- checking only ~0.8 m ahead
@@ -1029,6 +1044,21 @@ class PlanningNode(Node):
     # Path, and its dt is planner_dt * path_pose_stride * step_idx -- publishing at a
     # different stride would scale both by that ratio.
     PATH_POSE_STRIDE = 10
+
+    @staticmethod
+    def _publish_xy_path(pub, xy, header):
+        if pub.get_subscription_count() == 0:
+            return
+        path = Path()
+        path.header = header
+        path.header.frame_id = "world"
+        for x, y in xy:
+            ps = PoseStamped()
+            ps.header = path.header
+            ps.pose.position.x, ps.pose.position.y = float(x), float(y)
+            ps.pose.orientation.w = 1.0
+            path.poses.append(ps)
+        pub.publish(path)
 
     def publish_selected_path(self, trajectories, indices, header):
         path = Path()
@@ -1293,6 +1323,14 @@ class PlanningNode(Node):
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
+            if route_xy is not None and self._local_route:
+                cost = lr.cell_cost(ESDF_map, lr.observed_free(self.occupancy_grid),
+                                    ROBOT_CONFIG.half_width, **self._local_route_knobs)
+                local = lr.local_route(route_xy, init_p[:2], cost, self.origin[:2], self.resolution)
+                if local is not None:
+                    route_xy = local
+            if route_xy is not None:
+                self._publish_xy_path(self.local_route_pub, route_xy, depth_msg.header)
             path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
                 route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
             )
