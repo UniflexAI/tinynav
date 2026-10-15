@@ -536,6 +536,23 @@ class TestChassisWatch(unittest.TestCase):
         watch.check(2.0)
         self.assertTrue(log.has('warning', 'rt/sportmodestate silent'))
 
+    def test_a_silent_chassis_is_given_up_on_after_ten_seconds(self):
+        lost = []
+        watch = uc.ChassisWatch(_Log(), lost=lost.append)
+        watch.on_sport_state(0.0, 7, 1, 0, (0, 0, 0), 0.0, ())
+        watch.check(9.0)
+        self.assertEqual(lost, [])
+        watch.check(11.0)
+        self.assertEqual(lost, [11.0])
+
+    def test_a_chassis_never_heard_is_given_up_on_from_the_start(self):
+        lost = []
+        watch = uc.ChassisWatch(_Log(), started=100.0, lost=lost.append)
+        watch.check(105.0)
+        self.assertEqual(lost, [])
+        watch.check(111.0)
+        self.assertEqual(lost, [11.0])
+
 
 class TestConstructionOrder(unittest.TestCase):
     """The lowstate reader publishes /battery from its own thread as soon as it

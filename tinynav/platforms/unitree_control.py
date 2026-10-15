@@ -89,6 +89,10 @@ _REPEAT_S = 5.0
 # one ran 20s late with the robot walking at 0.9 m/s (65, 2026-09-29).
 _ACTION_MAX_WAIT_S = 0.2
 _SPORT_STATE_SILENT_S = 1.0
+# rt/sportmodestate silent this long with the link up: this process exits, and compose
+# starts a fresh one. A driver whose DDS stopped hearing the chassis stays deaf until
+# restarted (118, 2026-10-15). Counted from start too, for one that never heard it.
+_SPORT_STATE_LOST_S = 10.0
 
 
 class GaitWorker:
@@ -235,10 +239,12 @@ class ActionWorker:
 
 class ChassisWatch:
     """Compares what was commanded with what rt/sportmodestate says the chassis is
-    doing. Logs only; never changes a command."""
+    doing. Never changes a command; calls `lost` once the state has been silent for
+    `_SPORT_STATE_LOST_S`, counting from `started` until the first sample."""
 
-    def __init__(self, log):
+    def __init__(self, log, started=0.0, lost=lambda silent: None):
         self.log = log
+        self._started, self._lost = started, lost
         self.cmd = (0.0, 0.0, 0.0)
         self.cmd_at = None
         self.state = None
@@ -267,6 +273,9 @@ class ChassisWatch:
         self.state_at = now
 
     def check(self, now):
+        unheard = now - (self._started if self.state_at is None else self.state_at)
+        if unheard > _SPORT_STATE_LOST_S:
+            self._lost(unheard)
         if self.state_at is not None:
             silent = now - self.state_at
             if silent > _SPORT_STATE_SILENT_S and not self._silent_logged:
@@ -341,7 +350,8 @@ class Ros2UnitreeManagerNode(Node):
         self._reasserted_in = None
         self._move_failures = 0
         self._move_failure_logged_at = None
-        self.watch = ChassisWatch(self.logger)
+        self._net_iface = networkInterface
+        self.watch = ChassisWatch(self.logger, time.monotonic(), self._chassis_lost)
         self.gait = None
         if self.is_quadruped:
             # The gait in force when the request runs, not the one at startup.
@@ -396,6 +406,20 @@ class Ros2UnitreeManagerNode(Node):
             self._watch_timer = self.create_timer(0.5, lambda: self.watch.check(time.monotonic()))
 
         self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+
+    def _chassis_lost(self, silent):
+        """Exit for compose to restart, unless the cable is out: a fresh process would
+        hear nothing either, and the link coming back is what to wait for."""
+        try:
+            with open(f'/sys/class/net/{self._net_iface}/carrier') as f:
+                linked = f.read().strip() == '1'
+        except OSError:
+            linked = True
+        if not linked:
+            return
+        self.logger.error(f'[chassis] rt/sportmodestate silent for {silent:.0f}s with '
+                          f'{self._net_iface} up: exiting for a fresh connection')
+        os._exit(1)
 
     # twist message handler
     def TwistMessageHandler(self, msg: Twist_):
