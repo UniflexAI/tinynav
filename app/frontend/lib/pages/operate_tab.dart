@@ -16,6 +16,7 @@ import 'esdf_colormap_layer.dart';
 import 'local_voxel_painter.dart';
 import 'map_painter.dart';
 import 'planning_painter.dart';
+import 'navigation_settings_dialog.dart';
 
 const double _maxLinear = 0.5;   // m/s
 const double _maxAngular = 1.0;  // rad/s
@@ -137,6 +138,17 @@ class _OperateTabState extends ConsumerState<OperateTab> {
 
     return Column(
       children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Row(children: [
+            const Icon(Icons.map_outlined, size: 20),
+            const SizedBox(width: 8),
+            Expanded(child: Text('Current map: ${ref.watch(activeMapNameProvider).valueOrNull ?? "No map selected"}', maxLines: 1, overflow: TextOverflow.ellipsis)),
+            IconButton(tooltip: 'Navigation settings', icon: const Icon(Icons.settings_outlined),
+              onPressed: baseUrl == null ? null : () => showDialog<bool>(context: context, barrierDismissible: false,
+                builder: (_) => const NavigationSettingsDialog())),
+          ]),
+        ),
         // ── Camera (1/4) ──────────────────────────────────────────────
         const Expanded(flex: 2, child: _CameraPanel()),
         const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),

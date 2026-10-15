@@ -232,3 +232,23 @@ final poisProvider = FutureProvider.autoDispose<List<Poi>>((ref) async {
     rethrow;
   }
 });
+
+
+final activeMapNameProvider = StreamProvider.autoDispose<String?>((ref) async* {
+  if (ref.watch(baseUrlProvider) == null) { yield null; return; }
+  final dio = ref.watch(dioProvider);
+  var disposed = false;
+  ref.onDispose(() => disposed = true);
+  while (!disposed) {
+    String? name;
+    try {
+      final response = await dio.get('/map/active-name');
+      name = response.data['name'] as String?;
+    } on DioException {
+      name = null;
+    }
+    if (disposed) return;
+    yield name;
+    await Future<void>.delayed(const Duration(seconds: 3));
+  }
+});
