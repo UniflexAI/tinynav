@@ -63,7 +63,7 @@ class RobotConfig:
     min_angular_vel: float = 0.1
     max_angular_vel: float = 0.75
     #: The slowest turn in place, where the gait needs more than min_angular_vel to
-    #: take a step at all (`FREE_GAIT_SPIN_VEL`); 0 is no floor beyond it.
+    #: take a step at all (`FREE_GAIT_FLOORS`); 0 is no floor beyond it.
     min_spin_vel: float = 0.0
     obstacle: ObstacleConfig = field(default_factory=ObstacleConfig)
 
@@ -175,16 +175,16 @@ CHASSIS_GAIT = os.environ.get("CHASSIS_GAIT", "classic").strip().lower()
 if CHASSIS_GAIT not in GAITS:
     raise ValueError(f"Unsupported CHASSIS_GAIT: {CHASSIS_GAIT!r}, expected one of {GAITS}")
 
-#: Below this a turn in place in the free gait sways the body and never steps
-#: (docs/gotchas.md, pilot's).
-FREE_GAIT_SPIN_VEL = {'go2': 0.5}
+#: In the free gait, the slowest walk and turn in place that take a step at all: the
+#: thresholds as measured, no margin (pilot's docs/gotchas.md).
+FREE_GAIT_FLOORS = {'go2': {'min_linear_vel': 0.25, 'min_spin_vel': 0.45}}
 
 
 def robot_config(path=CAMERA_OFFSET_PATH, gait=CHASSIS_GAIT):
     """This ROBOT_TYPE's config in `gait`, with the rig's measurement read from disk now."""
     config = _TYPE_CONFIG
-    if gait == 'free' and config.name in FREE_GAIT_SPIN_VEL:
-        config = replace(config, min_spin_vel=FREE_GAIT_SPIN_VEL[config.name])
+    if gait == 'free' and config.name in FREE_GAIT_FLOORS:
+        config = replace(config, **FREE_GAIT_FLOORS[config.name])
     return with_measured_camera(config, path)
 
 

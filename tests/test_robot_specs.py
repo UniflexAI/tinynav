@@ -28,10 +28,8 @@ def test_an_unreadable_file_is_the_type_default_and_says_so(tmp_path, capsys, bo
     assert str(path) in capsys.readouterr().err
 
 
-def test_only_the_free_gait_raises_a_turn_in_place(tmp_path):
+def test_only_the_free_gait_has_floors_of_its_own(tmp_path):
     missing = tmp_path / 'none.json'
     classic, free = (robot_specs.robot_config(missing, gait) for gait in ('classic', 'free'))
-    assert classic.min_spin_vel == 0.0
-    expected = robot_specs.FREE_GAIT_SPIN_VEL.get(classic.name, 0.0)
-    assert free.min_spin_vel == expected
-    assert replace(free, min_spin_vel=0.0) == classic
+    floors = robot_specs.FREE_GAIT_FLOORS.get(classic.name, {})
+    assert replace(classic, **floors) == free
