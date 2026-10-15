@@ -1,3 +1,4 @@
+import sys
 import argparse
 import rclpy
 from rclpy.node import Node
@@ -72,11 +73,11 @@ class Ros2NodeManager(Node):
         if not os.path.exists(bag_file):
             self.get_logger().warn(f'Bag file not found: {bag_file}')
             return
-        cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+        cmd_perception = [sys.executable, '/tinynav/tinynav/core/perception_node.py']
         self.processes['perception'] = self._spawn(cmd_perception)
 
         cmd_build = [
-            'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
+            sys.executable, '/tinynav/tinynav/core/build_map_node.py',
             '--map_save_path', self.map_path,
             '--bag_file', bag_file
         ]
@@ -87,7 +88,7 @@ class Ros2NodeManager(Node):
             if proc_build:
                 proc_build.wait()
             cmd_convert = [
-                'uv', 'run', 'python', '/tinynav/tool/convert_to_colmap_format.py',
+                sys.executable, '/tinynav/tool/convert_to_colmap_format.py',
                 '--input_dir', self.map_path,
                 '--output_dir', self.map_path
             ]
@@ -102,17 +103,17 @@ class Ros2NodeManager(Node):
         if os.path.exists('nav_bag'):
             shutil.rmtree('nav_bag')
         
-        cmd_perception = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
+        cmd_perception = [sys.executable, '/tinynav/tinynav/core/perception_node.py']
         self.processes['perception'] = self._spawn(cmd_perception)
         
-        cmd_planning = ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py']
+        cmd_planning = [sys.executable, '/tinynav/tinynav/core/planning_node.py']
         self.processes['planning'] = self._spawn(cmd_planning)
         
-        cmd_control = ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py']
+        cmd_control = [sys.executable, '/tinynav/tinynav/platforms/cmd_vel_control.py']
         self.processes['control'] = self._spawn(cmd_control)
         
         cmd_map = [
-            'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
+            sys.executable, '/tinynav/tinynav/core/map_node.py',
             '--tinynav_db_path', self.nav_out_path,
             '--tinynav_map_path', self.map_path
         ]
