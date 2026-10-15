@@ -13,42 +13,14 @@ from nav_msgs.msg import Odometry
 from enum import Enum
 import time
 
-# go2/b2 are quadrupeds sharing the same SportClient gait API (Move/StandUp/
-# StandDown/BalanceStand/ClassicWalk). go2w/b2w are the wheeled variants of the
-# same chassis — the vendored SDK has no separate go2w/b2w package, so they reuse
-# the go2/b2 SportClient (same gait/lowstate API) as-is. g1 is a humanoid
-# controlled through the FSM-based LocoClient instead, so it needs its own
-# client, lowstate IDL, and stand/sit mapping.
-_QUADRUPED_ROBOT_MODELS = ('go2', 'go2w', 'b2', 'b2w')
-_SUPPORTED_ROBOT_MODELS = _QUADRUPED_ROBOT_MODELS + ('g1',)
-# SportClient.SwitchGait exists only on b2; go2's client has no such method, so
-# calling it there raises AttributeError -- inside a DDS reader callback, which is
-# fatal for the whole subscription (see ActionMessageHandler).
-_SWITCH_GAIT_ROBOT_MODELS = ('b2', 'b2w')
+try:
+    from .robot_profiles import require_profile
+except ImportError:
+    from robot_profiles import require_profile
+
 ROBOT_TYPE = os.environ["ROBOT_TYPE"].strip().lower()
-if ROBOT_TYPE not in _SUPPORTED_ROBOT_MODELS:
-    raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
+require_profile(ROBOT_TYPE)
 
-
-def _build_sport_client(robot_model: str):
-    if robot_model in ('go2', 'go2w'):
-        from unitree_sdk2py.go2.sport.sport_client import SportClient
-        return SportClient()
-    if robot_model in ('b2', 'b2w'):
-        from unitree_sdk2py.b2.sport.sport_client import SportClient
-        return SportClient()
-    if robot_model == 'g1':
-        from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
-        return LocoClient()
-    raise ValueError(f"Unsupported robot model: {robot_model}")
-
-
-def _lowstate_type_and_topic(robot_model: str):
-    if robot_model in _QUADRUPED_ROBOT_MODELS:
-        from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_
-        return LowState_, "rt/lowstate"
-    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
-    return LowState_, "rt/lowstate"
 
 class RobotStatus(Enum):
     STANDUP = "standup"
@@ -70,6 +42,17 @@ _STALL_CHASSIS_W = 0.05
 _STALL_AFTER_S = 2.0
 _REPEAT_S = 5.0
 _SPORT_STATE_SILENT_S = 1.0
+
+
+def _quat_xyzw_from_rpy(roll: float, pitch: float, yaw: float):
+    """ZYX (Unitree rpy) -> quaternion, geometry_msgs xyzw order."""
+    cy, sy = math.cos(yaw * 0.5), math.sin(yaw * 0.5)
+    cp, sp = math.cos(pitch * 0.5), math.sin(pitch * 0.5)
+    cr, sr = math.cos(roll * 0.5), math.sin(roll * 0.5)
+    return (cy * cp * sr - sy * sp * cr,
+            sy * cp * sr + cy * sp * cr,
+            sy * cp * cr - cy * sp * sr,
+            cy * cp * cr + sy * sp * sr)
 
 
 class GaitWorker:
@@ -128,7 +111,7 @@ class GaitWorker:
 
 
 class ChassisWatch:
-    """Compares what was commanded with what rt/sportmodestate says the chassis is
+    """Compares what was commanded with what rt/lf/sportmodestate says the chassis is
     doing. Logs only; never changes a command."""
 
     def __init__(self, log):
@@ -164,10 +147,10 @@ class ChassisWatch:
         if self.state_at is not None:
             silent = now - self.state_at
             if silent > _SPORT_STATE_SILENT_S and not self._silent_logged:
-                self.log.warning(f'[chassis] rt/sportmodestate silent for {silent:.1f}s')
+                self.log.warning(f'[chassis] rt/lf/sportmodestate silent for {silent:.1f}s')
                 self._silent_logged = True
             elif silent <= _SPORT_STATE_SILENT_S and self._silent_logged:
-                self.log.info('[chassis] rt/sportmodestate back')
+                self.log.info('[chassis] rt/lf/sportmodestate back')
                 self._silent_logged = False
 
         vx, vy, wz = self.cmd
@@ -199,17 +182,14 @@ class ChassisWatch:
 class Ros2UnitreeManagerNode(Node):
     def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
         super().__init__('ros2_unitree_manager')
-        if robot_model not in _SUPPORTED_ROBOT_MODELS:
-            raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
-        self.robot_model = robot_model
-        self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
-        self.has_switch_gait = robot_model in _SWITCH_GAIT_ROBOT_MODELS
+        self.profile = require_profile(robot_model)
+        self.robot_model = self.profile.type.value
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
-        self.sport_client = _build_sport_client(robot_model)
+        self.sport_client = self.profile.client_factory()
         self.sport_client.SetTimeout(10.0)
         self.sport_client.Init()
-        if self.is_quadruped:
+        if self.profile.gait_assertion == 'classic_walk':
             self.sport_client.ClassicWalk(True)
         self._robot_status = RobotStatus.SITTING
         self.battery = None
@@ -217,13 +197,13 @@ class Ros2UnitreeManagerNode(Node):
         self.logger = self.get_logger()
         # The last command was non-zero (so the next non-zero is not a start).
         self._walking = False
-        # The next Move re-asserts ClassicWalk first: set at every motion start.
+        # The next Move re-asserts the gait first: set at every motion start.
         self._gait_due = False
         self._move_failures = 0
         self._move_failure_logged_at = None
         self.watch = ChassisWatch(self.logger)
         self.gait = None
-        if self.is_quadruped:
+        if self.profile.gait_assertion == 'classic_walk' and self.profile.needs_gait_worker:
             self.gait = GaitWorker(lambda: self.sport_client.ClassicWalk(True), self.logger)
             self.gait.start()
 
@@ -233,36 +213,56 @@ class Ros2UnitreeManagerNode(Node):
         self.action_subscriber = ChannelSubscriber("rt/service/command", String_)
         self.action_subscriber.Init(self.ActionMessageHandler, 10)
 
-        lowstate_type, lowstate_topic = _lowstate_type_and_topic(robot_model)
-        lowstate_subscriber = ChannelSubscriber(lowstate_topic, lowstate_type)
-        lowstate_subscriber.Init(self.LowStateMessageHandler, 10)
-
-        # Latched and sent only on change: lowstate arrives at ~500Hz, and every
-        # message costs the backend's Python executor whatever the callback does.
+        # Latched and sent only on change: the lf battery topics stream at 20Hz
+        # whether the value moved or not.
         self.publisher_battery = self.create_publisher(
             Float32, '/battery',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
 
-        # Chassis odometry, republished onto the ROS bus. rt/utlidar/robot_odom
-        # is the leg odometry wrapped as nav_msgs/Odometry, not lidar odometry:
-        # it matches rt/sportmodestate.position exactly and keeps publishing with
-        # the lidar removed.
-        if self.is_quadruped:
+        self._init_battery_subscription()
+        self._init_chassis_state(networkInterface)
+
+        self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+
+    def _init_battery_subscription(self) -> None:
+        battery = self.profile.battery
+        if battery is None:
+            return
+        if battery.idl == 'unitree_go':
+            from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowState_ as BattMsg
+        else:
+            from unitree_sdk2py.idl.unitree_hg.msg.dds_ import BmsState_ as BattMsg
+        sub = ChannelSubscriber(battery.topic, BattMsg)
+        sub.Init(self.BatteryMessageHandler, 10)
+        self._battery_has_status = battery.has_status
+
+    def _init_chassis_state(self, networkInterface: str) -> None:
+        """Sport state (watch + AS2 odometry) exists for the sport API family;
+        the go family additionally gets leg odometry off the wire."""
+        if self.profile.motion_api != 'sport':
+            return
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+        self.sport_state_subscriber = ChannelSubscriber("rt/lf/sportmodestate",
+                                                        SportModeState_)
+        self.sport_state_subscriber.Init(self.SportStateMessageHandler, 10)
+        self._watch_timer = self.create_timer(0.5, lambda: self.watch.check(time.monotonic()))
+
+        if self.profile.odom == 'robot_odom':
+            # Chassis odometry, republished onto the ROS bus. rt/utlidar/robot_odom
+            # is the leg odometry wrapped as nav_msgs/Odometry, not lidar odometry:
+            # it matches rt/sportmodestate.position exactly and keeps publishing with
+            # the lidar removed.
             from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
             self.publisher_chassis_odom = self.create_publisher(Odometry, '/unitree/odometry', 10)
             self._last_chassis_odom_time = 0.0
             self.chassis_odom_subscriber = ChannelSubscriber("rt/utlidar/robot_odom", Odometry_)
             self.chassis_odom_subscriber.Init(self.ChassisOdomMessageHandler, 10)
+        elif self.profile.odom == 'sportmodestate':
+            self.publisher_chassis_odom = self.create_publisher(Odometry, '/unitree/odometry', 10)
+            self._last_chassis_odom_time = 0.0
 
-            from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
-            self.sport_state_subscriber = ChannelSubscriber("rt/sportmodestate", SportModeState_)
-            self.sport_state_subscriber.Init(self.SportStateMessageHandler, 10)
-            self._watch_timer = self.create_timer(0.5, lambda: self.watch.check(time.monotonic()))
-
-        self._status_timer = self.create_timer(1.0, self._publish_robot_status)
-
-    # twist message handler
+    # -- twist message handler
     def TwistMessageHandler(self, msg: Twist_):
         # Runs on the SDK reader thread: an exception escaping here kills the
         # subscription (see ActionMessageHandler).
@@ -306,11 +306,18 @@ class Ros2UnitreeManagerNode(Node):
             self._move_failure_logged_at = now
 
     def SportStateMessageHandler(self, msg):
-        # 500Hz on the SDK reader thread: keep it to field copies.
+        # 20Hz on the SDK reader thread: keep it to field copies.
         try:
-            self.watch.on_sport_state(time.monotonic(), int(msg.mode), int(msg.gait_type),
+            if (int(msg.stamp.sec) == 0 and int(msg.stamp.nanosec) == 0
+                    and int(msg.mode) == 0 and int(msg.gait_type) == 0
+                    and not any(msg.position) and not any(msg.velocity)):
+                return
+            now = time.monotonic()
+            self.watch.on_sport_state(now, int(msg.mode), int(msg.gait_type),
                                       int(msg.error_code), msg.velocity, float(msg.yaw_speed),
                                       msg.range_obstacle)
+            if self.profile.odom == 'sportmodestate':
+                self._republish_sportmodestate_odom(msg)
         except Exception as e:
             self.logger.error(f"Error in SportStateMessageHandler: {e}")
 
@@ -330,22 +337,23 @@ class Ros2UnitreeManagerNode(Node):
             return
         action_key = msg.data.split(" ")[1]
         if action_key == "sit":
-            if self.is_quadruped:
-                steps = [('StandDown', self.sport_client.StandDown)]
-            else:
-                steps = [('StandUp2Squat', self.sport_client.StandUp2Squat)]
+            steps = [(name, self._resolve_step(name)) for name in self.profile.sit_steps]
             self._play_steps('Sitting', steps, RobotStatus.SITTING)
         elif action_key == "stand":
-            if self.is_quadruped:
-                steps = [('StandUp', self.sport_client.StandUp),
-                         ('BalanceStand', self.sport_client.BalanceStand),
-                         ('ClassicWalk', lambda: self.sport_client.ClassicWalk(True))]
-                if self.has_switch_gait:
-                    steps.append(('SwitchGait', lambda: self.sport_client.SwitchGait(1)))
-            else:
-                steps = [('Damp', self.sport_client.Damp),
-                         ('Squat2StandUp', self._squat_to_stand)]
+            steps = [(name, self._resolve_step(name)) for name in self.profile.stand_steps]
             self._play_steps('Standing', steps, RobotStatus.STANDUP)
+
+    def _resolve_step(self, name: str):
+        """Profile step name -> bound call. Names the sport/loco clients spell
+        the same resolve by getattr; the three shaped calls are the exceptions
+        the old per-model branches used to carry."""
+        if name == 'ClassicWalk':
+            return lambda: self.sport_client.ClassicWalk(True)
+        if name == 'SwitchGait':
+            return lambda: self.sport_client.SwitchGait(1)
+        if name == 'Squat2StandUp':
+            return self._squat_to_stand
+        return getattr(self.sport_client, name)
 
     def _squat_to_stand(self):
         """The biped's FSM needs a moment after Damp before the stand takes."""
@@ -401,12 +409,38 @@ class Ros2UnitreeManagerNode(Node):
         except Exception as e:
             self.logger.error(f"Error in ChassisOdomMessageHandler: {e}")
 
-    def LowStateMessageHandler(self, msg):
-        if not self.is_quadruped:
-            # g1's lowstate has no battery field; skip battery reporting.
+    def _republish_sportmodestate_odom(self, msg) -> None:
+        """B2 and AS2 odometry source: same state the watch reads, on the wire type."""
+        now = time.time()
+        if now - self._last_chassis_odom_time < 0.02:
             return
+        self._last_chassis_odom_time = now
         try:
-            soc = float(msg.bms_state.soc)
+            odom = Odometry()
+            odom.header.stamp = self.get_clock().now().to_msg()
+            odom.header.frame_id = "odom"
+            odom.child_frame_id = "base_link"
+            odom.pose.pose.position.x = float(msg.position[0])
+            odom.pose.pose.position.y = float(msg.position[1])
+            odom.pose.pose.position.z = float(msg.position[2])
+            qx, qy, qz, qw = _quat_xyzw_from_rpy(
+                float(msg.imu_state.rpy[0]), float(msg.imu_state.rpy[1]),
+                float(msg.imu_state.rpy[2]))
+            odom.pose.pose.orientation.x = qx
+            odom.pose.pose.orientation.y = qy
+            odom.pose.pose.orientation.z = qz
+            odom.pose.pose.orientation.w = qw
+            odom.twist.twist.linear.x = float(msg.velocity[0])
+            odom.twist.twist.linear.y = float(msg.velocity[1])
+            odom.twist.twist.linear.z = float(msg.velocity[2])
+            odom.twist.twist.angular.z = float(msg.yaw_speed)
+            self.publisher_chassis_odom.publish(odom)
+        except Exception as e:
+            self.logger.error(f"Error republishing sportmodestate odometry: {e}")
+
+    def BatteryMessageHandler(self, msg):
+        try:
+            soc = float(msg.bms_state.soc) if self._battery_has_status else float(msg.soc)
             if soc == self.battery:
                 return
             # Recorded only once sent: lowstate starts before the publisher exists,
@@ -414,7 +448,7 @@ class Ros2UnitreeManagerNode(Node):
             self.publisher_battery.publish(Float32(data=soc))
             self.battery = soc
         except Exception as e:
-            self.logger.error(f"Error in LowStateMessageHandler: {e}")
+            self.logger.error(f"Error in BatteryMessageHandler: {e}")
             import traceback
             traceback.print_exc()
 

@@ -59,6 +59,18 @@ class _Sport:
         self.calls.append('StopMove')
         return 0
 
+    def StandUp(self):
+        self.calls.append('StandUp')
+        return 0
+
+    def StandDown(self):
+        self.calls.append('StandDown')
+        return 0
+
+    def BalanceStand(self):
+        self.calls.append('BalanceStand')
+        return 0
+
     def count(self, name):
         return self.calls.count(name)
 
@@ -284,7 +296,54 @@ class TestChassisWatch(unittest.TestCase):
         watch.check(0.5)
         self.assertFalse(log.has('warning', 'silent'))
         watch.check(2.0)
-        self.assertTrue(log.has('warning', 'rt/sportmodestate silent'))
+        self.assertTrue(log.has('warning', 'rt/lf/sportmodestate silent'))
+
+
+class TestAs2Profile(unittest.TestCase):
+    """AS2 assertions the profile table carries: no per-motion gait assert
+    (BalanceStand is a toggle -- re-asserting would break NORMAL_WALK), and
+    the stand sequence is StandUp -> BalanceStand only."""
+
+    def _node(self, sport=None):
+        node = uc.Ros2UnitreeManagerNode.__new__(uc.Ros2UnitreeManagerNode)
+        node.logger = _Log()
+        node.profile = uc.require_profile('as2')
+        node.sport_client = sport or _Sport()
+        node.last_twist_time = None
+        node._walking = False
+        node._gait_due = False
+        node._move_failures = 0
+        node._move_failure_logged_at = None
+        node.watch = uc.ChassisWatch(node.logger)
+        node.gait = None
+        node._robot_status = None
+        return node
+
+    def test_motion_flows_without_any_gait_assertion(self):
+        node = self._node()
+        _drive(node, 0.0, 10, 0.5)
+        _drive(node, 1.0, 5, 0.0)
+        _drive(node, 2.0, 10, 0.5)
+        self.assertEqual(node.sport_client.count('Move'), 20)
+        self.assertEqual(node.sport_client.count('BalanceStand'), 0)
+        self.assertEqual(node.sport_client.count('ClassicWalk'), 0)
+
+    def test_stand_is_standup_then_balancestand(self):
+        class Msg:
+            data = 'play stand'
+        node = self._node()
+        node._play_action(Msg())
+        self.assertEqual(node.sport_client.calls,
+                         ['StandUp', 'BalanceStand'])
+        self.assertEqual(node._robot_status, uc.RobotStatus.STANDUP)
+
+    def test_sit_is_standdown(self):
+        class Msg:
+            data = 'play sit'
+        node = self._node()
+        node._play_action(Msg())
+        self.assertEqual(node.sport_client.calls, ['StandDown'])
+        self.assertEqual(node._robot_status, uc.RobotStatus.SITTING)
 
 
 if __name__ == '__main__':
