@@ -289,8 +289,8 @@ function robotSummaryHtml() {
 }
 
 function footprintFromControl(r) {
-  const hl = r.shape === "circle" ? Number(r.radius || 0) : Number(r.length || 0) / 2;
-  const hw = r.shape === "circle" ? Number(r.radius || 0) : Number(r.width || 0) / 2;
+  const hl = Number(r.length || 0) / 2;
+  const hw = Number(r.width || 0) / 2;
   const cx = Number(r.control_x || 0);
   return [hl - cx, hl + cx, hw];
 }
@@ -753,6 +753,12 @@ function syncControlsLayout() {
 }
 
 function drawRealtimeFrame(frame) {
+  if (frame.applied_robot) {
+    const r = frame.applied_robot;
+    fields.robotSummary.innerHTML = robotSummaryHtml() + `<br>ROS applied: safety ${r.safety_radius.toFixed(2)} m | dilation ${r.obstacle.dilation_cells} cells | max ${r.max_linear_vel.toFixed(2)} m/s | decay ${frame.applied_decay_factor == null ? "pending" : String(frame.applied_decay_factor)}`;
+  } else {
+    fields.robotSummary.innerHTML = robotSummaryHtml() + "<br>Waiting for ROS parameter confirmation";
+  }
   currentFrame = frame;
   drawU8Canvas(depthCanvas, depthCtx, frame.depth_u8);
   if (config?.map_info) updateLabViewBounds(frame.robot_xy);

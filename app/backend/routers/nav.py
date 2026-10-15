@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..state import runner
+from ..planner_settings import presets
 
 router = APIRouter(tags=['nav'])
 
@@ -112,3 +113,20 @@ def nav_nodes_disable():
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_stop_nav_nodes()
     return {'ok': True}
+
+
+@router.get('/settings')
+def nav_settings():
+    node = _require_node()
+    with node._settings_lock:
+        return {'settings': dict(node.planner_settings.values), 'presets': presets()}
+
+
+@router.put('/settings')
+def nav_save_settings(values: dict):
+    try:
+        return _require_node().apply_planner_settings(values)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc

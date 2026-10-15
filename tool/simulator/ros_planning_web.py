@@ -12,6 +12,7 @@ import base64
 import copy
 import math
 import os
+import json
 import subprocess
 import threading
 import time
@@ -34,7 +35,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
@@ -74,9 +75,7 @@ CAMERA_DEFAULTS = {
     "mount_height": 0.45,
 }
 ROBOT_PRESETS = {
-    name.removesuffix("_CONFIG").lower(): asdict(getattr(robot_specs_mod, name))
-    for name in dir(robot_specs_mod)
-    if name.endswith("_CONFIG") and name != "ROBOT_CONFIG"
+    name: asdict(robot) for name, robot in robot_specs_mod.ROBOT_PRESETS.items()
 }
 
 
@@ -104,6 +103,7 @@ def default_config(robot_name: str | None = None) -> dict[str, Any]:
     return {
         "name": "ros_planning_sim",
         "robot": robot,
+        "planner": {"occupancy_decay_factor": 0.99},
         "obstacle": copy.deepcopy(robot.get("obstacle") or {}),
         "camera": copy.deepcopy(CAMERA_DEFAULTS),
         "start": {"xy": [0.0, 0.0], "yaw_deg": 0.0},
@@ -235,6 +235,8 @@ class RosPlanningSimNode(Node):
         self.last_esdf_grid: dict[str, Any] | None = None
         self.collision = False
         self.geom_footprint: list[list[float]] = []
+        self.applied_robot = None
+        self.applied_decay_factor = None
         self.running = True
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
@@ -243,6 +245,7 @@ class RosPlanningSimNode(Node):
         self.target_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         self.camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, "/planning/config", self.config_callback, latched)
         self.nav_active_pub = self.create_publisher(Bool, "/nav/active", latched)
         self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched)
 
@@ -278,6 +281,9 @@ class RosPlanningSimNode(Node):
     def set_config(self, config: dict[str, Any], reset: bool = False) -> None:
         with self.lock:
             prev_map = self.config.get("map_path")
+            if reset or self.config.get("robot") != config.get("robot"):
+                self.applied_robot = None
+                self.applied_decay_factor = None
             self.config = copy.deepcopy(config)
             robot = self.config.get("robot")
             if not isinstance(robot, dict):
@@ -296,6 +302,14 @@ class RosPlanningSimNode(Node):
                 self.last_esdf_grid = None
                 self.collision = False
                 self.geom_footprint = []
+
+    def config_callback(self, msg: String) -> None:
+        config = json.loads(msg.data)
+        with self.lock:
+            if (config['robot'] == self.config.get('robot') and
+                    config['decay_factor'] == self.config.get('planner', {}).get('occupancy_decay_factor', 0.99)):
+                self.applied_robot = config['robot']
+                self.applied_decay_factor = config['decay_factor']
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -405,6 +419,8 @@ class RosPlanningSimNode(Node):
             xy = [float(self.control_xy[0]), float(self.control_xy[1])]
             footprint = copy.deepcopy(self.geom_footprint) or copy.deepcopy(self.last_footprint)
             return {
+                "applied_robot": copy.deepcopy(self.applied_robot),
+                "applied_decay_factor": self.applied_decay_factor,
                 "robot_xy": xy,
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": footprint,
@@ -471,6 +487,10 @@ def _child_env() -> dict[str, str]:
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(key, "1")
     env["ROBOT_TYPE"] = _active_robot_type()
+    if SIM_NODE is not None:
+        robot = robot_specs_mod.robot_config_from_dict(SIM_NODE.config["robot"])
+        env["TINYNAV_ROBOT_CONFIG"] = json.dumps(asdict(robot))
+        env["TINYNAV_OCCUPANCY_DECAY_FACTOR"] = str(SIM_NODE.config.get("planner", {}).get("occupancy_decay_factor", 0.99))
     return env
 
 
@@ -610,14 +630,27 @@ def update_config(request: RunRequest) -> dict[str, Any]:
     if not isinstance(request.config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
     reset = bool(request.reset)
-    prev_robot = node.config.get("robot", {}).get("name")
-    node.set_config(copy.deepcopy(request.config), reset=reset)
-    robot_changed = prev_robot != node.config.get("robot", {}).get("name")
+    try:
+        robot = robot_specs_mod.robot_config_from_dict(request.config.get("robot", {}))
+        planner = request.config.get("planner", {})
+        if not isinstance(planner, dict):
+            raise ValueError("planner configuration must be an object")
+        factor = planner.get("occupancy_decay_factor", 0.99)
+        if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor) or not 0.0 <= factor <= 1.0:
+            raise ValueError("occupancy decay factor must be finite and between 0 and 1")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    config = copy.deepcopy(request.config)
+    config["robot"] = asdict(robot)
+    config["planner"] = {"occupancy_decay_factor": float(factor)}
+    robot_changed = node.config.get("robot") != config["robot"]
+    planner_changed = node.config.get("planner") != config["planner"]
+    node.set_config(config, reset=reset or robot_changed or planner_changed)
     if robot_changed:
         _stop_script("tinynav/platforms/simulator_control.py")
-    if reset or robot_changed:
-        ensure_ros_loop(reset_planning=True, force=robot_changed)
-    return {"ok": True, "robot_changed": robot_changed}
+    if reset or robot_changed or planner_changed:
+        ensure_ros_loop(reset_planning=True, force=robot_changed or planner_changed)
+    return {"ok": True, "robot_changed": robot_changed, "requested_robot": asdict(robot)}
 
 
 @app.post("/api/start-ros-loop")

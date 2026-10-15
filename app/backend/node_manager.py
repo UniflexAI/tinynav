@@ -30,6 +30,7 @@ from sensor_msgs.msg import CompressedImage, Image, PointCloud, PointCloud2
 from std_msgs.msg import Bool, Float32, String
 
 from tool.ros2_node_manager import Ros2NodeManager
+from .planner_settings import PlannerSettings
 
 _REALSENSE_SCRIPT = '/tinynav/scripts/run_realsense_sensor.sh'
 _VENV_SITE = '/tinynav/.venv/lib/python3.10/site-packages'
@@ -129,6 +130,8 @@ class BackendNode(Ros2NodeManager):
         super().__init__(tinynav_db_path=tinynav_db_path)
 
         self._lock = threading.Lock()
+        self._settings_lock = threading.Lock()
+        self.planner_settings = PlannerSettings(tinynav_db_path)
         self.mapping_percent: float = 0.0
         self.current_pose: dict | None = None   # latest pose from SLAM or map
 
@@ -737,11 +740,59 @@ class BackendNode(Ros2NodeManager):
         lf = self._make_log(name)
         proc = subprocess.Popen(
             cmd, preexec_fn=os.setsid, cwd=cwd,
-            env=env or os.environ.copy(),
+            env=self._navigation_env(cmd, env),
             stdout=lf, stderr=subprocess.STDOUT,
         )
         lf.close()
         return proc
+
+    def _navigation_env(self, cmd, env=None):
+        env = {**os.environ, **(env or {})}
+        if any(os.path.basename(arg) in ('planning_node.py', 'cmd_vel_control.py', 'unitree_control.py') for arg in cmd):
+            env = self.planner_settings.environment(env)
+        return env
+
+    def _spawn(self, cmd, extra_env=None):
+        return super()._spawn(cmd, extra_env=self._navigation_env(cmd, extra_env))
+
+    def apply_planner_settings(self, values):
+        with self._settings_lock:
+            if self.state not in ('idle', 'navigation'):
+                raise RuntimeError('Stop recording or map building before changing navigation settings')
+            previous = self.planner_settings.values
+            self.planner_settings.save(values)
+            values = self.planner_settings.values
+            if values == previous:
+                return {'settings': dict(values), 'changed': False}
+            type_changed = values['robot_type'] != previous['robot_type']
+            self._set_nav_active(False)
+            self.publish_cmd_vel(0.0, 0.0, 0.0)
+            self._publish_cmd_pois(None)
+            self.cmd_nav_resume()
+            if self.state == 'navigation':
+                self.state = 'idle'
+                self._pub_state()
+            env = os.environ.copy()
+            env['PYTHONPATH'] = _VENV_SITE + ':' + env.get('PYTHONPATH', '')
+            scripts = {
+                'planning': '/tinynav/tinynav/core/planning_node.py',
+                'cmd_vel_control': '/tinynav/tinynav/platforms/cmd_vel_control.py',
+                'unitree': '/tinynav/tinynav/platforms/unitree_control.py',
+            }
+
+            def restart(proc, name):
+                if proc and proc.poll() is None:
+                    self._kill_proc(proc)
+                    return self._launch_proc(name, ['uv', 'run', 'python', scripts[name]], env=env)
+                return proc
+
+            for attr, name in (('_planning_proc', 'planning'), ('_cmd_vel_proc', 'cmd_vel_control'), ('_unitree_proc', 'unitree')):
+                if name != 'unitree' or type_changed:
+                    setattr(self, attr, restart(getattr(self, attr), name))
+            for key, name in (('planning', 'planning'), ('control', 'cmd_vel_control')):
+                if key in self.processes:
+                    self.processes[key] = restart(self.processes[key], name)
+            return {'settings': dict(values), 'changed': True}
 
     def _stop_sensor_procs(self):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):
@@ -1146,6 +1197,12 @@ class BackendNode(Ros2NodeManager):
         self._action_pub.publish(String(data=f'play {action}'))
 
     def publish_cmd_vel(self, linear_x: float, linear_y: float, angular_z: float):
+        limits = self.planner_settings.values
+        speed = math.hypot(linear_x, linear_y)
+        if speed > limits['max_linear_vel']:
+            scale = limits['max_linear_vel'] / speed
+            linear_x, linear_y = linear_x * scale, linear_y * scale
+        angular_z = max(-limits['max_angular_vel'], min(limits['max_angular_vel'], angular_z))
         msg = Twist()
         msg.linear.x = float(linear_x)
         msg.linear.y = float(linear_y)

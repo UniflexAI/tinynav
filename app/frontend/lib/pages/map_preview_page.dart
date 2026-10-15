@@ -23,6 +23,7 @@ class _MapPreviewPageState extends ConsumerState<MapPreviewPage> {
     try {
       await ref.read(dioProvider).post('/map/set-active/${widget.mapName}');
       if (mounted) {
+        ref.invalidate(mapInfoProvider);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('${widget.mapName} set as navigation map'),

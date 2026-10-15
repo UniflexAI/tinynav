@@ -83,6 +83,7 @@ class Pose {
 }
 
 class MapInfo {
+  final String? name;
   final String imageUrl;
   final double originX;
   final double originY;
@@ -91,6 +92,7 @@ class MapInfo {
   final int height;
 
   const MapInfo({
+    this.name,
     required this.imageUrl,
     required this.originX,
     required this.originY,
@@ -100,6 +102,7 @@ class MapInfo {
   });
 
   factory MapInfo.fromJson(Map<String, dynamic> json) => MapInfo(
+        name: json['name'] as String?,
         imageUrl: json['imageUrl'] as String,
         originX: (json['origin_x'] as num).toDouble(),
         originY: (json['origin_y'] as num).toDouble(),

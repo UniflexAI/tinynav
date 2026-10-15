@@ -54,6 +54,7 @@ def map_current():
     except Exception as e:
         raise HTTPException(500, str(e))
     return {
+        'name': os.path.basename(os.path.realpath(node.map_path)),
         'imageUrl': '/map/image',
         **meta,
     }

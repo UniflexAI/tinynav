@@ -1,3 +1,6 @@
+import os
+import json
+from dataclasses import asdict
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -12,7 +15,8 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -316,7 +320,7 @@ class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
         self.get_logger().info(
-            f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
+            f"Robot: {ROBOT_CONFIG.name} (rectangle {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
             f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
             f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
@@ -337,11 +341,19 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 10)
+        self.grid_shape = (100, 100, 40)
         self.resolution = 0.05
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
+        self.occupancy_decay_factor = float(os.environ.get("TINYNAV_OCCUPANCY_DECAY_FACTOR", "0.99"))
+        if not np.isfinite(self.occupancy_decay_factor) or not 0.0 <= self.occupancy_decay_factor <= 1.0:
+            raise ValueError("occupancy decay factor must be finite and between 0 and 1")
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.config_pub = self.create_publisher(String, '/planning/config', latched)
+        self.config_pub.publish(String(data=json.dumps({
+            'robot': asdict(ROBOT_CONFIG), 'decay_factor': self.occupancy_decay_factor,
+        })))
         self.K = None
         self.baseline = None
         self.last_T = None
@@ -533,7 +545,7 @@ class PlanningNode(Node):
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-        self.occupancy_grid *= 0.99
+        self.occupancy_grid *= self.occupancy_decay_factor
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
