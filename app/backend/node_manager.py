@@ -737,7 +737,7 @@ class BackendNode(Ros2NodeManager):
     def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
                       cwd: str = '/tinynav') -> subprocess.Popen:
         """Spawn a subprocess with standard logging and process-group setup."""
-        if name in ('planning', 'cmd_vel_control'):
+        if name in ('planning', 'cmd_vel_control', 'unitree'):
             env = self.planner_settings.environment(env or os.environ.copy())
         lf = self._make_log(name)
         proc = subprocess.Popen(
@@ -757,6 +757,7 @@ class BackendNode(Ros2NodeManager):
         with self._settings_lock:
             if self.state not in ('idle', 'navigation'):
                 raise RuntimeError('Stop recording or map building before changing navigation settings')
+            type_changed = values['robot_type'] != self.planner_settings.values['robot_type']
             self.planner_settings.save(values)
             self._set_nav_active(False)
             self.publish_cmd_vel(0.0, 0.0, 0.0)
@@ -774,6 +775,11 @@ class BackendNode(Ros2NodeManager):
                 if proc and proc.poll() is None:
                     self._kill_proc(proc)
                     setattr(self, attr, self._launch_proc(name, ['uv', 'run', 'python', script], env=env))
+            unitree = getattr(self, '_unitree_proc', None)
+            if type_changed and unitree and unitree.poll() is None:
+                self._kill_proc(unitree)
+                self._unitree_proc = self._launch_proc('unitree',
+                    ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'], env=env)
             for name, script in (('planning', scripts[0][2]), ('control', scripts[1][2])):
                 proc = self.processes.get(name)
                 if proc and proc.poll() is None:
