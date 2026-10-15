@@ -15,7 +15,8 @@ from planning_node import (run_raycasting_loopy, build_route_fields, route_band_
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M, reverse_gate_penalty,
                            generate_trajectory_library_3d, turn_in_place_penalty,
-                           heading_of_pose7, angle_between)
+                           heading_of_pose7, angle_between, cap_selected_arc)
+from types import SimpleNamespace
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -640,7 +641,8 @@ def test_a_cell_under_the_body_is_reported_as_a_body_hit():
     leaves the current pose can only be inf if a footprint sample is already on an
     obstacle cell. Sampled through the shipped lattice, so a cell has to land on a
     sample -- exactly the condition the scorer uses."""
-    off_fwd, off_lat = footprint_lattice(0.25, 0.35, 0.15, 0.1)   # the go2 default
+    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+    off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
     on_sample = (float(off_fwd[3]), float(off_lat[3]))
     hits, n = _hits_at(on_sample)
     assert hits, f'a cell on sample {on_sample} was not seen'
@@ -656,14 +658,77 @@ def test_a_cell_beyond_the_footprint_is_not_a_body_hit():
 
 def test_the_report_names_where_the_hits_are():
     """Scattered singles are odometry-drift phantoms; a blob is a real obstacle.
-    The offsets are the only way to tell, so they have to be in the line."""
-    from planning_node import PlanningNode
-    off_fwd, off_lat = footprint_lattice(0.25, 0.35, 0.15, 0.1)
+    The offsets are the only way to tell, so they have to be in the line. Sampled
+    through the ROBOT_CONFIG lattice -- a hardcoded point is not on the scored
+    lattice of every model (a go2-sized point is not a b2 lattice sample)."""
+    fl, rl, hw = ROBOT_CONFIG.footprint_from_control()
+    off_fwd, off_lat = footprint_lattice(fl, rl, hw, ROBOT_CONFIG.safety_radius)
     hits, n = _hits_at((float(off_fwd[3]), float(off_lat[3])))
     line = PlanningNode._hits_report(hits, n)
     assert 'body_hits=%d/%d' % (len(hits), n) in line
     assert '(' in line and ',' in line, f'no offsets in the report: {line}'
     assert PlanningNode._hits_report([], n) == 'body_hits=0/%d' % n
+
+
+# --- sampling/execution decoupling: the execution half --------------------------
+
+def test_superspeed_arc_is_capped_toward_its_start():
+    """An arc sampled at the class ceiling but selected into a tighter clearance
+    budget shrinks toward its start by exactly v_allow/sel_vx: cmd_vel_control
+    reads speed off path geometry, so the shrink IS the cap. Position columns
+    scale; heading columns (the omega source) must not move."""
+    t = np.zeros((31, 7))
+    t[:, 0] = np.linspace(0.0, 1.8, 31)            # 0.6 m/s * 3 s, straight +x
+    t[:, 2] = np.linspace(0.0, 0.3, 31)            # z rides along proportionally
+    t[:, 6] = 1.0                                  # identity quat
+    before = t.copy()
+    executed = cap_selected_arc(t, 0.6, 0.3)
+    assert executed == 0.3
+    assert np.allclose(t[:, 0], np.linspace(0.0, 0.9, 31))
+    assert np.allclose(t[:, 2], before[:, 2] * 0.5)
+    assert np.allclose(t[:, 3:], before[:, 3:])
+
+
+def test_within_allow_arc_is_untouched():
+    """The cap must be a no-op below the budget -- no gratuitous resample of an
+    already-legal arc, and the schedule keeps the selected speed."""
+    t = np.zeros((31, 7))
+    t[:, 0] = np.linspace(0.0, 0.9, 31)
+    t[:, 6] = 1.0
+    before = t.copy()
+    assert cap_selected_arc(t, 0.3, 0.6) == 0.3
+    assert (t == before).all()
+
+
+def test_reverse_arc_is_not_capped():
+    """Reverse keeps the fixed-speed vocabulary cmd_vel_control rewrites; a
+    negative sel_vx is never 'over' the (nonnegative) budget."""
+    t = np.zeros((31, 7))
+    t[:, 0] = np.linspace(0.0, -0.9, 31)
+    t[:, 6] = 1.0
+    before = t.copy()
+    assert cap_selected_arc(t, -0.3, 0.2) == -0.3
+    assert (t == before).all()
+
+
+def test_capped_speed_discounts_the_next_reaction_window():
+    """The clearance schedule must discount by the speed the last path actually
+    carries (_executed_vx), not the lattice param: reserving braking distance at
+    the selected 0.6 when only 0.3 executes would double-penalize the next
+    cycle's budget."""
+    node_attrs = SimpleNamespace(_t_react_s=0.5, _clear_c0_m=0.4,
+                                 _clear_open_m=2.0, _vx_min=0.1)
+    at_executed = PlanningNode._speed_from_clearance(node_attrs, 1.0, 0.3, 0.6)
+    at_selected = PlanningNode._speed_from_clearance(node_attrs, 1.0, 0.6, 0.6)
+    assert at_executed > at_selected
+
+
+def test_sync_callback_caps_through_the_helper():
+    """Guard the wiring: the selected row's cap must go through cap_selected_arc,
+    so a refactor cannot silently drop the decoupling's execution half."""
+    calls = [n.func.id for n in ast.walk(_sync_callback_src())
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert 'cap_selected_arc' in calls
 
 
 def _sync_callback_src():

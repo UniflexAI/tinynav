@@ -486,6 +486,22 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
     return scores, occ_points, path_costs, end_remainings, end_heading_errs
 
 
+def cap_selected_arc(sel_traj, sel_vx, v_allow):
+    """Execution half of the sampling/execution decoupling: the lattice is sampled
+    at the class ceiling (_vx_max), so an arc whose vx exceeds the clearance
+    schedule's cap is scaled toward its start by v_allow/sel_vx -- cmd_vel_control
+    derives its speed off the path geometry, so the shrink IS the cap, and headings
+    do not move, so neither does omega. Reverse keeps the fixed-speed vocabulary
+    cmd_vel_control rewrites. Mutates sel_traj in place; returns the vx actually
+    executed (what the next clearance schedule must discount its reaction window
+    by -- a capped arc still reserves braking distance at the capped speed)."""
+    if sel_vx > v_allow:
+        k = v_allow / sel_vx
+        sel_traj[:, :3] = sel_traj[0, :3] + (sel_traj[:, :3] - sel_traj[0, :3]) * k
+        return v_allow
+    return sel_vx
+
+
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
     shift_m = new_origin - old_origin
     shift_voxels = np.round(shift_m / resolution).astype(int)
@@ -745,6 +761,10 @@ class PlanningNode(Node):
         self.K = None
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
+        # Forward speed the published path actually carries, post-cap: the
+        # clearance schedule discounts by the speed being traveled, not the
+        # lattice param.
+        self._executed_vx = 0.0
 
         self.create_subscription(Odometry, '/control/target_pose', self.target_pose_callback, 10)
         self.target_pose = None
@@ -1164,10 +1184,10 @@ class PlanningNode(Node):
         ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
         return min_span_map, obstacle_mask, ESDF_map
 
-    def generate_trajectories(self, init_p, init_q, v_allow):
+    def generate_trajectories(self, init_p, init_q):
         trajectories, params = generate_trajectory_library_3d(
             init_p=init_p, init_q=init_q,
-            max_linear_vel=v_allow,
+            max_linear_vel=self._vx_max,
             max_angular_vel=ROBOT_CONFIG.max_angular_vel,
             max_lat_acc=self._traj_max_lat_acc,
             min_linear_vel=self._vx_min,
@@ -1236,13 +1256,13 @@ class PlanningNode(Node):
             # Forward clearance drives both the peak-speed schedule and the reverse gate.
             front_clearance = self._front_obstacle_dist(T, obstacle_mask, max_dist=self._clear_scan_m)
             v_open = self._open_target_speed()
-            v_allow = self._speed_from_clearance(front_clearance, abs(float(self.last_param[0])), v_open)
+            v_allow = self._speed_from_clearance(front_clearance, abs(self._executed_vx), v_open)
             # The library exists only to pick a trajectory toward a goal, so without
             # one there is nothing to generate or score. The occupancy grid, the ESDF
             # and the speed cap above are maintained either way.
             if self.target_pose is None:
                 return
-            trajectories, params = self.generate_trajectories(init_p, init_q, v_allow)
+            trajectories, params = self.generate_trajectories(init_p, init_q)
 
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
@@ -1409,6 +1429,8 @@ class PlanningNode(Node):
             # camera pitches (where -omega_y would be subtly wrong).
             sel_traj = trajectories[top_indices[0]]
             sel_vx = float(params[top_indices[0]][0])
+
+            self._executed_vx = cap_selected_arc(sel_traj, sel_vx, v_allow)
 
             sel_omega = _yaw_rate(sel_traj)
             self.last_yaw_rate = sel_omega
