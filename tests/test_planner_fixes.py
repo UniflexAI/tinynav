@@ -45,6 +45,14 @@ class PlannerFixTests(unittest.TestCase):
         PlanningNode.publish_selected_path(node, traj, [0], Header(stamp=Time(sec=10)))
         self.assertEqual([p.header.stamp.sec for p in messages[0].poses], [10,11,12,13])
 
+    def test_legacy_shape_uses_rectangle(self):
+        values = asdict(GO2_CONFIG)
+        values.update(shape='circle', radius=5.)
+        robot = robot_config_from_dict(values)
+        self.assertEqual(robot.half_size, (robot.length / 2., robot.width / 2.))
+        self.assertNotIn('shape', asdict(robot))
+        self.assertNotIn('radius', asdict(robot))
+
     def test_robot_override_validation(self):
         values = asdict(GO2_CONFIG); values['safety_radius'] = .35; values['obstacle']['dilation_cells'] = 3
         result = robot_config_from_dict(values)

@@ -325,7 +325,7 @@ class PlanningNode(Node):
     def __init__(self):
         super().__init__('planning_node')
         self.get_logger().info(
-            f"Robot: {ROBOT_CONFIG.name} ({ROBOT_CONFIG.shape} {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
+            f"Robot: {ROBOT_CONFIG.name} (rectangle {ROBOT_CONFIG.length}x{ROBOT_CONFIG.width}m, "
             f"cam=({ROBOT_CONFIG.camera_x},{ROBOT_CONFIG.camera_y}), "
             f"ctrl=({ROBOT_CONFIG.control_x},{ROBOT_CONFIG.control_y}), "
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "

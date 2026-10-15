@@ -47,15 +47,9 @@
         <label class="map-select-label">Preset
           <select id="robotPreset"></select>
         </label>
-        <label>Shape
-          <select data-bind="robot.shape">
-            <option value="square">square</option>
-            <option value="circle">circle</option>
-          </select>
-        </label>
+        <div class="robot-summary">Rectangular footprint defined by length and width.</div>
         <label>Length (m) <input data-bind="robot.length" type="number" step="0.05" min="0.05" /></label>
         <label>Width (m) <input data-bind="robot.width" type="number" step="0.05" min="0.05" /></label>
-        <label>Radius (m) <input data-bind="robot.radius" type="number" step="0.05" min="0.05" /></label>
         <label>Camera X (m) <input data-bind="robot.camera_x" type="number" step="0.01" /></label>
         <label>Camera Y (m) <input data-bind="robot.camera_y" type="number" step="0.01" /></label>
         <label>Control X (m) <input data-bind="robot.control_x" type="number" step="0.01" /></label>

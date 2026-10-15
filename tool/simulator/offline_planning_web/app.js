@@ -289,8 +289,8 @@ function robotSummaryHtml() {
 }
 
 function footprintFromControl(r) {
-  const hl = r.shape === "circle" ? Number(r.radius || 0) : Number(r.length || 0) / 2;
-  const hw = r.shape === "circle" ? Number(r.radius || 0) : Number(r.width || 0) / 2;
+  const hl = Number(r.length || 0) / 2;
+  const hw = Number(r.width || 0) / 2;
   const cx = Number(r.control_x || 0);
   return [hl - cx, hl + cx, hw];
 }

@@ -28,10 +28,8 @@ class RobotConfig:
     for a given ROBOT_TYPE instead of keeping separate copies.
     """
     name: str = 'go2'
-    shape: str = 'square'
     length: float = 0.7
     width: float = 0.3
-    radius: float = 0.3
     camera_x: float = 0.35
     camera_y: float = 0.0
     control_x: float = 0.0
@@ -53,8 +51,6 @@ class RobotConfig:
 
     @property
     def half_size(self):
-        if self.shape == 'circle':
-            return (self.radius, self.radius)
         return (self.length / 2.0, self.width / 2.0)
 
     def footprint_from_control(self):
@@ -64,7 +60,7 @@ class RobotConfig:
 
 
 GO2_CONFIG = RobotConfig(
-    name='go2', shape='square',
+    name='go2',
     length=0.4, width=0.3,
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
@@ -73,7 +69,7 @@ GO2_CONFIG = RobotConfig(
 )
 
 GO2W_CONFIG = RobotConfig(
-    name='go2w', shape='square',
+    name='go2w',
     length=0.4, width=0.3,
     camera_x=0.2, camera_y=0.0,
     control_x=0.0, control_y=0.0,
@@ -82,7 +78,7 @@ GO2W_CONFIG = RobotConfig(
 )
 
 B2_CONFIG = RobotConfig(
-    name='b2', shape='square',
+    name='b2',
     length=1.1, width=0.5,
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
@@ -91,7 +87,7 @@ B2_CONFIG = RobotConfig(
 )
 
 B2W_CONFIG = RobotConfig(
-    name='b2w', shape='square',
+    name='b2w',
     length=1.1, width=0.5,
     camera_x=0.3, camera_y=0.0,
     control_x=0.0, control_y=0.0,
@@ -100,7 +96,7 @@ B2W_CONFIG = RobotConfig(
 )
 
 G1_CONFIG = RobotConfig(
-    name='g1', shape='square',
+    name='g1',
     length=0.3, width=0.5,
     camera_x=0.1, camera_y=0.0,
     control_x=0.0, control_y=0.0,
@@ -119,19 +115,20 @@ except KeyError:
 def robot_config_from_dict(values):
     """Validate a complete WebSim robot config before starting child nodes."""
     values = dict(values)
+    # Old saved configurations may contain the removed shape selector.
+    values.pop("shape", None)
+    values.pop("radius", None)
     obstacle = ObstacleConfig(**values.pop("obstacle", {}))
     config = RobotConfig(obstacle=obstacle, **values)
     if config.name not in ("go2", "go2w", "b2", "b2w", "g1"):
         raise ValueError("unsupported robot name")
-    if config.shape not in ("square", "circle"):
-        raise ValueError("unsupported robot shape")
     for key, value in asdict(config).items():
-        if key not in ("name", "shape", "obstacle") and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+        if key not in ("name", "obstacle") and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
             raise ValueError(f"invalid robot value: {key}")
     for key, value in asdict(obstacle).items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError(f"invalid obstacle value: {key}")
-    if min(config.length, config.width, config.radius, config.max_linear_vel, config.max_angular_vel) <= 0:
+    if min(config.length, config.width, config.max_linear_vel, config.max_angular_vel) <= 0:
         raise ValueError("dimensions and maximum velocities must be positive")
     if config.safety_radius < 0 or not 0 <= config.min_linear_vel <= config.max_linear_vel or not 0 <= config.min_angular_vel <= config.max_angular_vel:
         raise ValueError("invalid safety or velocity limits")

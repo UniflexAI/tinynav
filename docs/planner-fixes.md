@@ -21,6 +21,8 @@ A standalone App does not yet expose this setting. This change provides the WebS
 
 ## Validation and limitations
 
-Five focused tests pass: trajectory origin/endpoints, published timestamps, per-update decay at factors 0, 0.9, 0.99 and 1, and robot configuration validation. Python/JavaScript syntax and whitespace checks pass. API integration confirms factor-only changes from 0.95 to 0.99 with reset=false; negative, greater-than-one and boolean values are rejected and defaults are restored.
+Six focused tests pass: trajectory origin/endpoints, published timestamps, per-update decay at factors 0, 0.9, 0.99 and 1, and robot configuration validation. Python/JavaScript syntax and whitespace checks pass. API integration confirms factor-only changes from 0.95 to 0.99 with reset=false; negative, greater-than-one and boolean values are rejected and defaults are restored.
 
 Earlier navigation runs preceded the final scope adjustments and are not acceptance results for this revision. GO2 hardware and Nano performance remain untested. Corner deadlock remains unresolved.
+
+Footprint geometry is always rectangular and configured by length/width. Shape selection and body-radius fields are removed; legacy saved shape/radius keys are ignored when loading and omitted from normalized configuration. Safety radius remains configurable.
