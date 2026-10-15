@@ -50,7 +50,11 @@ lekiwi =[
     "lerobot[lekiwi]==0.3.3",
 ]
 unitree = [
-    "unitree-sdk2py @ git+https://github.com/junlinp/unitree_sdk2_python.git@800103eab7e045336b1c40186cda5023dbd05821",
+    # Discovery-lease fix (ghost readers hold the dog's writer sessions for the
+    # full 100s default): upstream PR unitreerobotics/unitree_sdk2_python#190,
+    # byte-identical to deploy/patches/unitree-sdk2py-814556d-lease. Re-pin to
+    # upstream once #190 merges.
+    "unitree-sdk2py @ git+https://github.com/zhongyuanguo-code/unitree_sdk2_python.git@cd47a98be4b0699462ca995797169b09710a19a6",
 ]
 3dgs = [
     "torch>=2.4,<2.11",
