@@ -853,8 +853,11 @@ class PlanningNode(Node):
         self.declare_parameter('vx_hard_max', 1.0)   # absolute forward-speed ceiling (hardware)
         self.declare_parameter('vx_min', 0.2)        # creep speed in tight space (m/s)
         self.declare_parameter('clear_c0_m', 0.35)   # net clearance <= this -> only vx_min
-        self.declare_parameter('clear_open_m', 1.0)  # net clearance >= this -> full open target
-        self.declare_parameter('clear_scan_m', 2.0)  # forward clearance scan cap (m)
+        # cmd_vel_control brakes at 0.6 m/s^2, so the ramp has to be long enough for it:
+        # from 1.0 m/s down to vx_min the linear schedule needs clear_open_m >= ~1.7.
+        self.declare_parameter('clear_open_m', 1.8)  # net clearance >= this -> full open target
+        # The front face sits ~2.5 m behind the grid's forward edge.
+        self.declare_parameter('clear_scan_m', 2.4)  # forward clearance scan cap (m)
         self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
         # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
         # max_lat_acc/max_angular_vel; below that the omega range is unchanged.
