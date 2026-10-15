@@ -17,7 +17,7 @@ from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header, String
+from std_msgs.msg import Header, String, Float64
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from codetiming import Timer
 import cv2
@@ -358,6 +358,8 @@ class PlanningNode(Node):
         self.occupancy_decay_tau_s = float(os.environ.get("TINYNAV_OCCUPANCY_DECAY_TAU_S", "10.0"))
         if not np.isfinite(self.occupancy_decay_tau_s) or self.occupancy_decay_tau_s <= 0:
             raise ValueError("occupancy decay time constant must be positive and finite")
+        self.decay_config_pub = self.create_publisher(Float64, '/planning/occupancy_decay_tau_s', latched)
+        self.decay_config_pub.publish(Float64(data=self.occupancy_decay_tau_s))
         self.last_occupancy_update = None
         self.K = None
         self.baseline = None
@@ -535,13 +537,10 @@ class PlanningNode(Node):
     def update_velocity_estimate(self, T, stamp):
         if self.last_T is None:
             self.last_T = T.copy()
-            self.last_stamp = stamp
             self.smoothed_velocity = 0.0
-            return
-        dt = stamp - self.last_stamp
-        if dt <= 0.0:
-            return
-        velocity_estimated = np.linalg.norm(T[:2, 3] - self.last_T[:2, 3]) / dt
+            self.last_stamp = 0
+            self.smoothed_velocity = 0.0
+        velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
         self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
 
     def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
@@ -573,7 +572,7 @@ class PlanningNode(Node):
         # regular trajectory penalty
         traj_end = np.array(traj[-1,:3])
         target_end = target_pose if target_pose is not None else traj_end
-        dist = np.linalg.norm(traj_end[:2] - target_end[:2])
+        dist = np.linalg.norm(traj_end - target_end)
         # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
         # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
         heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)

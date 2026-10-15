@@ -66,6 +66,8 @@
         <label>Z-band bottom (m) <input data-bind="robot.obstacle.robot_z_bottom" type="number" step="0.05" /></label>
         <label>Z-band top (m) <input data-bind="robot.obstacle.robot_z_top" type="number" step="0.05" /></label>
         <label>Dilation (cells) <input data-bind="robot.obstacle.dilation_cells" type="number" step="1" min="0" /></label>
+        <label>Obstacle decay time constant (s) <input data-bind="planner.occupancy_decay_tau_s" type="number" step="0.1" min="0.1" /></label>
+        <div class="robot-summary">Larger values keep old obstacles longer. Half-life is about 0.69 times this value. Apply with Realtime.</div>
         <div class="robot-summary" id="robotSummary"></div>
 
         <h2>Camera</h2>

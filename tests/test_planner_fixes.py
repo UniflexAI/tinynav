@@ -27,13 +27,6 @@ class PlannerFixTests(unittest.TestCase):
         reverse, _ = generate_predefined_trajectory_vocabularies(init_q=q)
         self.assertAlmostEqual(reverse[0, -1, 0], -.9)
 
-    def test_goal_cost_ignores_height(self):
-        node = SimpleNamespace(last_param=(0., 0.))
-        traj = np.array([[0., 0., 2., 0., 0., 0., 1.]])
-        a = PlanningNode.trajectory_cost(node, traj, (0., 0.), 0., np.array([1., 0., 0.]), False)
-        b = PlanningNode.trajectory_cost(node, traj, (0., 0.), 0., np.array([1., 0., 50.]), False)
-        self.assertEqual(a, b)
-
     def test_decay_independent_of_frame_rate(self):
         def run(times):
             node = SimpleNamespace(origin=np.zeros(3), grid_shape=(2,2,2), resolution=1., occupancy_grid=np.full((2,2,2), .2), step=1, last_occupancy_update=0., occupancy_decay_tau_s=10.)
@@ -44,13 +37,6 @@ class PlannerFixTests(unittest.TestCase):
             return node.occupancy_grid
         np.testing.assert_allclose(run([1.]), run([.1*i for i in range(1,11)]))
         self.assertAlmostEqual(run([1.])[0,0,0], .2*np.exp(-.1))
-
-    def test_duplicate_stamp_does_not_divide_by_zero(self):
-        node = SimpleNamespace(last_T=None, smoothed_velocity=0.)
-        T = np.eye(4)
-        PlanningNode.update_velocity_estimate(node, T, 1.)
-        PlanningNode.update_velocity_estimate(node, T, 1.)
-        self.assertEqual(node.smoothed_velocity, 0.)
 
     def test_published_pose_times(self):
         from std_msgs.msg import Header

@@ -1,16 +1,26 @@
 # Planner maintenance fixes
 
-Based on main fc17408 on branch xiaole/planner-fixes. Two-stage candidates and their UI were removed from this branch; their previous work is archived on spark under /tmp/tinynav-two-stage-backup.
+Based on main fc17408, branch xiaole/planner-fixes.
 
-- Grid remains 0.05 m per cell, with height increased from 10 to 40 cells (2 m total).
-- WebSim validates and passes the complete robot configuration to both planner and simulator controller. Changing any robot field restarts the relevant children and resets simulation state. Planner confirms its loaded configuration through /planning/robot_config; the UI displays confirmed safety, dilation and maximum speed. /api/effective-robot exposes requested and confirmed configurations separately.
-- Forward/reverse trajectories now include the measured pose at t=0 and end at t=3.0 s, instead of starting at t=0.1 s and ending at t=3.1 s. The existing 106 candidates, 0.1 s spacing and every-tenth-pose publication remain. Individual published poses carry their future timestamps. Controllers keep their existing 1 s interval interpretation.
-- Ground navigation goal distance uses world XY; target height no longer changes goal distance or heading fade.
-- Unobserved occupancy decays exponentially by monotonic elapsed time, rather than multiplying by 0.99 once per frame. TINYNAV_OCCUPANCY_DECAY_TAU_S sets the physical time constant (default 10 s, approximately the former decay at 10 Hz; half-life 6.93 s). Measurement evidence still accumulates per observation; this does not claim complete mapping frame-rate invariance.
-- Velocity estimation initializes its timestamp correctly, ignores duplicate/backward intervals and measures horizontal travel.
+## Scope
 
-Validation: seven targeted tests pass in tests/test_planner_fixes.py. Python and JavaScript syntax and git whitespace checks pass. API integration confirms custom safety=0.35 m, dilation=3 and max speed=0.6 m/s are loaded by the actual planner; negative dilation returns HTTP 400 without replacing current config, then defaults are restored.
+- Increase the 0.05 m grid height from 10 to 40 cells (2 m total).
+- Validate and forward complete WebSim robot settings to planner and simulator controller. Show settings confirmed by the planner.
+- Generate trajectories from t=0 to t=3.0 s; stamp published poses at their respective future times. Retain the original 106 candidates and control interval.
+- Decay unobserved occupancy by monotonic elapsed time rather than once per frame. Measurement evidence still accumulates per observation.
 
-GO2 L WebSim, one 45 s run per configuration in the current session: baseline with grid40 ends 4.336 m from goal, final fixes 4.316 m; neither arrives or reports collision. An initial fixed S run ends 3.610 m from goal without collision. Reverting only trajectory origin also remained stuck (L distance 4.459 m). The earlier session's baseline L distance 0.327 m was not reproduced. These fixes do not solve corner deadlock or establish improved navigation success. No GO2 hardware or Nano performance test was performed.
+Goal distance and velocity estimation are unchanged from main, as requested. No two-stage candidates are included.
 
-An unobstructed 2 m target run reaches the 0.30 m arrival threshold in 6.35 s, ending 0.271 m away without collision.
+## Decay configuration
+
+WebSim exposes `planner.occupancy_decay_tau_s` as **Obstacle decay time constant (s)**. Default: 10 seconds. Unobserved evidence is multiplied by exp(-elapsed/tau); its half-life is tau*ln(2), approximately 6.93 seconds at the default. Larger values retain old evidence longer. This is a decay constant, not a fixed obstacle expiration time.
+
+Edit the input and start Realtime to apply. Changing this setting resets the scene and restarts the planner. The server passes TINYNAV_OCCUPANCY_DECAY_TAU_S to the child. `/planning/occupancy_decay_tau_s` reports the actual loaded value, also displayed in WebSim. `/api/effective-robot` returns requested and confirmed values separately. Non-finite, zero, negative and boolean settings are rejected before replacing the current config.
+
+A standalone App does not yet expose this setting. This change provides the WebSim frontend and backend path; production startup may use the environment variable.
+
+## Validation and limitations
+
+Five focused tests pass, covering trajectory origin/endpoints, published timestamps, elapsed-time decay and robot configuration validation. Python/JavaScript syntax and whitespace checks pass. API integration confirms changes from 18 seconds to 6 seconds, including parameter-only changes with reset=false; zero, negative and boolean values are rejected and defaults are restored.
+
+Earlier-revision navigation checks reached an unobstructed 2 m target but still reproduced L/S deadlock. Those runs preceded reverting goal-distance and velocity-estimation changes and are not acceptance results for this revision. GO2 hardware and Nano performance remain untested; corner deadlock remains unresolved.
