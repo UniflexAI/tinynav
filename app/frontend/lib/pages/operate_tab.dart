@@ -143,9 +143,9 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           child: Row(children: [
             const Icon(Icons.map_outlined, size: 20),
             const SizedBox(width: 8),
-            Expanded(child: Text('Current map: ${ref.watch(activeMapNameProvider).valueOrNull ?? "No map selected"}', maxLines: 1, overflow: TextOverflow.ellipsis)),
+            Expanded(child: Text('Current map: ${mapInfo?.name ?? (mapInfo == null ? "No map selected" : "Unnamed map")}', maxLines: 1, overflow: TextOverflow.ellipsis)),
             IconButton(tooltip: 'Navigation settings', icon: const Icon(Icons.settings_outlined),
-              onPressed: baseUrl == null ? null : () => showDialog<bool>(context: context, barrierDismissible: false,
+              onPressed: baseUrl == null ? null : () => showDialog<void>(context: context, barrierDismissible: false,
                 builder: (_) => const NavigationSettingsDialog())),
           ]),
         ),

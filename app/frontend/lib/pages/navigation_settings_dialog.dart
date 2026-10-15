@@ -49,6 +49,11 @@ class _NavigationSettingsDialogState
     }
   }
 
+  void _usePreset(String? name) {
+    if (name == null) return;
+    setState(() => _fill(Map<String, dynamic>.from(_presets[name] as Map)));
+  }
+
   String _message(Object error) {
     if (error is DioException) {
       final data = error.response?.data;
@@ -113,10 +118,13 @@ class _NavigationSettingsDialogState
           : double.parse(_inputs[key]!.text);
     }
     try {
-      await ref.read(dioProvider).put('/nav/settings', data: values);
+      final response =
+          await ref.read(dioProvider).put('/nav/settings', data: values);
       if (!mounted) return;
-      ref.read(activeNavPoisProvider.notifier).state = const [];
-      Navigator.of(context).pop(true);
+      if (response.data['changed'] == true) {
+        ref.read(activeNavPoisProvider.notifier).state = const [];
+      }
+      Navigator.of(context).pop();
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -129,111 +137,99 @@ class _NavigationSettingsDialogState
 
   @override
   Widget build(BuildContext context) => PopScope(
-    canPop: !_saving,
-    child: AlertDialog(
-      title: const Text('Navigation settings'),
-      content: SizedBox(
-        width: 440,
-        child: SingleChildScrollView(
-          child: _loading
-              ? const Center(child: CircularProgressIndicator())
-              : _robot == null
-              ? Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_error ?? 'Unable to load settings'),
-                    TextButton(onPressed: _load, child: const Text('Retry')),
-                  ],
-                )
-              : Form(
-                  key: _form,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text(
-                        'Saving stops current navigation and applies the new settings.',
-                      ),
-                      const SizedBox(height: 16),
-                      DropdownButtonFormField<String>(
-                        initialValue: _robot,
-                        decoration: const InputDecoration(
-                          labelText: 'Robot type',
-                        ),
-                        items: _presets.keys
-                            .map(
-                              (name) => DropdownMenuItem(
-                                value: name,
-                                child: Text(name.toUpperCase()),
+        canPop: !_saving,
+        child: AlertDialog(
+          title: const Text('Navigation settings'),
+          content: SizedBox(
+            width: 440,
+            child: SingleChildScrollView(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _robot == null
+                      ? Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(_error ?? 'Unable to load settings'),
+                            TextButton(
+                                onPressed: _load, child: const Text('Retry')),
+                          ],
+                        )
+                      : Form(
+                          key: _form,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              const Text(
+                                'Saving stops current navigation and applies the new settings.',
                               ),
-                            )
-                            .toList(),
-                        onChanged: _saving
-                            ? null
-                            : (name) {
-                                if (name != null) {
-                                  setState(
-                                    () => _fill(
-                                      Map<String, dynamic>.from(
-                                        _presets[name] as Map,
+                              const SizedBox(height: 16),
+                              DropdownButtonFormField<String>(
+                                initialValue: _robot,
+                                decoration: const InputDecoration(
+                                  labelText: 'Robot type',
+                                ),
+                                items: _presets.keys
+                                    .map(
+                                      (name) => DropdownMenuItem(
+                                        value: name,
+                                        child: Text(name.toUpperCase()),
                                       ),
+                                    )
+                                    .toList(),
+                                onChanged: _saving ? null : _usePreset,
+                              ),
+                              for (final entry in _labels.entries)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 12),
+                                  child: TextFormField(
+                                    controller: _inputs[entry.key],
+                                    enabled: !_saving,
+                                    keyboardType:
+                                        const TextInputType.numberWithOptions(
+                                      decimal: true,
+                                      signed: true,
                                     ),
-                                  );
-                                }
-                              },
-                      ),
-                      for (final entry in _labels.entries)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 12),
-                          child: TextFormField(
-                            controller: _inputs[entry.key],
-                            enabled: !_saving,
-                            keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true,
-                              signed: true,
-                            ),
-                            decoration: InputDecoration(labelText: entry.value),
-                            validator: (text) => _validate(entry.key, text),
+                                    decoration:
+                                        InputDecoration(labelText: entry.value),
+                                    validator: (text) =>
+                                        _validate(entry.key, text),
+                                  ),
+                                ),
+                              const Padding(
+                                padding: EdgeInsets.only(top: 12),
+                                child: Text(
+                                  'Decay multiplies old occupancy on every update. Default: 0.99. Larger values retain obstacles longer.',
+                                ),
+                              ),
+                              if (_error != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 12),
+                                  child: Text(
+                                    _error!,
+                                    style: const TextStyle(color: Colors.red),
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
-                      const Padding(
-                        padding: EdgeInsets.only(top: 12),
-                        child: Text(
-                          'Decay multiplies old occupancy on every update. Default: 0.99. Larger values retain obstacles longer.',
-                        ),
-                      ),
-                      if (_error != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 12),
-                          child: Text(
-                            _error!,
-                            style: const TextStyle(color: Colors.red),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed:
+                  _saving || _robot == null ? null : () => _usePreset(_robot),
+              child: const Text('Restore defaults'),
+            ),
+            TextButton(
+              onPressed: _saving ? null : () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: _loading || _saving || _robot == null ? null : _save,
+              child: Text(_saving ? 'Saving…' : 'Save'),
+            ),
+          ],
         ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: _saving || _robot == null
-              ? null
-              : () => setState(
-                  () =>
-                      _fill(Map<String, dynamic>.from(_presets[_robot] as Map)),
-                ),
-          child: const Text('Restore defaults'),
-        ),
-        TextButton(
-          onPressed: _saving ? null : () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: _loading || _saving || _robot == null ? null : _save,
-          child: Text(_saving ? 'Saving…' : 'Save'),
-        ),
-      ],
-    ),
-  );
+      );
 }

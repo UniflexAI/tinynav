@@ -8,8 +8,7 @@ from tinynav.core import robot_specs
 
 def presets():
     result = {}
-    for name in ('go2', 'go2w', 'b2', 'b2w', 'g1'):
-        robot = getattr(robot_specs, name.upper() + '_CONFIG')
+    for name, robot in robot_specs.ROBOT_PRESETS.items():
         result[name] = dict(robot_type=name, safety_radius=robot.safety_radius,
             dilation_cells=robot.obstacle.dilation_cells, decay_factor=0.99,
             max_linear_vel=robot.max_linear_vel, max_angular_vel=robot.max_angular_vel,
@@ -19,7 +18,7 @@ def presets():
 
 def validate(values):
     defaults = presets()
-    if not isinstance(values, dict) or values.get('robot_type') not in defaults:
+    if not isinstance(values, dict) or not isinstance(values.get('robot_type'), str) or values['robot_type'] not in defaults:
         raise ValueError('Unsupported robot type')
     result = defaults[values['robot_type']].copy()
     if set(values) - set(result):
@@ -62,7 +61,7 @@ class PlannerSettings:
 
     def environment(self, env):
         values = self.values
-        robot = asdict(getattr(robot_specs, values['robot_type'].upper() + '_CONFIG'))
+        robot = asdict(robot_specs.ROBOT_PRESETS[values['robot_type']])
         for key in ('safety_radius', 'max_linear_vel', 'max_angular_vel'):
             robot[key] = values[key]
         robot['min_linear_vel'] = min(robot['min_linear_vel'], robot['max_linear_vel'])

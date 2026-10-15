@@ -54,6 +54,7 @@ def map_current():
     except Exception as e:
         raise HTTPException(500, str(e))
     return {
+        'name': os.path.basename(os.path.realpath(node.map_path)),
         'imageUrl': '/map/image',
         **meta,
     }
@@ -235,10 +236,3 @@ def map_preview_delete_poi(map_name: str, poi_id: int):
     with open(pois_file, 'w') as f:
         json.dump(pois, f, indent=2)
     return {'ok': True}
-
-
-@router.get('/active-name')
-def map_active_name():
-    node = _require_node()
-    path = os.path.realpath(node.map_path)
-    return {'name': os.path.basename(path) if os.path.exists(os.path.join(path, 'occupancy_grid.npy')) else None}

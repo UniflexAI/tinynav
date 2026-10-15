@@ -105,22 +105,27 @@ G1_CONFIG = RobotConfig(
     obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
 )
 
+ROBOT_PRESETS = {config.name: config for config in (
+    GO2_CONFIG, GO2W_CONFIG, B2_CONFIG, B2W_CONFIG, G1_CONFIG,
+)}
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
 try:
-    ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
+    ROBOT_CONFIG = ROBOT_PRESETS[ROBOT_TYPE]
 except KeyError:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
 
 
 def robot_config_from_dict(values):
-    """Validate a complete WebSim robot config before starting child nodes."""
+    """Validate shared robot geometry and motion settings."""
+    if not isinstance(values, dict):
+        raise ValueError("robot configuration must be an object")
     values = dict(values)
     # Old saved configurations may contain the removed shape selector.
     values.pop("shape", None)
     values.pop("radius", None)
     obstacle = ObstacleConfig(**values.pop("obstacle", {}))
     config = RobotConfig(obstacle=obstacle, **values)
-    if config.name not in ("go2", "go2w", "b2", "b2w", "g1"):
+    if not isinstance(config.name, str) or config.name not in ROBOT_PRESETS:
         raise ValueError("unsupported robot name")
     for key, value in asdict(config).items():
         if key not in ("name", "obstacle") and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):

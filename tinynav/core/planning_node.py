@@ -16,7 +16,7 @@ from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header, String, Float64
+from std_msgs.msg import Header, String
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from codetiming import Timer
 import cv2
@@ -331,9 +331,6 @@ class PlanningNode(Node):
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
-        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.robot_config_pub = self.create_publisher(String, '/planning/robot_config', latched)
-        self.robot_config_pub.publish(String(data=json.dumps(asdict(ROBOT_CONFIG))))
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
@@ -357,8 +354,11 @@ class PlanningNode(Node):
         self.occupancy_decay_factor = float(os.environ.get("TINYNAV_OCCUPANCY_DECAY_FACTOR", "0.99"))
         if not np.isfinite(self.occupancy_decay_factor) or not 0.0 <= self.occupancy_decay_factor <= 1.0:
             raise ValueError("occupancy decay factor must be finite and between 0 and 1")
-        self.decay_config_pub = self.create_publisher(Float64, '/planning/occupancy_decay_factor', latched)
-        self.decay_config_pub.publish(Float64(data=self.occupancy_decay_factor))
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.config_pub = self.create_publisher(String, '/planning/config', latched)
+        self.config_pub.publish(String(data=json.dumps({
+            'robot': asdict(ROBOT_CONFIG), 'decay_factor': self.occupancy_decay_factor,
+        })))
         self.K = None
         self.baseline = None
         self.last_T = None

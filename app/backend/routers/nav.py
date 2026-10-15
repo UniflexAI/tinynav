@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..state import runner
+from ..planner_settings import presets
 
 router = APIRouter(tags=['nav'])
 
@@ -116,7 +117,6 @@ def nav_nodes_disable():
 
 @router.get('/settings')
 def nav_settings():
-    from ..planner_settings import presets
     node = _require_node()
     with node._settings_lock:
         return {'settings': dict(node.planner_settings.values), 'presets': presets()}
@@ -124,10 +124,8 @@ def nav_settings():
 
 @router.put('/settings')
 def nav_save_settings(values: dict):
-    from ..planner_settings import validate
     try:
-        values = validate(values)
-        return {'settings': _require_node().apply_planner_settings(values)}
+        return _require_node().apply_planner_settings(values)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:

@@ -130,7 +130,7 @@ class BackendNode(Ros2NodeManager):
         super().__init__(tinynav_db_path=tinynav_db_path)
 
         self._lock = threading.Lock()
-        self._settings_lock = threading.RLock()
+        self._settings_lock = threading.Lock()
         self.planner_settings = PlannerSettings(tinynav_db_path)
         self.mapping_percent: float = 0.0
         self.current_pose: dict | None = None   # latest pose from SLAM or map
@@ -737,28 +737,34 @@ class BackendNode(Ros2NodeManager):
     def _launch_proc(self, name: str, cmd: list[str], env: dict | None = None,
                       cwd: str = '/tinynav') -> subprocess.Popen:
         """Spawn a subprocess with standard logging and process-group setup."""
-        if name in ('planning', 'cmd_vel_control', 'unitree'):
-            env = self.planner_settings.environment(env or os.environ.copy())
         lf = self._make_log(name)
         proc = subprocess.Popen(
             cmd, preexec_fn=os.setsid, cwd=cwd,
-            env=env or os.environ.copy(),
+            env=self._navigation_env(cmd, env),
             stdout=lf, stderr=subprocess.STDOUT,
         )
         lf.close()
         return proc
 
+    def _navigation_env(self, cmd, env=None):
+        env = {**os.environ, **(env or {})}
+        if any(os.path.basename(arg) in ('planning_node.py', 'cmd_vel_control.py', 'unitree_control.py') for arg in cmd):
+            env = self.planner_settings.environment(env)
+        return env
+
     def _spawn(self, cmd, extra_env=None):
-        if any(script in cmd for script in ('/tinynav/tinynav/core/planning_node.py', '/tinynav/tinynav/platforms/cmd_vel_control.py')):
-            extra_env = self.planner_settings.environment({**os.environ, **(extra_env or {})})
-        return super()._spawn(cmd, extra_env=extra_env)
+        return super()._spawn(cmd, extra_env=self._navigation_env(cmd, extra_env))
 
     def apply_planner_settings(self, values):
         with self._settings_lock:
             if self.state not in ('idle', 'navigation'):
                 raise RuntimeError('Stop recording or map building before changing navigation settings')
-            type_changed = values['robot_type'] != self.planner_settings.values['robot_type']
+            previous = self.planner_settings.values
             self.planner_settings.save(values)
+            values = self.planner_settings.values
+            if values == previous:
+                return {'settings': dict(values), 'changed': False}
+            type_changed = values['robot_type'] != previous['robot_type']
             self._set_nav_active(False)
             self.publish_cmd_vel(0.0, 0.0, 0.0)
             self._publish_cmd_pois(None)
@@ -768,24 +774,25 @@ class BackendNode(Ros2NodeManager):
                 self._pub_state()
             env = os.environ.copy()
             env['PYTHONPATH'] = _VENV_SITE + ':' + env.get('PYTHONPATH', '')
-            scripts = (('_planning_proc', 'planning', '/tinynav/tinynav/core/planning_node.py'),
-                       ('_cmd_vel_proc', 'cmd_vel_control', '/tinynav/tinynav/platforms/cmd_vel_control.py'))
-            for attr, name, script in scripts:
-                proc = getattr(self, attr)
+            scripts = {
+                'planning': '/tinynav/tinynav/core/planning_node.py',
+                'cmd_vel_control': '/tinynav/tinynav/platforms/cmd_vel_control.py',
+                'unitree': '/tinynav/tinynav/platforms/unitree_control.py',
+            }
+
+            def restart(proc, name):
                 if proc and proc.poll() is None:
                     self._kill_proc(proc)
-                    setattr(self, attr, self._launch_proc(name, ['uv', 'run', 'python', script], env=env))
-            unitree = getattr(self, '_unitree_proc', None)
-            if type_changed and unitree and unitree.poll() is None:
-                self._kill_proc(unitree)
-                self._unitree_proc = self._launch_proc('unitree',
-                    ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'], env=env)
-            for name, script in (('planning', scripts[0][2]), ('control', scripts[1][2])):
-                proc = self.processes.get(name)
-                if proc and proc.poll() is None:
-                    self._kill_proc(proc)
-                    self.processes[name] = self._spawn(['uv', 'run', 'python', script], extra_env=env)
-            return dict(self.planner_settings.values)
+                    return self._launch_proc(name, ['uv', 'run', 'python', scripts[name]], env=env)
+                return proc
+
+            for attr, name in (('_planning_proc', 'planning'), ('_cmd_vel_proc', 'cmd_vel_control'), ('_unitree_proc', 'unitree')):
+                if name != 'unitree' or type_changed:
+                    setattr(self, attr, restart(getattr(self, attr), name))
+            for key, name in (('planning', 'planning'), ('control', 'cmd_vel_control')):
+                if key in self.processes:
+                    self.processes[key] = restart(self.processes[key], name)
+            return {'settings': dict(values), 'changed': True}
 
     def _stop_sensor_procs(self):
         for attr in ('_looper_bridge_proc', '_realsense_proc', '_perception_proc', '_planning_proc'):

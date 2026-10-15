@@ -35,7 +35,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
-from std_msgs.msg import Bool, String, Float64
+from std_msgs.msg import Bool, String
 
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
@@ -75,9 +75,7 @@ CAMERA_DEFAULTS = {
     "mount_height": 0.45,
 }
 ROBOT_PRESETS = {
-    name.removesuffix("_CONFIG").lower(): asdict(getattr(robot_specs_mod, name))
-    for name in dir(robot_specs_mod)
-    if name.endswith("_CONFIG") and name != "ROBOT_CONFIG"
+    name: asdict(robot) for name, robot in robot_specs_mod.ROBOT_PRESETS.items()
 }
 
 
@@ -247,8 +245,7 @@ class RosPlanningSimNode(Node):
         self.target_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         self.camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.create_subscription(String, "/planning/robot_config", self.robot_config_callback, latched)
-        self.create_subscription(Float64, "/planning/occupancy_decay_factor", self.decay_config_callback, latched)
+        self.create_subscription(String, "/planning/config", self.config_callback, latched)
         self.nav_active_pub = self.create_publisher(Bool, "/nav/active", latched)
         self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched)
 
@@ -306,16 +303,13 @@ class RosPlanningSimNode(Node):
                 self.collision = False
                 self.geom_footprint = []
 
-    def decay_config_callback(self, msg: Float64) -> None:
+    def config_callback(self, msg: String) -> None:
+        config = json.loads(msg.data)
         with self.lock:
-            if msg.data == self.config.get("planner", {}).get("occupancy_decay_factor", 0.99):
-                self.applied_decay_factor = msg.data
-
-    def robot_config_callback(self, msg: String) -> None:
-        robot = json.loads(msg.data)
-        with self.lock:
-            if robot == self.config.get("robot"):
-                self.applied_robot = robot
+            if (config['robot'] == self.config.get('robot') and
+                    config['decay_factor'] == self.config.get('planner', {}).get('occupancy_decay_factor', 0.99)):
+                self.applied_robot = config['robot']
+                self.applied_decay_factor = config['decay_factor']
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -638,7 +632,10 @@ def update_config(request: RunRequest) -> dict[str, Any]:
     reset = bool(request.reset)
     try:
         robot = robot_specs_mod.robot_config_from_dict(request.config.get("robot", {}))
-        factor = request.config.get("planner", {}).get("occupancy_decay_factor", 0.99)
+        planner = request.config.get("planner", {})
+        if not isinstance(planner, dict):
+            raise ValueError("planner configuration must be an object")
+        factor = planner.get("occupancy_decay_factor", 0.99)
         if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor) or not 0.0 <= factor <= 1.0:
             raise ValueError("occupancy decay factor must be finite and between 0 and 1")
     except (TypeError, ValueError) as exc:
@@ -659,13 +656,6 @@ def update_config(request: RunRequest) -> dict[str, Any]:
 @app.post("/api/start-ros-loop")
 def start_ros_loop() -> dict[str, Any]:
     return {"ok": True, "process_count": ensure_ros_loop(reset_planning=True, force=True)}
-
-
-@app.get("/api/effective-robot")
-def effective_robot() -> dict[str, Any]:
-    node = _require_sim()
-    with node.lock:
-        return {"requested_robot": copy.deepcopy(node.config["robot"]), "applied_robot": copy.deepcopy(node.applied_robot), "requested_decay_factor": node.config.get("planner", {}).get("occupancy_decay_factor", 0.99), "applied_decay_factor": node.applied_decay_factor}
 
 
 @app.get("/api/sim-state")
