@@ -1,6 +1,8 @@
 import os
+import json
+import math
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 
 
 @dataclass
@@ -112,3 +114,33 @@ try:
     ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
 except KeyError:
     raise ValueError(f"Unsupported ROBOT_TYPE: {ROBOT_TYPE!r}") from None
+
+
+def robot_config_from_dict(values):
+    """Validate a complete WebSim robot config before starting child nodes."""
+    values = dict(values)
+    obstacle = ObstacleConfig(**values.pop("obstacle", {}))
+    config = RobotConfig(obstacle=obstacle, **values)
+    if config.name not in ("go2", "go2w", "b2", "b2w", "g1"):
+        raise ValueError("unsupported robot name")
+    if config.shape not in ("square", "circle"):
+        raise ValueError("unsupported robot shape")
+    for key, value in asdict(config).items():
+        if key not in ("name", "shape", "obstacle") and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+            raise ValueError(f"invalid robot value: {key}")
+    for key, value in asdict(obstacle).items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"invalid obstacle value: {key}")
+    if min(config.length, config.width, config.radius, config.max_linear_vel, config.max_angular_vel) <= 0:
+        raise ValueError("dimensions and maximum velocities must be positive")
+    if config.safety_radius < 0 or not 0 <= config.min_linear_vel <= config.max_linear_vel or not 0 <= config.min_angular_vel <= config.max_angular_vel:
+        raise ValueError("invalid safety or velocity limits")
+    if obstacle.robot_z_bottom >= obstacle.robot_z_top or obstacle.min_wall_span_m < 0 or obstacle.occ_threshold < 0:
+        raise ValueError("invalid obstacle height band or threshold")
+    if not isinstance(obstacle.dilation_cells, int) or obstacle.dilation_cells < 0:
+        raise ValueError("dilation_cells must be a non-negative integer")
+    return config
+
+
+if "TINYNAV_ROBOT_CONFIG" in os.environ:
+    ROBOT_CONFIG = robot_config_from_dict(json.loads(os.environ["TINYNAV_ROBOT_CONFIG"]))

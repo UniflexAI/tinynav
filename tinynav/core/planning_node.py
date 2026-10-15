@@ -1,3 +1,7 @@
+import os
+import json
+from dataclasses import asdict
+import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -9,10 +13,12 @@ from scipy.spatial.transform import Rotation as R
 from numba import njit
 import message_filters
 from rclpy.time import Time
+from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from codetiming import Timer
 import cv2
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np
@@ -154,7 +160,9 @@ def generate_trajectory_library_3d(
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
-            for i in range(num_steps):
+            traj[0, :3] = p
+            traj[0, 3:] = init_q
+            for i in range(1, num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
                 q = q @ dq
                 v_world = q @ np.array([0.0, 0.0, vx])
@@ -187,7 +195,9 @@ def generate_predefined_trajectory_vocabularies(
     p = init_p.copy()
     q = quat_to_matrix(init_q)
     traj = np.empty((num_steps, 7), dtype=np.float64)
-    for i in range(num_steps):
+    traj[0, :3] = p
+    traj[0, 3:] = init_q
+    for i in range(1, num_steps):
         v_world = q @ np.array([0.0, 0.0, -reverse_speed])
         p += v_world * dt
         traj[i, :3] = p
@@ -322,6 +332,9 @@ class PlanningNode(Node):
             f"safety_r={ROBOT_CONFIG.safety_radius}m, "
             f"z_band=[{ROBOT_CONFIG.obstacle.robot_z_bottom}, {ROBOT_CONFIG.obstacle.robot_z_top}]m)"
         )
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.robot_config_pub = self.create_publisher(String, '/planning/robot_config', latched)
+        self.robot_config_pub.publish(String(data=json.dumps(asdict(ROBOT_CONFIG))))
         self.bridge = CvBridge()
         self.path_pub = self.create_publisher(Path, '/planning/trajectory_path', 10)
         self.height_map_pub = self.create_publisher(Image, "/planning/height_map", 10)
@@ -337,11 +350,15 @@ class PlanningNode(Node):
         self.ts.registerCallback(self.sync_callback)
         self.camerainfo_sub = self.create_subscription(CameraInfo, '/camera/camera/infra2/camera_info', self.info_callback, 10)
 
-        self.grid_shape = (100, 100, 10)
+        self.grid_shape = (100, 100, 40)
         self.resolution = 0.05
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
+        self.occupancy_decay_tau_s = float(os.environ.get("TINYNAV_OCCUPANCY_DECAY_TAU_S", "10.0"))
+        if not np.isfinite(self.occupancy_decay_tau_s) or self.occupancy_decay_tau_s <= 0:
+            raise ValueError("occupancy decay time constant must be positive and finite")
+        self.last_occupancy_update = None
         self.K = None
         self.baseline = None
         self.last_T = None
@@ -518,10 +535,13 @@ class PlanningNode(Node):
     def update_velocity_estimate(self, T, stamp):
         if self.last_T is None:
             self.last_T = T.copy()
+            self.last_stamp = stamp
             self.smoothed_velocity = 0.0
-            self.last_stamp = 0
-            self.smoothed_velocity = 0.0
-        velocity_estimated = np.linalg.norm(T[:3, 3] - self.last_T[:3, 3]) / (stamp - self.last_stamp)
+            return
+        dt = stamp - self.last_stamp
+        if dt <= 0.0:
+            return
+        velocity_estimated = np.linalg.norm(T[:2, 3] - self.last_T[:2, 3]) / dt
         self.smoothed_velocity = 0.9 * self.smoothed_velocity + 0.1 * velocity_estimated
 
     def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
@@ -533,7 +553,11 @@ class PlanningNode(Node):
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-        self.occupancy_grid *= 0.99
+        now = time.monotonic()
+        if self.last_occupancy_update is not None:
+            elapsed = max(0.0, now - self.last_occupancy_update)
+            self.occupancy_grid *= np.exp(-elapsed / self.occupancy_decay_tau_s)
+        self.last_occupancy_update = now
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
@@ -549,7 +573,7 @@ class PlanningNode(Node):
         # regular trajectory penalty
         traj_end = np.array(traj[-1,:3])
         target_end = target_pose if target_pose is not None else traj_end
-        dist = np.linalg.norm(traj_end - target_end)
+        dist = np.linalg.norm(traj_end[:2] - target_end[:2])
         # heading error weighted like distance (1 rad ~ 1 m) far from the goal, faded out
         # linearly inside 2 m so bearing noise cannot dominate the distance term on arrival
         heading = goal_heading_error(traj[-1], target_end) * min(1.0, dist / 2.0)
@@ -572,7 +596,7 @@ class PlanningNode(Node):
             for j in range(0, len(trajectories[i]), 10):
                 x,y,z,qx,qy,qz,qw = trajectories[i][j]
                 pose = PoseStamped()
-                pose.header = header
+                pose.header = Header(frame_id="world", stamp=(Time.from_msg(header.stamp) + Duration(seconds=j * 0.1)).to_msg())
                 pose.pose.position.x = x
                 pose.pose.position.y = y
                 pose.pose.position.z = z

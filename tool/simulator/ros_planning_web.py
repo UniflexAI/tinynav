@@ -12,6 +12,7 @@ import base64
 import copy
 import math
 import os
+import json
 import subprocess
 import threading
 import time
@@ -34,7 +35,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import CameraInfo, Image, PointCloud
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 from tinynav.core.robot_specs import GO2_CONFIG
 from tinynav.core import robot_specs as robot_specs_mod
@@ -235,6 +236,7 @@ class RosPlanningSimNode(Node):
         self.last_esdf_grid: dict[str, Any] | None = None
         self.collision = False
         self.geom_footprint: list[list[float]] = []
+        self.applied_robot = None
         self.running = True
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
@@ -243,6 +245,7 @@ class RosPlanningSimNode(Node):
         self.target_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         self.camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, "/planning/robot_config", self.robot_config_callback, latched)
         self.nav_active_pub = self.create_publisher(Bool, "/nav/active", latched)
         self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched)
 
@@ -278,6 +281,8 @@ class RosPlanningSimNode(Node):
     def set_config(self, config: dict[str, Any], reset: bool = False) -> None:
         with self.lock:
             prev_map = self.config.get("map_path")
+            if reset or self.config.get("robot") != config.get("robot"):
+                self.applied_robot = None
             self.config = copy.deepcopy(config)
             robot = self.config.get("robot")
             if not isinstance(robot, dict):
@@ -296,6 +301,12 @@ class RosPlanningSimNode(Node):
                 self.last_esdf_grid = None
                 self.collision = False
                 self.geom_footprint = []
+
+    def robot_config_callback(self, msg: String) -> None:
+        robot = json.loads(msg.data)
+        with self.lock:
+            if robot == self.config.get("robot"):
+                self.applied_robot = robot
 
     def cmd_callback(self, msg: Twist) -> None:
         with self.lock:
@@ -405,6 +416,7 @@ class RosPlanningSimNode(Node):
             xy = [float(self.control_xy[0]), float(self.control_xy[1])]
             footprint = copy.deepcopy(self.geom_footprint) or copy.deepcopy(self.last_footprint)
             return {
+                "applied_robot": copy.deepcopy(self.applied_robot),
                 "robot_xy": xy,
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": footprint,
@@ -471,6 +483,9 @@ def _child_env() -> dict[str, str]:
     for key in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env.setdefault(key, "1")
     env["ROBOT_TYPE"] = _active_robot_type()
+    if SIM_NODE is not None:
+        robot = robot_specs_mod.robot_config_from_dict(SIM_NODE.config["robot"])
+        env["TINYNAV_ROBOT_CONFIG"] = json.dumps(asdict(robot))
     return env
 
 
@@ -610,19 +625,31 @@ def update_config(request: RunRequest) -> dict[str, Any]:
     if not isinstance(request.config, dict):
         raise HTTPException(status_code=400, detail="config must be an object")
     reset = bool(request.reset)
-    prev_robot = node.config.get("robot", {}).get("name")
-    node.set_config(copy.deepcopy(request.config), reset=reset)
-    robot_changed = prev_robot != node.config.get("robot", {}).get("name")
+    try:
+        robot = robot_specs_mod.robot_config_from_dict(request.config.get("robot", {}))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    config = copy.deepcopy(request.config)
+    config["robot"] = asdict(robot)
+    robot_changed = node.config.get("robot") != config["robot"]
+    node.set_config(config, reset=reset or robot_changed)
     if robot_changed:
         _stop_script("tinynav/platforms/simulator_control.py")
     if reset or robot_changed:
         ensure_ros_loop(reset_planning=True, force=robot_changed)
-    return {"ok": True, "robot_changed": robot_changed}
+    return {"ok": True, "robot_changed": robot_changed, "requested_robot": asdict(robot)}
 
 
 @app.post("/api/start-ros-loop")
 def start_ros_loop() -> dict[str, Any]:
     return {"ok": True, "process_count": ensure_ros_loop(reset_planning=True, force=True)}
+
+
+@app.get("/api/effective-robot")
+def effective_robot() -> dict[str, Any]:
+    node = _require_sim()
+    with node.lock:
+        return {"requested_robot": copy.deepcopy(node.config["robot"]), "applied_robot": copy.deepcopy(node.applied_robot)}
 
 
 @app.get("/api/sim-state")
