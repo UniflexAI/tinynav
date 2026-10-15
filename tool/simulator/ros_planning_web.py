@@ -105,7 +105,7 @@ def default_config(robot_name: str | None = None) -> dict[str, Any]:
     return {
         "name": "ros_planning_sim",
         "robot": robot,
-        "planner": {"occupancy_decay_tau_s": 10.0},
+        "planner": {"occupancy_decay_factor": 0.99},
         "obstacle": copy.deepcopy(robot.get("obstacle") or {}),
         "camera": copy.deepcopy(CAMERA_DEFAULTS),
         "start": {"xy": [0.0, 0.0], "yaw_deg": 0.0},
@@ -238,7 +238,7 @@ class RosPlanningSimNode(Node):
         self.collision = False
         self.geom_footprint: list[list[float]] = []
         self.applied_robot = None
-        self.applied_decay_tau_s = None
+        self.applied_decay_factor = None
         self.running = True
 
         self.depth_pub = self.create_publisher(Image, "/slam/depth", 10)
@@ -248,7 +248,7 @@ class RosPlanningSimNode(Node):
         self.camera_info_pub = self.create_publisher(CameraInfo, "/camera/camera/infra2/camera_info", 10)
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(String, "/planning/robot_config", self.robot_config_callback, latched)
-        self.create_subscription(Float64, "/planning/occupancy_decay_tau_s", self.decay_config_callback, latched)
+        self.create_subscription(Float64, "/planning/occupancy_decay_factor", self.decay_config_callback, latched)
         self.nav_active_pub = self.create_publisher(Bool, "/nav/active", latched)
         self.nav_paused_pub = self.create_publisher(Bool, "/nav/paused", latched)
 
@@ -286,7 +286,7 @@ class RosPlanningSimNode(Node):
             prev_map = self.config.get("map_path")
             if reset or self.config.get("robot") != config.get("robot"):
                 self.applied_robot = None
-                self.applied_decay_tau_s = None
+                self.applied_decay_factor = None
             self.config = copy.deepcopy(config)
             robot = self.config.get("robot")
             if not isinstance(robot, dict):
@@ -308,8 +308,8 @@ class RosPlanningSimNode(Node):
 
     def decay_config_callback(self, msg: Float64) -> None:
         with self.lock:
-            if msg.data == self.config.get("planner", {}).get("occupancy_decay_tau_s", 10.0):
-                self.applied_decay_tau_s = msg.data
+            if msg.data == self.config.get("planner", {}).get("occupancy_decay_factor", 0.99):
+                self.applied_decay_factor = msg.data
 
     def robot_config_callback(self, msg: String) -> None:
         robot = json.loads(msg.data)
@@ -426,7 +426,7 @@ class RosPlanningSimNode(Node):
             footprint = copy.deepcopy(self.geom_footprint) or copy.deepcopy(self.last_footprint)
             return {
                 "applied_robot": copy.deepcopy(self.applied_robot),
-                "applied_decay_tau_s": self.applied_decay_tau_s,
+                "applied_decay_factor": self.applied_decay_factor,
                 "robot_xy": xy,
                 "robot_yaw_deg": float(self.yaw_deg),
                 "robot_footprint_xy": footprint,
@@ -496,7 +496,7 @@ def _child_env() -> dict[str, str]:
     if SIM_NODE is not None:
         robot = robot_specs_mod.robot_config_from_dict(SIM_NODE.config["robot"])
         env["TINYNAV_ROBOT_CONFIG"] = json.dumps(asdict(robot))
-        env["TINYNAV_OCCUPANCY_DECAY_TAU_S"] = str(SIM_NODE.config.get("planner", {}).get("occupancy_decay_tau_s", 10.0))
+        env["TINYNAV_OCCUPANCY_DECAY_FACTOR"] = str(SIM_NODE.config.get("planner", {}).get("occupancy_decay_factor", 0.99))
     return env
 
 
@@ -638,14 +638,14 @@ def update_config(request: RunRequest) -> dict[str, Any]:
     reset = bool(request.reset)
     try:
         robot = robot_specs_mod.robot_config_from_dict(request.config.get("robot", {}))
-        tau = request.config.get("planner", {}).get("occupancy_decay_tau_s", 10.0)
-        if isinstance(tau, bool) or not isinstance(tau, (int, float)) or not math.isfinite(tau) or tau <= 0:
-            raise ValueError("occupancy decay time constant must be positive and finite")
+        factor = request.config.get("planner", {}).get("occupancy_decay_factor", 0.99)
+        if isinstance(factor, bool) or not isinstance(factor, (int, float)) or not math.isfinite(factor) or not 0.0 <= factor <= 1.0:
+            raise ValueError("occupancy decay factor must be finite and between 0 and 1")
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     config = copy.deepcopy(request.config)
     config["robot"] = asdict(robot)
-    config["planner"] = {"occupancy_decay_tau_s": float(tau)}
+    config["planner"] = {"occupancy_decay_factor": float(factor)}
     robot_changed = node.config.get("robot") != config["robot"]
     planner_changed = node.config.get("planner") != config["planner"]
     node.set_config(config, reset=reset or robot_changed or planner_changed)
@@ -665,7 +665,7 @@ def start_ros_loop() -> dict[str, Any]:
 def effective_robot() -> dict[str, Any]:
     node = _require_sim()
     with node.lock:
-        return {"requested_robot": copy.deepcopy(node.config["robot"]), "applied_robot": copy.deepcopy(node.applied_robot), "requested_decay_tau_s": node.config.get("planner", {}).get("occupancy_decay_tau_s", 10.0), "applied_decay_tau_s": node.applied_decay_tau_s}
+        return {"requested_robot": copy.deepcopy(node.config["robot"]), "applied_robot": copy.deepcopy(node.applied_robot), "requested_decay_factor": node.config.get("planner", {}).get("occupancy_decay_factor", 0.99), "applied_decay_factor": node.applied_decay_factor}
 
 
 @app.get("/api/sim-state")

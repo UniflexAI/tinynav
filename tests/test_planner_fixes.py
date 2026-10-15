@@ -27,16 +27,14 @@ class PlannerFixTests(unittest.TestCase):
         reverse, _ = generate_predefined_trajectory_vocabularies(init_q=q)
         self.assertAlmostEqual(reverse[0, -1, 0], -.9)
 
-    def test_decay_independent_of_frame_rate(self):
-        def run(times):
-            node = SimpleNamespace(origin=np.zeros(3), grid_shape=(2,2,2), resolution=1., occupancy_grid=np.full((2,2,2), .2), step=1, last_occupancy_update=0., occupancy_decay_tau_s=10.)
+    def test_decay_factor_per_update(self):
+        for factor in (0.0, 0.9, 0.99, 1.0):
+            node = SimpleNamespace(origin=np.zeros(3), grid_shape=(2,2,2), resolution=1., occupancy_grid=np.full((2,2,2), .2), step=1, occupancy_decay_factor=factor)
             T = np.eye(4); T[:3,3] = 1.
-            with patch('tinynav.core.planning_node.run_raycasting_loopy', return_value=np.zeros((2,2,2))), patch('tinynav.core.planning_node.time.monotonic', side_effect=times):
-                for _ in times:
+            with patch('tinynav.core.planning_node.run_raycasting_loopy', return_value=np.zeros((2,2,2))):
+                for count in range(1,4):
                     PlanningNode.update_occupancy_grid(node, np.zeros((1,1)), T, 1,1,0,0)
-            return node.occupancy_grid
-        np.testing.assert_allclose(run([1.]), run([.1*i for i in range(1,11)]))
-        self.assertAlmostEqual(run([1.])[0,0,0], .2*np.exp(-.1))
+                    np.testing.assert_allclose(node.occupancy_grid, .2 * factor ** count)
 
     def test_published_pose_times(self):
         from std_msgs.msg import Header

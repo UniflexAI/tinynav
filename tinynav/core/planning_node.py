@@ -1,7 +1,6 @@
 import os
 import json
 from dataclasses import asdict
-import time
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -355,12 +354,11 @@ class PlanningNode(Node):
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
         self.occupancy_grid = np.zeros(self.grid_shape)
-        self.occupancy_decay_tau_s = float(os.environ.get("TINYNAV_OCCUPANCY_DECAY_TAU_S", "10.0"))
-        if not np.isfinite(self.occupancy_decay_tau_s) or self.occupancy_decay_tau_s <= 0:
-            raise ValueError("occupancy decay time constant must be positive and finite")
-        self.decay_config_pub = self.create_publisher(Float64, '/planning/occupancy_decay_tau_s', latched)
-        self.decay_config_pub.publish(Float64(data=self.occupancy_decay_tau_s))
-        self.last_occupancy_update = None
+        self.occupancy_decay_factor = float(os.environ.get("TINYNAV_OCCUPANCY_DECAY_FACTOR", "0.99"))
+        if not np.isfinite(self.occupancy_decay_factor) or not 0.0 <= self.occupancy_decay_factor <= 1.0:
+            raise ValueError("occupancy decay factor must be finite and between 0 and 1")
+        self.decay_config_pub = self.create_publisher(Float64, '/planning/occupancy_decay_factor', latched)
+        self.decay_config_pub.publish(Float64(data=self.occupancy_decay_factor))
         self.K = None
         self.baseline = None
         self.last_T = None
@@ -552,11 +550,7 @@ class PlanningNode(Node):
             new_origin = new_center - np.array(self.grid_shape) * self.resolution / 2
             self.occupancy_grid, self.origin = roll_occupancy_grid(self.occupancy_grid, self.origin, new_origin, self.resolution)
         new_occ = run_raycasting_loopy(depth, T, self.grid_shape, fx, fy, cx, cy, self.origin, self.step, self.resolution)
-        now = time.monotonic()
-        if self.last_occupancy_update is not None:
-            elapsed = max(0.0, now - self.last_occupancy_update)
-            self.occupancy_grid *= np.exp(-elapsed / self.occupancy_decay_tau_s)
-        self.last_occupancy_update = now
+        self.occupancy_grid *= self.occupancy_decay_factor
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
