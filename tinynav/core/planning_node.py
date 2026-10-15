@@ -12,7 +12,6 @@ from scipy.spatial.transform import Rotation as R
 from numba import njit
 import message_filters
 from rclpy.time import Time
-from rclpy.duration import Duration
 from sensor_msgs.msg import PointCloud2, PointCloud
 from geometry_msgs.msg import PoseStamped, Point32
 import sensor_msgs_py.point_cloud2 as pc2
@@ -159,9 +158,7 @@ def generate_trajectory_library_3d(
             p = init_p.copy()
             q = quat_to_matrix(init_q)
             traj = np.empty((num_steps, 7))
-            traj[0, :3] = p
-            traj[0, 3:] = init_q
-            for i in range(1, num_steps):
+            for i in range(num_steps):
                 dq = rotvec_to_matrix(np.array([0.0, omega_y * dt, 0.0]))
                 q = q @ dq
                 v_world = q @ np.array([0.0, 0.0, vx])
@@ -194,9 +191,7 @@ def generate_predefined_trajectory_vocabularies(
     p = init_p.copy()
     q = quat_to_matrix(init_q)
     traj = np.empty((num_steps, 7), dtype=np.float64)
-    traj[0, :3] = p
-    traj[0, 3:] = init_q
-    for i in range(1, num_steps):
+    for i in range(num_steps):
         v_world = q @ np.array([0.0, 0.0, -reverse_speed])
         p += v_world * dt
         traj[i, :3] = p
@@ -589,7 +584,7 @@ class PlanningNode(Node):
             for j in range(0, len(trajectories[i]), 10):
                 x,y,z,qx,qy,qz,qw = trajectories[i][j]
                 pose = PoseStamped()
-                pose.header = Header(frame_id="world", stamp=(Time.from_msg(header.stamp) + Duration(seconds=j * 0.1)).to_msg())
+                pose.header = header
                 pose.pose.position.x = x
                 pose.pose.position.y = y
                 pose.pose.position.z = z
