@@ -29,7 +29,13 @@ class ObstacleConfig:
     #: span-filtered: walls span, stair risers and ground bumps do not. Cells starting
     #: above the band are floating obstacles and keep a single-voxel noise floor.
     ground_band_m: float = 0.3
-    dilation_cells: int = 0
+    #: Hard-occupied skirt binary-dilated around every obstacle (build_obstacle_map)
+    #: before the ESDF is built: a footprint sample on it is a body hit (drives the
+    #: all-collision escape branch), and the safety_radius soft band ramps outside
+    #: it. Physical width is dilation_cells * PlanningNode.resolution -- 4 @ 0.05 m
+    #: is the same 0.2 m floor the 014 rig chose as 2 @ 0.1 (v1.3.1, yishang-aligned).
+    #: Tune in meters, not cells, when the grid pitch changes.
+    dilation_cells: int = 4
 
 
 @dataclass
@@ -78,10 +84,17 @@ GO2_CONFIG = RobotConfig(
     name='go2',
     front_len=0.25, rear_len=0.35, half_width=0.15,
     camera_fwd=0.30, camera_left=0.0,
-    safety_radius=0.1,
+    safety_radius=0.2,
 )
 
 GO2W_CONFIG = replace(GO2_CONFIG, name='go2w')
+
+AS2_CONFIG = RobotConfig(
+    name='as2',
+    front_len=0.20, rear_len=0.25, half_width=0.16,
+    camera_fwd=0.20, camera_left=0.0,
+    safety_radius=0.2,
+)
 
 B2_CONFIG = RobotConfig(
     name='b2',
