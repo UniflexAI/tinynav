@@ -31,7 +31,7 @@ from cv_bridge import CvBridge
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
+from tinynav.core.path_speed import CAPTURE_SPEED_GAIN, lookahead_distance_m
 
 # === Helper functions ===
 @njit(cache=True)
@@ -699,6 +699,27 @@ def turn_remainder(init_q, heading, step):
     return None if abs(rem) <= step else -rem
 
 
+#: The carrot's horizons along the route, nearest first: the first whose point is not
+#: on an obstacle cell is the goal the rows are scored against. map_node's own target
+#: pose stays at its 5 s.
+CARROT_HORIZONS_S = (3.0, 5.0)
+
+
+def point_along(route_xy, here_xy, length_m):
+    """The route point `length_m` along it from `here_xy`, walked as map_node walks its
+    target: from here to the nearest route point, then point to point. The route's end
+    when it is shorter."""
+    route_xy = np.asarray(route_xy, dtype=float)
+    k = int(np.argmin(np.linalg.norm(route_xy - here_xy, axis=1)))
+    walked, prev = 0.0, np.asarray(here_xy, dtype=float)
+    for p in route_xy[k:]:
+        walked += float(np.linalg.norm(p - prev))
+        if walked > length_m:
+            return p
+        prev = p
+    return route_xy[-1]
+
+
 def build_route_fields(route_xy, shape, origin, resolution):
     """
     Rasterize a route into the lookup maps read by the DWA scoring, so scoring costs
@@ -1019,6 +1040,22 @@ class PlanningNode(Node):
         return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
                                [self._vx_min, v_open]))
 
+    def _carrot(self, route_xy, T, obstacle_mask):
+        """The goal the rows are scored against: the route point CARROT_HORIZONS_S
+        ahead of the camera, the nearest horizon whose point is not on an obstacle
+        cell, else the farthest. Height is map_node's target's."""
+        fresh = (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
+                 and np.isfinite(self._speed_cap))
+        cap = self._speed_cap if fresh else float('inf')
+        for horizon_s in CARROT_HORIZONS_S:
+            p = point_along(route_xy, T[:2, 3],
+                            lookahead_distance_m(cap, self._capture_speed_gain, horizon_s))
+            xi, yi = ((p - self.origin[:2]) / self.resolution).astype(int)
+            inside = 0 <= xi < obstacle_mask.shape[0] and 0 <= yi < obstacle_mask.shape[1]
+            if not (inside and obstacle_mask[xi, yi]):
+                break
+        return np.array([p[0], p[1], self.target_pose[2]])
+
     def _on_global_route(self, msg: Path):
         self._global_route_map_xy = (
             np.array([[p.pose.position.x, p.pose.position.y] for p in msg.poses])
@@ -1296,12 +1333,13 @@ class PlanningNode(Node):
             path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
                 route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
             )
+            target = self._carrot(route_xy, T, obstacle_mask) if has_route else self.target_pose
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
              end_devs, end_goal_errs, end_goal_dxys) = self.score_trajectories(
                 trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map,
-                self.target_pose, has_route)
+                target, has_route)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
@@ -1310,8 +1348,6 @@ class PlanningNode(Node):
                                            self.reverse_engaged)
             self.reverse_engaged = should_reverse
             scores = admit_reverse(scores, params, should_reverse)
-
-            target = self.target_pose
 
             _world_heading = heading_of_pose7
 

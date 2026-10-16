@@ -973,3 +973,19 @@ def test_the_careful_reverse_stops_after_its_length():
     assert np.isclose(np.linalg.norm(careful[-1, :2]), REVERSE_CAREFUL_M)
     assert np.linalg.norm(full[-1, :2]) > 2 * REVERSE_CAREFUL_M
 
+
+
+def test_the_carrot_is_three_seconds_out_unless_that_is_on_an_obstacle():
+    import types
+    route = np.c_[np.arange(0.0, 8.0, 0.05), np.zeros(160)]
+    node = types.SimpleNamespace(
+        _signal_fresh=lambda *a: True, _speed_cap_stamp_ns=0, _speed_cap_ttl_ns=0,
+        _speed_cap=1.0, _capture_speed_gain=1.0, origin=np.array([-1.0, -2.5, 0.0]),
+        resolution=0.05, target_pose=np.array([9.0, 9.0, 0.4]))
+    T = np.eye(4)
+    mask = np.zeros((200, 100), dtype=bool)
+    near = PlanningNode._carrot(node, route, T, mask)
+    assert abs(near[0] - 3.0) < 0.1 and near[2] == 0.4
+    mask[int((near[0] + 1.0) / 0.05), 50] = True
+    far = PlanningNode._carrot(node, route, T, mask)
+    assert abs(far[0] - 5.0) < 0.1
