@@ -114,8 +114,11 @@ class PlanningVisNode(Node):
             return
         grid, self.grid_msg = self.bridge.imgmsg_to_cv2(self.grid_msg), None
         header, resolution, mask_origin, esdf = self.mask
-        # planning puts the mask plane at mid-height of its grid
-        origin = mask_origin - np.array([0.0, 0.0, grid.shape[2] * resolution / 2])
+        # planning puts the mask plane at mid-height of its grid, and grows the mask by
+        # the same number of cells on every side of the grid (compose_mask)
+        pad = (np.array(esdf.shape) - np.array(grid.shape[:2])) // 2
+        origin = mask_origin + np.array([pad[0] * resolution, pad[1] * resolution,
+                                         -grid.shape[2] * resolution / 2])
         if self.voxels_pub.get_subscription_count() > 0:
             points = origin + np.argwhere(grid > 0.1) * resolution
             self.voxels_pub.publish(pc2.create_cloud_xyz32(header, points))

@@ -35,12 +35,15 @@ from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
 
 # === Helper functions ===
 @njit(cache=True)
-def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False):
+def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy, origin, step, resolution, filter_ground = False, resolution_z = 0.0):
     """
     A "C-style" version of run_raycasting that uses explicit loops instead of
     NumPy vector operations, designed for optimal Numba performance.
     Reference: https://numba.readthedocs.io/en/stable/user/performance-tips.html#loops
+
+    `resolution_z` > 0 gives the voxels their own height; `resolution` is then x and y.
     """
+    res_z = resolution if resolution_z <= 0.0 else resolution_z
     occupancy_grid = np.zeros(grid_shape)
     depth_height, depth_width = depth_image.shape
 
@@ -53,7 +56,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
 
     start_voxel_x = int(np.floor((cam_orig_x - origin_x) / resolution))
     start_voxel_y = int(np.floor((cam_orig_y - origin_y) / resolution))
-    start_voxel_z = int(np.floor((cam_orig_z - origin_z) / resolution))
+    start_voxel_z = int(np.floor((cam_orig_z - origin_z) / res_z))
 
     for v in range(0, depth_height, step):
         for u in range(0, depth_width, step):
@@ -75,7 +78,7 @@ def run_raycasting_loopy(depth_image, T_cam_to_world, grid_shape, fx, fy, cx, cy
             # Calculate end voxel
             end_voxel_x = int(np.floor((pw_x - origin_x) / resolution))
             end_voxel_y = int(np.floor((pw_y - origin_y) / resolution))
-            end_voxel_z = int(np.floor((pw_z - origin_z) / resolution))
+            end_voxel_z = int(np.floor((pw_z - origin_z) / res_z))
 
             # Bresenham's line algorithm (simplified)
             diff_x = end_voxel_x - start_voxel_x
@@ -598,11 +601,9 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             arrive_ts, end_devs, end_goal_errs, end_goal_dxys)
 
 
-#: How far ahead of the camera the rolling grid is centred: the 6 m grid then reaches
-#: 4.5 m ahead and 1.5 m behind. A 3 s row at 1.5 m/s reaches 4.45 m ahead of the
-#: camera (control centre 0.30 m behind it, nose 0.25 m in front of that), and a cell
-#: outside the grid is never checked; 1.5 m behind holds a reverse row.
-GRID_AHEAD_M = 1.5
+#: How far ahead of the camera the near grid is centred: the 5 m grid then reaches
+#: 3.5 m ahead, where Looper depth places a wall to ~10-20 cm, and 1.5 m behind.
+GRID_AHEAD_M = 1.0
 
 
 def grid_center(T, z_grid_drop, ahead_m=GRID_AHEAD_M):
@@ -612,6 +613,39 @@ def grid_center(T, z_grid_drop, ahead_m=GRID_AHEAD_M):
     n = np.hypot(fwd[0], fwd[1])
     ahead = np.array([fwd[0] / n, fwd[1] / n, 0.0]) if n > 1e-6 else np.zeros(3)
     return T[:3, 3] + ahead_m * ahead - np.array([0.0, 0.0, z_grid_drop])
+
+
+#: The far layer: the ground beyond the near grid, held as coarse as depth is there
+#: (a wall at 4-5 m moves 15-30 cm frame to frame) and kept while out of view. Its
+#: cells are FAR_RES across and as tall as the near grid's, so a step still reads
+#: as a step. 60 cells is 12 m, centred on the camera.
+FAR_RES = 0.2
+FAR_CELLS = 60
+#: Near-resolution cells around the near grid that the planner's map takes from the
+#: far layer: a 3 s row at 1.5 m/s reaches 4.45 m ahead of the camera, the near grid
+#: 3.5 m, and a cell outside the map is never checked.
+PAD_CELLS = 20
+
+
+def compose_mask(near_mask, near_seen, near_origin, resolution, far_mask, far_origin, far_res, pad):
+    """The planner's map: the near mask grown by `pad` cells a side, the margin and
+    every near cell no ray has touched read from the far mask (nearest far cell).
+    Returns (mask, from_far, origin_xy); `from_far` marks the cells read there."""
+    h, w = near_mask.shape
+    origin = np.asarray(near_origin[:2], dtype=float) - pad * resolution
+    xs = origin[0] + (np.arange(h + 2 * pad) + 0.5) * resolution
+    ys = origin[1] + (np.arange(w + 2 * pad) + 0.5) * resolution
+    fi = np.floor((xs - far_origin[0]) / far_res).astype(np.int64)
+    fj = np.floor((ys - far_origin[1]) / far_res).astype(np.int64)
+    oki = (fi >= 0) & (fi < far_mask.shape[0])
+    okj = (fj >= 0) & (fj < far_mask.shape[1])
+    far = np.zeros((h + 2 * pad, w + 2 * pad), dtype=bool)
+    far[np.ix_(oki, okj)] = far_mask[np.ix_(fi[oki], fj[okj])]
+    from_far = np.ones_like(far)
+    from_far[pad:pad + h, pad:pad + w] = ~near_seen
+    mask = far.copy()
+    mask[pad:pad + h, pad:pad + w] = np.where(near_seen, near_mask, far[pad:pad + h, pad:pad + w])
+    return mask, from_far & mask, origin
 
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
@@ -850,7 +884,7 @@ class PlanningNode(Node):
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
-        self.grid_shape = (120, 120, z_layers)
+        self.grid_shape = (100, 100, z_layers)
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
 
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
@@ -902,6 +936,14 @@ class PlanningNode(Node):
         # freeze it was meant to prevent turned out to have other causes.
 
         self.occupancy_grid = np.zeros(self.grid_shape)
+        self.far_shape = (FAR_CELLS, FAR_CELLS, self.grid_shape[2])
+        self.far_grid = np.zeros(self.far_shape)
+        self._far_res3 = np.array([FAR_RES, FAR_RES, self.resolution])
+        self.far_origin = np.array(self.far_shape) * self._far_res3 / -2.
+        # Where the planner's map (compose_mask) sits; everything that scores against
+        # it reads this, not the near grid's origin.
+        self._plan_origin = self.origin[:2] - PAD_CELLS * self.resolution
+        self._far_cells = np.zeros(0, dtype=bool)
         self.K = None
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
@@ -1117,8 +1159,8 @@ class PlanningNode(Node):
         for k in range(len(off_fwd)):
             x = center[0] + fx * off_fwd[k] + lx * off_lat[k]
             y = center[1] + fy * off_fwd[k] + ly * off_lat[k]
-            xi = int((x - self.origin[0]) / self.resolution)
-            yi = int((y - self.origin[1]) / self.resolution)
+            xi = int((x - self._plan_origin[0]) / self.resolution)
+            yi = int((y - self._plan_origin[1]) / self.resolution)
             if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
                 hits.append((float(off_fwd[k]), float(off_lat[k])))
         return hits, len(off_fwd)
@@ -1149,8 +1191,8 @@ class PlanningNode(Node):
             d_from_face = step * self.resolution
             d_from_center = fl + d_from_face
             for w in (-hw, 0.0, hw):
-                xi = int((center[0] + fx * d_from_center + lx * w - self.origin[0]) / self.resolution)
-                yi = int((center[1] + fy * d_from_center + ly * w - self.origin[1]) / self.resolution)
+                xi = int((center[0] + fx * d_from_center + lx * w - self._plan_origin[0]) / self.resolution)
+                yi = int((center[1] + fy * d_from_center + ly * w - self._plan_origin[1]) / self.resolution)
                 if 0 <= xi < rows and 0 <= yi < cols and obstacle_mask[xi, yi]:
                     return d_from_face
         return max_dist + 1.0
@@ -1163,11 +1205,14 @@ class PlanningNode(Node):
         msg.info.resolution = self.resolution
         msg.info.width = mask.shape[1]
         msg.info.height = mask.shape[0]
-        msg.info.origin.position.x = self.origin[0]
-        msg.info.origin.position.y = self.origin[1]
+        msg.info.origin.position.x = self._plan_origin[0]
+        msg.info.origin.position.y = self._plan_origin[1]
         msg.info.origin.position.z = self.origin[2] + self.grid_shape[2] * self.resolution / 2
         msg.info.origin.orientation.w = 1.0
-        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
+        # 100 seen by the near grid, 60 read from the far layer: both are obstacles to
+        # every reader (> 0), the value only says which.
+        far = self._far_cells if self._far_cells.shape == mask.shape else np.zeros_like(mask)
+        msg.data = np.where(mask, np.where(far, 60, 100), 0).astype(np.int8).ravel(order="F").tolist()
         self.obstacle_mask_pub.publish(msg)
 
 
@@ -1193,6 +1238,15 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
+        far_origin = grid_center(T, self.z_grid_drop, 0.0) - np.array(self.far_shape) * self._far_res3 / 2
+        if np.any(np.abs(far_origin - self.far_origin) >= self._far_res3):
+            self.far_grid, self.far_origin = roll_occupancy_grid(
+                self.far_grid, self.far_origin, far_origin, self._far_res3)
+        # No decay: out of view is kept until a ray passes through it again.
+        self.far_grid += run_raycasting_loopy(depth, T, self.far_shape, fx, fy, cx, cy, self.far_origin,
+                                              self.step, FAR_RES, False, self.resolution)
+        np.clip(self.far_grid, -0.2, 0.2, out=self.far_grid)
+
     def build_obstacle_and_esdf(self, T):
         min_span_map = self._min_span_map(self.origin, self.resolution,
                                           self.occupancy_grid.shape[:2])
@@ -1200,6 +1254,12 @@ class PlanningNode(Node):
             self.occupancy_grid, self.origin, self.resolution,
             robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
         )
+        far_mask = build_obstacle_map(self.far_grid, self.far_origin, self.resolution,
+                                      robot_z=T[2, 3], config=self.obstacle_config)
+        near_seen = np.any(np.abs(self.occupancy_grid) > 1e-3, axis=2)
+        obstacle_mask, self._far_cells, self._plan_origin = compose_mask(
+            obstacle_mask, near_seen, self.origin, self.resolution,
+            far_mask, self.far_origin, FAR_RES, PAD_CELLS)
         ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
         return min_span_map, obstacle_mask, ESDF_map
 
@@ -1241,7 +1301,7 @@ class PlanningNode(Node):
         def score(trajs):
             return score_trajectories_by_ESDF(
                 np.ascontiguousarray(trajs), ESDF_map, path_dist_map, remaining_map,
-                route_heading_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
+                route_heading_map, self._plan_origin, self.resolution, ROBOT_CONFIG.safety_radius,
                 front_len, rear_len, half_w, float(target[0]), float(target[1]),
                 float(cam[0]), float(cam[1]), float(cam[2]), ARRIVE_M, ARRIVE_TICKS,
                 int(round(ARRIVE_TICK_S / self._traj_dt)), self.route_terminal_band,
@@ -1309,7 +1369,7 @@ class PlanningNode(Node):
         with Timer(name='route fields', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             route_xy = self._route_in_world()
             path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
-                route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
+                route_xy if route_xy is not None else [], ESDF_map.shape, self._plan_origin, self.resolution,
             )
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
@@ -1339,8 +1399,8 @@ class PlanningNode(Node):
 
             if all(s == float('inf') for s in scores):
                 center = self.camera_to_robot_center(T)
-                cxi = int((center[0] - self.origin[0]) / self.resolution)
-                cyi = int((center[1] - self.origin[1]) / self.resolution)
+                cxi = int((center[0] - self._plan_origin[0]) / self.resolution)
+                cyi = int((center[1] - self._plan_origin[1]) / self.resolution)
                 rows, cols = obstacle_mask.shape
                 hits, n_samples = self._footprint_hits(T, obstacle_mask)
                 self.get_logger().warn(
@@ -1368,7 +1428,7 @@ class PlanningNode(Node):
 
             # map_node's arrival circles, from the camera pose; the route at the
             # control centre is where scoring reads it.
-            xi, yi = ((init_p[:2] - self.origin[:2]) / self.resolution).astype(int)
+            xi, yi = ((init_p[:2] - self._plan_origin[:2]) / self.resolution).astype(int)
             rem_here = (remaining_map[xi, yi] if 0 <= xi < remaining_map.shape[0]
                         and 0 <= yi < remaining_map.shape[1] else 1e3)
             here_arrived = (ROBOT_CONFIG.arrival_distance(T, target) < ARRIVE_M

@@ -588,7 +588,7 @@ class _EscapeNode:
 
     def __init__(self, obstacle_xy=None, resolution=0.05, origin=(-2.0, -2.0)):
         self.resolution = resolution
-        self.origin = np.array(origin)
+        self.origin = self._plan_origin = np.array(origin)
         n = 120
         self.mask = np.zeros((n, n), dtype=bool)
         if obstacle_xy is not None:
@@ -671,6 +671,7 @@ class _Grid:
 
     def __init__(self, origin, resolution):
         self.origin, self.resolution = origin, resolution
+        self._plan_origin = origin
         self._traj_dt, self.route_terminal_band = 0.1, 0.5
 
 
@@ -976,11 +977,31 @@ def test_the_careful_reverse_stops_after_its_length():
 
 
 
-def test_the_grid_reaches_four_and_a_half_metres_ahead():
-    from planning_node import grid_center
-    # Camera at the origin looking along world +x (body +Z forward); the grid is 6 m.
+def test_the_planners_map_reaches_four_and_a_half_metres_ahead():
+    """The near grid reaches 3.5 m ahead of the camera and the far margin 1 m more:
+    a 3 s row at 1.5 m/s reaches 4.45 m."""
+    from planning_node import grid_center, PAD_CELLS
+    # Camera at the origin looking along world +x (body +Z forward).
     T = np.eye(4)
     T[:3, :3] = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], dtype=float)
     c = grid_center(T, 0.0)
-    np.testing.assert_allclose(c[:2] + 3.0, [4.5, 3.0])
-    np.testing.assert_allclose(c[:2] - 3.0, [-1.5, -3.0])
+    np.testing.assert_allclose([c[0] + 2.5, c[0] - 2.5], [3.5, -1.5])
+    assert c[0] + 2.5 + PAD_CELLS * 0.05 >= 4.45
+
+
+def test_the_near_grid_wins_where_it_has_looked_and_the_far_layer_fills_the_rest():
+    from planning_node import compose_mask
+    res, far_res, pad = 0.05, 0.2, 4
+    near = np.zeros((8, 8), dtype=bool)
+    near_seen = np.zeros((8, 8), dtype=bool)
+    near_seen[:4] = True                    # the near grid has looked at its first half
+    near[1, 1] = True                       # and seen one obstacle there
+    far = np.ones((10, 10), dtype=bool)     # the far layer says obstacle everywhere
+    mask, from_far, origin = compose_mask(near, near_seen, np.zeros(3), res, far,
+                                          np.array([-1.0, -1.0, 0.0]), far_res, pad)
+    np.testing.assert_allclose(origin, [-pad * res, -pad * res])
+    inner = mask[pad:pad + 8, pad:pad + 8]
+    assert inner[1, 1] and inner[:4].sum() == 1           # looked at: the near grid's word
+    assert inner[4:].all() and from_far[pad + 4:pad + 8, pad:pad + 8].all()  # not: the far layer's
+    assert mask[:pad].all() and from_far[:pad].all()       # the margin: the far layer's
+    assert not from_far[pad + 1, pad + 1]
