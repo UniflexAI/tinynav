@@ -643,11 +643,12 @@ TIE_S = 0.15
 
 
 def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_gerr,
-                   end_gdxy, here_arrived, has_route, should_reverse, v, w, band, t_end,
+                   end_gdxy, here_arrived, has_route, should_reverse, v, w, carrot_rem, t_end,
                    carry=-1, last_yaw=0.0):
     """Index of the row with the least time to go: when map_node's arrival fires, or the
-    row's own duration `t_end` plus the distance left at `v` and the heading left at
-    `w`. The reverse gate
+    row's own duration `t_end` plus the distance left to the carrot at `v` and the
+    heading left at `w` (a row past the carrot along the route gains what it went beyond
+    it). The reverse gate
     filters, and so does standing still while another row is open, unless the robot is
     already inside the arrival radius. Arrays are per row; `scores` inf is a collision.
 
@@ -662,9 +663,12 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
     if not ok.any():
         ok = free
     if has_route:
-        fade = np.clip(end_rem / band, 0.0, 1.0)
-        d = end_rem + end_dev + (1.0 - fade) * end_gdxy
-        h = fade * end_rerr + (1.0 - fade) * end_gerr
+        # Time to the carrot: straight to it and facing it, until a row has gone past it
+        # along the route -- then what it has gained beyond it, along the route and
+        # facing the way the route runs. `carrot_rem` is the route left at the carrot.
+        past = end_rem < carrot_rem
+        d = np.where(past, end_rem - carrot_rem, end_gdxy) + end_dev
+        h = np.where(past, end_rerr, end_gerr)
     else:
         d, h = end_gdxy, end_gerr
     t = np.where(np.isfinite(arrive_t), arrive_t, t_end + d / v + h / w)
@@ -706,18 +710,18 @@ CARROT_HORIZONS_S = (3.0, 5.0)
 
 
 def point_along(route_xy, here_xy, length_m):
-    """The route point `length_m` along it from `here_xy`, walked as map_node walks its
-    target: from here to the nearest route point, then point to point. The route's end
-    when it is shorter."""
+    """Index of the route point `length_m` along it from `here_xy`, walked as map_node
+    walks its target: from here to the nearest route point, then point to point. The
+    route's last index when it is shorter."""
     route_xy = np.asarray(route_xy, dtype=float)
     k = int(np.argmin(np.linalg.norm(route_xy - here_xy, axis=1)))
     walked, prev = 0.0, np.asarray(here_xy, dtype=float)
-    for p in route_xy[k:]:
-        walked += float(np.linalg.norm(p - prev))
+    for i in range(k, len(route_xy)):
+        walked += float(np.linalg.norm(route_xy[i] - prev))
         if walked > length_m:
-            return p
-        prev = p
-    return route_xy[-1]
+            return i
+        prev = route_xy[i]
+    return len(route_xy) - 1
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -1041,20 +1045,22 @@ class PlanningNode(Node):
                                [self._vx_min, v_open]))
 
     def _carrot(self, route_xy, T, obstacle_mask):
-        """The goal the rows are scored against: the route point CARROT_HORIZONS_S
-        ahead of the camera, the nearest horizon whose point is not on an obstacle
-        cell, else the farthest. Height is map_node's target's."""
+        """(goal, route left at it): the goal the rows are scored against, the route
+        point CARROT_HORIZONS_S ahead of the camera, the nearest horizon whose point is
+        not on an obstacle cell, else the farthest. Height is map_node's target's."""
         fresh = (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
                  and np.isfinite(self._speed_cap))
         cap = self._speed_cap if fresh else float('inf')
         for horizon_s in CARROT_HORIZONS_S:
-            p = point_along(route_xy, T[:2, 3],
+            i = point_along(route_xy, T[:2, 3],
                             lookahead_distance_m(cap, self._capture_speed_gain, horizon_s))
+            p = route_xy[i]
             xi, yi = ((p - self.origin[:2]) / self.resolution).astype(int)
             inside = 0 <= xi < obstacle_mask.shape[0] and 0 <= yi < obstacle_mask.shape[1]
             if not (inside and obstacle_mask[xi, yi]):
                 break
-        return np.array([p[0], p[1], self.target_pose[2]])
+        rem = float(np.linalg.norm(np.diff(route_xy[i:], axis=0), axis=1).sum())
+        return np.array([p[0], p[1], self.target_pose[2]]), rem
 
     def _on_global_route(self, msg: Path):
         self._global_route_map_xy = (
@@ -1333,7 +1339,8 @@ class PlanningNode(Node):
             path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
                 route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
             )
-            target = self._carrot(route_xy, T, obstacle_mask) if has_route else self.target_pose
+            target, carrot_rem = (self._carrot(route_xy, T, obstacle_mask) if has_route
+                                  else (self.target_pose, 0.0))
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
@@ -1400,7 +1407,7 @@ class PlanningNode(Node):
                 params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
                 should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
-                self.route_terminal_band, durations, carry, self._last_yaw)]
+                carrot_rem, durations, carry, self._last_yaw)]
 
             sel = top_indices[0]
             self.last_param = params[sel]

@@ -984,8 +984,9 @@ def test_the_carrot_is_three_seconds_out_unless_that_is_on_an_obstacle():
         resolution=0.05, target_pose=np.array([9.0, 9.0, 0.4]))
     T = np.eye(4)
     mask = np.zeros((200, 100), dtype=bool)
-    near = PlanningNode._carrot(node, route, T, mask)
-    assert abs(near[0] - 3.0) < 0.1 and near[2] == 0.4
+    near, rem = PlanningNode._carrot(node, route, T, mask)
+    assert abs(near[0] - 3.0) < 0.1 and near[2] == 0.4 and abs(rem - (7.95 - near[0])) < 1e-6
     mask[int((near[0] + 1.0) / 0.05), 50] = True
-    far = PlanningNode._carrot(node, route, T, mask)
+    far, _ = PlanningNode._carrot(node, route, T, mask)
     assert abs(far[0] - 5.0) < 0.1
+
