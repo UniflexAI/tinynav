@@ -601,30 +601,22 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             arrive_ts, end_devs, end_goal_errs, end_goal_dxys)
 
 
-#: How far ahead of the camera the near grid is centred: the 5 m grid then reaches
-#: 3.5 m ahead, where Looper depth places a wall to ~10-20 cm, and 1.5 m behind.
-GRID_AHEAD_M = 1.0
+def grid_center(T, z_grid_drop):
+    """World centre of the rolling grids for camera pose `T`: the camera, `z_grid_drop`
+    below it. Every view of the planner's map draws the robot at its middle."""
+    return T[:3, 3] - np.array([0.0, 0.0, z_grid_drop])
 
 
-def grid_center(T, z_grid_drop, ahead_m=GRID_AHEAD_M):
-    """World centre of the rolling grid for camera pose `T`: `ahead_m` along the
-    camera's heading (body +Z, flattened onto XY), and `z_grid_drop` below it."""
-    fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
-    n = np.hypot(fwd[0], fwd[1])
-    ahead = np.array([fwd[0] / n, fwd[1] / n, 0.0]) if n > 1e-6 else np.zeros(3)
-    return T[:3, 3] + ahead_m * ahead - np.array([0.0, 0.0, z_grid_drop])
-
-
-#: The far layer: the ground beyond the near grid, held as coarse as depth is there
-#: (a wall at 4-5 m moves 15-30 cm frame to frame) and kept while out of view. Its
-#: cells are FAR_RES across and as tall as the near grid's, so a step still reads
-#: as a step. 60 cells is 12 m, centred on the camera.
+#: The far layer: what lies beyond the near grid, held as coarse as depth is there (a
+#: wall at 4-5 m moves 15-30 cm frame to frame) and kept while out of view. Its cells
+#: are FAR_RES across and as tall as the near grid's, so a step still reads as a step.
+#: 60 cells is 6 m either side of the camera.
 FAR_RES = 0.2
 FAR_CELLS = 60
-#: Near-resolution cells around the near grid that the planner's map takes from the
-#: far layer: a 3 s row at 1.5 m/s reaches 4.45 m ahead of the camera, the near grid
-#: 3.5 m, and a cell outside the map is never checked.
-PAD_CELLS = 20
+#: Near-resolution cells added on every side of the near grid (6 m) to make the
+#: planner's map (12 m), read from the far layer: it then covers the far layer, and a
+#: 3 s row at 1.5 m/s, which reaches 4.45 m ahead of the camera.
+PAD_CELLS = 60
 
 
 def compose_mask(near_mask, near_seen, near_origin, resolution, far_mask, far_origin, far_res, pad):
@@ -884,7 +876,8 @@ class PlanningNode(Node):
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
-        self.grid_shape = (100, 100, z_layers)
+        # 3 m either side at 5 cm: Looper depth places a wall to ~10 cm there.
+        self.grid_shape = (120, 120, z_layers)
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
 
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
@@ -1238,7 +1231,7 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-        far_origin = grid_center(T, self.z_grid_drop, 0.0) - np.array(self.far_shape) * self._far_res3 / 2
+        far_origin = grid_center(T, self.z_grid_drop) - np.array(self.far_shape) * self._far_res3 / 2
         if np.any(np.abs(far_origin - self.far_origin) >= self._far_res3):
             self.far_grid, self.far_origin = roll_occupancy_grid(
                 self.far_grid, self.far_origin, far_origin, self._far_res3)

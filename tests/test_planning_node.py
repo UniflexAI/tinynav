@@ -977,16 +977,16 @@ def test_the_careful_reverse_stops_after_its_length():
 
 
 
-def test_the_planners_map_reaches_four_and_a_half_metres_ahead():
-    """The near grid reaches 3.5 m ahead of the camera and the far margin 1 m more:
-    a 3 s row at 1.5 m/s reaches 4.45 m."""
+def test_the_planners_map_holds_a_fast_row_and_keeps_the_robot_in_the_middle():
+    """A 3 s row at 1.5 m/s reaches 4.45 m ahead of the camera; the map is centred on
+    the camera because every view draws the robot at its middle."""
     from planning_node import grid_center, PAD_CELLS
-    # Camera at the origin looking along world +x (body +Z forward).
     T = np.eye(4)
     T[:3, :3] = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], dtype=float)
-    c = grid_center(T, 0.0)
-    np.testing.assert_allclose([c[0] + 2.5, c[0] - 2.5], [3.5, -1.5])
-    assert c[0] + 2.5 + PAD_CELLS * 0.05 >= 4.45
+    T[:3, 3] = [1.0, 2.0, 0.3]
+    np.testing.assert_allclose(grid_center(T, 0.0)[:2], [1.0, 2.0])
+    half = 120 * 0.05 / 2 + PAD_CELLS * 0.05
+    assert half >= 4.45
 
 
 def test_the_near_grid_wins_where_it_has_looked_and_the_far_layer_fills_the_rest():
