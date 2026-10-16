@@ -105,10 +105,14 @@ GO2_CONFIG = RobotConfig(
     safety_radius=0.1,
     # Measured on looper 2026-09-29, in place: 0.19 rad/s does not yaw at all, 0.20 does.
     min_angular_vel=0.2,
+    # Measured on 65 2026-10-16, in place, free gait: 2.0 rad/s drives 1.91 and 3.0
+    # drives 2.87, so the chassis is not what bounds a turn here.
+    max_angular_vel=2.0,
 )
 
 # The wheeled base was not measured, so it keeps the default.
-GO2W_CONFIG = replace(GO2_CONFIG, name='go2w', min_angular_vel=RobotConfig.min_angular_vel)
+GO2W_CONFIG = replace(GO2_CONFIG, name='go2w', min_angular_vel=RobotConfig.min_angular_vel,
+                      max_angular_vel=RobotConfig.max_angular_vel)
 
 B2_CONFIG = RobotConfig(
     name='b2',
