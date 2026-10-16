@@ -598,17 +598,12 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             arrive_ts, end_devs, end_goal_errs, end_goal_dxys)
 
 
-def grid_ahead_m(half_extent_m, config=ROBOT_CONFIG, reverse_s=3.0):
-    """How far ahead of the camera the rolling grid is centred: as far as still leaves
-    the full reverse row's tail (`reverse_s` at REVERSE_SPEED behind the body's rear)
-    inside the grid. Everything else the grid spans is ahead, where depth still places
-    a wall to ~10-20 cm out to 3.5 m. Along the world axes; at any other heading the
-    square reaches further both ways."""
-    behind = config.camera_fwd + config.rear_len + REVERSE_SPEED * reverse_s
-    return max(0.0, half_extent_m - behind)
+#: How far ahead of the camera the rolling grid is centred: the 5 m grid then reaches
+#: 3.5 m ahead, where Looper depth still places a wall to ~10-20 cm, and 1.5 m behind.
+GRID_AHEAD_M = 1.0
 
 
-def grid_center(T, z_grid_drop, ahead_m):
+def grid_center(T, z_grid_drop, ahead_m=GRID_AHEAD_M):
     """World centre of the rolling grid for camera pose `T`: `ahead_m` along the
     camera's heading (body +Z, flattened onto XY), and `z_grid_drop` below it."""
     fwd = T[:3, :3] @ np.array([0.0, 0.0, 1.0])
@@ -857,10 +852,6 @@ class PlanningNode(Node):
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
 
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
-        self._grid_ahead_m = grid_ahead_m(self.grid_shape[0] * self.resolution / 2)
-        half = self.grid_shape[0] * self.resolution / 2
-        self.get_logger().info(f"grid: {half + self._grid_ahead_m:.2f} m ahead of the camera, "
-                               f"{half - self._grid_ahead_m:.2f} m behind")
         self.step = 4
         self._traj_dt = 0.1  # matches generate_trajectory_library_3d / vocab dt
 
@@ -1180,7 +1171,7 @@ class PlanningNode(Node):
 
     def update_occupancy_grid(self, depth, T, fx, fy, cx, cy):
         center = self.origin + np.array(self.grid_shape) * self.resolution / 2
-        target_center = grid_center(T, self.z_grid_drop, self._grid_ahead_m)
+        target_center = grid_center(T, self.z_grid_drop)
         delta = target_center - center
         if np.linalg.norm(delta) > .1:
             new_center = target_center
