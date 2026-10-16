@@ -598,9 +598,11 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
             arrive_ts, end_devs, end_goal_errs, end_goal_dxys)
 
 
-#: How far ahead of the camera the rolling grid is centred: the 5 m grid then reaches
-#: 3.5 m ahead, where Looper depth still places a wall to ~10-20 cm, and 1.5 m behind.
-GRID_AHEAD_M = 1.0
+#: How far ahead of the camera the rolling grid is centred: the 6 m grid then reaches
+#: 4.5 m ahead and 1.5 m behind. A 3 s row at 1.5 m/s reaches 4.45 m ahead of the
+#: camera (control centre 0.30 m behind it, nose 0.25 m in front of that), and a cell
+#: outside the grid is never checked; 1.5 m behind holds a reverse row.
+GRID_AHEAD_M = 1.5
 
 
 def grid_center(T, z_grid_drop, ahead_m=GRID_AHEAD_M):
@@ -848,7 +850,7 @@ class PlanningNode(Node):
         # Derive the grid's z extent and vertical offset from the obstacle band so
         # the grid covers exactly [robot_z_bottom, robot_z_top] relative to the camera.
         z_layers = int(round((self.obstacle_config.robot_z_top - self.obstacle_config.robot_z_bottom) / self.resolution))
-        self.grid_shape = (100, 100, z_layers)
+        self.grid_shape = (120, 120, z_layers)
         self.z_grid_drop = -(self.obstacle_config.robot_z_top + self.obstacle_config.robot_z_bottom) / 2
 
         self.origin = np.array(self.grid_shape) * self.resolution / -2.

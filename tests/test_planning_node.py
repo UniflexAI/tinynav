@@ -976,11 +976,11 @@ def test_the_careful_reverse_stops_after_its_length():
 
 
 
-def test_the_grid_reaches_three_and_a_half_metres_ahead():
+def test_the_grid_reaches_four_and_a_half_metres_ahead():
     from planning_node import grid_center
-    # Camera at the origin looking along world +x (body +Z forward).
+    # Camera at the origin looking along world +x (body +Z forward); the grid is 6 m.
     T = np.eye(4)
     T[:3, :3] = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], dtype=float)
     c = grid_center(T, 0.0)
-    np.testing.assert_allclose(c[:2] + 2.5, [3.5, 2.5])
-    np.testing.assert_allclose(c[:2] - 2.5, [-1.5, -2.5])
+    np.testing.assert_allclose(c[:2] + 3.0, [4.5, 3.0])
+    np.testing.assert_allclose(c[:2] - 3.0, [-1.5, -3.0])
