@@ -27,28 +27,6 @@ from tinynav.core.path_prior import (
 # `--ros-args`.
 CAPTURE_SPEED_GAIN = float(os.environ.get('TINYNAV_CAPTURE_SPEED_GAIN', '1.0'))
 
-# The carrot sits at a TIME horizon along the path, so how far it sits rides the speed
-# actually driven: the capture-speed prior times CAPTURE_SPEED_GAIN. map_node's target
-# pose is LOOKAHEAD_S ahead; planning may hold a shorter horizon of its own.
-_LOOKAHEAD_S = 5.0
-# No prior (off-path, or a map with no path_speed.npy): planning falls back to vx_max for
-# the speed, so the carrot falls back to the same number.
-_NO_CAP_SPEED_MPS = 0.6
-# Bounds on the resulting distance: planning's [vx_min, vx_hard_max] x _LOOKAHEAD_S, as
-# metres, so neither node needs the other's parameters to stay consistent.
-_LOOKAHEAD_MIN_M = 1.0
-_LOOKAHEAD_MAX_M = 5.0
-
-
-def lookahead_distance_m(speed_cap_mps: float, gain: float = CAPTURE_SPEED_GAIN,
-                         horizon_s: float = _LOOKAHEAD_S) -> float:
-    """How far along the path a carrot `horizon_s` ahead sits, given the capture-speed
-    prior. `speed_cap_mps` is what /planning/speed_cap carries: +inf (or NaN) means
-    off-path or no prior. `gain` is applied on the prior branch only -- the no-prior
-    fallback is planning's ungained vx_max."""
-    speed = speed_cap_mps * gain if np.isfinite(speed_cap_mps) else _NO_CAP_SPEED_MPS
-    return float(np.clip(speed * horizon_s, _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
-
 # Defaults (tunable).
 WIN_M = 1.0            # half-window horizontal arclength (m) for local speed aggregation
 SPEED_PCT = 75.0       # percentile of in-window segment speeds -> the representative

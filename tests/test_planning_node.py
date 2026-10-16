@@ -18,7 +18,8 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            generate_rotate_then_go, ROTATE_DEG, ROTATE_THEN_GO_M,
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
-                           generate_trajectory_library_3d, heading_of_pose7, angle_between)
+                           generate_trajectory_library_3d, heading_of_pose7, angle_between,
+                           route_left_at)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -975,18 +976,6 @@ def test_the_careful_reverse_stops_after_its_length():
 
 
 
-def test_the_carrot_is_three_seconds_out_unless_that_is_on_an_obstacle():
-    import types
+def test_the_route_left_at_a_point_is_from_its_nearest_route_point():
     route = np.c_[np.arange(0.0, 8.0, 0.05), np.zeros(160)]
-    node = types.SimpleNamespace(
-        _signal_fresh=lambda *a: True, _speed_cap_stamp_ns=0, _speed_cap_ttl_ns=0,
-        _speed_cap=1.0, _capture_speed_gain=1.0, origin=np.array([-1.0, -2.5, 0.0]),
-        resolution=0.05, target_pose=np.array([9.0, 9.0, 0.4]))
-    T = np.eye(4)
-    mask = np.zeros((200, 100), dtype=bool)
-    near, rem = PlanningNode._carrot(node, route, T, mask)
-    assert abs(near[0] - 3.0) < 0.1 and near[2] == 0.4 and abs(rem - (7.95 - near[0])) < 1e-6
-    mask[int((near[0] + 1.0) / 0.05), 50] = True
-    far, _ = PlanningNode._carrot(node, route, T, mask)
-    assert abs(far[0] - 5.0) < 0.1
-
+    assert abs(route_left_at(route, [3.01, 0.2]) - 4.95) < 1e-6

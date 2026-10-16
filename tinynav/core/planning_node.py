@@ -31,7 +31,7 @@ from cv_bridge import CvBridge
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tinynav.core.path_speed import CAPTURE_SPEED_GAIN, lookahead_distance_m
+from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
 
 # === Helper functions ===
 @njit(cache=True)
@@ -703,25 +703,11 @@ def turn_remainder(init_q, heading, step):
     return None if abs(rem) <= step else -rem
 
 
-#: The carrot's horizons along the route, nearest first: the first whose point is not
-#: on an obstacle cell is the goal the rows are scored against. map_node's own target
-#: pose stays at its 5 s.
-CARROT_HORIZONS_S = (3.0, 5.0)
-
-
-def point_along(route_xy, here_xy, length_m):
-    """Index of the route point `length_m` along it from `here_xy`, walked as map_node
-    walks its target: from here to the nearest route point, then point to point. The
-    route's last index when it is shorter."""
+def route_left_at(route_xy, xy):
+    """Route arc length left from the route point nearest `xy` to the route's end."""
     route_xy = np.asarray(route_xy, dtype=float)
-    k = int(np.argmin(np.linalg.norm(route_xy - here_xy, axis=1)))
-    walked, prev = 0.0, np.asarray(here_xy, dtype=float)
-    for i in range(k, len(route_xy)):
-        walked += float(np.linalg.norm(route_xy[i] - prev))
-        if walked > length_m:
-            return i
-        prev = route_xy[i]
-    return len(route_xy) - 1
+    k = int(np.argmin(np.linalg.norm(route_xy - np.asarray(xy, dtype=float), axis=1)))
+    return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -1044,24 +1030,6 @@ class PlanningNode(Node):
         return float(np.interp(c_eff, [self._clear_c0_m, self._clear_open_m],
                                [self._vx_min, v_open]))
 
-    def _carrot(self, route_xy, T, obstacle_mask):
-        """(goal, route left at it): the goal the rows are scored against, the route
-        point CARROT_HORIZONS_S ahead of the camera, the nearest horizon whose point is
-        not on an obstacle cell, else the farthest. Height is map_node's target's."""
-        fresh = (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
-                 and np.isfinite(self._speed_cap))
-        cap = self._speed_cap if fresh else float('inf')
-        for horizon_s in CARROT_HORIZONS_S:
-            i = point_along(route_xy, T[:2, 3],
-                            lookahead_distance_m(cap, self._capture_speed_gain, horizon_s))
-            p = route_xy[i]
-            xi, yi = ((p - self.origin[:2]) / self.resolution).astype(int)
-            inside = 0 <= xi < obstacle_mask.shape[0] and 0 <= yi < obstacle_mask.shape[1]
-            if not (inside and obstacle_mask[xi, yi]):
-                break
-        rem = float(np.linalg.norm(np.diff(route_xy[i:], axis=0), axis=1).sum())
-        return np.array([p[0], p[1], self.target_pose[2]]), rem
-
     def _on_global_route(self, msg: Path):
         self._global_route_map_xy = (
             np.array([[p.pose.position.x, p.pose.position.y] for p in msg.poses])
@@ -1339,8 +1307,8 @@ class PlanningNode(Node):
             path_dist_map, remaining_map, route_heading_map, has_route = build_route_fields(
                 route_xy if route_xy is not None else [], ESDF_map.shape, self.origin, self.resolution,
             )
-            target, carrot_rem = (self._carrot(route_xy, T, obstacle_mask) if has_route
-                                  else (self.target_pose, 0.0))
+            target = self.target_pose
+            carrot_rem = route_left_at(route_xy, target[:2]) if has_route else 0.0
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
