@@ -1,17 +1,37 @@
+"""The chassis driver: one pure-SDK process -- no rclpy here.
+
+Why no rclpy: this process opens the Unitree SDK's cyclonedds domain 0 on the
+dog-facing NIC, and cyclonedds 0.10.x allows a domain id to be created exactly
+once per process. A Cyclone rmw in the same process would be the second
+creator and die (measured 2026-10-15, both orders). Everything the wider bus
+needs from this process is published as raw DDS on ROS-compatible topics --
+`rt/battery`, `rt/robot_status`, `rt/unitree/odometry` use std_msgs types,
+so rclpy subscribers see them as `/battery`, `/robot_status`,
+`/unitree/odometry` like the old rclpy publishers -- /battery is a JSON
+string sample (soc/status/current) where the old one was a Float32 soc. The rt/cmd_vel input is the same equivalence read
+in reverse.
+
+QoS note: the SDK's ChannelPublisher takes no QoS -- writers are RELIABLE
+VOLATILE. /battery used to be TRANSIENT_LOCAL; it is now published on every
+lf sample (~20 Hz) instead, so a late joiner waits one sample, not a change.
+"""
 import argparse
+import logging
 import math
 import os
-import rclpy
 import threading
-from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
-from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
-from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
-from std_msgs.msg import Float32, String
-from nav_msgs.msg import Odometry
-from enum import Enum
 import time
+from unitree_sdk2py.core.channel import (ChannelFactoryInitialize,
+                                         ChannelPublisher, ChannelSubscriber)
+from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import Twist_
+from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_ as SdkString_
+from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_ as SdkOdometry_
+from unitree_sdk2py.idl.builtin_interfaces.msg.dds_ import Time_ as SdkTime_
+from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import (
+    Point_, Pose_, PoseWithCovariance_, Quaternion_, Twist_ as SdkTwist_,
+    TwistWithCovariance_, Vector3_)
+from unitree_sdk2py.idl.std_msgs.msg.dds_ import Header_ as SdkHeader_
+from enum import Enum
 
 try:
     from .robot_profiles import require_profile
@@ -42,6 +62,9 @@ _STALL_CHASSIS_W = 0.05
 _STALL_AFTER_S = 2.0
 _REPEAT_S = 5.0
 _SPORT_STATE_SILENT_S = 1.0
+_ODOM_MIN_PERIOD_S = 0.02          # cap the odometry republish at 50 Hz
+_STATUS_PERIOD_S = 1.0
+_WATCH_PERIOD_S = 0.5
 
 
 def _quat_xyzw_from_rpy(roll: float, pitch: float, yaw: float):
@@ -53,6 +76,28 @@ def _quat_xyzw_from_rpy(roll: float, pitch: float, yaw: float):
             sy * cp * sr + cy * sp * cr,
             sy * cp * cr - cy * sp * sr,
             cy * cp * cr + sy * sp * sr)
+
+
+def _ros_time(t: float) -> SdkTime_:
+    return SdkTime_(sec=int(t), nanosec=int((t - int(t)) * 1e9))
+
+
+def _odometry_msg(stamp: float, x: float, y: float, z: float,
+                  qx: float, qy: float, qz: float, qw: float,
+                  vx: float, vy: float, vz: float, wz: float) -> SdkOdometry_:
+    """nav_msgs/Odometry on the wire type; zero covariances (the old rclpy
+    publisher sent the message default, which is also zeros)."""
+    return SdkOdometry_(
+        header=SdkHeader_(stamp=_ros_time(stamp), frame_id="odom"),
+        child_frame_id="base_link",
+        pose=PoseWithCovariance_(
+            pose=Pose_(position=Point_(x=x, y=y, z=z),
+                       orientation=Quaternion_(x=qx, y=qy, z=qz, w=qw)),
+            covariance=[0.0] * 36),
+        twist=TwistWithCovariance_(
+            twist=SdkTwist_(linear=Vector3_(x=vx, y=vy, z=vz),
+                            angular=Vector3_(x=0.0, y=0.0, z=wz)),
+            covariance=[0.0] * 36))
 
 
 class GaitWorker:
@@ -179,11 +224,16 @@ class ChassisWatch:
             self._stall_logged_at = None
 
 
-class Ros2UnitreeManagerNode(Node):
-    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE):
-        super().__init__('ros2_unitree_manager')
+class Ros2UnitreeManagerNode:
+    """Historical name: it stopped being an rclpy node when the process went
+    pure-SDK (the class the tests build via __new__). Everything the bus needs
+    leaves through raw-DDS publishers on ROS-compatible topics."""
+
+    def __init__(self, networkInterface: str = "enP8p1s0", robot_model: str = ROBOT_TYPE,
+                 log: logging.Logger | None = None):
         self.profile = require_profile(robot_model)
         self.robot_model = self.profile.type.value
+        self.logger = log or logging.getLogger('unitree_control')
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = self.profile.client_factory()
@@ -194,7 +244,6 @@ class Ros2UnitreeManagerNode(Node):
         self._robot_status = RobotStatus.SITTING
         self.battery = None
         self.last_twist_time = None
-        self.logger = self.get_logger()
         # The last command was non-zero (so the next non-zero is not a start).
         self._walking = False
         # The next Move re-asserts the gait first: set at every motion start.
@@ -210,20 +259,22 @@ class Ros2UnitreeManagerNode(Node):
         self.twist_subscriber = ChannelSubscriber("rt/cmd_vel", Twist_)
         self.twist_subscriber.Init(self.TwistMessageHandler, 10)
 
-        self.action_subscriber = ChannelSubscriber("rt/service/command", String_)
+        self.action_subscriber = ChannelSubscriber("rt/service/command", SdkString_)
         self.action_subscriber.Init(self.ActionMessageHandler, 10)
 
-        # Latched and sent only on change: the lf battery topics stream at 20Hz
-        # whether the value moved or not.
-        self.publisher_battery = self.create_publisher(
-            Float32, '/battery',
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        self.publisher_robot_status = self.create_publisher(String, '/robot_status', 10)
+        # Bus publishers, raw DDS on ROS-compatible names (class docstring).
+        self.publisher_robot_status = ChannelPublisher('rt/robot_status', SdkString_)
+        self.publisher_robot_status.Init()
 
         self._init_battery_subscription()
         self._init_chassis_state(networkInterface)
 
-        self._status_timer = self.create_timer(1.0, self._publish_robot_status)
+        self._threads: list[threading.Thread] = []
+        for target, name in ((self._publish_robot_status, 'robot-status'),
+                             (self._watch_loop, 'chassis-watch')):
+            t = threading.Thread(target=target, name=name, daemon=True)
+            t.start()
+            self._threads.append(t)
 
     def _init_battery_subscription(self) -> None:
         battery = self.profile.battery
@@ -236,6 +287,9 @@ class Ros2UnitreeManagerNode(Node):
         sub = ChannelSubscriber(battery.topic, BattMsg)
         sub.Init(self.BatteryMessageHandler, 10)
         self._battery_has_status = battery.has_status
+        # The BMS bridge the bus reads (see BatteryMessageHandler).
+        self.publisher_battery = ChannelPublisher('rt/battery', SdkString_)
+        self.publisher_battery.Init()
 
     def _init_chassis_state(self, networkInterface: str) -> None:
         """Sport state (watch + AS2 odometry) exists for the sport API family;
@@ -246,21 +300,20 @@ class Ros2UnitreeManagerNode(Node):
         self.sport_state_subscriber = ChannelSubscriber("rt/lf/sportmodestate",
                                                         SportModeState_)
         self.sport_state_subscriber.Init(self.SportStateMessageHandler, 10)
-        self._watch_timer = self.create_timer(0.5, lambda: self.watch.check(time.monotonic()))
+
+        self.publisher_chassis_odom = ChannelPublisher('rt/unitree/odometry',
+                                                       SdkOdometry_)
+        self.publisher_chassis_odom.Init()
+        self._last_chassis_odom_time = 0.0
 
         if self.profile.odom == 'robot_odom':
             # Chassis odometry, republished onto the ROS bus. rt/utlidar/robot_odom
             # is the leg odometry wrapped as nav_msgs/Odometry, not lidar odometry:
             # it matches rt/sportmodestate.position exactly and keeps publishing with
             # the lidar removed.
-            from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
-            self.publisher_chassis_odom = self.create_publisher(Odometry, '/unitree/odometry', 10)
-            self._last_chassis_odom_time = 0.0
-            self.chassis_odom_subscriber = ChannelSubscriber("rt/utlidar/robot_odom", Odometry_)
+            self.chassis_odom_subscriber = ChannelSubscriber("rt/utlidar/robot_odom",
+                                                             SdkOdometry_)
             self.chassis_odom_subscriber.Init(self.ChassisOdomMessageHandler, 10)
-        elif self.profile.odom == 'sportmodestate':
-            self.publisher_chassis_odom = self.create_publisher(Odometry, '/unitree/odometry', 10)
-            self._last_chassis_odom_time = 0.0
 
     # -- twist message handler
     def TwistMessageHandler(self, msg: Twist_):
@@ -321,7 +374,7 @@ class Ros2UnitreeManagerNode(Node):
         except Exception as e:
             self.logger.error(f"Error in SportStateMessageHandler: {e}")
 
-    def ActionMessageHandler(self, msg: String_):
+    def ActionMessageHandler(self, msg: SdkString_):
         self.logger.info(f"ActionMessageHandler received: {msg.data!r}")
         # unitree_sdk2py's reader thread calls this with no except around it, so an
         # exception escaping here kills that thread and the subscription goes deaf
@@ -332,7 +385,7 @@ class Ros2UnitreeManagerNode(Node):
         except Exception:
             self.logger.exception("action failed")
 
-    def _play_action(self, msg: String_):
+    def _play_action(self, msg: SdkString_):
         if msg.data.split(" ")[0] != "play":
             return
         action_key = msg.data.split(" ")[1]
@@ -375,77 +428,65 @@ class Ros2UnitreeManagerNode(Node):
                 "service and it declined them.")
 
     def _publish_robot_status(self):
-        msg = String()
-        msg.data = self._robot_status.value
-        self.publisher_robot_status.publish(msg)
+        """1 Hz thread: the status tree reads this to know sit from stand."""
+        while True:
+            self.publisher_robot_status.Write(SdkString_(data=self._robot_status.value))
+            time.sleep(_STATUS_PERIOD_S)
+
+    def _watch_loop(self):
+        while True:
+            self.watch.check(time.monotonic())
+            time.sleep(_WATCH_PERIOD_S)
 
     def ChassisOdomMessageHandler(self, msg):
         # Already a nav_msgs Odometry on the wire; cap it at 50Hz.
         now = time.time()
-        if now - self._last_chassis_odom_time < 0.02:
+        if now - self._last_chassis_odom_time < _ODOM_MIN_PERIOD_S:
             return
         self._last_chassis_odom_time = now
         try:
-            odom = Odometry()
-            # Restamped on the ROS clock: the chassis stamp is its own timebase.
-            odom.header.stamp = self.get_clock().now().to_msg()
-            # The chassis's own odom origin; unrelated to tinynav's "world".
-            odom.header.frame_id = "odom"
-            odom.child_frame_id = "base_link"
+            # Restamped on the wall clock: the chassis stamp is its own timebase.
             p, q = msg.pose.pose.position, msg.pose.pose.orientation
-            odom.pose.pose.position.x = float(p.x)
-            odom.pose.pose.position.y = float(p.y)
-            odom.pose.pose.position.z = float(p.z)
-            odom.pose.pose.orientation.x = float(q.x)
-            odom.pose.pose.orientation.y = float(q.y)
-            odom.pose.pose.orientation.z = float(q.z)
-            odom.pose.pose.orientation.w = float(q.w)
             v, w = msg.twist.twist.linear, msg.twist.twist.angular
-            odom.twist.twist.linear.x = float(v.x)
-            odom.twist.twist.linear.y = float(v.y)
-            odom.twist.twist.linear.z = float(v.z)
-            odom.twist.twist.angular.z = float(w.z)
-            self.publisher_chassis_odom.publish(odom)
+            self.publisher_chassis_odom.Write(_odometry_msg(
+                now, float(p.x), float(p.y), float(p.z),
+                float(q.x), float(q.y), float(q.z), float(q.w),
+                float(v.x), float(v.y), float(v.z), float(w.z)))
         except Exception as e:
             self.logger.error(f"Error in ChassisOdomMessageHandler: {e}")
 
     def _republish_sportmodestate_odom(self, msg) -> None:
         """B2 and AS2 odometry source: same state the watch reads, on the wire type."""
         now = time.time()
-        if now - self._last_chassis_odom_time < 0.02:
+        if now - self._last_chassis_odom_time < _ODOM_MIN_PERIOD_S:
             return
         self._last_chassis_odom_time = now
         try:
-            odom = Odometry()
-            odom.header.stamp = self.get_clock().now().to_msg()
-            odom.header.frame_id = "odom"
-            odom.child_frame_id = "base_link"
-            odom.pose.pose.position.x = float(msg.position[0])
-            odom.pose.pose.position.y = float(msg.position[1])
-            odom.pose.pose.position.z = float(msg.position[2])
             qx, qy, qz, qw = _quat_xyzw_from_rpy(
                 float(msg.imu_state.rpy[0]), float(msg.imu_state.rpy[1]),
                 float(msg.imu_state.rpy[2]))
-            odom.pose.pose.orientation.x = qx
-            odom.pose.pose.orientation.y = qy
-            odom.pose.pose.orientation.z = qz
-            odom.pose.pose.orientation.w = qw
-            odom.twist.twist.linear.x = float(msg.velocity[0])
-            odom.twist.twist.linear.y = float(msg.velocity[1])
-            odom.twist.twist.linear.z = float(msg.velocity[2])
-            odom.twist.twist.angular.z = float(msg.yaw_speed)
-            self.publisher_chassis_odom.publish(odom)
+            self.publisher_chassis_odom.Write(_odometry_msg(
+                now, float(msg.position[0]), float(msg.position[1]), float(msg.position[2]),
+                qx, qy, qz, qw,
+                float(msg.velocity[0]), float(msg.velocity[1]), float(msg.velocity[2]),
+                float(msg.yaw_speed)))
         except Exception as e:
             self.logger.error(f"Error republishing sportmodestate odometry: {e}")
 
     def BatteryMessageHandler(self, msg):
         try:
-            soc = float(msg.bms_state.soc) if self._battery_has_status else float(msg.soc)
-            if soc == self.battery:
-                return
-            # Recorded only once sent: lowstate starts before the publisher exists,
-            # and a value marked sent but never published would stay unsent.
-            self.publisher_battery.publish(Float32(data=soc))
+            # One JSON sample carries everything the bus needs from the BMS: soc
+            # for the status display, status+current for the charge judgement
+            # (core_runtime reads /battery instead of opening its own SDK on
+            # the dog NIC -- one cyclonedds domain-0 creator per process).
+            if self._battery_has_status:
+                status = int(msg.bms_state.status)
+                ma = float(msg.bms_state.current)
+                soc = float(msg.bms_state.soc)
+            else:
+                status, ma, soc = None, float(msg.current), float(msg.soc)
+            self.publisher_battery.Write(SdkString_(
+                data=f'{{"soc": {soc}, "status": {status if status is not None else "null"}, "ma": {ma}}}'))
             self.battery = soc
         except Exception as e:
             self.logger.error(f"Error in BatteryMessageHandler: {e}")
@@ -457,17 +498,13 @@ def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--network-interface", default="enP8p1s0",
                         help="Network interface connected to the robot")
-    parsed_args, ros_args = parser.parse_known_args(args=args)
-
-    rclpy.init(args=ros_args)
+    parsed_args, _ = parser.parse_known_args(args=args)
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(name)s %(levelname)s %(message)s')
     node = Ros2UnitreeManagerNode(parsed_args.network_interface)
-    try:
-        rclpy.spin(node)
-    finally:
-        if node.gait is not None:
-            node.gait.stop()
-    node.destroy_node()
-    rclpy.shutdown()
+    # Every thread is daemonized; blocking here is the process's whole job.
+    threading.Event().wait()
+
 
 if __name__ == "__main__":
     main()
