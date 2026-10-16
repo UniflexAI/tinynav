@@ -973,3 +973,16 @@ def test_the_careful_reverse_stops_after_its_length():
     assert np.isclose(np.linalg.norm(careful[-1, :2]), REVERSE_CAREFUL_M)
     assert np.linalg.norm(full[-1, :2]) > 2 * REVERSE_CAREFUL_M
 
+
+
+def test_the_grid_reaches_ahead_and_keeps_a_reverse_row_behind():
+    from planning_node import grid_ahead_m, grid_center, REVERSE_SPEED
+    half = 2.5
+    ahead = grid_ahead_m(half)
+    # Camera at the origin looking along world +x (body +Z forward).
+    T = np.eye(4)
+    T[:3, :3] = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], dtype=float)
+    c = grid_center(T, 0.0, ahead)
+    assert c[0] + half > half and abs(c[1]) < 1e-9
+    tail = ROBOT_CONFIG.camera_fwd + ROBOT_CONFIG.rear_len + REVERSE_SPEED * 3.0
+    assert c[0] - half <= -tail + 1e-9
