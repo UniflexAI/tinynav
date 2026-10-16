@@ -22,7 +22,7 @@ def test_mask_arrives_as_planning_holds_it():
     origin = np.array([-1.23, 4.56, -0.35])
     mask = np.random.default_rng(0).random((X, Y)) > 0.7
     planning = types.SimpleNamespace(origin=origin, grid_shape=(X, Y, Z), resolution=resolution,
-                                     _plan_origin=origin[:2], _far_cells=np.zeros(0, bool),
+                                     _plan_origin=origin[:2], _far_cells=np.zeros((X, Y), bool),
                                      obstacle_mask_pub=_Capture())
     PlanningNode.publish_obstacle_mask(planning, mask, Time(sec=1))
     got, got_resolution, plane = decode_mask(planning.obstacle_mask_pub.msg)

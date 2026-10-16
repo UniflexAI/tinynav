@@ -114,8 +114,8 @@ class PlanningVisNode(Node):
             return
         grid, self.grid_msg = self.bridge.imgmsg_to_cv2(self.grid_msg), None
         header, resolution, mask_origin, esdf = self.mask
-        # planning puts the mask plane at mid-height of its grid, and grows the mask by
-        # the same number of cells on every side of the grid (compose_mask)
+        # planning centres the mask and its grid on the same point, and puts the mask
+        # plane at mid-height of the grid
         pad = (np.array(esdf.shape) - np.array(grid.shape[:2])) // 2
         origin = mask_origin + np.array([pad[0] * resolution, pad[1] * resolution,
                                          -grid.shape[2] * resolution / 2])

@@ -8,6 +8,7 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 """
 
 
+import array
 import json
 import rclpy
 from rclpy.node import Node
@@ -607,37 +608,32 @@ def grid_center(T, z_grid_drop):
     return T[:3, 3] - np.array([0.0, 0.0, z_grid_drop])
 
 
-#: The far layer: what lies beyond the near grid, held as coarse as depth is there (a
-#: wall at 4-5 m moves 15-30 cm frame to frame) and kept while out of view. Its cells
-#: are FAR_RES across and as tall as the near grid's, so a step still reads as a step.
-#: 60 cells is 6 m either side of the camera.
+#: The far layer, 6 m either side of the camera: as coarse across as depth is there
+#: (a wall at 4-5 m moves 15-30 cm frame to frame), as tall as the near grid's cells so
+#: a step still reads as a step, and kept while out of view.
 FAR_RES = 0.2
 FAR_CELLS = 60
-#: Near-resolution cells added on every side of the near grid (6 m) to make the
-#: planner's map (12 m), read from the far layer: it then covers the far layer, and a
-#: 3 s row at 1.5 m/s, which reaches 4.45 m ahead of the camera.
+#: Near cells added on every side of the near grid (6 m) from the far layer, making a
+#: 12 m map: a 3 s row at 1.5 m/s reaches 4.45 m.
 PAD_CELLS = 60
 
 
 def compose_mask(near_mask, near_seen, near_origin, resolution, far_mask, far_origin, far_res, pad):
     """The planner's map: the near mask grown by `pad` cells a side, the margin and
     every near cell no ray has touched read from the far mask (nearest far cell).
-    Returns (mask, from_far, origin_xy); `from_far` marks the cells read there."""
-    h, w = near_mask.shape
+    Returns (mask, from_far, origin_xy); `from_far` marks the obstacles read there."""
+    seen = np.pad(near_seen, pad)
     origin = np.asarray(near_origin[:2], dtype=float) - pad * resolution
-    xs = origin[0] + (np.arange(h + 2 * pad) + 0.5) * resolution
-    ys = origin[1] + (np.arange(w + 2 * pad) + 0.5) * resolution
+    xs = origin[0] + (np.arange(seen.shape[0]) + 0.5) * resolution
+    ys = origin[1] + (np.arange(seen.shape[1]) + 0.5) * resolution
     fi = np.floor((xs - far_origin[0]) / far_res).astype(np.int64)
     fj = np.floor((ys - far_origin[1]) / far_res).astype(np.int64)
     oki = (fi >= 0) & (fi < far_mask.shape[0])
     okj = (fj >= 0) & (fj < far_mask.shape[1])
-    far = np.zeros((h + 2 * pad, w + 2 * pad), dtype=bool)
+    far = np.zeros(seen.shape, dtype=bool)
     far[np.ix_(oki, okj)] = far_mask[np.ix_(fi[oki], fj[okj])]
-    from_far = np.ones_like(far)
-    from_far[pad:pad + h, pad:pad + w] = ~near_seen
-    mask = far.copy()
-    mask[pad:pad + h, pad:pad + w] = np.where(near_seen, near_mask, far[pad:pad + h, pad:pad + w])
-    return mask, from_far & mask, origin
+    mask = np.where(seen, np.pad(near_mask, pad), far)
+    return mask, ~seen & mask, origin
 
 
 def roll_occupancy_grid(occupancy_grid, old_origin, new_origin, resolution):
@@ -936,7 +932,6 @@ class PlanningNode(Node):
         # Where the planner's map (compose_mask) sits; everything that scores against
         # it reads this, not the near grid's origin.
         self._plan_origin = self.origin[:2] - PAD_CELLS * self.resolution
-        self._far_cells = np.zeros(0, dtype=bool)
         self.K = None
         self.baseline = None
         self.last_param = (0.0, 0.0)  # (vx, omega) of the last selected trajectory
@@ -1204,8 +1199,8 @@ class PlanningNode(Node):
         msg.info.origin.orientation.w = 1.0
         # 100 seen by the near grid, 60 read from the far layer: both are obstacles to
         # every reader (> 0), the value only says which.
-        far = self._far_cells if self._far_cells.shape == mask.shape else np.zeros_like(mask)
-        msg.data = np.where(mask, np.where(far, 60, 100), 0).astype(np.int8).ravel(order="F").tolist()
+        values = np.where(mask, np.where(self._far_cells, 60, 100), 0).astype(np.int8)
+        msg.data = array.array("b", values.ravel(order="F").tobytes())
         self.obstacle_mask_pub.publish(msg)
 
 
@@ -1231,10 +1226,9 @@ class PlanningNode(Node):
         self.occupancy_grid += new_occ
         self.occupancy_grid = np.clip(self.occupancy_grid, -0.2, 0.2)
 
-        far_origin = grid_center(T, self.z_grid_drop) - np.array(self.far_shape) * self._far_res3 / 2
-        if np.any(np.abs(far_origin - self.far_origin) >= self._far_res3):
-            self.far_grid, self.far_origin = roll_occupancy_grid(
-                self.far_grid, self.far_origin, far_origin, self._far_res3)
+        self.far_grid, self.far_origin = roll_occupancy_grid(
+            self.far_grid, self.far_origin,
+            target_center - np.array(self.far_shape) * self._far_res3 / 2, self._far_res3)
         # No decay: out of view is kept until a ray passes through it again.
         self.far_grid += run_raycasting_loopy(depth, T, self.far_shape, fx, fy, cx, cy, self.far_origin,
                                               self.step, FAR_RES, False, self.resolution)
@@ -1243,7 +1237,7 @@ class PlanningNode(Node):
     def build_obstacle_and_esdf(self, T):
         min_span_map = self._min_span_map(self.origin, self.resolution,
                                           self.occupancy_grid.shape[:2])
-        obstacle_mask = build_obstacle_map(
+        near_mask = build_obstacle_map(
             self.occupancy_grid, self.origin, self.resolution,
             robot_z=T[2, 3], config=self.obstacle_config, min_span_map=min_span_map,
         )
@@ -1251,7 +1245,7 @@ class PlanningNode(Node):
                                       robot_z=T[2, 3], config=self.obstacle_config)
         near_seen = np.any(np.abs(self.occupancy_grid) > 1e-3, axis=2)
         obstacle_mask, self._far_cells, self._plan_origin = compose_mask(
-            obstacle_mask, near_seen, self.origin, self.resolution,
+            near_mask, near_seen, self.origin, self.resolution,
             far_mask, self.far_origin, FAR_RES, PAD_CELLS)
         ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
         return min_span_map, obstacle_mask, ESDF_map
