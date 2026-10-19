@@ -876,7 +876,7 @@ class PlanningNode(Node):
         # Speed a turning row gives up, at the full turn rate: it drives at
         # (1 - this) of its speed there, and proportionally less off it. A turn taken
         # at the straight-line speed swings the footprint wide of the arc it plans.
-        self.declare_parameter('traj_turn_slowdown', 0.5)
+        self.declare_parameter('traj_turn_slowdown', 0.0)
         # Extra per-frame decay on cells under the footprint, on top of the global 0.99.
         self.declare_parameter('footprint_decay', 0.9)
         self._vx_max = float(self.get_parameter('vx_max').value)
