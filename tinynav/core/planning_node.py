@@ -17,6 +17,8 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra
 from dataclasses import replace
 from numba import njit
 import rclpy
@@ -646,8 +648,8 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
                    end_gdxy, here_arrived, has_route, should_reverse, v, w, carrot_rem, t_end,
                    carry=-1, last_yaw=0.0):
     """Index of the row with the least time to go: when map_node's arrival fires, or the
-    row's own duration `t_end` plus the distance left to the carrot at `v` and the
-    heading left at `w` (a row past the carrot along the route gains what it went beyond
+    row's own duration `t_end` plus the distance left to the carrot (`end_gdxy`, measured
+    around obstacles by the caller) at `v` and the heading left at `w` (a row past the carrot along the route gains what it went beyond
     it). The reverse gate
     filters, and so does standing still while another row is open, unless the robot is
     already inside the arrival radius. Arrays are per row; `scores` inf is a collision.
@@ -663,7 +665,7 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
     if not ok.any():
         ok = free
     if has_route:
-        # Time to the carrot: straight to it and facing it, until a row has gone past it
+        # Time to the carrot: to it and facing it, until a row has gone past it
         # along the route -- then what it has gained beyond it, along the route and
         # facing the way the route runs. `carrot_rem` is the route left at the carrot.
         past = end_rem < carrot_rem
@@ -708,6 +710,78 @@ def route_left_at(route_xy, xy):
     route_xy = np.asarray(route_xy, dtype=float)
     k = int(np.argmin(np.linalg.norm(route_xy - np.asarray(xy, dtype=float), axis=1)))
     return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
+
+
+def distance_to_target(free, origin, resolution, target_xy):
+    """Metres from every cell to `target_xy` through `free` cells, 8-connected; inf where
+    it cannot be reached. A target off the grid is reached through the grid's free edge
+    cells, each seeded with its straight distance to it; a target on a cell that is not
+    free, through the free cell nearest it."""
+    H, W = free.shape
+    idx = np.arange(H * W).reshape(H, W)
+    flat = free.ravel()
+    rows, cols, wts = [], [], []
+    for dx, dy, step in ((1, 0, 1.0), (0, 1, 1.0), (1, 1, 2 ** 0.5), (1, -1, 2 ** 0.5)):
+        a = idx[max(0, -dx):H - max(0, dx), max(0, -dy):W - max(0, dy)].ravel()
+        b = idx[max(0, dx):H + min(0, dx) or None, max(0, dy):W + min(0, dy) or None].ravel()
+        both = flat[a] & flat[b]
+        rows.append(a[both]); cols.append(b[both]); wts.append(np.full(both.sum(), step * resolution))
+    ti, tj = int((target_xy[0] - origin[0]) / resolution), int((target_xy[1] - origin[1]) / resolution)
+    if 0 <= ti < H and 0 <= tj < W:
+        _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
+        fi, fj = ni[ti, tj], nj[ti, tj]
+        seeds, seed_m = np.array([idx[fi, fj]]), np.array([np.hypot(fi - ti, fj - tj) * resolution])
+    else:
+        edge = np.zeros_like(free)
+        edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
+        e = np.argwhere(edge & free)
+        xy = np.asarray(origin[:2]) + (e + 0.5) * resolution
+        seeds, seed_m = idx[e[:, 0], e[:, 1]], np.linalg.norm(xy - np.asarray(target_xy[:2]), axis=1)
+    src = H * W
+    rows.append(np.full(len(seeds), src)); cols.append(seeds); wts.append(seed_m + 1e-6)
+    r, c, w = np.concatenate(rows), np.concatenate(cols), np.concatenate(wts)
+    graph = coo_matrix((w, (r, c)), shape=(src + 1, src + 1)).tocsr()
+    return dijkstra(graph, directed=False, indices=src)[:src].reshape(H, W)
+
+
+def around_obstacles(ends_xy, straight, scores, target_xy, ESDF_map, origin, resolution, band):
+    """Per row, the distance from its end to the target the way the body can go: cells
+    `band` (half the body's width plus the safety margin -- its narrowest) clear of an
+    obstacle are passable, so a passage the body fits by width stays open and turning
+    room is left to the rows' own footprint check.
+
+    A row that sees the target -- its straight line stays on passable cells but for the
+    last `band` -- keeps `straight`, which is then the way around. A row that does not
+    reads the field. A field that reaches no collision-free row leaves every row
+    `straight`: a target walled off on this grid is more often noise or a way round off
+    the grid than a dead end, and this term is not the one that stops the robot."""
+    free = ESDF_map >= band
+    ends_xy = np.asarray(ends_xy, dtype=float)
+    target = np.asarray(target_xy[:2], dtype=float)
+    shape = np.array(ESDF_map.shape)
+    org = np.asarray(origin[:2], dtype=float)
+
+    def cells(xy):
+        return np.clip(((xy - org) / resolution).astype(int), 0, shape - 1)
+
+    n = max(2, int(np.ceil(np.max(straight, initial=0.0) / (resolution / 2))) + 1)
+    s = np.linspace(0.0, 1.0, n)
+    pts = ends_xy[:, None, :] + s[None, :, None] * (target - ends_xy)[:, None, :]
+    on_grid = np.all((pts >= org) & (pts < org + shape * resolution), axis=2)
+    near_target = np.linalg.norm(pts - target, axis=2) <= band
+    c = cells(pts.reshape(-1, 2)).reshape(len(ends_xy), n, 2)
+    blocked = ~free[c[..., 0], c[..., 1]] & on_grid & ~near_target
+    sight = ~blocked.any(axis=1)
+
+    field = distance_to_target(free, origin, resolution, target)
+    _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
+    e = cells(ends_xy)
+    fi, fj = ni[e[:, 0], e[:, 1]], nj[e[:, 0], e[:, 1]]
+    way = field[fi, fj] + np.hypot(fi - e[:, 0], fj - e[:, 1]) * resolution
+    out = np.where(sight, straight, way)
+    if not np.isfinite(out[np.isfinite(scores)]).any():
+        return np.asarray(straight, dtype=float)
+    return np.where(np.isfinite(out), out, 1e3)
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -1316,6 +1390,12 @@ class PlanningNode(Node):
              end_devs, end_goal_errs, end_goal_dxys) = self.score_trajectories(
                 trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map,
                 target, has_route)
+            # A row's way to the target goes around what is in it, not through it: a
+            # target past a corner otherwise draws the rows into the corner's inside.
+            _, _, half_w = ROBOT_CONFIG.footprint_from_control()
+            end_goal_dxys = around_obstacles(
+                trajectories[:, -1, :2], end_goal_dxys, scores, target, ESDF_map, self.origin,
+                self.resolution, half_w + ROBOT_CONFIG.safety_radius)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
