@@ -871,8 +871,9 @@ class PlanningNode(Node):
         self.declare_parameter('clear_scan_m', 2.4)  # forward clearance scan cap (m)
         self.declare_parameter('t_react_s', 0.2)     # perception+plan latency (s)
         # Lateral-acceleration cap, vx*omega (m/s^2). Binds only above
-        # max_lat_acc/max_angular_vel; below that the omega range is unchanged.
-        self.declare_parameter('traj_max_lat_acc', 0.5)
+        # max_lat_acc/max_angular_vel; below that the omega range is unchanged. 1e9 is
+        # no cap: a fast row may turn at the full rate, so a turn costs no speed.
+        self.declare_parameter('traj_max_lat_acc', 1e9)
         # Speed a turning row gives up, at the full turn rate: it drives at
         # (1 - this) of its speed there, and proportionally less off it. A turn taken
         # at the straight-line speed swings the footprint wide of the arc it plans.
