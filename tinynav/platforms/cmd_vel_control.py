@@ -72,6 +72,16 @@ class CmdVelControlNode(Node):
         # Hack: if path first segment points far away from robot heading,
         # rotate in place instead of publishing near-zero cmd_vel.
         self.force_turn_heading_threshold = np.deg2rad(80.0)
+        # The chassis's own yaw while it is told to walk straight, learned from odometry
+        # (rad per metre, left positive) and taken off every forward command after the
+        # floors: a turn the planner asks for still goes through `_snap`, the correction
+        # does not, since it is smaller than any floor. Odometry, not the path, is the
+        # reference: a relocalization moves the path and would be learned as a bias.
+        #: Metres of straight walking the learned bias converges over.
+        self.yaw_bias_metres = 2.0
+        self._yaw_bias = 0.0
+        self._bias_heading = None
+        self._bias_settle = 0.0
 
         self.latest_cmd = Twist()
         self.prev_cmd = Twist()
@@ -122,10 +132,34 @@ class CmdVelControlNode(Node):
     def _clamp_step(self, target: float, current: float, max_delta: float) -> float:
         return float(np.clip(target - current, -max_delta, max_delta) + current)
 
+    def _heading(self) -> float:
+        """The robot's heading in odom: the camera's +z (forward) on the ground plane."""
+        q = self.pose.pose.pose.orientation
+        fwd = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()[:, 2]
+        return float(np.arctan2(fwd[1], fwd[0]))
+
+    def _learn_yaw_bias(self, prev, now, dt, straight, turn):
+        """One tick of the bias: while told straight, it moves by the yaw odometry saw
+        over `yaw_bias_metres`. A turn's tail (`turn` rad/s, stopping at max_angular_acc)
+        and a heading jump faster than the chassis can turn are not walking."""
+        if not straight:
+            self._bias_settle = max(self._bias_settle, now + abs(turn) / self.max_angular_acc)
+            return
+        self._bias_heading = self._heading()
+        if prev is None or now < self._bias_settle:
+            return
+        d = float(np.arctan2(np.sin(self._bias_heading - prev), np.cos(self._bias_heading - prev)))
+        if abs(d) <= self.max_angular_speed * dt:
+            self._yaw_bias += d / self.yaw_bias_metres
+            self.logger.info(f'yaw bias {np.degrees(self._yaw_bias):+.2f} deg/m',
+                             throttle_duration_sec=5.0)
+
     def cmd_timer_callback(self):
         now = time.monotonic()
         dt = max(1e-3, now - self.last_cmd_pub_time)
         self.last_cmd_pub_time = now
+        # Only a tick that walked straight leaves a heading for the next to difference.
+        prev_heading, self._bias_heading = self._bias_heading, None
 
         if not self._nav_active:
             return
@@ -177,6 +211,12 @@ class CmdVelControlNode(Node):
                       else self.min_effective_angular_speed)
         out.angular.z = self._snap(out.angular.z, target_cmd.angular.z, spin_floor,
                                    self.angular_engage_threshold)
+        if self.pose is not None:
+            self._learn_yaw_bias(prev_heading, now, dt,
+                                 out.linear.x > 0.0 and out.angular.z == 0.0, out.angular.z)
+        if out.linear.x > 0.0:
+            out.angular.z = float(np.clip(out.angular.z - self._yaw_bias * out.linear.x,
+                                          -self.max_angular_speed, self.max_angular_speed))
 
         self.cmd_pub.publish(out)
         self.prev_cmd = out

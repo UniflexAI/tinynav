@@ -10,7 +10,8 @@ what reached /cmd_vel was a median of exactly 0.000.
 Upstream instead takes the bearing to a pose `lookahead_steps` ahead, expressed in the
 robot frame, and uses it only to REPLACE the command when it is large. These tests pin
 the two properties that distinguish that from what was here: the reference moves the
-output (leverage), and nothing accumulates between cycles (no integrator).
+output (leverage), and nothing accumulates between cycles (no integrator). The one
+thing learned is the chassis's own yaw against odometry, never the path (YawBiasTest).
 
 Frame: with identity pose orientations, cmd_vel_control's T_robot_to_camera makes world
 +z the robot's forward axis and world -x its left, so heading_err = atan2(-dx, dz).
@@ -27,6 +28,7 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
+from scipy.spatial.transform import Rotation as R
 
 from tinynav.platforms.cmd_vel_control import CmdVelControlNode
 
@@ -135,6 +137,41 @@ class HeadingControlTest(_NodeCase):
         # one back trips here rather than on a rig.
         for attr in ('_yaw_bias_per_m', '_drift_lp', 'yaw_kp', 'yaw_bias_ki'):
             self.assertFalse(hasattr(self.node, attr), f'{attr} is back')
+
+
+class YawBiasTest(_NodeCase):
+    """The chassis's own yaw while told straight is learned from odometry and taken off
+    the command. Odometry here is z-up: the robot at `heading`, its camera's +z forward."""
+
+    STRAIGHT = _path((0, 0, 0), (0, 0, 1.0))
+
+    def _face(self, heading):
+        cam = R.from_euler('z', heading).as_matrix() @ self.node.T_robot_to_camera[:3, :3].T
+        q = R.from_matrix(cam).as_quat()
+        o = self.node.pose.pose.pose.orientation
+        o.x, o.y, o.z, o.w = q
+
+    def _walk(self, ticks, yaw_per_m):
+        """Straight ahead on a chassis that yaws `yaw_per_m` (rad/m) more than it is told."""
+        self.node.path_callback(self.STRAIGHT)
+        state = {'h': 0.0}
+
+        def chassis(n):
+            sent = n.prev_cmd
+            state['h'] += (yaw_per_m * sent.linear.x + sent.angular.z) * _DT
+            self._face(state['h'])
+        return self._tick(ticks, before=chassis)
+
+    def test_a_chassis_that_yaws_left_is_told_right_until_it_walks_straight(self):
+        bias = np.radians(3.0)
+        out = self._walk(400, bias)[-1]           # 400 ticks at ~0.9 m/s: some 30 m
+        self.assertAlmostEqual(out.angular.z, -bias * out.linear.x, places=3)
+
+    def test_a_heading_jump_is_not_learned(self):
+        self._walk(5, 0.0)
+        self._face(1.0)                           # an odometry restart
+        self._tick(1)
+        self.assertEqual(self.node._yaw_bias, 0.0)
 
 
 class TurnInPlaceTest(_NodeCase):
