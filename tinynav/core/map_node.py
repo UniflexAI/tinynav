@@ -200,36 +200,6 @@ _LOOKAHEAD_MIN_M = 1.0
 _LOOKAHEAD_MAX_M = 5.0
 
 
-def local_target_index(path, start_i, lookahead_max, min_lookahead=1.0,
-                       turn_thresh=np.deg2rad(60.0), smooth_m=0.4):
-    """Index of the target on `path`: the first point past `min_lookahead` of arc length
-    whose heading (smoothed over `smooth_m`) has turned `turn_thresh` from the entry
-    heading, else the point `lookahead_max` along. The robot drives to a corner instead
-    of slicing across it."""
-    pxy = np.asarray([p[:2] for p in path], dtype=np.float64)
-    n = len(pxy)
-    cum = np.zeros(n)
-    cum[start_i + 1:] = np.cumsum(np.linalg.norm(np.diff(pxy[start_i:], axis=0), axis=1))
-
-    def heading(i):
-        j = min(int(np.searchsorted(cum, cum[i] + smooth_m)), n - 1)
-        d = pxy[j] - pxy[i]
-        L = float(np.linalg.norm(d))
-        return d / L if L > 1e-6 else None
-
-    entry = heading(start_i)
-    k = start_i
-    for k in range(start_i + 1, n):
-        along = cum[k] - cum[start_i]
-        if along >= lookahead_max:
-            break
-        dk = heading(k)
-        if along >= min_lookahead and entry is not None and dk is not None:
-            if abs(np.arctan2(dk[0] * entry[1] - dk[1] * entry[0], float(dk @ entry))) >= turn_thresh:
-                break
-    return k
-
-
 def lookahead_distance_m(speed_cap_mps: float, gain: float = CAPTURE_SPEED_GAIN) -> float:
     """How far along the path the target pose sits, given the capture-speed prior.
 
@@ -862,7 +832,17 @@ class MapNode(Node):
         return percent, estimated_remaining_s
 
     def select_target_position(self, paths, closest_idx, pos, cap):
-        return paths[local_target_index(paths, closest_idx, lookahead_distance_m(cap))]
+        lookahead_m = lookahead_distance_m(cap)
+        accumulated_distance = 0.0
+        start_point = pos[:3]
+        target_position = paths[-1]
+        for i in range(closest_idx, len(paths) - 1):
+            accumulated_distance += np.linalg.norm(paths[i][:2] - start_point[:2])
+            if accumulated_distance > lookahead_m:
+                target_position = paths[i]
+                break
+            start_point = paths[i]
+        return target_position
 
     def nav_target_timer_callback(self):
         if (
