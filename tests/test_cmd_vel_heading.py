@@ -21,6 +21,8 @@ Needs rclpy, so this runs in the device container.
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 import time
 import unittest
 
@@ -30,6 +32,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path
 from scipy.spatial.transform import Rotation as R
 
+from tinynav.platforms import cmd_vel_control
 from tinynav.platforms.cmd_vel_control import CmdVelControlNode
 
 _DT = 1.0 / 12.0
@@ -64,6 +67,8 @@ class _NodeCase(unittest.TestCase):
         rclpy.shutdown()
 
     def setUp(self):
+        self._calib = tempfile.TemporaryDirectory()
+        cmd_vel_control.YAW_BIAS_PATH = os.path.join(self._calib.name, 'calib', 'yaw_bias.json')
         self.node = CmdVelControlNode()
         # The classic gait's floors, whatever CHASSIS_GAIT the host has.
         self.node.min_effective_spin_speed = self.node.min_effective_angular_speed
@@ -77,6 +82,7 @@ class _NodeCase(unittest.TestCase):
 
     def tearDown(self):
         self.node.destroy_node()
+        self._calib.cleanup()
 
     def _tick(self, ticks=1, before=None):
         """Tick the timer `ticks` times, never stale. Returns the published Twists."""
@@ -151,12 +157,15 @@ class YawBiasTest(_NodeCase):
         o = self.node.pose.pose.pose.orientation
         o.x, o.y, o.z, o.w = q
 
-    def _walk(self, ticks, yaw_per_m):
-        """Straight ahead on a chassis that yaws `yaw_per_m` (rad/m) more than it is told."""
+    def _walk(self, ticks, yaw_per_m, say=False):
+        """Straight ahead on a chassis that yaws `yaw_per_m` (rad/m) more than it is told;
+        `say` makes every tick due to say (and save) the bias."""
         self.node.path_callback(self.STRAIGHT)
         state = {'h': 0.0}
 
         def chassis(n):
+            if say:
+                n._bias_said = -1e9
             sent = n.prev_cmd
             state['h'] += (yaw_per_m * sent.linear.x + sent.angular.z) * _DT
             self._face(state['h'])
@@ -166,6 +175,12 @@ class YawBiasTest(_NodeCase):
         bias = np.radians(3.0)
         out = self._walk(400, bias)[-1]           # 400 ticks at ~0.9 m/s: some 30 m
         self.assertAlmostEqual(out.angular.z, -bias * out.linear.x, places=3)
+
+    def test_the_next_goal_starts_from_the_bias_learned(self):
+        self._walk(400, np.radians(3.0), say=True)
+        learned = self.node._yaw_bias
+        self.assertGreater(learned, 0.0)
+        self.assertAlmostEqual(CmdVelControlNode()._yaw_bias, learned, places=9)
 
     def test_a_heading_jump_is_not_learned(self):
         self._walk(5, 0.0)

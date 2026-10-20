@@ -7,12 +7,37 @@ from std_msgs.msg import Bool
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from scipy.spatial.transform import Rotation as R
 import numpy as np
+import json
 import logging
+import os
 import time
 from tinynav.core.robot_specs import ROBOT_CONFIG
 
 # Module-level logger for cases where self.get_logger() is not available
 logger = logging.getLogger(__name__)
+
+#: This rig's learned yaw bias, `rad_per_m` (left positive), carried from one nav goal's
+#: process to the next.
+YAW_BIAS_PATH = '/tinynav/tinynav_db/calib/yaw_bias.json'
+
+
+def read_yaw_bias(path):
+    """The bias saved at `path`, 0 when there is none or it cannot be read."""
+    try:
+        with open(path) as f:
+            return float(json.load(f)['rad_per_m'])
+    except FileNotFoundError:
+        return 0.0
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f'ignoring {path}, not a yaw bias ({e!r})')
+        return 0.0
+
+
+def write_yaw_bias(path, rad_per_m):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + '.tmp', 'w') as f:
+        json.dump({'rad_per_m': rad_per_m}, f)
+    os.replace(path + '.tmp', path)
 
 class CmdVelControlNode(Node):
     def __init__(self):
@@ -79,7 +104,8 @@ class CmdVelControlNode(Node):
         # reference: a relocalization moves the path and would be learned as a bias.
         #: Metres of straight walking the learned bias converges over.
         self.yaw_bias_metres = 2.0
-        self._yaw_bias = 0.0
+        self._yaw_bias = read_yaw_bias(YAW_BIAS_PATH)
+        self._bias_said = time.monotonic()
         self._bias_heading = None
         self._bias_settle = 0.0
 
@@ -151,8 +177,10 @@ class CmdVelControlNode(Node):
         d = float(np.arctan2(np.sin(self._bias_heading - prev), np.cos(self._bias_heading - prev)))
         if abs(d) <= self.max_angular_speed * dt:
             self._yaw_bias += d / self.yaw_bias_metres
-            self.logger.info(f'yaw bias {np.degrees(self._yaw_bias):+.2f} deg/m',
-                             throttle_duration_sec=5.0)
+            if now - self._bias_said >= 5.0:
+                self._bias_said = now
+                self.logger.info(f'yaw bias {np.degrees(self._yaw_bias):+.2f} deg/m')
+                write_yaw_bias(YAW_BIAS_PATH, self._yaw_bias)
 
     def cmd_timer_callback(self):
         now = time.monotonic()
