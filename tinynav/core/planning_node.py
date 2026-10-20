@@ -724,12 +724,11 @@ def _grid_dijkstra(free, seed_i, seed_j, seed_m, need_i, need_j, resolution):
         if not want[need_i[k], need_j[k]]:
             want[need_i[k], need_j[k]] = True
             left += 1
-    heap = [(0.0, 0, 0)]
+    heap = [(0.0, 0, 0)]                # numba types the list from its first item
     heap.pop()
     for k in range(len(seed_i)):
-        if seed_m[k] < dist[seed_i[k], seed_j[k]]:
-            dist[seed_i[k], seed_j[k]] = seed_m[k]
-            heapq.heappush(heap, (seed_m[k], seed_i[k], seed_j[k]))
+        dist[seed_i[k], seed_j[k]] = seed_m[k]
+        heapq.heappush(heap, (seed_m[k], seed_i[k], seed_j[k]))
     diag = resolution * 2.0 ** 0.5
     while len(heap) > 0 and left > 0:
         d, i, j = heapq.heappop(heap)
@@ -753,8 +752,8 @@ def _grid_dijkstra(free, seed_i, seed_j, seed_m, need_i, need_j, resolution):
 
 
 def distance_to_target(free, origin, resolution, target_xy, nearest, need_i, need_j):
-    """Metres from the `need` cells to `target_xy` through `free` cells, 8-connected; inf
-    where it cannot be reached (other cells may be inf too). A target off the grid is
+    """A grid of metres to `target_xy` through `free` cells, 8-connected, exact at the
+    `need` cells (inf where they cannot reach it; other cells may be inf). A target off the grid is
     reached through the grid's free edge cells, each seeded with its straight distance to
     it; a target on a cell that is not free, through the free cell nearest it --
     `nearest`, the (rows, cols) index arrays `distance_transform_edt(~free,
@@ -801,7 +800,8 @@ def around_obstacles(ends_xy, straight, scores, target_xy, free, origin, resolut
     `straight`; one that does not reads the field, never under `straight`. The field is
     built only when a collision-free row is out of sight. A field that reaches no
     collision-free row leaves every row `straight`: a target walled off on this grid is
-    more often noise or a way round off it than a dead end."""
+    more often noise or a way round off it than a dead end; otherwise a row the field
+    does not reach gets 1e3."""
     ends_xy = np.asarray(ends_xy, dtype=float)
     straight = np.asarray(straight, dtype=float)
     target = np.asarray(target_xy[:2], dtype=float)
@@ -815,8 +815,10 @@ def around_obstacles(ends_xy, straight, scores, target_xy, free, origin, resolut
                 np.array(free.shape) - 1)
     fi, fj = ni[e[:, 0], e[:, 1]], nj[e[:, 0], e[:, 1]]
     field = distance_to_target(free, origin, resolution, target, (ni, nj), fi[blind], fj[blind])
-    way = np.maximum(field[fi, fj] + np.hypot(fi - e[:, 0], fj - e[:, 1]) * resolution, straight)
-    out = np.where(sight, straight, way)
+    out = straight.copy()
+    out[blind] = np.maximum(field[fi[blind], fj[blind]]
+                            + np.hypot(fi - e[:, 0], fj - e[:, 1])[blind] * resolution,
+                            straight[blind])
     if not np.isfinite(out[ok]).any():
         return straight
     return np.where(np.isfinite(out), out, 1e3)

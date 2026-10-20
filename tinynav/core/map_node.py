@@ -740,7 +740,7 @@ class MapNode(Node):
 
         Each constraint is one observation's implied map->odom, `camera_in_odom @
         inv(camera_in_map)` -- true at the moment that observation was taken, and only
-        still true while odom has not drifted since. The solve keeps the newest 3.
+        still true while odom has not drifted since. The solve keeps those `select_fusion_constraints` picks.
         """
         relative_pose_constraint = []
         optimized_parameters = {
