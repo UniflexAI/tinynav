@@ -712,11 +712,12 @@ def route_left_at(route_xy, xy):
     return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
 
 
-def distance_to_target(free, origin, resolution, target_xy):
+def distance_to_target(free, origin, resolution, target_xy, nearest):
     """Metres from every cell to `target_xy` through `free` cells, 8-connected; inf where
     it cannot be reached. A target off the grid is reached through the grid's free edge
     cells, each seeded with its straight distance to it; a target on a cell that is not
-    free, through the free cell nearest it."""
+    free, through the free cell nearest it -- `nearest`, the (rows, cols) index arrays
+    `distance_transform_edt(~free, return_indices=True)` gives."""
     H, W = free.shape
     idx = np.arange(H * W).reshape(H, W)
     flat = free.ravel()
@@ -728,8 +729,7 @@ def distance_to_target(free, origin, resolution, target_xy):
         rows.append(a[both]); cols.append(b[both]); wts.append(np.full(both.sum(), step * resolution))
     ti, tj = int((target_xy[0] - origin[0]) / resolution), int((target_xy[1] - origin[1]) / resolution)
     if 0 <= ti < H and 0 <= tj < W:
-        _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
-        fi, fj = ni[ti, tj], nj[ti, tj]
+        fi, fj = nearest[0][ti, tj], nearest[1][ti, tj]
         seeds, seed_m = np.array([idx[fi, fj]]), np.array([np.hypot(fi - ti, fj - tj) * resolution])
     else:
         edge = np.zeros_like(free)
@@ -744,43 +744,54 @@ def distance_to_target(free, origin, resolution, target_xy):
     return dijkstra(graph, directed=False, indices=src)[:src].reshape(H, W)
 
 
-def around_obstacles(ends_xy, straight, scores, target_xy, ESDF_map, origin, resolution, band):
+def sees_target(ends_xy, target_xy, free, origin, resolution, band):
+    """Per row, whether the straight line from its end to the target stays on `free`
+    cells but for its last `band` (a target beside an obstacle sits in that band).
+    Off-grid stretches of the line count as clear."""
+    ends_xy = np.asarray(ends_xy, dtype=float)
+    target = np.asarray(target_xy[:2], dtype=float)
+    shape = np.array(free.shape)
+    org = np.asarray(origin[:2], dtype=float)
+    reach = np.max(np.linalg.norm(target - ends_xy, axis=1), initial=0.0)
+    n = max(2, int(np.ceil(reach / (resolution / 2))) + 1)
+    pts = ends_xy[:, None, :] + np.linspace(0.0, 1.0, n)[None, :, None] * (target - ends_xy)[:, None, :]
+    on_grid = np.all((pts >= org) & (pts < org + shape * resolution), axis=2)
+    near_target = np.linalg.norm(pts - target, axis=2) <= band
+    c = np.clip(((pts - org) / resolution).astype(int), 0, shape - 1)
+    return ~(~free[c[..., 0], c[..., 1]] & on_grid & ~near_target).any(axis=1)
+
+
+def around_obstacles(ends_xy, straight, scores, target_xy, ESDF_map, origin, resolution, band,
+                     sight=None):
     """Per row, the distance from its end to the target the way the body can go: cells
     `band` (half the body's width plus the safety margin -- its narrowest) clear of an
     obstacle are passable, so a passage the body fits by width stays open and turning
     room is left to the rows' own footprint check.
 
-    A row that sees the target -- its straight line stays on passable cells but for the
-    last `band` -- keeps `straight`, which is then the way around. A row that does not
-    reads the field. A field that reaches no collision-free row leaves every row
-    `straight`: a target walled off on this grid is more often noise or a way round off
-    the grid than a dead end, and this term is not the one that stops the robot."""
+    A row that sees the target (`sees_target`, or `sight` if the caller has it) keeps
+    `straight`, which is then the way around; a row that does not reads the field, never
+    under `straight`. So no row comes out nearer than it was, and a choice that already
+    sees the target stands -- which is why the caller need only build this for one that
+    does not. A field that reaches no collision-free row leaves every row `straight`: a
+    target walled off on this grid is more often noise or a way round off the grid than
+    a dead end, and this term is not the one that stops the robot."""
     free = ESDF_map >= band
     ends_xy = np.asarray(ends_xy, dtype=float)
+    straight = np.asarray(straight, dtype=float)
     target = np.asarray(target_xy[:2], dtype=float)
-    shape = np.array(ESDF_map.shape)
-    org = np.asarray(origin[:2], dtype=float)
-
-    def cells(xy):
-        return np.clip(((xy - org) / resolution).astype(int), 0, shape - 1)
-
-    n = max(2, int(np.ceil(np.max(straight, initial=0.0) / (resolution / 2))) + 1)
-    s = np.linspace(0.0, 1.0, n)
-    pts = ends_xy[:, None, :] + s[None, :, None] * (target - ends_xy)[:, None, :]
-    on_grid = np.all((pts >= org) & (pts < org + shape * resolution), axis=2)
-    near_target = np.linalg.norm(pts - target, axis=2) <= band
-    c = cells(pts.reshape(-1, 2)).reshape(len(ends_xy), n, 2)
-    blocked = ~free[c[..., 0], c[..., 1]] & on_grid & ~near_target
-    sight = ~blocked.any(axis=1)
-
-    field = distance_to_target(free, origin, resolution, target)
+    if sight is None:
+        sight = sees_target(ends_xy, target, free, origin, resolution, band)
+    if sight[np.isfinite(scores)].all():
+        return straight
     _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
-    e = cells(ends_xy)
+    field = distance_to_target(free, origin, resolution, target, (ni, nj))
+    e = np.clip(((ends_xy - np.asarray(origin[:2])) / resolution).astype(int), 0,
+                np.array(free.shape) - 1)
     fi, fj = ni[e[:, 0], e[:, 1]], nj[e[:, 0], e[:, 1]]
-    way = field[fi, fj] + np.hypot(fi - e[:, 0], fj - e[:, 1]) * resolution
+    way = np.maximum(field[fi, fj] + np.hypot(fi - e[:, 0], fj - e[:, 1]) * resolution, straight)
     out = np.where(sight, straight, way)
     if not np.isfinite(out[np.isfinite(scores)]).any():
-        return np.asarray(straight, dtype=float)
+        return straight
     return np.where(np.isfinite(out), out, 1e3)
 
 
@@ -1390,12 +1401,6 @@ class PlanningNode(Node):
              end_devs, end_goal_errs, end_goal_dxys) = self.score_trajectories(
                 trajectories, params, ESDF_map, path_dist_map, remaining_map, route_heading_map,
                 target, has_route)
-            # A row's way to the target goes around what is in it, not through it: a
-            # target past a corner otherwise draws the rows into the corner's inside.
-            _, _, half_w = ROBOT_CONFIG.footprint_from_control()
-            end_goal_dxys = around_obstacles(
-                trajectories[:, -1, :2], end_goal_dxys, scores, target, ESDF_map, self.origin,
-                self.resolution, half_w + ROBOT_CONFIG.safety_radius)
 
         with Timer(name='pub', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             n_fwd_ok = sum(1 for i in range(len(trajectories))
@@ -1452,11 +1457,28 @@ class PlanningNode(Node):
                             and (not has_route or rem_here <= self.route_terminal_band))
             yaws = np.array([_yaw_rate(t) for t in trajectories])
             v_nom = max(float(v_allow), self._vx_min, 0.1)
-            top_indices = [select_by_time(
-                params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
-                end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
-                should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
-                carrot_rem, durations, carry, self._last_yaw)]
+
+            def pick(to_target):
+                return select_by_time(
+                    params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
+                    end_heading_errs, end_goal_errs, to_target, here_arrived, has_route,
+                    should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
+                    carrot_rem, durations, carry, self._last_yaw)
+
+            # A row's way to the target goes around what is in it, not through it: a
+            # target past a corner otherwise draws the rows into the corner's inside.
+            # Only a pick that cannot see the target can change, so only then is the
+            # field built (most frames on 65 it is not).
+            _, _, half_w = ROBOT_CONFIG.footprint_from_control()
+            band = half_w + ROBOT_CONFIG.safety_radius
+            ends = trajectories[:, -1, :2]
+            sight = sees_target(ends, target, ESDF_map >= band, self.origin, self.resolution, band)
+            sel = pick(end_goal_dxys)
+            if not sight[sel]:
+                end_goal_dxys = around_obstacles(ends, end_goal_dxys, scores, target, ESDF_map,
+                                                 self.origin, self.resolution, band, sight)
+                sel = pick(end_goal_dxys)
+            top_indices = [sel]
 
             sel = top_indices[0]
             self.last_param = params[sel]
