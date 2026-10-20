@@ -648,8 +648,8 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
                    end_gdxy, here_arrived, has_route, should_reverse, v, w, carrot_rem, t_end,
                    carry=-1, last_yaw=0.0):
     """Index of the row with the least time to go: when map_node's arrival fires, or the
-    row's own duration `t_end` plus the distance left to the carrot (`end_gdxy`, measured
-    around obstacles by the caller) at `v` and the heading left at `w` (a row past the carrot along the route gains what it went beyond
+    row's own duration `t_end` plus the distance left to the carrot at `v` and the
+    heading left at `w` (a row past the carrot along the route gains what it went beyond
     it). The reverse gate
     filters, and so does standing still while another row is open, unless the robot is
     already inside the arrival radius. Arrays are per row; `scores` inf is a collision.
@@ -761,28 +761,16 @@ def sees_target(ends_xy, target_xy, free, origin, resolution, band):
     return ~(~free[c[..., 0], c[..., 1]] & on_grid & ~near_target).any(axis=1)
 
 
-def around_obstacles(ends_xy, straight, scores, target_xy, ESDF_map, origin, resolution, band,
-                     sight=None):
-    """Per row, the distance from its end to the target the way the body can go: cells
-    `band` (half the body's width plus the safety margin -- its narrowest) clear of an
-    obstacle are passable, so a passage the body fits by width stays open and turning
-    room is left to the rows' own footprint check.
-
-    A row that sees the target (`sees_target`, or `sight` if the caller has it) keeps
-    `straight`, which is then the way around; a row that does not reads the field, never
-    under `straight`. So no row comes out nearer than it was, and a choice that already
-    sees the target stands -- which is why the caller need only build this for one that
-    does not. A field that reaches no collision-free row leaves every row `straight`: a
-    target walled off on this grid is more often noise or a way round off the grid than
-    a dead end, and this term is not the one that stops the robot."""
-    free = ESDF_map >= band
+def around_obstacles(ends_xy, straight, sight, scores, target_xy, free, origin, resolution):
+    """Per row, the distance from its end to the target through `free` cells -- those the
+    body fits by its narrowest, so turning room is left to the rows' own footprint check.
+    A row in `sight` (`sees_target`) keeps `straight`; one out of it reads the field,
+    never under `straight`. A field that reaches no collision-free row leaves every row
+    `straight`: a target walled off on this grid is more often noise or a way round off
+    it than a dead end."""
     ends_xy = np.asarray(ends_xy, dtype=float)
     straight = np.asarray(straight, dtype=float)
     target = np.asarray(target_xy[:2], dtype=float)
-    if sight is None:
-        sight = sees_target(ends_xy, target, free, origin, resolution, band)
-    if sight[np.isfinite(scores)].all():
-        return straight
     _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
     field = distance_to_target(free, origin, resolution, target, (ni, nj))
     e = np.clip(((ends_xy - np.asarray(origin[:2])) / resolution).astype(int), 0,
@@ -1467,20 +1455,18 @@ class PlanningNode(Node):
 
             # A row's way to the target goes around what is in it, not through it: a
             # target past a corner otherwise draws the rows into the corner's inside.
-            # Only a pick that cannot see the target can change, so only then is the
-            # field built (most frames on 65 it is not).
+            # Rows out of sight only ever get further, so a pick in sight stands and the
+            # field is built only for one that is not.
             _, _, half_w = ROBOT_CONFIG.footprint_from_control()
             band = half_w + ROBOT_CONFIG.safety_radius
+            free = ESDF_map >= band
             ends = trajectories[:, -1, :2]
-            sight = sees_target(ends, target, ESDF_map >= band, self.origin, self.resolution, band)
+            sight = sees_target(ends, target, free, self.origin, self.resolution, band)
             sel = pick(end_goal_dxys)
             if not sight[sel]:
-                end_goal_dxys = around_obstacles(ends, end_goal_dxys, scores, target, ESDF_map,
-                                                 self.origin, self.resolution, band, sight)
+                end_goal_dxys = around_obstacles(ends, end_goal_dxys, sight, scores, target,
+                                                 free, self.origin, self.resolution)
                 sel = pick(end_goal_dxys)
-            top_indices = [sel]
-
-            sel = top_indices[0]
             self.last_param = params[sel]
             self._last_yaw = float(yaws[sel])
             self._turn_heading = float(heading_of_pose7(trajectories[sel][-1])) if is_turn[sel] else None
@@ -1526,7 +1512,7 @@ class PlanningNode(Node):
                 'sel_omega': round(sel_omega, 3),
             })))
 
-            self.publish_selected_path(trajectories, top_indices, depth_msg.header)
+            self.publish_selected_path(trajectories, [sel], depth_msg.header)
 
 
 def main(args=None):

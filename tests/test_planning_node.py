@@ -19,7 +19,7 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between,
-                           route_left_at, around_obstacles)
+                           route_left_at, around_obstacles, sees_target)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -982,33 +982,29 @@ def test_the_route_left_at_a_point_is_from_its_nearest_route_point():
 
 
 def _walled(wall_to_y):
-    """3 m x 3 m at 0.05 m, a wall at x = 1.5 from y = 0 up to `wall_to_y`."""
+    """3 m x 3 m at 0.05 m, a wall at x = 1.5 from y = 0 up to `wall_to_y`: the cells
+    0.25 m clear of it."""
     occ = np.zeros((60, 60), dtype=bool)
     occ[30, :int(wall_to_y / 0.05)] = True
-    return distance_transform_edt(~occ).astype(np.float32) * 0.05
+    return distance_transform_edt(~occ) * 0.05 >= 0.25
+
+
+def _around(free, ends, target):
+    straight = np.linalg.norm(ends - target, axis=1)
+    sight = sees_target(ends, target, free, np.zeros(2), 0.05, 0.25)
+    return straight, sight, around_obstacles(ends, straight, sight, np.zeros(len(ends)), target,
+                                             free, np.zeros(2), 0.05)
 
 
 def test_a_row_behind_a_wall_from_the_target_goes_round_it():
-    esdf, target = _walled(2.0), np.array([2.0, 0.5])
-    ends = np.array([[1.0, 0.5], [1.0, 2.6]])         # behind the wall; past its end
-    straight = np.linalg.norm(ends - target, axis=1)
-    d = around_obstacles(ends, straight, np.zeros(2), target, esdf, np.zeros(2), 0.05, 0.25)
+    ends = np.array([[1.0, 0.5], [2.0, 1.5]])         # behind the wall; on the target's side
+    straight, sight, d = _around(_walled(2.0), ends, np.array([2.0, 0.5]))
+    assert sight.tolist() == [False, True]
     assert d[0] > straight[0] + 2.0                   # up round the wall's end and back
-    assert d[0] > d[1]                                # so the row past the end is nearer
-
-
-def test_a_row_in_sight_of_the_target_keeps_the_straight_distance():
-    esdf, target = _walled(2.0), np.array([1.0, 2.0])
-    ends = np.array([[1.0, 0.5]])
-    straight = np.linalg.norm(ends - target, axis=1)
-    d = around_obstacles(ends, straight, np.zeros(1), target, esdf, np.zeros(2), 0.05, 0.25)
-    assert np.allclose(d, straight)
+    assert d[1] == straight[1]
 
 
 def test_a_target_walled_off_leaves_every_row_its_straight_distance():
-    esdf, target = _walled(3.0), np.array([2.0, 0.5])  # the wall spans the grid
     ends = np.array([[1.0, 0.5], [1.0, 2.6]])
-    straight = np.linalg.norm(ends - target, axis=1)
-    d = around_obstacles(ends, straight, np.zeros(2), target, esdf, np.zeros(2), 0.05, 0.25)
+    straight, _, d = _around(_walled(3.0), ends, np.array([2.0, 0.5]))  # the wall spans the grid
     assert np.allclose(d, straight)
-
