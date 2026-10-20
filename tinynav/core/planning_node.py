@@ -8,6 +8,7 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 """
 
 
+import heapq
 import json
 import rclpy
 from rclpy.node import Node
@@ -17,8 +18,6 @@ from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from cv_bridge import CvBridge
 import numpy as np
 from scipy.ndimage import distance_transform_edt, binary_dilation, maximum_filter
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import dijkstra
 from dataclasses import replace
 from numba import njit
 import rclpy
@@ -712,36 +711,70 @@ def route_left_at(route_xy, xy):
     return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
 
 
-def distance_to_target(free, origin, resolution, target_xy, nearest):
-    """Metres from every cell to `target_xy` through `free` cells, 8-connected; inf where
-    it cannot be reached. A target off the grid is reached through the grid's free edge
-    cells, each seeded with its straight distance to it; a target on a cell that is not
-    free, through the free cell nearest it -- `nearest`, the (rows, cols) index arrays
-    `distance_transform_edt(~free, return_indices=True)` gives."""
+@njit(cache=True)
+def _grid_dijkstra(free, seed_i, seed_j, seed_m, need_i, need_j, resolution):
+    """Metres from the seeds (cells, each at its own starting distance) to each cell
+    through `free` cells, 8-connected. Stops once every `need` cell is settled: only
+    those are exact, the rest may be inf."""
     H, W = free.shape
-    idx = np.arange(H * W).reshape(H, W)
-    flat = free.ravel()
-    rows, cols, wts = [], [], []
-    for dx, dy, step in ((1, 0, 1.0), (0, 1, 1.0), (1, 1, 2 ** 0.5), (1, -1, 2 ** 0.5)):
-        a = idx[max(0, -dx):H - max(0, dx), max(0, -dy):W - max(0, dy)].ravel()
-        b = idx[max(0, dx):H + min(0, dx) or None, max(0, dy):W + min(0, dy) or None].ravel()
-        both = flat[a] & flat[b]
-        rows.append(a[both]); cols.append(b[both]); wts.append(np.full(both.sum(), step * resolution))
+    dist = np.full((H, W), np.inf)
+    want = np.zeros((H, W), dtype=np.bool_)
+    left = 0
+    for k in range(len(need_i)):
+        if not want[need_i[k], need_j[k]]:
+            want[need_i[k], need_j[k]] = True
+            left += 1
+    heap = [(0.0, 0, 0)]
+    heap.pop()
+    for k in range(len(seed_i)):
+        if seed_m[k] < dist[seed_i[k], seed_j[k]]:
+            dist[seed_i[k], seed_j[k]] = seed_m[k]
+            heapq.heappush(heap, (seed_m[k], seed_i[k], seed_j[k]))
+    diag = resolution * 2.0 ** 0.5
+    while len(heap) > 0 and left > 0:
+        d, i, j = heapq.heappop(heap)
+        if d > dist[i, j]:
+            continue
+        if want[i, j]:
+            want[i, j] = False
+            left -= 1
+        for di in range(-1, 2):
+            for dj in range(-1, 2):
+                if di == 0 and dj == 0:
+                    continue
+                a, b = i + di, j + dj
+                if a < 0 or a >= H or b < 0 or b >= W or not free[a, b]:
+                    continue
+                nd = d + (diag if di != 0 and dj != 0 else resolution)
+                if nd < dist[a, b]:
+                    dist[a, b] = nd
+                    heapq.heappush(heap, (nd, a, b))
+    return dist
+
+
+def distance_to_target(free, origin, resolution, target_xy, nearest, need_i, need_j):
+    """Metres from the `need` cells to `target_xy` through `free` cells, 8-connected; inf
+    where it cannot be reached (other cells may be inf too). A target off the grid is
+    reached through the grid's free edge cells, each seeded with its straight distance to
+    it; a target on a cell that is not free, through the free cell nearest it --
+    `nearest`, the (rows, cols) index arrays `distance_transform_edt(~free,
+    return_indices=True)` gives."""
+    H, W = free.shape
     ti, tj = int((target_xy[0] - origin[0]) / resolution), int((target_xy[1] - origin[1]) / resolution)
     if 0 <= ti < H and 0 <= tj < W:
         fi, fj = nearest[0][ti, tj], nearest[1][ti, tj]
-        seeds, seed_m = np.array([idx[fi, fj]]), np.array([np.hypot(fi - ti, fj - tj) * resolution])
+        seeds = np.array([[fi, fj]])
+        seed_m = np.array([np.hypot(fi - ti, fj - tj) * resolution])
     else:
         edge = np.zeros_like(free)
         edge[0, :] = edge[-1, :] = edge[:, 0] = edge[:, -1] = True
-        e = np.argwhere(edge & free)
-        xy = np.asarray(origin[:2]) + (e + 0.5) * resolution
-        seeds, seed_m = idx[e[:, 0], e[:, 1]], np.linalg.norm(xy - np.asarray(target_xy[:2]), axis=1)
-    src = H * W
-    rows.append(np.full(len(seeds), src)); cols.append(seeds); wts.append(seed_m + 1e-6)
-    r, c, w = np.concatenate(rows), np.concatenate(cols), np.concatenate(wts)
-    graph = coo_matrix((w, (r, c)), shape=(src + 1, src + 1)).tocsr()
-    return dijkstra(graph, directed=False, indices=src)[:src].reshape(H, W)
+        seeds = np.argwhere(edge & free)
+        xy = np.asarray(origin[:2]) + (seeds + 0.5) * resolution
+        seed_m = np.linalg.norm(xy - np.asarray(target_xy[:2]), axis=1)
+    return _grid_dijkstra(np.ascontiguousarray(free), seeds[:, 0].astype(np.int64),
+                          seeds[:, 1].astype(np.int64), seed_m.astype(np.float64),
+                          np.asarray(need_i, dtype=np.int64), np.asarray(need_j, dtype=np.int64),
+                          float(resolution))
 
 
 def sees_target(ends_xy, target_xy, free, origin, resolution, band):
@@ -761,24 +794,30 @@ def sees_target(ends_xy, target_xy, free, origin, resolution, band):
     return ~(~free[c[..., 0], c[..., 1]] & on_grid & ~near_target).any(axis=1)
 
 
-def around_obstacles(ends_xy, straight, sight, scores, target_xy, free, origin, resolution):
+def around_obstacles(ends_xy, straight, scores, target_xy, free, origin, resolution, band):
     """Per row, the distance from its end to the target through `free` cells -- those the
-    body fits by its narrowest, so turning room is left to the rows' own footprint check.
-    A row in `sight` (`sees_target`) keeps `straight`; one out of it reads the field,
-    never under `straight`. A field that reaches no collision-free row leaves every row
-    `straight`: a target walled off on this grid is more often noise or a way round off
-    it than a dead end."""
+    body fits by its narrowest (`band` clear of an obstacle), so turning room is left to
+    the rows' own footprint check. A row that sees the target (`sees_target`) keeps
+    `straight`; one that does not reads the field, never under `straight`. The field is
+    built only when a collision-free row is out of sight. A field that reaches no
+    collision-free row leaves every row `straight`: a target walled off on this grid is
+    more often noise or a way round off it than a dead end."""
     ends_xy = np.asarray(ends_xy, dtype=float)
     straight = np.asarray(straight, dtype=float)
     target = np.asarray(target_xy[:2], dtype=float)
+    ok = np.isfinite(scores)
+    sight = sees_target(ends_xy, target, free, origin, resolution, band)
+    blind = ok & ~sight
+    if not blind.any():
+        return straight
     _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
-    field = distance_to_target(free, origin, resolution, target, (ni, nj))
     e = np.clip(((ends_xy - np.asarray(origin[:2])) / resolution).astype(int), 0,
                 np.array(free.shape) - 1)
     fi, fj = ni[e[:, 0], e[:, 1]], nj[e[:, 0], e[:, 1]]
+    field = distance_to_target(free, origin, resolution, target, (ni, nj), fi[blind], fj[blind])
     way = np.maximum(field[fi, fj] + np.hypot(fi - e[:, 0], fj - e[:, 1]) * resolution, straight)
     out = np.where(sight, straight, way)
-    if not np.isfinite(out[np.isfinite(scores)]).any():
+    if not np.isfinite(out[ok]).any():
         return straight
     return np.where(np.isfinite(out), out, 1e3)
 
@@ -1445,28 +1484,18 @@ class PlanningNode(Node):
                             and (not has_route or rem_here <= self.route_terminal_band))
             yaws = np.array([_yaw_rate(t) for t in trajectories])
             v_nom = max(float(v_allow), self._vx_min, 0.1)
-
-            def pick(to_target):
-                return select_by_time(
-                    params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
-                    end_heading_errs, end_goal_errs, to_target, here_arrived, has_route,
-                    should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
-                    carrot_rem, durations, carry, self._last_yaw)
-
             # A row's way to the target goes around what is in it, not through it: a
             # target past a corner otherwise draws the rows into the corner's inside.
-            # Rows out of sight only ever get further, so a pick in sight stands and the
-            # field is built only for one that is not.
             _, _, half_w = ROBOT_CONFIG.footprint_from_control()
             band = half_w + ROBOT_CONFIG.safety_radius
-            free = ESDF_map >= band
-            ends = trajectories[:, -1, :2]
-            sight = sees_target(ends, target, free, self.origin, self.resolution, band)
-            sel = pick(end_goal_dxys)
-            if not sight[sel]:
-                end_goal_dxys = around_obstacles(ends, end_goal_dxys, sight, scores, target,
-                                                 free, self.origin, self.resolution)
-                sel = pick(end_goal_dxys)
+            end_goal_dxys = around_obstacles(trajectories[:, -1, :2], end_goal_dxys, scores,
+                                             target, ESDF_map >= band, self.origin,
+                                             self.resolution, band)
+            sel = select_by_time(
+                params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
+                end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
+                should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
+                carrot_rem, durations, carry, self._last_yaw)
             self.last_param = params[sel]
             self._last_yaw = float(yaws[sel])
             self._turn_heading = float(heading_of_pose7(trajectories[sel][-1])) if is_turn[sel] else None

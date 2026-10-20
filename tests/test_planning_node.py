@@ -992,8 +992,8 @@ def _walled(wall_to_y):
 def _around(free, ends, target):
     straight = np.linalg.norm(ends - target, axis=1)
     sight = sees_target(ends, target, free, np.zeros(2), 0.05, 0.25)
-    return straight, sight, around_obstacles(ends, straight, sight, np.zeros(len(ends)), target,
-                                             free, np.zeros(2), 0.05)
+    return straight, sight, around_obstacles(ends, straight, np.zeros(len(ends)), target,
+                                             free, np.zeros(2), 0.05, 0.25)
 
 
 def test_a_row_behind_a_wall_from_the_target_goes_round_it():
