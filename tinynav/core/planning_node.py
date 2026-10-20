@@ -751,6 +751,37 @@ def _grid_dijkstra(free, seed_i, seed_j, seed_m, need_i, need_j, resolution):
     return dist
 
 
+@njit(cache=True)
+def _first_leg(dist, free, i, j, resolution):
+    """The farthest cell down `dist`'s steepest descent from (i, j) that (i, j) still
+    sees in a straight line over `free` cells: where the way round first turns. (i, j)
+    itself when it is where the descent ends."""
+    H, W = free.shape
+    diag = resolution * 2.0 ** 0.5
+    li, lj = i, j
+    ci, cj = i, j
+    while True:
+        bi, bj, best = -1, -1, dist[ci, cj]
+        for di in range(-1, 2):
+            for dj in range(-1, 2):
+                a, b = ci + di, cj + dj
+                if (di == 0 and dj == 0) or a < 0 or a >= H or b < 0 or b >= W:
+                    continue
+                nd = dist[a, b] + (diag if di != 0 and dj != 0 else resolution)
+                if dist[a, b] < dist[ci, cj] and nd <= best + 1e-9:
+                    bi, bj, best = a, b, nd
+        if bi < 0:
+            return li, lj
+        ci, cj = bi, bj
+        n = 2 * max(abs(ci - i), abs(cj - j))
+        for k in range(1, n):
+            a = int(i + 0.5 + (ci - i) * k / n)
+            b = int(j + 0.5 + (cj - j) * k / n)
+            if not free[a, b]:
+                return li, lj
+        li, lj = ci, cj
+
+
 def distance_to_target(free, origin, resolution, target_xy, nearest, need_i, need_j):
     """A grid of metres to `target_xy` through `free` cells, 8-connected, exact at the
     `need` cells (inf where they cannot reach it; other cells may be inf). A target off the grid is
@@ -793,11 +824,14 @@ def sees_target(ends_xy, target_xy, free, origin, resolution, band):
     return ~(~free[c[..., 0], c[..., 1]] & on_grid & ~near_target).any(axis=1)
 
 
-def around_obstacles(ends_xy, straight, scores, target_xy, free, origin, resolution, band):
+def around_obstacles(ends_xy, end_headings, straight, bearing_err, scores, target_xy, free,
+                     origin, resolution, band):
     """Per row, the distance from its end to the target through `free` cells -- those the
     body fits by its narrowest (`band` clear of an obstacle), so turning room is left to
-    the rows' own footprint check. A row that sees the target (`sees_target`) keeps
-    `straight`; one that does not reads the field, never under `straight`. The field is
+    the rows' own footprint check -- and the heading error to the way there. A row that
+    sees the target (`sees_target`) keeps `straight` and `bearing_err`; one that does not
+    reads the field, never under `straight`, and is measured against the bearing to where
+    that way first turns (`_first_leg`). The field is
     built only when a collision-free row is out of sight. A field that reaches no
     collision-free row leaves every row `straight`: a target walled off on this grid is
     more often noise or a way round off it than a dead end; otherwise a row the field
@@ -809,7 +843,7 @@ def around_obstacles(ends_xy, straight, scores, target_xy, free, origin, resolut
     sight = sees_target(ends_xy, target, free, origin, resolution, band)
     blind = ok & ~sight
     if not blind.any():
-        return straight
+        return straight, bearing_err
     _, (ni, nj) = distance_transform_edt(~free, return_indices=True)
     e = np.clip(((ends_xy - np.asarray(origin[:2])) / resolution).astype(int), 0,
                 np.array(free.shape) - 1)
@@ -820,8 +854,15 @@ def around_obstacles(ends_xy, straight, scores, target_xy, free, origin, resolut
                             + np.hypot(fi - e[:, 0], fj - e[:, 1])[blind] * resolution,
                             straight[blind])
     if not np.isfinite(out[ok]).any():
-        return straight
-    return np.where(np.isfinite(out), out, 1e3)
+        return straight, bearing_err
+    err = np.array(bearing_err, dtype=float)
+    org = np.asarray(origin[:2], dtype=float)
+    for k in np.flatnonzero(blind & np.isfinite(out)):
+        li, lj = _first_leg(field, free, fi[k], fj[k], resolution)
+        if (li, lj) != (fi[k], fj[k]):
+            to = org + (np.array([li, lj]) + 0.5) * resolution - ends_xy[k]
+            err[k] = angle_between(np.arctan2(to[1], to[0]), end_headings[k])
+    return np.where(np.isfinite(out), out, 1e3), err
 
 
 def build_route_fields(route_xy, shape, origin, resolution):
@@ -1486,13 +1527,14 @@ class PlanningNode(Node):
                             and (not has_route or rem_here <= self.route_terminal_band))
             yaws = np.array([_yaw_rate(t) for t in trajectories])
             v_nom = max(float(v_allow), self._vx_min, 0.1)
-            # A row's way to the target goes around what is in it, not through it: a
-            # target past a corner otherwise draws the rows into the corner's inside.
+            # A row's way to the target, and the heading it is judged by, go around what
+            # is in it: a target past a corner otherwise draws the rows into its inside.
             _, _, half_w = ROBOT_CONFIG.footprint_from_control()
             band = half_w + ROBOT_CONFIG.safety_radius
-            end_goal_dxys = around_obstacles(trajectories[:, -1, :2], end_goal_dxys, scores,
-                                             target, ESDF_map >= band, self.origin,
-                                             self.resolution, band)
+            end_goal_dxys, end_goal_errs = around_obstacles(
+                trajectories[:, -1, :2], [heading_of_pose7(t[-1]) for t in trajectories],
+                end_goal_dxys, end_goal_errs, scores, target, ESDF_map >= band, self.origin,
+                self.resolution, band)
             sel = select_by_time(
                 params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,

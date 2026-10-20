@@ -990,19 +990,24 @@ def _walled(wall_to_y):
 
 
 def _around(free, ends, target):
-    straight = np.linalg.norm(ends - target, axis=1)
-    return straight, around_obstacles(ends, straight, np.zeros(len(ends)), target,
-                                             free, np.zeros(2), 0.05, 0.25)
+    """Every row facing +x: (straight, its bearing error, the distance and error back)."""
+    to = target - ends
+    straight = np.linalg.norm(to, axis=1)
+    err = np.abs(np.arctan2(to[:, 1], to[:, 0]))
+    return (straight, err) + around_obstacles(ends, np.zeros(len(ends)), straight, err,
+                                              np.zeros(len(ends)), target, free, np.zeros(2),
+                                              0.05, 0.25)
 
 
 def test_a_row_behind_a_wall_from_the_target_goes_round_it():
     ends = np.array([[1.0, 0.5], [2.0, 1.5]])         # behind the wall; on the target's side
-    straight, d = _around(_walled(2.0), ends, np.array([2.0, 0.5]))
+    straight, err, d, e = _around(_walled(2.0), ends, np.array([2.0, 0.5]))
     assert d[0] > straight[0] + 2.0                   # up round the wall's end and back
-    assert d[1] == straight[1]
+    assert err[0] == 0.0 and e[0] > 1.0               # faces the wall, not the way round
+    assert d[1] == straight[1] and e[1] == err[1]
 
 
 def test_a_target_walled_off_leaves_every_row_its_straight_distance():
     ends = np.array([[1.0, 0.5], [1.0, 2.6]])
-    straight, d = _around(_walled(3.0), ends, np.array([2.0, 0.5]))  # the wall spans the grid
-    assert np.allclose(d, straight)
+    straight, err, d, e = _around(_walled(3.0), ends, np.array([2.0, 0.5]))  # the wall spans the grid
+    assert np.allclose(d, straight) and np.allclose(e, err)
