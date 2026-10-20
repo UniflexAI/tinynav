@@ -238,7 +238,7 @@ CLIMB_PRIOR_DEFAULT = True
 
 
 def select_fusion_constraints(constraints):
-    return constraints[-20:]
+    return constraints[-3:]
 
 
 class MapNode(Node):
@@ -740,7 +740,7 @@ class MapNode(Node):
 
         Each constraint is one observation's implied map->odom, `camera_in_odom @
         inv(camera_in_map)` -- true at the moment that observation was taken, and only
-        still true while odom has not drifted since. The solve keeps the newest 100.
+        still true while odom has not drifted since. The solve keeps the newest 3.
         """
         relative_pose_constraint = []
         optimized_parameters = {
