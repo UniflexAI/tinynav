@@ -106,6 +106,16 @@ def test_lookahead_rides_the_gained_speed():
                    - _NO_CAP_SPEED_MPS * _LOOKAHEAD_S) < 1e-6
 
 
+
+def test_the_target_stops_at_a_corner():
+    from tinynav.core.map_node import local_target_index
+
+    straight = np.c_[np.arange(0.0, 8.0, 0.1), np.zeros(80), np.zeros(80)]
+    assert abs(straight[local_target_index(straight, 0, 4.0)][0] - 4.0) < 0.11
+    corner = np.r_[straight[:41], np.c_[np.full(40, 4.0), np.arange(0.1, 4.05, 0.1), np.zeros(40)]]
+    target = corner[local_target_index(corner, 0, 5.0)]
+    assert target[1] < 0.05 and 3.0 < target[0] <= 4.0
+
 if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
