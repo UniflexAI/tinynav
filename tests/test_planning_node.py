@@ -19,7 +19,7 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between,
-                           route_left_at, around_obstacles, route_blocked_ahead)
+                           route_left_at, around_obstacles, route_blocked_ahead, keep_on_route)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -1044,3 +1044,11 @@ def test_an_obstacle_beside_behind_or_past_the_carrot_does_not():
 def test_an_obstacle_further_than_the_horizon_is_not_judged_yet():
     assert _blocked_with_box_at(2.0, 2.5, ahead_m=1.5)    # 1 m ahead of the robot
     assert not _blocked_with_box_at(2.0, 2.5, ahead_m=0.5)
+
+
+def test_short_of_the_horizon_only_rows_that_keep_to_the_route_stay_open():
+    # standstill, along the route, swerving off it, and one already off when the robot is
+    scores, costs = np.zeros(4), np.array([0.05, 0.10, 0.60, 0.30])
+    assert np.isfinite(keep_on_route(scores, costs, dev_here=0.05, half_w=0.15)).tolist() == \
+        [True, True, False, False]
+    assert np.isfinite(keep_on_route(scores, costs, dev_here=0.30, half_w=0.15))[3]
