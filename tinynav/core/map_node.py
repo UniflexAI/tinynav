@@ -187,8 +187,8 @@ _ARRIVE_M = ROBOT_CONFIG.arrival_radius
 _ARRIVE_TICKS = int(os.environ.get('TINYNAV_ARRIVE_TICKS', '1'))
 
 # The target pose is a carrot at a TIME horizon, so how far along the path it sits rides
-# the speed actually driven: the capture-speed prior this node publishes, times the same
-# gain planning applies to it.
+# the speed actually driven: the capture-speed prior times the gain, which is what this
+# node publishes on /planning/speed_cap.
 _LOOKAHEAD_S = 5.0
 # No prior (off-path, or a map with no path_speed.npy): planning falls back to vx_max for
 # the speed, so the carrot falls back to the same number.
@@ -206,14 +206,17 @@ _STOP_LOOKAHEAD_S = 1.5
 # The global route is a few thousand poses built in Python, and the nav timer ticks at
 # 10 Hz: sent every tick it was the timer's largest cost. It changes only on a replan.
 _PLAN_RESEND_S = 1.0
+# A /planning/speed_gain silent this long gives way to CAPTURE_SPEED_GAIN; the sender
+# repeats it at 1 Hz, as it does strict follow.
+_SPEED_GAIN_TTL_S = 3.0
 
 
 def _driven_speed(speed_cap_mps: float, gain: float) -> float:
-    """The speed a lookahead rides. `speed_cap_mps` is what /planning/speed_cap carries:
+    """The speed a lookahead rides. `speed_cap_mps` is the raw capture-speed prior:
     +inf (or NaN) means off-path or no prior, the same sentinel planning treats as "no
-    data". `gain` mirrors planning's capture_speed_gain: a horizon is a TIME, so it has
-    to ride the speed actually driven, not the raw prior. It is applied on the prior
-    branch only -- the no-prior fallback is planning's ungained vx_max."""
+    data". `gain` is the one published on /planning/speed_cap with it: a horizon is a
+    TIME, so it has to ride the speed actually driven, not the raw prior. It is applied
+    on the prior branch only -- the no-prior fallback is planning's ungained vx_max."""
     return speed_cap_mps * gain if np.isfinite(speed_cap_mps) else _NO_CAP_SPEED_MPS
 
 
@@ -286,6 +289,9 @@ class MapNode(Node):
         # Capture-speed prior: the operator's local speed (path_speed.npy) at the
         # robot's pose-in-map. planning_node caps peak forward speed by it.
         self.speed_cap_pub = self.create_publisher(Float32, "/planning/speed_cap", 10)
+        self._speed_gain = None
+        self._speed_gain_ns = None
+        self.create_subscription(Float32, '/planning/speed_gain', self._on_speed_gain, 10)
         # Climb prior: the capture samples labelled climbing, as geometry planning_node
         # applies per cell, plus the collapsed "am I on it" flag for the app.
         self.climb_region_pub = self.create_publisher(PointCloud, CLIMB_REGION_TOPIC, 10)
@@ -463,6 +469,19 @@ class MapNode(Node):
                           for p in pts_in_odom]
         self.climb_region_pub.publish(msg)
         self.on_stairs_pub.publish(Bool(data=bool(on_stairs)))
+
+    def _on_speed_gain(self, msg):
+        self._speed_gain = float(msg.data)
+        self._speed_gain_ns = self.get_clock().now().nanoseconds
+
+    def speed_gain(self) -> float:
+        """The gain on /planning/speed_gain while it is fresh and positive, else the
+        rig's CAPTURE_SPEED_GAIN."""
+        g, at = self._speed_gain, self._speed_gain_ns
+        if (g is not None and np.isfinite(g) and g > 0.0
+                and self.get_clock().now().nanoseconds - at <= _SPEED_GAIN_TTL_S * 1e9):
+            return g
+        return CAPTURE_SPEED_GAIN
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)
@@ -874,11 +893,12 @@ class MapNode(Node):
 
         pose_in_map = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         self.current_pose_in_map_pub.publish(np2msg(pose_in_map, self.get_clock().now().to_msg(), "world", "map"))
-        # Capture speed (m/s) near the robot; +inf when off-path/unknown (speed_cap's
-        # own "no cap" sentinel) -> planning's isfinite guard treats it as no data and
-        # falls back to vx_max, so publish it straight through.
+        # Capture speed (m/s) near the robot, times the gain; +inf when off-path/unknown
+        # (speed_cap's own "no cap" sentinel) -> planning's isfinite guard treats it as
+        # no data and falls back to vx_max, so it goes out ungained.
         cap = self.speed_index.speed_cap(pose_in_map[:3, 3]) if self.speed_index else float('inf')
-        self.speed_cap_pub.publish(Float32(data=float(cap)))
+        gain = self.speed_gain()
+        self.speed_cap_pub.publish(Float32(data=float(cap * gain)))
 
         poi = self.pois[self.poi_index]
         pos = pose_in_map[:3, 3]
@@ -941,9 +961,9 @@ class MapNode(Node):
                                   round(estimated_remaining_s, 1), False)
 
         target_position = self.select_target_position(paths, closest_idx, pos,
-                                                      lookahead_distance_m(cap))
+                                                      lookahead_distance_m(cap, gain))
         stop_position = self.select_target_position(paths, closest_idx, pos,
-                                                    stop_distance_m(cap))
+                                                    stop_distance_m(cap, gain))
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
         stamp = self.get_clock().now().to_msg()

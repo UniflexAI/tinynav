@@ -32,7 +32,6 @@ from cv_bridge import CvBridge
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
 from tinynav.core.robot_specs import ROBOT_CONFIG, ObstacleConfig
-from tinynav.core.path_speed import CAPTURE_SPEED_GAIN
 
 # === Helper functions ===
 @njit(cache=True)
@@ -1115,13 +1114,11 @@ class PlanningNode(Node):
                                  self.climb_region_callback, 10)
 
         # Capture-speed prior from map_node's /planning/speed_cap: the operator's
-        # local speed (m/s) near the robot. It IS the open-space target speed (scaled
-        # by capture_speed_gain), clamped to [vx_min, vx_hard_max] -- so it may raise
-        # the target above vx_max where the operator went fast, never past the hardware
-        # ceiling. NaN (off-path / unknown) or a stale stream -> fall back to vx_max.
-        # The gain is shared with map_node's carrot horizon -- see path_speed.
-        self.declare_parameter('capture_speed_gain', CAPTURE_SPEED_GAIN)
-        self._capture_speed_gain = float(self.get_parameter('capture_speed_gain').value)
+        # local speed (m/s) near the robot, already times the capture-speed gain (see
+        # path_speed). It IS the open-space target speed, clamped to [vx_min,
+        # vx_hard_max] -- so it may raise the target above vx_max where the operator
+        # went fast, never past the hardware ceiling. NaN (off-path / unknown) or a
+        # stale stream -> fall back to vx_max.
         self.declare_parameter('speed_cap_ttl_s', 2.0)
         self._speed_cap_ttl_ns = int(float(self.get_parameter('speed_cap_ttl_s').value) * 1e9)
         self._speed_cap = None
@@ -1187,15 +1184,15 @@ class PlanningNode(Node):
         self._strict_follow_stamp_ns = self.get_clock().now().nanoseconds
 
     def _open_target_speed(self):
-        """Open-space target forward speed: the capture-speed prior (scaled by
-        capture_speed_gain) when a fresh, finite value is available, else vx_max
+        """Open-space target forward speed: the gained capture-speed prior when a
+        fresh, finite value is available, else vx_max
         (the no-capture fallback). Clamped to [vx_min, vx_hard_max] -- the prior may
         raise the target above vx_max but never past the hardware ceiling."""
         # _signal_fresh short-circuits on a never-received (None) stamp, so a fresh
         # stamp implies _speed_cap was set -> the isfinite guard is safe.
         if (self._signal_fresh(self._speed_cap_stamp_ns, self._speed_cap_ttl_ns)
                 and np.isfinite(self._speed_cap)):
-            return float(np.clip(self._speed_cap * self._capture_speed_gain,
+            return float(np.clip(self._speed_cap,
                                  self._vx_min, self._vx_hard_max))
         return self._vx_max
 

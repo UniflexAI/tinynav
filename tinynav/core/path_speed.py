@@ -21,10 +21,11 @@ import numpy as np
 from tinynav.core.path_prior import (
     poses_to_positions, horizontal_arclength, is_stale, PathSampleIndex)
 
-# How much faster than the operator to replay. Multiplies the prior for BOTH of its
-# consumers -- planning's open-space target and map_node's carrot horizon -- so they
-# stay one speed. Set from the environment because pilot spawns both nodes with no
-# `--ros-args`.
+# How much faster than the operator to replay: map_node multiplies the prior by it
+# before publishing /planning/speed_cap, so planning's open-space target and the carrot
+# horizon stay one speed. This is the rig's default; a gain on /planning/speed_gain
+# (tinynav-pilot sends the map's own) overrides it while fresh. From the environment
+# because pilot spawns the nodes with no `--ros-args`.
 CAPTURE_SPEED_GAIN = float(os.environ.get('TINYNAV_CAPTURE_SPEED_GAIN', '1.0'))
 
 # Defaults (tunable).
