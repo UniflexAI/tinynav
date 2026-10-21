@@ -199,9 +199,10 @@ _NO_CAP_SPEED_MPS = 0.6
 _LOOKAHEAD_MIN_M = 1.0
 _LOOKAHEAD_MAX_M = 5.0
 # The stop pose: the near end of the stretch strict follow checks for an obstacle on the
-# route (planning_node's route_blocked_ahead), at the same speed as the carrot. The
-# operator's number.
-_STOP_LOOKAHEAD_S = 1.0
+# route (planning_node's route_blocked_ahead), at the same speed as the carrot. Half a
+# second past one second of travel: the robot is still moving that long after the
+# planner publishes the standstill row. The operator's number.
+_STOP_LOOKAHEAD_S = 1.5
 # The global route is a few thousand poses built in Python, and the nav timer ticks at
 # 10 Hz: sent every tick it was the timer's largest cost. It changes only on a replan.
 _PLAN_RESEND_S = 1.0
