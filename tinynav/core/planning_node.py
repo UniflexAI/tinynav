@@ -1504,6 +1504,25 @@ class PlanningNode(Node):
             )
             target = self.target_pose
             carrot_rem = route_left_at(route_xy, target[:2]) if has_route else 0.0
+            xi, yi = ((init_p[:2] - self.origin[:2]) / self.resolution).astype(int)
+            rem_here = (remaining_map[xi, yi] if 0 <= xi < remaining_map.shape[0]
+                        and 0 <= yi < remaining_map.shape[1] else 1e3)
+            _, _, half_w = ROBOT_CONFIG.footprint_from_control()
+            # Strict follow: an obstacle on the route as far as the carrot aims DWA at
+            # map_node's stop pose instead, so it does not start round it early; one as far
+            # as the stop pose stands the robot. Off when either stream is stale.
+            strict = (self._strict_follow and has_route
+                      and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
+                      and self._signal_fresh(self._stop_stamp_ns, self._strict_follow_ttl_ns))
+            aim_stop = strict and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
+                                                      rem_here, carrot_rem, half_w)
+            route_blocked = False
+            if aim_stop:
+                stop_rem = route_left_at(route_xy, self._stop_xy)
+                route_blocked = route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
+                                                    rem_here, stop_rem, half_w)
+                target = np.array([self._stop_xy[0], self._stop_xy[1], target[2]])
+                carrot_rem = stop_rem
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
@@ -1559,25 +1578,10 @@ class PlanningNode(Node):
 
             # map_node's arrival circles, from the camera pose; the route at the
             # control centre is where scoring reads it.
-            xi, yi = ((init_p[:2] - self.origin[:2]) / self.resolution).astype(int)
-            rem_here = (remaining_map[xi, yi] if 0 <= xi < remaining_map.shape[0]
-                        and 0 <= yi < remaining_map.shape[1] else 1e3)
             here_arrived = (ROBOT_CONFIG.arrival_distance(T, target) < ARRIVE_M
                             and (not has_route or rem_here <= self.route_terminal_band))
             yaws = np.array([_yaw_rate(t) for t in trajectories])
             v_nom = max(float(v_allow), self._vx_min, 0.1)
-            _, _, half_w = ROBOT_CONFIG.footprint_from_control()
-            # Strict follow: an obstacle on the route as far as map_node's stop pose
-            # stands the robot; anything further is DWA's, which drives to the carrot as
-            # ever. Off when either stream is stale. The standstill row is published
-            # rather than nothing, so cmd_vel_control stops at once instead of waiting
-            # out a stale path.
-            route_blocked = (
-                self._strict_follow and has_route
-                and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
-                and self._signal_fresh(self._stop_stamp_ns, self._strict_follow_ttl_ns)
-                and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here,
-                                        route_left_at(route_xy, self._stop_xy), half_w))
             # A row's way to the target, and the heading it is judged by, go around what
             # is in it: a target past a corner otherwise draws the rows into its inside.
             band = half_w + ROBOT_CONFIG.safety_radius
@@ -1585,6 +1589,8 @@ class PlanningNode(Node):
                 trajectories[:, -1, :2], [heading_of_pose7(t[-1]) for t in trajectories],
                 end_goal_dxys, end_goal_errs, scores, target, ESDF_map >= band, self.origin,
                 self.resolution, band)
+            # A blocked route publishes the standstill row rather than nothing, so
+            # cmd_vel_control stops at once instead of waiting out a stale path.
             sel = select_by_time(
                 params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
@@ -1602,7 +1608,7 @@ class PlanningNode(Node):
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[sel][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} route_blocked={route_blocked} '
+                f'should_reverse={should_reverse} aim_stop={aim_stop} route_blocked={route_blocked} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
             )
 
@@ -1633,6 +1639,7 @@ class PlanningNode(Node):
                 'n_traj': int(len(trajectories)),
                 'sel_vx': round(sel_vx, 3),
                 'sel_omega': round(sel_omega, 3),
+                'aim_stop': bool(aim_stop),
                 'route_blocked': bool(route_blocked),
             })))
 
