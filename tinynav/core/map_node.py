@@ -280,10 +280,6 @@ class MapNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         self._save_completed = False
-        self._nav_paused = False
-        from rclpy.qos import QoSProfile, DurabilityPolicy
-        self.create_subscription(Bool, '/nav/paused', self.nav_pause_callback,
-                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.nav_target_timer = self.create_timer(0.5, self.nav_target_timer_callback)
 
     def load_map(self, tinynav_map_path: str) -> None:
@@ -680,17 +676,7 @@ class MapNode(Node):
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
         return percent, estimated_remaining_s
 
-    def nav_pause_callback(self, msg):
-        self._nav_paused = msg.data
-        self.cached_nav_path_in_map = None
-        self.cached_nav_path_poi_index = -1
-        self._leg_start_time = None
-        self._leg_initial_length = None
-        self._speed_estimate = None
-
     def nav_target_timer_callback(self):
-        if self._nav_paused:
-            return
         if (
             self.poi_index < 0
             or self.poi_index >= len(self.pois)

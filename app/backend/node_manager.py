@@ -5,7 +5,6 @@ mapping progress, plus a NodeRunner that spins it in a background thread.
 from __future__ import annotations
 
 import json
-from functools import wraps
 import math
 import os
 import re
@@ -123,24 +122,13 @@ def _jet_bgr_to_scalar(arr_bgr: np.ndarray) -> np.ndarray:
     return lut[inv].reshape(arr_bgr.shape[:2])
 
 
-def _serialized_command(method):
-    @wraps(method)
-    def command(self, *args, **kwargs):
-        with self._lock:
-            allowed = {'cmd_manual_enter', 'cmd_manual_exit', 'cmd_nav_cancel', 'cmd_action'}
-            if self._manual_intervention and method.__name__ not in allowed:
-                raise ValueError('Exit manual intervention first')
-            return method(self, *args, **kwargs)
-    return command
-
-
 class BackendNode(Ros2NodeManager):
     """Ros2NodeManager + subscriptions needed by the HTTP/WS layer."""
 
     def __init__(self, tinynav_db_path: str = '/tinynav/tinynav_db'):
         super().__init__(tinynav_db_path=tinynav_db_path)
 
-        self._lock = threading.RLock()
+        self._lock = threading.Lock()
         self.mapping_percent: float = 0.0
         self.current_pose: dict | None = None   # latest pose from SLAM or map
 
@@ -208,7 +196,8 @@ class BackendNode(Ros2NodeManager):
         self._manual_intervention = False
         self._manual_velocity = (0.0, 0.0, 0.0)
         self._manual_received = 0.0
-        self._manual_had_controller = False
+        self._manual_pub = self.create_publisher(Bool, '/nav/manual_control', _latched_qos)
+        self._manual_pub.publish(Bool(data=False))
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -256,18 +245,6 @@ class BackendNode(Ros2NodeManager):
     # ROS callbacks                                                        #
     # ------------------------------------------------------------------ #
 
-    def _cmd_cb(self, msg):
-        with self._lock:
-            if self._manual_intervention:
-                return
-            if msg.data.strip() == 'navigation':
-                if self._nav_active:
-                    self.cmd_nav_cancel()
-                elif not self._nav_nodes_running:
-                    self.cmd_start_nav_nodes()
-                return
-            super()._cmd_cb(msg)
-
     def _on_battery(self, msg: Float32):
         with self._lock:
             self._battery = float(msg.data)
@@ -278,18 +255,15 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub.publish(Bool(data=bool(active)))
 
     def _on_nav_done(self, msg: Bool):
-        with self._lock:
-            if msg.data and self.state == 'navigation' and not self._nav_paused:
-                self._set_nav_active(False)
-                self.state = 'idle'
-                self._pub_state()
+        if msg.data and self.state == 'navigation':
+            self._set_nav_active(False)
+            self.state = 'idle'
+            self._pub_state()
 
     def _on_nav_progress(self, msg: String):
         try:
             data = json.loads(msg.data)
             with self._lock:
-                if self._nav_paused:
-                    return
                 self._nav_progress = data
             for cb in self.nav_progress_callbacks:
                 cb(data)
@@ -499,7 +473,7 @@ class BackendNode(Ros2NodeManager):
             result = subprocess.run(
                 ['ros2', 'node', 'list'], capture_output=True, text=True, timeout=3
             )
-            if os.environ.get('TINYNAV_SENSOR_MODE') == 'looper' or '/insight_full' in result.stdout.splitlines():
+            if '/insight_full' in result.stdout.splitlines():
                 self._sensor_mode = 'looper'
                 self.get_logger().info('Sensor mode: looper — launching looper bridge + planning')
             else:
@@ -662,13 +636,11 @@ class BackendNode(Ros2NodeManager):
         return snapshot
 
     def _start_unitree_if_configured(self):
-        if os.environ.get("TINYNAV_DISABLE_CHASSIS") == "1":
-            return
         _env = os.environ.copy()
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         self._unitree_proc = self._launch_proc(
             'unitree',
-            [sys.executable, '/tinynav/tinynav/platforms/unitree_control.py'],
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/unitree_control.py'],
             env=_env,
         )
         self.get_logger().info('unitree_control started')
@@ -746,20 +718,15 @@ class BackendNode(Ros2NodeManager):
     # ------------------------------------------------------------------ #
 
     def _kill_proc(self, proc: subprocess.Popen | None):
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            os.killpg(proc.pid, 15)
-        except ProcessLookupError:
-            return
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
+        if proc and proc.poll() is None:
             try:
-                os.killpg(proc.pid, 9)
-            except ProcessLookupError:
-                pass
-            proc.wait(timeout=2)
+                os.killpg(os.getpgid(proc.pid), 15)
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
     def _make_log(self, name: str):
         """Open a timestamped log file under tinynav_db/logs/. Safe to close in parent
@@ -793,12 +760,12 @@ class BackendNode(Ros2NodeManager):
         if self._sensor_mode == 'looper':
             self._looper_bridge_proc = self._launch_proc(
                 'looper_bridge',
-                [sys.executable, '/tinynav/tool/looper_bridge_node.py'],
+                ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py'],
                 env=env,
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                [sys.executable, '/tinynav/tinynav/core/planning_node.py'],
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
                 env=env,
             )
         elif self._sensor_mode == 'realsense':
@@ -808,12 +775,12 @@ class BackendNode(Ros2NodeManager):
             )
             self._perception_proc = self._launch_proc(
                 'perception',
-                [sys.executable, '/tinynav/tinynav/core/perception_node.py'],
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py'],
                 env=env,
             )
             self._planning_proc = self._launch_proc(
                 'planning',
-                [sys.executable, '/tinynav/tinynav/core/planning_node.py'],
+                ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
                 env=env,
             )
 
@@ -827,7 +794,6 @@ class BackendNode(Ros2NodeManager):
     # Nav nodes toggle                                                     #
     # ------------------------------------------------------------------ #
 
-    @_serialized_command
     def cmd_start_nav_nodes(self):
         self._set_nav_active(False)
         _env = os.environ.copy()
@@ -835,21 +801,20 @@ class BackendNode(Ros2NodeManager):
         self._map_node_proc = self._launch_proc(
             'map_node',
             [
-                sys.executable, '/tinynav/tinynav/core/map_node.py',
+                'uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
                 '--tinynav_map_path', self.map_path,
             ],
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            [sys.executable, '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
             env=_env,
         )
         with self._lock:
             self._nav_nodes_running = True
         self.get_logger().info('Nav nodes started')
 
-    @_serialized_command
     def cmd_stop_nav_nodes(self):
         self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
@@ -865,7 +830,6 @@ class BackendNode(Ros2NodeManager):
             self._nav_paused = False
         self.get_logger().info('Nav nodes stopped')
 
-    @_serialized_command
     def cmd_restart_nav_nodes(self):
         self._set_nav_active(False)
         self._kill_proc(self._map_node_proc)
@@ -880,18 +844,18 @@ class BackendNode(Ros2NodeManager):
 
         self._planning_proc = self._launch_proc(
             'planning',
-            [sys.executable, '/tinynav/tinynav/core/planning_node.py'],
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/planning_node.py'],
             env=_env,
         )
         self._map_node_proc = self._launch_proc(
             'map_node',
-            [sys.executable, '/tinynav/tinynav/core/map_node.py',
+            ['uv', 'run', 'python', '/tinynav/tinynav/core/map_node.py',
              '--tinynav_map_path', self.map_path],
             env=_env,
         )
         self._cmd_vel_proc = self._launch_proc(
             'cmd_vel_control',
-            [sys.executable, '/tinynav/tinynav/platforms/cmd_vel_control.py'],
+            ['uv', 'run', 'python', '/tinynav/tinynav/platforms/cmd_vel_control.py'],
             env=_env,
         )
         with self._lock:
@@ -904,14 +868,12 @@ class BackendNode(Ros2NodeManager):
         self._pub_state()
         self.get_logger().info('Nav nodes restarted (emergency stop)')
 
-    @_serialized_command
     def cmd_bag_start(self):
         if self._sensor_mode == 'looper':
             self._stop_sensor_procs()
         self._stop_all()
         self._start('realsense_bag_record')
 
-    @_serialized_command
     def cmd_bag_stop(self):
         if self.state == 'realsense_bag_record':
             bag_path = self.bag_path
@@ -979,10 +941,10 @@ class BackendNode(Ros2NodeManager):
         _env['PYTHONPATH'] = _VENV_SITE + ':' + _env.get('PYTHONPATH', '')
         if self._sensor_mode == 'looper':
             source_name = 'looper_bridge'
-            source_cmd = [sys.executable, '/tinynav/tool/looper_bridge_node.py']
+            source_cmd = ['uv', 'run', 'python', '/tinynav/tool/looper_bridge_node.py']
         else:
             source_name = 'perception'
-            source_cmd = [sys.executable, '/tinynav/tinynav/core/perception_node.py']
+            source_cmd = ['uv', 'run', 'python', '/tinynav/tinynav/core/perception_node.py']
 
         self.processes[source_name] = self._launch_proc(
             source_name,
@@ -992,7 +954,7 @@ class BackendNode(Ros2NodeManager):
         self.processes['build_map'] = self._launch_proc_tee(
             'build_map_node',
             [
-                sys.executable, '/tinynav/tinynav/core/build_map_node.py',
+                'uv', 'run', 'python', '/tinynav/tinynav/core/build_map_node.py',
                 '--map_save_path', self.map_path,
                 '--bag_file', bag_file,
             ],
@@ -1073,7 +1035,6 @@ class BackendNode(Ros2NodeManager):
         self._restart_sensor_procs()
 
 
-    @_serialized_command
     def cmd_map_build(self):
         self._stop_sensor_procs()
         self._stop_all()
@@ -1101,7 +1062,6 @@ class BackendNode(Ros2NodeManager):
         self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
         return True
 
-    @_serialized_command
     def cmd_manual_target_pose(self, x: float, y: float, z: float):
         """Publish a manually selected local-planner target pose.
 
@@ -1119,11 +1079,8 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             self._nav_target_pose = {'x': float(x), 'y': float(y)}
 
-    @_serialized_command
     def cmd_send_pois(self, poi_ids: list[int]):
         """Publish selected POIs to map_node and transition to navigation state."""
-        if not self._nav_nodes_running:
-            raise ValueError('Enable navigation first')
         if not poi_ids:
             self._cmd_pois_pub.publish(String(data='{}'))
             self._set_nav_active(False)
@@ -1144,21 +1101,30 @@ class BackendNode(Ros2NodeManager):
                     payload[str(len(payload))] = all_pois[key]
             self._cmd_pois_pub.publish(String(data=json.dumps(payload)))
             self._set_nav_active(bool(payload))
-        self.state = 'navigation'
-        self._pub_state()
+        with self._lock:
+            nav_running = self._nav_nodes_running
+        if nav_running:
+            self.state = 'navigation'
+            self._pub_state()
+        else:
+            self._stop_all()
+            self._start('navigation')
 
-    @_serialized_command
     def cmd_nav_start(self, poi_id: str | None = None):
-        if not self._nav_nodes_running:
-            raise ValueError('Enable navigation first')
         if poi_id is not None:
             self._set_nav_active(self._publish_cmd_pois(int(poi_id)))
         else:
             self._set_nav_active(False)
-        self.state = 'navigation'
-        self._pub_state()
+        with self._lock:
+            nav_running = self._nav_nodes_running
+        if nav_running:
+            # Nav nodes already running — just send the target, don't spawn duplicates.
+            self.state = 'navigation'
+            self._pub_state()
+        else:
+            self._stop_all()
+            self._start('navigation')
 
-    @_serialized_command
     def cmd_nav_cancel(self):
         if self.state != 'navigation':
             return
@@ -1173,23 +1139,19 @@ class BackendNode(Ros2NodeManager):
         else:
             self._stop_all()
 
-    @_serialized_command
     def cmd_nav_pause(self):
         with self._lock:
             self._nav_paused = True
         self._pause_pub.publish(Bool(data=True))
 
-    @_serialized_command
     def cmd_nav_resume(self):
         with self._lock:
             self._nav_paused = False
         self._pause_pub.publish(Bool(data=False))
 
-    @_serialized_command
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))
 
-    @_serialized_command
     def cmd_manual_enter(self):
         with self._lock:
             if self._manual_intervention:
@@ -1199,26 +1161,19 @@ class BackendNode(Ros2NodeManager):
             self._manual_intervention = True
             self._manual_velocity = (0.0, 0.0, 0.0)
             self._manual_received = 0.0
+            self._manual_pub.publish(Bool(data=True))
             if self._nav_paused:
                 self._nav_paused = False
                 self._pause_pub.publish(Bool(data=False))
             self._write_velocity(0.0, 0.0, 0.0)
-            self._manual_had_controller = self._cmd_vel_proc is not None
-            self._kill_proc(self._cmd_vel_proc)
-            self._cmd_vel_proc = None
-            self._write_velocity(0.0, 0.0, 0.0)
 
-    @_serialized_command
     def cmd_manual_exit(self):
         with self._lock:
             if not self._manual_intervention:
                 return
             self._manual_velocity = (0.0, 0.0, 0.0)
             self._write_velocity(0.0, 0.0, 0.0)
-            env = os.environ.copy()
-            if self._manual_had_controller:
-                self._cmd_vel_proc = self._launch_proc(
-                    'cmd_vel_control', [sys.executable, '/tinynav/tinynav/platforms/cmd_vel_control.py'], env=env)
+            self._manual_pub.publish(Bool(data=False))
             self._manual_intervention = False
 
     def _manual_tick(self):

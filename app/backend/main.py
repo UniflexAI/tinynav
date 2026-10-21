@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from .state import runner
 from .routers import action, bag, device, files, nav, sensor
@@ -43,14 +42,3 @@ app.include_router(sensor.router)
 app.include_router(files.router)
 app.include_router(action.router)
 app.include_router(ws.router)
-
-
-@app.middleware('http')
-async def protect_manual_mode(request, call_next):
-    node = runner.node
-    allowed = {'/nav/manual/enter', '/nav/manual/exit', '/nav/cancel', '/action/command'}
-    if (node is not None and node._manual_intervention
-            and request.method in ('POST', 'PUT', 'DELETE', 'PATCH')
-            and request.url.path not in allowed):
-        return JSONResponse({'detail': 'Exit manual intervention first'}, status_code=409)
-    return await call_next(request)

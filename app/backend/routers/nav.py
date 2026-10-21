@@ -29,10 +29,6 @@ class ManualTargetRequest(BaseModel):
 @router.post('/send-pois')
 def nav_send_pois(req: SendPoisRequest):
     node = _require_node()
-    if not node._nav_nodes_running:
-        raise HTTPException(409, 'Enable navigation first')
-    if node._manual_intervention:
-        raise HTTPException(409, 'Exit manual intervention first')
     if not node._localized:
         raise HTTPException(409, 'Not localized')
     node.cmd_send_pois(req.poi_ids)
@@ -42,10 +38,6 @@ def nav_send_pois(req: SendPoisRequest):
 @router.post('/go-to-poi')
 def nav_go_to_poi(req: GoToPoiRequest):
     node = _require_node()
-    if not node._nav_nodes_running:
-        raise HTTPException(409, 'Enable navigation first')
-    if node._manual_intervention:
-        raise HTTPException(409, 'Exit manual intervention first')
     if node.state == 'navigation':
         raise HTTPException(409, 'Already navigating')
     if node.state not in ('idle',):
@@ -57,8 +49,6 @@ def nav_go_to_poi(req: GoToPoiRequest):
 @router.post('/manual-target')
 def nav_manual_target(req: ManualTargetRequest):
     node = _require_node()
-    if node._manual_intervention:
-        raise HTTPException(409, 'Exit manual intervention first')
     if node._odom_pose is None:
         raise HTTPException(409, 'Odometry not ready')
     node.cmd_manual_target_pose(req.x, req.y, req.z)
@@ -86,8 +76,6 @@ def nav_status():
 @router.post('/nodes/enable')
 def nav_nodes_enable():
     node = _require_node()
-    if node._manual_intervention:
-        raise HTTPException(409, 'Exit manual intervention first')
     if node._nav_nodes_running:
         raise HTTPException(409, 'Nav nodes already running')
     node.cmd_start_nav_nodes()
@@ -97,8 +85,6 @@ def nav_nodes_enable():
 @router.post('/restart')
 def nav_restart():
     node = _require_node()
-    if node._manual_intervention:
-        raise HTTPException(409, 'Exit manual intervention first')
     if not node._nav_nodes_running:
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_restart_nav_nodes()
@@ -115,8 +101,6 @@ def nav_pause():
 @router.post('/resume')
 def nav_resume():
     node = _require_node()
-    if node._manual_intervention:
-        raise HTTPException(409, 'Exit manual intervention first')
     node.cmd_nav_resume()
     return {'ok': True}
 
@@ -124,8 +108,6 @@ def nav_resume():
 @router.post('/nodes/disable')
 def nav_nodes_disable():
     node = _require_node()
-    if node._manual_intervention:
-        raise HTTPException(409, 'Exit manual intervention first')
     if not node._nav_nodes_running:
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_stop_nav_nodes()

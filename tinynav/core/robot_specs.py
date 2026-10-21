@@ -107,11 +107,6 @@ G1_CONFIG = RobotConfig(
     obstacle=ObstacleConfig(robot_z_bottom=-0.8, robot_z_top=0.6),
 )
 
-LEKIWI_CONFIG = RobotConfig(name='lekiwi', shape='circle', radius=0.14,
-    camera_x=0.09, camera_y=0.0255, max_linear_vel=0.3, min_linear_vel=0.05,
-    obstacle=ObstacleConfig(robot_z_bottom=-0.08, robot_z_top=0.3))
-
-
 ROBOT_TYPE = os.environ.get("ROBOT_TYPE", "go2").strip().lower()
 try:
     ROBOT_CONFIG = globals()[f"{ROBOT_TYPE.upper()}_CONFIG"]
