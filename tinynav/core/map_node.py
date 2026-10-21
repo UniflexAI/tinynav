@@ -22,6 +22,7 @@ from tinynav.tinynav_cpp_bind import pose_graph_solve
 from tinynav.core.models_trt import LightGlueTRT, Dinov2TRT, SuperPointTRT
 import logging
 import asyncio
+import threading
 from tf2_ros import TransformBroadcaster
 from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop
@@ -308,6 +309,9 @@ class MapNode(Node):
 
         os.makedirs(f"{tinynav_db_path}/nav_temp", exist_ok=True)
         self.nav_temp_db = TinyNavDB(f"{tinynav_db_path}/nav_temp", is_scratch=True)
+        # One event loop per thread for the TRT models' coroutines, kept for the node's
+        # life rather than built and torn down by asyncio.run on every inference.
+        self._infer_loops = threading.local()
         self.declare_parameter('climb_prior', CLIMB_PRIOR_DEFAULT)
         self._climb_prior = bool(self.get_parameter('climb_prior').value)
         self.load_map(tinynav_map_path)
@@ -546,7 +550,7 @@ class MapNode(Node):
         odom, _ = msg2np(keyframe_odom_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
         # No per-keyframe nav_temp_db entry and no DINOv2 embedding: nothing reads either.
-        features = asyncio.run(self.super_point_extractor.infer(image))
+        features = self._infer(self.super_point_extractor.infer(image))
         # Relocalization runs on this same keyframe right after; hand it these features
         # rather than paying for a second SuperPoint pass over the same image.
         self._latest_keyframe_features = (keyframe_image_timestamp, features)
@@ -566,16 +570,22 @@ class MapNode(Node):
         self.last_keyframe_image = image
 
 
+    def _infer(self, coro):
+        loop = getattr(self._infer_loops, "loop", None)
+        if loop is None:
+            loop = self._infer_loops.loop = asyncio.new_event_loop()
+        return loop.run_until_complete(coro)
+
     def get_embeddings(self, image: np.ndarray) -> np.ndarray:
         # shape: (1, 768)
-        return asyncio.run(self.dinov2_model.infer(image))
+        return self._infer(self.dinov2_model.infer(image))
 
     def get_vlad_descriptor(self, image: np.ndarray) -> np.ndarray:
-        patch_tokens = asyncio.run(self.dinov2_model.infer_patch_tokens(image))
+        patch_tokens = self._infer(self.dinov2_model.infer_patch_tokens(image))
         return compute_vlad(patch_tokens, self.vlad_centres)
 
     def match_keypoints(self, feats0:dict, feats1:dict, image_shape = np.array([848, 480], dtype = np.int64)) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        match_result = asyncio.run(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
+        match_result = self._infer(self.light_glue_matcher.infer(feats0["kpts"], feats1["kpts"], feats0['descps'], feats1['descps'], feats0['mask'], feats1['mask'], image_shape, image_shape))
         match_indices = match_result["match_indices"][0]
         valid_mask = match_indices != -1
         keypoints0 = feats0["kpts"][0][valid_mask]
@@ -658,31 +668,19 @@ class MapNode(Node):
         return False, np.eye(4), -np.inf
 
     def keypoint_with_depth_to_3d(self, keypoints:np.ndarray, depth:np.ndarray, pose_from_camera_to_world:np.ndarray, K:np.ndarray):
-        point_in_camera = []
-        inliers = []
-        fx = K[0, 0]
-        fy = K[1, 1]
-        cx = K[0, 2]
-        cy = K[1, 2]
-        for kp in keypoints:
-            u = int(kp[0])
-            v = int(kp[1])
-            Z = depth[v, u]
-            if Z > 0 and Z < 50:
-                X = (u - cx) * Z / fx
-                Y = (v - cy) * Z / fy
-                inliers.append(True)
-            else:
-                X = 0
-                Y = 0
-                inliers.append(False)
-            point_in_camera.append(np.array([X, Y, Z]))
-        # shape: (N, 3)
-        point_in_camera = np.array(point_in_camera)
-        inliers = np.array(inliers)
+        """Each keypoint (pixel, truncated) un-projected through `depth` into the world, and
+        whether its depth was usable (0 < Z < 50). An unusable one keeps its Z and gets
+        X = Y = 0."""
+        keypoints = np.asarray(keypoints)
+        u = keypoints[:, 0].astype(np.int64)
+        v = keypoints[:, 1].astype(np.int64)
+        Z = depth[v, u].astype(np.float64)
+        inliers = (Z > 0) & (Z < 50)
+        X = np.where(inliers, (u - K[0, 2]) * Z / K[0, 0], 0.0)
+        Y = np.where(inliers, (v - K[1, 2]) * Z / K[1, 1], 0.0)
+        point_in_camera = np.stack([X, Y, Z], axis=1)
         rotation = pose_from_camera_to_world[:3, :3]
         translation = pose_from_camera_to_world[:3,3]
-
         point_in_world = (rotation @ point_in_camera.T).T + translation
         return point_in_world, inliers
 
@@ -693,7 +691,7 @@ class MapNode(Node):
         if cached_timestamp == timestamp_ns:
             features = cached_features          # extracted by keyframe_mapping already
         else:
-            features = asyncio.run(self.super_point_extractor.infer(image))
+            features = self._infer(self.super_point_extractor.infer(image))
         res, pose_in_camera, pose_cov_weight = self.relocalize_with_depth(image, features, self.K)
         if res:
             # publish the relocalization pose for debug

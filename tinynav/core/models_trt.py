@@ -39,6 +39,11 @@ def disparity_to_depth(disparity: np.ndarray, baseline: float, focal_length: flo
     depth[valid] = (baseline * focal_length) / disparity[valid]
     return depth
 
+#: Seconds between polls of a running inference's completion: the latency a finished
+#: inference can wait unnoticed, against the CPU a tighter poll spends.
+_POLL_S = 0.0005
+
+
 class TRTBase:
     def __init__(self, engine_path):
         TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
@@ -136,8 +141,11 @@ class TRTBase:
 
         _, event = cudart.cudaEventCreate()
         cudart.cudaEventRecord(event, self.stream)
+        # Polled with a short sleep, not sleep(0) and not cudaEventSynchronize: a busy
+        # poll holds a CPU core for the whole inference, and cuda-python's synchronize
+        # holds the GIL while it waits, stalling every other thread in the process.
         while cudart.cudaEventQuery(event)[0] == cudart.cudaError_t.cudaErrorNotReady:
-            await asyncio.sleep(0)
+            await asyncio.sleep(_POLL_S)
         cudart.cudaEventDestroy(event)
 
         results = {}
