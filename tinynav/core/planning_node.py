@@ -645,7 +645,7 @@ TIE_S = 0.15
 
 def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_gerr,
                    end_gdxy, here_arrived, has_route, should_reverse, v, w, carrot_rem, t_end,
-                   carry=-1, last_yaw=0.0):
+                   carry=-1, last_yaw=0.0, stand_still=False):
     """Index of the row with the least time to go: when map_node's arrival fires, or the
     row's own duration `t_end` plus the distance left to the carrot at `v` and the
     heading left at `w` (a row past the carrot along the route gains what it went beyond
@@ -655,10 +655,15 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
 
     Among the rows within TIE_S of the fastest, the `carry` row (last frame's choice
     carried forward, -1 for none) wins outright; otherwise the least motion, then a
-    yaw that does not reverse `last_yaw`, then the time."""
+    yaw that does not reverse `last_yaw`, then the time.
+
+    `stand_still` (strict follow, the route is blocked) overrides all of it: the
+    standstill row, or -1 when the library has none."""
+    still = (np.abs(vx) <= 1e-3) & (np.abs(yaw) < 1e-3)
+    if stand_still:
+        return int(np.flatnonzero(still)[0]) if still.any() else -1
     free = np.isfinite(scores)
     ok = free & ((vx < 0.0) == should_reverse)
-    still = (np.abs(vx) <= 1e-3) & (np.abs(yaw) < 1e-3)
     if (ok & ~still).any() and not here_arrived:
         ok &= ~still
     if not ok.any():
@@ -1561,11 +1566,6 @@ class PlanningNode(Node):
                 trajectories[:, -1, :2], [heading_of_pose7(t[-1]) for t in trajectories],
                 end_goal_dxys, end_goal_errs, scores, target, ESDF_map >= band, self.origin,
                 self.resolution, band)
-            sel = select_by_time(
-                params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
-                end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
-                should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
-                carrot_rem, durations, carry, self._last_yaw)
             # Strict follow: an obstacle may stop the robot, never send it round. The
             # standstill row is published rather than nothing, so cmd_vel_control stops
             # at once instead of waiting out a stale path.
@@ -1574,11 +1574,13 @@ class PlanningNode(Node):
                 and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
                 and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
                                         rem_here, carrot_rem, half_w))
-            if route_blocked:
-                still = np.flatnonzero((np.abs(params[:, 0]) <= 1e-3) & (np.abs(yaws) < 1e-3))
-                if len(still) == 0:
-                    return
-                sel = int(still[0])
+            sel = select_by_time(
+                params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
+                end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
+                should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
+                carrot_rem, durations, carry, self._last_yaw, stand_still=route_blocked)
+            if sel < 0:
+                return
             self.last_param = params[sel]
             self._last_yaw = float(yaws[sel])
             self._turn_heading = float(heading_of_pose7(trajectories[sel][-1])) if is_turn[sel] else None
