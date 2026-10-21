@@ -1156,8 +1156,8 @@ class BackendNode(Ros2NodeManager):
         with self._lock:
             if self._manual_intervention:
                 return
-            if self.state not in ('idle', 'navigation'):
-                raise ValueError('Manual intervention requires an idle or navigating robot')
+            if self.state not in ('idle', 'navigation', 'realsense_bag_record'):
+                raise ValueError('Manual intervention requires an idle, navigating, or recording robot')
             self._manual_intervention = True
             self._manual_velocity = (0.0, 0.0, 0.0)
             self._manual_received = 0.0
