@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -30,11 +29,62 @@ class OperateTab extends ConsumerStatefulWidget {
   ConsumerState<OperateTab> createState() => _OperateTabState();
 }
 
-class _OperateTabState extends ConsumerState<OperateTab> {
+class _OperateTabState extends ConsumerState<OperateTab> with WidgetsBindingObserver {
   WebSocketChannel? _teleopChannel;
   double _linearX = 0, _linearY = 0, _angularZ = 0;
   DateTime _lastTeleopSend = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _teleopTimer;
+  Timer? _holdTimer;
+  final _keyboardFocus = FocusNode();
+  final Set<LogicalKeyboardKey> _heldKeys = {};
+  bool _manualBusy = false;
+
+  void _stopInput() {
+    _heldKeys.clear();
+    _linearX = 0; _linearY = 0; _angularZ = 0;
+    _sendVelocity(force: true);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) _stopInput();
+  }
+
+  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
+    if (!(ref.read(deviceStatusProvider).valueOrNull?.manualIntervention ?? false)) {
+      return KeyEventResult.ignored;
+    }
+    final keys = {LogicalKeyboardKey.keyW, LogicalKeyboardKey.keyS,
+      LogicalKeyboardKey.keyA, LogicalKeyboardKey.keyD,
+      LogicalKeyboardKey.arrowLeft, LogicalKeyboardKey.arrowRight};
+    if (!keys.contains(event.logicalKey)) { return KeyEventResult.ignored; }
+    if (event is KeyUpEvent) {
+      _heldKeys.remove(event.logicalKey);
+    } else {
+      _heldKeys.add(event.logicalKey);
+    }
+    double held(LogicalKeyboardKey k) => _heldKeys.contains(k) ? 1 : 0;
+    _linearX = (held(LogicalKeyboardKey.keyW) - held(LogicalKeyboardKey.keyS)) * _maxLinear;
+    _linearY = (held(LogicalKeyboardKey.keyA) - held(LogicalKeyboardKey.keyD)) * _maxLinear;
+    _angularZ = (held(LogicalKeyboardKey.arrowLeft) - held(LogicalKeyboardKey.arrowRight)) * _maxAngular;
+    _sendVelocity(force: true);
+    return KeyEventResult.handled;
+  }
+
+  Future<void> _toggleManual(bool manual) async {
+    _stopInput();
+    setState(() => _manualBusy = true);
+    try {
+      await ref.read(dioProvider).post(manual ? '/nav/manual/exit' : '/nav/manual/enter');
+      ref.invalidate(deviceStatusProvider);
+      if (!manual) { _keyboardFocus.requestFocus(); }
+    } on DioException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.response?.data?['detail'] ?? 'Manual intervention failed')));
+    } finally {
+      if (mounted) setState(() => _manualBusy = false);
+    }
+  }
 
   bool _showObstacle = true;
   bool _showEsdf = true;
@@ -49,6 +99,10 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _holdTimer = Timer.periodic(_teleopSendInterval, (_) {
+      if (_linearX != 0 || _linearY != 0 || _angularZ != 0) _sendVelocity(force: true);
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) => _connectTeleop());
   }
 
@@ -97,14 +151,19 @@ class _OperateTabState extends ConsumerState<OperateTab> {
   }
 
   Future<void> _emergencyStop() async {
-    _linearX = 0; _linearY = 0; _angularZ = 0;
-    _sendVelocity(force: true);
-    try { await ref.read(dioProvider).post('/nav/nodes/disable'); } catch (_) {}
+    _stopInput();
+    if (!(ref.read(deviceStatusProvider).valueOrNull?.manualIntervention ?? false)) {
+      try { await ref.read(dioProvider).post('/nav/manual/enter'); } catch (_) {}
+    }
   }
 
   @override
   void dispose() {
+    _stopInput();
+    _holdTimer?.cancel();
     _teleopTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _keyboardFocus.dispose();
     _teleopChannel?.sink.close();
     super.dispose();
   }
@@ -120,6 +179,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final baseUrl = ref.watch(baseUrlProvider);
 
     ref.listen<AsyncValue<DeviceStatus>>(deviceStatusProvider, (prev, next) {
+      if (prev?.valueOrNull?.manualIntervention != next.valueOrNull?.manualIntervention) _stopInput();
       final prevState = prev?.valueOrNull?.rawState;
       final nextState = next.valueOrNull?.rawState;
       if (prevState == 'navigation' && nextState != 'navigation') {
@@ -135,8 +195,25 @@ class _OperateTabState extends ConsumerState<OperateTab> {
     final isNavigating = status?.rawState == 'navigation';
     final np = isNavigating ? ref.watch(navProgressStreamProvider).valueOrNull : null;
 
-    return Column(
+    final manual = status?.manualIntervention ?? false;
+    return Focus(
+      focusNode: _keyboardFocus,
+      onKeyEvent: _handleKey,
+      onFocusChange: (focused) { if (!focused) _stopInput(); },
+      child: Column(
       children: [
+        Container(
+          color: manual ? const Color(0xFF17324D) : const Color(0xFFF0F3F6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(children: [
+            Expanded(child: Text(manual
+              ? (isNavigating ? 'Manual control | Task retained\nW/S forward/back | A/D strafe | Left/Right turn' : 'Manual control\nW/S forward/back | A/D strafe | Left/Right turn')
+              : (status?.navPaused ?? false) ? 'Task paused | Resume when ready' : 'Manual intervention available',
+              style: TextStyle(color: manual ? Colors.white : const Color(0xFF17324D), fontSize: 12))),
+            FilledButton(onPressed: _manualBusy ? null : () => _toggleManual(manual),
+              child: Text(_manualBusy ? 'Please wait...' : manual ? 'Exit manual' : 'Take control')),
+          ]),
+        ),
         // ── Camera (1/4) ──────────────────────────────────────────────
         const Expanded(flex: 2, child: _CameraPanel()),
         const Divider(height: 1, thickness: 1, color: Color(0xFFE0E0E0)),
@@ -264,7 +341,7 @@ class _OperateTabState extends ConsumerState<OperateTab> {
           ),
         ),
       ],
-    );
+    ));
   }
 }
 
@@ -1451,10 +1528,10 @@ class _PauseButtonState extends ConsumerState<_PauseButton> {
 
     final paused = status?.navPaused ?? false;
     return FilledButton.icon(
-      onPressed: _loading ? null : () => _toggle(paused),
+      onPressed: _loading || (status?.manualIntervention ?? false) ? null : () => _toggle(paused),
       style: FilledButton.styleFrom(
         backgroundColor: paused
-            ? const Color(0xFFFF9800).withOpacity(0.9)
+            ? const Color(0xFF17324D)
             : Colors.black54,
         foregroundColor: Colors.white,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -1462,7 +1539,7 @@ class _PauseButtonState extends ConsumerState<_PauseButton> {
       icon: _loading
           ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
           : Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 16),
-      label: Text(paused ? 'Continue' : 'Pause'),
+      label: Text(paused ? 'Resume' : 'Pause'),
     );
   }
 }

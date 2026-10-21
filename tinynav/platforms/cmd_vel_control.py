@@ -72,9 +72,9 @@ class CmdVelControlNode(Node):
 
     def _on_paused(self, msg: Bool):
         self._paused = msg.data
-        if not self._paused:
-            # Reset prev_cmd so resume starts from zero cleanly
-            self.prev_cmd = Twist()
+        self.prev_cmd = Twist()
+        self.latest_cmd = Twist()
+        self.last_path_update_time = None
 
     def _on_nav_active(self, msg: Bool):
         was_active = self._nav_active
@@ -159,7 +159,7 @@ class CmdVelControlNode(Node):
         self.prev_cmd = out
         
     def path_callback(self, msg):
-        if not self._nav_active:
+        if self._paused or not self._nav_active:
             return
         if msg is None or self.pose is None:
             return
