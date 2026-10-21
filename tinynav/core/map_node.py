@@ -843,9 +843,7 @@ class MapNode(Node):
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
         return percent, estimated_remaining_s
 
-    def select_target_position(self, paths, closest_idx, pos, cap, lookahead_m=None):
-        if lookahead_m is None:
-            lookahead_m = lookahead_distance_m(cap)
+    def select_target_position(self, paths, closest_idx, pos, lookahead_m):
         accumulated_distance = 0.0
         start_point = pos[:3]
         target_position = paths[-1]
@@ -940,8 +938,9 @@ class MapNode(Node):
                                   round(self._leg_initial_length, 2),
                                   round(estimated_remaining_s, 1), False)
 
-        target_position = self.select_target_position(paths, closest_idx, pos, cap)
-        stop_position = self.select_target_position(paths, closest_idx, pos, cap,
+        target_position = self.select_target_position(paths, closest_idx, pos,
+                                                      lookahead_distance_m(cap))
+        stop_position = self.select_target_position(paths, closest_idx, pos,
                                                     stop_distance_m(cap))
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
@@ -952,7 +951,7 @@ class MapNode(Node):
             dummy_pose[:3, 3] = T[:3, :3] @ position + T[:3, 3]
             pub.publish(np2msg(dummy_pose, stamp, "world", "camera"))
 
-        self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
+        self.tf_broadcaster.sendTransform(np2tf(T, stamp, "world", "map"))
 
     def generate_nav_path_in_map(self, pose_in_map: np.ndarray, target_poi: np.ndarray) -> np.ndarray:
         dummy_poi_pose = np.eye(4)

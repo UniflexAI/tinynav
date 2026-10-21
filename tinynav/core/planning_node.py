@@ -658,10 +658,10 @@ def select_by_time(vx, yaw, scores, arrive_t, end_rem, end_dev, end_rerr, end_ge
     yaw that does not reverse `last_yaw`, then the time.
 
     `stand_still` (strict follow, the route is blocked) overrides all of it: the
-    standstill row, or -1 when the library has none."""
+    standstill row, which the lattice always carries."""
     still = (np.abs(vx) <= 1e-3) & (np.abs(yaw) < 1e-3)
     if stand_still:
-        return int(np.flatnonzero(still)[0]) if still.any() else -1
+        return int(np.flatnonzero(still)[0])
     free = np.isfinite(scores)
     ok = free & ((vx < 0.0) == should_reverse)
     if (ok & ~still).any() and not here_arrived:
@@ -1566,23 +1566,20 @@ class PlanningNode(Node):
                             and (not has_route or rem_here <= self.route_terminal_band))
             yaws = np.array([_yaw_rate(t) for t in trajectories])
             v_nom = max(float(v_allow), self._vx_min, 0.1)
-            # A row's way to the target, and the heading it is judged by, go around what
-            # is in it: a target past a corner otherwise draws the rows into its inside.
             _, _, half_w = ROBOT_CONFIG.footprint_from_control()
-            # Strict follow: an obstacle on the route as far as the stop pose stands the
-            # robot; anything further is DWA's, which drives to the carrot as ever. The
-            # standstill row is published rather than nothing, so cmd_vel_control stops
-            # at once instead of waiting out a stale path. Without a fresh stop pose the
-            # check runs to the carrot, which only stops sooner.
-            stop_rem = (route_left_at(route_xy, self._stop_xy)
-                        if has_route and self._stop_xy is not None
-                        and self._signal_fresh(self._stop_stamp_ns, self._strict_follow_ttl_ns)
-                        else carrot_rem)
+            # Strict follow: an obstacle on the route as far as map_node's stop pose
+            # stands the robot; anything further is DWA's, which drives to the carrot as
+            # ever. Off when either stream is stale. The standstill row is published
+            # rather than nothing, so cmd_vel_control stops at once instead of waiting
+            # out a stale path.
             route_blocked = (
                 self._strict_follow and has_route
                 and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
-                and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
-                                        rem_here, stop_rem, half_w))
+                and self._signal_fresh(self._stop_stamp_ns, self._strict_follow_ttl_ns)
+                and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here,
+                                        route_left_at(route_xy, self._stop_xy), half_w))
+            # A row's way to the target, and the heading it is judged by, go around what
+            # is in it: a target past a corner otherwise draws the rows into its inside.
             band = half_w + ROBOT_CONFIG.safety_radius
             end_goal_dxys, end_goal_errs = around_obstacles(
                 trajectories[:, -1, :2], [heading_of_pose7(t[-1]) for t in trajectories],
@@ -1593,8 +1590,6 @@ class PlanningNode(Node):
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
                 should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
                 carrot_rem, durations, carry, self._last_yaw, stand_still=route_blocked)
-            if sel < 0:
-                return
             self.last_param = params[sel]
             self._last_yaw = float(yaws[sel])
             self._turn_heading = float(heading_of_pose7(trajectories[sel][-1])) if is_turn[sel] else None

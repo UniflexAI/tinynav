@@ -929,7 +929,6 @@ def test_a_mirror_tie_keeps_the_last_direction():
 
 def test_a_blocked_route_picks_the_standstill_row_over_a_faster_one():
     assert _pick([0.0, 0.2, 0.2], [0.0, 0.0, 0.75], [1.0, 0.5, 0.5], stand_still=True) == 0
-    assert _pick([0.2, 0.2], [0.0, 0.75], [0.5, 0.5], stand_still=True) == -1
 
 
 def test_the_carried_row_wins_a_tie_but_not_a_race():
