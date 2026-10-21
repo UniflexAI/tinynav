@@ -1431,7 +1431,9 @@ class PlanningNode(Node):
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             self.publish_obstacle_mask(obstacle_mask, depth_msg.header.stamp)
             if self.occupancy_3d_pub.get_subscription_count() > 0:
-                self.occupancy_3d_pub.publish(self.bridge.cv2_to_imgmsg(self.occupancy_grid, header=depth_msg.header))
+                # float32 halves the ~1 MB a frame; its readers only threshold it at 0.1.
+                self.occupancy_3d_pub.publish(self.bridge.cv2_to_imgmsg(
+                    self.occupancy_grid.astype(np.float32), header=depth_msg.header))
 
         with Timer(name='traj gen', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             init_p = self.camera_to_robot_center(T)
