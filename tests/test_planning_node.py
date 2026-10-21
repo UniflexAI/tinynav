@@ -19,7 +19,7 @@ from planning_node import (run_raycasting_loopy, build_route_fields, score_traje
                            footprint_lattice, footprint_cells, PlanningNode, ROBOT_CONFIG,
                            reverse_armed, REVERSE_ENTER_M, REVERSE_EXIT_M,
                            generate_trajectory_library_3d, heading_of_pose7, angle_between,
-                           route_left_at, around_obstacles, route_blocked_ahead, keep_on_route)
+                           route_left_at, around_obstacles, route_blocked_ahead)
 from tinynav.tinynav_cpp_bind import run_raycasting_cpp
 
 @njit
@@ -1018,42 +1018,24 @@ def test_a_target_walled_off_leaves_every_row_its_straight_distance():
     assert np.allclose(d, straight) and np.allclose(e, err)
 
 
-def _blocked_with_box_at(x, y, ahead_m=np.inf):
-    """A 4m route along x at y=2.5, the robot at x=1 and the carrot at x=3, and one
+def _blocked_with_box_at(x, y):
+    """A 4m route along x at y=2.5, the robot at x=1 and the stop pose at x=3, and one
     obstacle cell at (x, y)."""
     origin, res = np.array([0.0, 0.0]), 0.1
     path_dist, remaining, _, _ = build_route_fields([(0.5, 2.5), (4.5, 2.5)], (50, 50), origin, res)
     obstacle = np.zeros((50, 50), dtype=bool)
     obstacle[int(x / res), int(y / res)] = True
     esdf = distance_transform_edt(~obstacle) * res
-    return route_blocked_ahead(esdf, path_dist, remaining, rem_here=3.5, carrot_rem=1.5, half_w=0.25,
-                               ahead_m=ahead_m)
+    return route_blocked_ahead(esdf, path_dist, remaining, rem_here=3.5, stop_rem=1.5, half_w=0.25)
 
 
-def test_an_obstacle_on_the_route_before_the_carrot_blocks_it():
+def test_an_obstacle_on_the_route_before_the_stop_pose_blocks_it():
     assert _blocked_with_box_at(2.0, 2.5)
     assert _blocked_with_box_at(2.0, 2.7)             # within half a body of the line
 
 
-def test_an_obstacle_beside_behind_or_past_the_carrot_does_not():
+def test_an_obstacle_beside_behind_or_past_the_stop_pose_does_not():
     assert not _blocked_with_box_at(2.0, 3.0)         # clears the body
     assert not _blocked_with_box_at(0.6, 2.5)         # behind the robot
-    assert not _blocked_with_box_at(4.0, 2.5)         # past the carrot
+    assert not _blocked_with_box_at(4.0, 2.5)         # past the stop pose
 
-
-def test_an_obstacle_further_than_the_horizon_is_not_judged_yet():
-    assert _blocked_with_box_at(2.0, 2.5, ahead_m=1.5)    # 1 m ahead of the robot
-    assert not _blocked_with_box_at(2.0, 2.5, ahead_m=0.5)
-
-
-def test_short_of_the_horizon_only_rows_that_keep_to_the_route_stay_open():
-    # standstill, along the route, swerving off it, one already off when the robot is,
-    # and a turn back along the route behind
-    scores = np.zeros(5)
-    costs = np.array([0.05, 0.10, 0.60, 0.30, 0.05])
-    end_rem = np.array([3.0, 2.5, 2.5, 2.5, 3.5])
-    def open_(dev):
-        return np.isfinite(keep_on_route(scores, costs, end_rem, dev_here=dev, rem_here=3.0,
-                                         half_w=0.15)).tolist()
-    assert open_(0.05) == [True, True, False, False, False]
-    assert open_(0.30)[3]

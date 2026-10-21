@@ -716,39 +716,15 @@ def route_left_at(route_xy, xy):
     return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
 
 
-#: How far ahead strict follow stops for an obstacle on the route, in seconds of
-#: driving at the open-space speed: one further away is approached along the route,
-#: never gone round (`keep_on_route`), so the robot stands about this far from it --
-#: near enough to a crossing by a wall to stand inside the link it switches on. The
-#: operator's number. The open-space speed and not the one the clearance allows: that
-#: one falls as the obstacle nears, and the horizon shrank faster than the gap.
-STRICT_AHEAD_S = 1.0
-
-
-def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, carrot_rem, half_w,
-                        ahead_m=np.inf):
-    """Whether an obstacle is on the route within `ahead_m` of the robot and before the
-    carrot: a route cell whose remaining arc lies in [max(carrot_rem, rem_here - ahead_m),
-    rem_here] has ESDF under `half_w`, so the body would not fit driving the route
-    itself. `half_w`, not plus the safety radius: the route is where the capture drove,
-    often closer to a wall than that. Route cells are the zeros of `path_dist_map`
-    (build_route_fields); cells off the grid are not seen."""
+def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, stop_rem, half_w):
+    """Whether an obstacle is on the route between the robot and the stop pose: a route
+    cell whose remaining arc lies in [stop_rem, rem_here] has ESDF under `half_w`, so the
+    body would not fit driving the route itself. `half_w`, not plus the safety radius: the
+    route is where the capture drove, often closer to a wall than that. Route cells are
+    the zeros of `path_dist_map` (build_route_fields); cells off the grid are not seen."""
     ahead = ((path_dist_map == 0.0) & (remaining_map <= rem_here)
-             & (remaining_map >= max(carrot_rem, rem_here - ahead_m)))
+             & (remaining_map >= stop_rem))
     return bool((ESDF_map[ahead] < half_w).any())
-
-
-def keep_on_route(scores, path_costs, end_rem, dev_here, rem_here, half_w):
-    """`scores` with every row that would leave the route closed (inf): one whose centre
-    gets further from it than `half_w`, or than the robot already is (`dev_here`), and
-    one that ends with more route left than the robot has now (`rem_here`) -- the
-    route behind is route too, so a turn back along it keeps close to it.
-    What strict follow allows while an obstacle is on the route but beyond its horizon:
-    closing on it along the route, turning in place, standing -- never going round or
-    back."""
-    off = ((np.asarray(path_costs, dtype=float) > max(half_w, dev_here))
-           | (np.asarray(end_rem, dtype=float) > rem_here))
-    return np.where(off, np.inf, np.asarray(scores, dtype=float))
 
 
 @njit(cache=True)
@@ -1160,6 +1136,10 @@ class PlanningNode(Node):
         self._strict_follow = False
         self._strict_follow_stamp_ns = None
         self.create_subscription(Bool, '/planning/strict_follow', self.strict_follow_callback, 10)
+        # map_node's stop pose: where the strict-follow check ends (route_blocked_ahead).
+        self._stop_xy = None
+        self._stop_stamp_ns = None
+        self.create_subscription(Odometry, '/control/stop_pose', self.stop_pose_callback, 10)
 
     # --- callbacks ---------------------------------------------------------
     def climb_region_callback(self, msg):
@@ -1197,6 +1177,10 @@ class PlanningNode(Node):
     def speed_cap_callback(self, msg):
         self._speed_cap = float(msg.data)
         self._speed_cap_stamp_ns = self.get_clock().now().nanoseconds
+
+    def stop_pose_callback(self, msg):
+        self._stop_xy = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
+        self._stop_stamp_ns = self.get_clock().now().nanoseconds
 
     def strict_follow_callback(self, msg):
         self._strict_follow = bool(msg.data)
@@ -1585,25 +1569,20 @@ class PlanningNode(Node):
             # A row's way to the target, and the heading it is judged by, go around what
             # is in it: a target past a corner otherwise draws the rows into its inside.
             _, _, half_w = ROBOT_CONFIG.footprint_from_control()
-            # Strict follow: an obstacle on the route may stop the robot, never send it
-            # round. Up to the carrot it is approached along the route only; within
-            # STRICT_AHEAD_S the robot stands. The standstill row is published rather
-            # than nothing, so cmd_vel_control stops at once instead of waiting out a
-            # stale path.
-            obstructed = (
+            # Strict follow: an obstacle on the route as far as the stop pose stands the
+            # robot; anything further is DWA's, which drives to the carrot as ever. The
+            # standstill row is published rather than nothing, so cmd_vel_control stops
+            # at once instead of waiting out a stale path. Without a fresh stop pose the
+            # check runs to the carrot, which only stops sooner.
+            stop_rem = (route_left_at(route_xy, self._stop_xy)
+                        if has_route and self._stop_xy is not None
+                        and self._signal_fresh(self._stop_stamp_ns, self._strict_follow_ttl_ns)
+                        else carrot_rem)
+            route_blocked = (
                 self._strict_follow and has_route
                 and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
                 and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
-                                        rem_here, carrot_rem, half_w))
-            route_blocked = obstructed and route_blocked_ahead(
-                ESDF_map, path_dist_map, remaining_map, rem_here, carrot_rem, half_w,
-                ahead_m=v_open * STRICT_AHEAD_S)
-            if obstructed and not route_blocked:
-                dev_here = (float(path_dist_map[xi, yi]) if 0 <= xi < path_dist_map.shape[0]
-                            and 0 <= yi < path_dist_map.shape[1] else 0.0)
-                scores = keep_on_route(scores, path_costs, end_remainings, dev_here,
-                                       rem_here, half_w)
-                route_blocked = not np.isfinite(scores).any()
+                                        rem_here, stop_rem, half_w))
             band = half_w + ROBOT_CONFIG.safety_radius
             end_goal_dxys, end_goal_errs = around_obstacles(
                 trajectories[:, -1, :2], [heading_of_pose7(t[-1]) for t in trajectories],
@@ -1628,8 +1607,7 @@ class PlanningNode(Node):
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[sel][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} obstructed={obstructed} '
-                f'route_blocked={route_blocked} '
+                f'should_reverse={should_reverse} route_blocked={route_blocked} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
             )
 
@@ -1660,7 +1638,6 @@ class PlanningNode(Node):
                 'n_traj': int(len(trajectories)),
                 'sel_vx': round(sel_vx, 3),
                 'sel_omega': round(sel_omega, 3),
-                'obstructed': bool(obstructed),
                 'route_blocked': bool(route_blocked),
             })))
 

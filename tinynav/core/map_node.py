@@ -198,21 +198,30 @@ _NO_CAP_SPEED_MPS = 0.6
 # this node needs none of planning's parameters to stay consistent with it.
 _LOOKAHEAD_MIN_M = 1.0
 _LOOKAHEAD_MAX_M = 5.0
+# The stop pose: the near end of the stretch strict follow checks for an obstacle on the
+# route (planning_node's route_blocked_ahead), at the same speed as the carrot. The
+# operator's number.
+_STOP_LOOKAHEAD_S = 1.0
+
+
+def _driven_speed(speed_cap_mps: float, gain: float) -> float:
+    """The speed a lookahead rides. `speed_cap_mps` is what /planning/speed_cap carries:
+    +inf (or NaN) means off-path or no prior, the same sentinel planning treats as "no
+    data". `gain` mirrors planning's capture_speed_gain: a horizon is a TIME, so it has
+    to ride the speed actually driven, not the raw prior. It is applied on the prior
+    branch only -- the no-prior fallback is planning's ungained vx_max."""
+    return speed_cap_mps * gain if np.isfinite(speed_cap_mps) else _NO_CAP_SPEED_MPS
 
 
 def lookahead_distance_m(speed_cap_mps: float, gain: float = CAPTURE_SPEED_GAIN) -> float:
-    """How far along the path the target pose sits, given the capture-speed prior.
+    """How far along the path the target pose sits, given the capture-speed prior."""
+    return float(np.clip(_driven_speed(speed_cap_mps, gain) * _LOOKAHEAD_S,
+                         _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
 
-    `speed_cap_mps` is what /planning/speed_cap carries: +inf (or NaN) means off-path or
-    no prior, the same sentinel planning treats as "no data". `gain` mirrors planning's
-    capture_speed_gain: the horizon is a TIME, so it has to ride the speed actually
-    driven, not the raw prior. It is applied on the prior branch only -- the no-prior
-    fallback is planning's ungained vx_max."""
-    if np.isfinite(speed_cap_mps):
-        speed = speed_cap_mps * gain
-    else:
-        speed = _NO_CAP_SPEED_MPS
-    return float(np.clip(speed * _LOOKAHEAD_S, _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
+
+def stop_distance_m(speed_cap_mps: float, gain: float = CAPTURE_SPEED_GAIN) -> float:
+    """How far along the path the stop pose sits: _STOP_LOOKAHEAD_S at the carrot's speed."""
+    return float(_driven_speed(speed_cap_mps, gain) * _STOP_LOOKAHEAD_S)
 
 
 # ── climb prior ─────────────────────────────────────────────────────────────── #
@@ -313,6 +322,9 @@ class MapNode(Node):
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
+        # Where strict follow stops judging the route: planning drives to the target pose
+        # and stands only for an obstacle between here and this one.
+        self.stop_pose_pub = self.create_publisher(Odometry, "/control/stop_pose", 10)
 
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -831,8 +843,9 @@ class MapNode(Node):
         estimated_remaining_s = remaining_length / self._speed_estimate if self._speed_estimate else -1.0
         return percent, estimated_remaining_s
 
-    def select_target_position(self, paths, closest_idx, pos, cap):
-        lookahead_m = lookahead_distance_m(cap)
+    def select_target_position(self, paths, closest_idx, pos, cap, lookahead_m=None):
+        if lookahead_m is None:
+            lookahead_m = lookahead_distance_m(cap)
         accumulated_distance = 0.0
         start_point = pos[:3]
         target_position = paths[-1]
@@ -928,12 +941,16 @@ class MapNode(Node):
                                   round(estimated_remaining_s, 1), False)
 
         target_position = self.select_target_position(paths, closest_idx, pos, cap)
+        stop_position = self.select_target_position(paths, closest_idx, pos, cap,
+                                                    stop_distance_m(cap))
 
         T = self.latest_odom_pose @ np.linalg.inv(pose_in_map)
-        target_position_in_odom = T[:3, :3] @ target_position + T[:3, 3]
-        dummy_pose = np.eye(4)
-        dummy_pose[:3, 3] = target_position_in_odom
-        self.target_pose_pub.publish(np2msg(dummy_pose, self.get_clock().now().to_msg(), "world", "camera"))
+        stamp = self.get_clock().now().to_msg()
+        for pub, position in ((self.target_pose_pub, target_position),
+                              (self.stop_pose_pub, stop_position)):
+            dummy_pose = np.eye(4)
+            dummy_pose[:3, 3] = T[:3, :3] @ position + T[:3, 3]
+            pub.publish(np2msg(dummy_pose, stamp, "world", "camera"))
 
         self.tf_broadcaster.sendTransform(np2tf(T, self.get_clock().now().to_msg(), "world", "map"))
 

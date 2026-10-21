@@ -106,6 +106,15 @@ def test_lookahead_rides_the_gained_speed():
                    - _NO_CAP_SPEED_MPS * _LOOKAHEAD_S) < 1e-6
 
 
+def test_the_stop_pose_rides_the_carrot_s_speed_for_one_second():
+    from tinynav.core.map_node import stop_distance_m, _NO_CAP_SPEED_MPS
+
+    for gain in (1.0, 1.5):
+        for cap in (0.2, 0.6):
+            assert abs(stop_distance_m(cap, gain=gain) - cap * gain) < 1e-6
+    assert abs(stop_distance_m(float("inf"), gain=1.5) - _NO_CAP_SPEED_MPS) < 1e-6
+
+
 if __name__ == "__main__":
     print("Running pose graph solve test...")
     test_pose_graph_solve()
