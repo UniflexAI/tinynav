@@ -87,6 +87,17 @@ class PathSpeedIndex(PathSampleIndex):
         return v if (v is not None and np.isfinite(v) and v > 0.0) else float('inf')
 
 
+def mean_speed(map_path: str) -> float | None:
+    """The mean of `map_path`'s path_speed.npy labels (m/s), the prior's cruising speed
+    over the whole capture; None for a map without one."""
+    try:
+        speeds = np.load(os.path.join(map_path, 'path_speed.npy'))[:, 3]
+    except (OSError, ValueError, IndexError):
+        return None
+    speeds = speeds[np.isfinite(speeds)]
+    return float(speeds.mean()) if speeds.size else None
+
+
 def bake(map_path: str, force: bool = False) -> str:
     """Write `path_speed.npy` into `map_path`; returns a one-line summary.
 

@@ -1520,6 +1520,9 @@ class PlanningNode(Node):
                                                     rem_here, stop_rem, half_w)
                 target = np.array([self._stop_xy[0], self._stop_xy[1], target[2]])
                 carrot_rem = stop_rem
+            # One value for the log and the gate topic: 0 the carrot, 1 the stop pose,
+            # 2 standing.
+            follow = 2 if route_blocked else int(aim_stop)
 
         with Timer(name='traj score', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
             (scores, occ_points, path_costs, end_remainings, end_heading_errs, arrive_ts,
@@ -1605,7 +1608,7 @@ class PlanningNode(Node):
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[sel][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} aim_stop={aim_stop} route_blocked={route_blocked} '
+                f'should_reverse={should_reverse} follow={follow} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
             )
 
@@ -1636,8 +1639,7 @@ class PlanningNode(Node):
                 'n_traj': int(len(trajectories)),
                 'sel_vx': round(sel_vx, 3),
                 'sel_omega': round(sel_omega, 3),
-                'aim_stop': bool(aim_stop),
-                'route_blocked': bool(route_blocked),
+                'follow': follow,
             })))
 
             self.publish_selected_path(trajectories, [sel], depth_msg.header)

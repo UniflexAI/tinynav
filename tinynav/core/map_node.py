@@ -220,13 +220,13 @@ def _driven_speed(speed_cap_mps: float, gain: float) -> float:
     return speed_cap_mps * gain if np.isfinite(speed_cap_mps) else _NO_CAP_SPEED_MPS
 
 
-def lookahead_distance_m(speed_cap_mps: float, gain: float = CAPTURE_SPEED_GAIN) -> float:
+def lookahead_distance_m(speed_cap_mps: float, gain: float) -> float:
     """How far along the path the target pose sits, given the capture-speed prior."""
     return float(np.clip(_driven_speed(speed_cap_mps, gain) * _LOOKAHEAD_S,
                          _LOOKAHEAD_MIN_M, _LOOKAHEAD_MAX_M))
 
 
-def stop_distance_m(speed_cap_mps: float, gain: float = CAPTURE_SPEED_GAIN) -> float:
+def stop_distance_m(speed_cap_mps: float, gain: float) -> float:
     """How far along the path the stop pose sits: _STOP_LOOKAHEAD_S at the carrot's speed."""
     return float(_driven_speed(speed_cap_mps, gain) * _STOP_LOOKAHEAD_S)
 
