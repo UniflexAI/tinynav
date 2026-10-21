@@ -138,6 +138,7 @@ class TRTBase:
         cudart.cudaEventRecord(event, self.stream)
         while cudart.cudaEventQuery(event)[0] == cudart.cudaError_t.cudaErrorNotReady:
             await asyncio.sleep(0)
+        cudart.cudaEventDestroy(event)
 
         results = {}
         for out in self.outputs:

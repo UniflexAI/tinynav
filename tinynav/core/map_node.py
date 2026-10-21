@@ -27,7 +27,6 @@ from tinynav.core.build_map_node import TinyNavDB
 from tinynav.core.build_map_node import find_loop
 from tinynav.core.vlad import compute_vlad
 from tinynav.core.robot_specs import ROBOT_CONFIG
-import einops
 from tinynav.core.build_map_node import OdomPoseRecorder
 from tinynav.core.path_speed import (
     CAPTURE_SPEED_GAIN, PathSpeedIndex, bake as bake_path_speed)
@@ -544,16 +543,10 @@ class MapNode(Node):
         depth_timestamp = int(depth_msg.header.stamp.sec * 1e9) + int(depth_msg.header.stamp.nanosec)
         assert keyframe_image_timestamp == keyframe_odom_timestamp
         assert keyframe_image_timestamp == depth_timestamp
-        depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="32FC1")
         odom, _ = msg2np(keyframe_odom_msg)
         image = self.bridge.imgmsg_to_cv2(keyframe_image_msg, desired_encoding="mono8")
-        rgb_image_place_holder = einops.repeat(image, "h w -> h w c", c = 3)
-
-        self.nav_temp_db.set_entry(keyframe_image_timestamp, depth = depth, infra1_image = image, rgb_image = rgb_image_place_holder)
-        embedding = self.get_embeddings(image)
-        self.nav_temp_db.set_entry(keyframe_image_timestamp, embedding = embedding)
+        # No per-keyframe nav_temp_db entry and no DINOv2 embedding: nothing reads either.
         features = asyncio.run(self.super_point_extractor.infer(image))
-        self.nav_temp_db.set_entry(keyframe_image_timestamp, features = features)
         # Relocalization runs on this same keyframe right after; hand it these features
         # rather than paying for a second SuperPoint pass over the same image.
         self._latest_keyframe_features = (keyframe_image_timestamp, features)
