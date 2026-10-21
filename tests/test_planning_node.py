@@ -1047,8 +1047,13 @@ def test_an_obstacle_further_than_the_horizon_is_not_judged_yet():
 
 
 def test_short_of_the_horizon_only_rows_that_keep_to_the_route_stay_open():
-    # standstill, along the route, swerving off it, and one already off when the robot is
-    scores, costs = np.zeros(4), np.array([0.05, 0.10, 0.60, 0.30])
-    assert np.isfinite(keep_on_route(scores, costs, dev_here=0.05, half_w=0.15)).tolist() == \
-        [True, True, False, False]
-    assert np.isfinite(keep_on_route(scores, costs, dev_here=0.30, half_w=0.15))[3]
+    # standstill, along the route, swerving off it, one already off when the robot is,
+    # and a turn back along the route behind
+    scores = np.zeros(5)
+    costs = np.array([0.05, 0.10, 0.60, 0.30, 0.05])
+    end_rem = np.array([3.0, 2.5, 2.5, 2.5, 3.5])
+    def open_(dev):
+        return np.isfinite(keep_on_route(scores, costs, end_rem, dev_here=dev, rem_here=3.0,
+                                         half_w=0.15)).tolist()
+    assert open_(0.05) == [True, True, False, False, False]
+    assert open_(0.30)[3]

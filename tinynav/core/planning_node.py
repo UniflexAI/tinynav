@@ -738,12 +738,16 @@ def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, carrot
     return bool((ESDF_map[ahead] < half_w).any())
 
 
-def keep_on_route(scores, path_costs, dev_here, half_w):
+def keep_on_route(scores, path_costs, end_rem, dev_here, rem_here, half_w):
     """`scores` with every row that would leave the route closed (inf): one whose centre
-    gets further from it than `half_w`, or than the robot already is (`dev_here`).
+    gets further from it than `half_w`, or than the robot already is (`dev_here`), and
+    one that ends with more route left than the robot has now (`rem_here`) -- the
+    route behind is route too, so a turn back along it keeps close to it.
     What strict follow allows while an obstacle is on the route but beyond its horizon:
-    closing on it along the route, turning in place, standing -- never going round."""
-    off = np.asarray(path_costs, dtype=float) > max(half_w, dev_here)
+    closing on it along the route, turning in place, standing -- never going round or
+    back."""
+    off = ((np.asarray(path_costs, dtype=float) > max(half_w, dev_here))
+           | (np.asarray(end_rem, dtype=float) > rem_here))
     return np.where(off, np.inf, np.asarray(scores, dtype=float))
 
 
@@ -1597,7 +1601,8 @@ class PlanningNode(Node):
             if obstructed and not route_blocked:
                 dev_here = (float(path_dist_map[xi, yi]) if 0 <= xi < path_dist_map.shape[0]
                             and 0 <= yi < path_dist_map.shape[1] else 0.0)
-                scores = keep_on_route(scores, path_costs, dev_here, half_w)
+                scores = keep_on_route(scores, path_costs, end_remainings, dev_here,
+                                       rem_here, half_w)
                 route_blocked = not np.isfinite(scores).any()
             band = half_w + ROBOT_CONFIG.safety_radius
             end_goal_dxys, end_goal_errs = around_obstacles(
