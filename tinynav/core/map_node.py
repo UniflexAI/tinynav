@@ -277,7 +277,6 @@ class MapNode(Node):
         # applies per cell, plus the collapsed "am I on it" flag for the app.
         self.climb_region_pub = self.create_publisher(PointCloud, CLIMB_REGION_TOPIC, 10)
         self.on_stairs_pub = self.create_publisher(Bool, ON_STAIRS_TOPIC, 10)
-        self.strict_follow_pub = self.create_publisher(Bool, '/planning/strict_follow', 10)
 
         # Add stop signal subscription and data saved publisher
         self.localization_stop_sub = self.create_subscription(Bool, '/benchmark/stop', self.localization_stop_callback, 10)
@@ -390,12 +389,6 @@ class MapNode(Node):
         Never raises: a bad or missing prior degrades to "no data" (planning falls back
         to vx_max for speed, and to its strict span filter everywhere for climb), which
         is the safe direction and must not stop nav."""
-        # Strict follow is set by hand, per map: an empty `strict_follow` file in the map
-        # directory. planning_node then stops at an obstacle on the route rather than
-        # going round it.
-        self.strict_follow = os.path.exists(f"{tinynav_map_path}/strict_follow")
-        self.get_logger().info(f"[strict] strict_follow={self.strict_follow}")
-
         speed_path = f"{tinynav_map_path}/path_speed.npy"
         try:
             # Bakes when missing OR stale -- a reloop rewrites poses.npy and every prior
@@ -447,7 +440,6 @@ class MapNode(Node):
                           for p in pts_in_odom]
         self.climb_region_pub.publish(msg)
         self.on_stairs_pub.publish(Bool(data=bool(on_stairs)))
-        self.strict_follow_pub.publish(Bool(data=self.strict_follow))
 
     def pois_callback(self, msg: String):
         self.get_logger().info("Received POIs from planner: " + msg.data)

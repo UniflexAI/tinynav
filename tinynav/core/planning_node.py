@@ -1123,9 +1123,11 @@ class PlanningNode(Node):
         self._speed_cap_stamp_ns = None
         self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
 
-        # Strict follow, a per-map flag from map_node's prior tick: when the route to the
-        # carrot is blocked the robot stands still instead of going around. Off when the
-        # stream is stale; it shares the climb region's tick, so its TTL too.
+        # Strict follow, a per-map flag the agent side sends (tinynav-pilot sends it at
+        # 1 Hz for the loaded map): when the route to the carrot is blocked the robot
+        # stands still instead of going around. Off when the stream is stale.
+        self.declare_parameter('strict_follow_ttl_s', 3.0)
+        self._strict_follow_ttl_ns = int(float(self.get_parameter('strict_follow_ttl_s').value) * 1e9)
         self._strict_follow = False
         self._strict_follow_stamp_ns = None
         self.create_subscription(Bool, '/planning/strict_follow', self.strict_follow_callback, 10)
@@ -1569,7 +1571,7 @@ class PlanningNode(Node):
             # at once instead of waiting out a stale path.
             route_blocked = (
                 self._strict_follow and has_route
-                and self._signal_fresh(self._strict_follow_stamp_ns, self._climb_region_ttl_ns)
+                and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
                 and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
                                         rem_here, carrot_rem, half_w))
             if route_blocked:
