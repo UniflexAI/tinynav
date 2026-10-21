@@ -193,6 +193,11 @@ class BackendNode(Ros2NodeManager):
         self._nav_active_pub = self.create_publisher(Bool, '/nav/active', _latched_qos)
         self._nav_paused = False
         self._nav_active = False
+        self._manual_intervention = False
+        self._manual_velocity = (0.0, 0.0, 0.0)
+        self._manual_received = 0.0
+        self._manual_pub = self.create_publisher(Bool, '/nav/manual_control', _latched_qos)
+        self._manual_pub.publish(Bool(data=False))
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -232,6 +237,7 @@ class BackendNode(Ros2NodeManager):
         self.create_subscription(Float32, '/battery', self._on_battery, _latched_qos)
         self.create_subscription(Bool, '/mapping/nav_done', self._on_nav_done, 10)
         self.create_subscription(String, '/mapping/nav_progress', self._on_nav_progress, 10)
+        self.create_timer(0.05, self._manual_tick)
         self._detect_and_init_sensor()
         self._start_unitree_if_configured()
 
@@ -693,6 +699,7 @@ class BackendNode(Ros2NodeManager):
             'rawState': raw,
             'navNodesRunning': nav_nodes,
             'navPaused': nav_paused,
+            'manualIntervention': self._manual_intervention,
             'navActive': nav_active,
         }
 
@@ -1145,11 +1152,55 @@ class BackendNode(Ros2NodeManager):
     def cmd_action(self, action: str):
         self._action_pub.publish(String(data=f'play {action}'))
 
+    def cmd_manual_enter(self):
+        with self._lock:
+            if self._manual_intervention:
+                return
+            if self.state not in ('idle', 'navigation', 'realsense_bag_record'):
+                raise ValueError('Manual intervention requires an idle, navigating, or recording robot')
+            self._manual_intervention = True
+            self._manual_velocity = (0.0, 0.0, 0.0)
+            self._manual_received = 0.0
+            self._manual_pub.publish(Bool(data=True))
+            if self._nav_paused:
+                self._nav_paused = False
+                self._pause_pub.publish(Bool(data=False))
+            self._write_velocity(0.0, 0.0, 0.0)
+
+    def cmd_manual_exit(self):
+        with self._lock:
+            if not self._manual_intervention:
+                return
+            self._manual_velocity = (0.0, 0.0, 0.0)
+            self._write_velocity(0.0, 0.0, 0.0)
+            self._manual_pub.publish(Bool(data=False))
+            self._manual_intervention = False
+
+    def _manual_tick(self):
+        with self._lock:
+            if not self._manual_intervention:
+                return
+            velocity = self._manual_velocity if time.monotonic() - self._manual_received < 0.3 else (0.0, 0.0, 0.0)
+            self._write_velocity(*velocity)
+
     def publish_cmd_vel(self, linear_x: float, linear_y: float, angular_z: float):
+        values = (float(linear_x), float(linear_y), float(angular_z))
+        if not all(math.isfinite(v) for v in values):
+            return
+        with self._lock:
+            if self._manual_intervention:
+                x, y, z = values
+                scale = max(1.0, math.hypot(x, y) / 0.5)
+                self._manual_velocity = (x / scale, y / scale, max(-1.0, min(1.0, z)))
+                self._manual_received = time.monotonic()
+            elif not self._nav_active:
+                self._write_velocity(*values)
+
+    def _write_velocity(self, linear_x: float, linear_y: float, angular_z: float):
         msg = Twist()
-        msg.linear.x = float(linear_x)
-        msg.linear.y = float(linear_y)
-        msg.angular.z = float(angular_z)
+        msg.linear.x = linear_x
+        msg.linear.y = linear_y
+        msg.angular.z = angular_z
         self._cmd_vel_pub.publish(msg)
 
 

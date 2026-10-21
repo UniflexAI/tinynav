@@ -112,3 +112,18 @@ def nav_nodes_disable():
         raise HTTPException(409, 'Nav nodes not running')
     node.cmd_stop_nav_nodes()
     return {'ok': True}
+
+
+@router.post('/manual/enter')
+def manual_enter():
+    try:
+        _require_node().cmd_manual_enter()
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {'ok': True}
+
+
+@router.post('/manual/exit')
+def manual_exit():
+    _require_node().cmd_manual_exit()
+    return {'ok': True}
