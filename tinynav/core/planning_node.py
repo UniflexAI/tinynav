@@ -27,7 +27,7 @@ from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image, CameraInfo, PointCloud
 from nav_msgs.msg import Path, Odometry, OccupancyGrid
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Header, Float32, String
+from std_msgs.msg import Bool, Header, Float32, String
 from cv_bridge import CvBridge
 from codetiming import Timer
 from tinynav.core.math_utils import rotvec_to_matrix, quat_to_matrix, matrix_to_quat, msg2np, wrap_angle
@@ -711,6 +711,17 @@ def route_left_at(route_xy, xy):
     return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
 
 
+def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, carrot_rem, half_w):
+    """Whether an obstacle is on the route between the robot and the carrot: a route cell
+    whose remaining arc lies in [carrot_rem, rem_here] has ESDF under `half_w`, so the body
+    would not fit driving the route itself. `half_w`, not plus the safety radius: the
+    route is where the capture drove, often closer to a wall than that. Route cells are
+    the zeros of `path_dist_map` (build_route_fields); cells off the grid are not seen."""
+    ahead = ((path_dist_map == 0.0) & (remaining_map <= rem_here)
+             & (remaining_map >= carrot_rem))
+    return bool((ESDF_map[ahead] < half_w).any())
+
+
 @njit(cache=True)
 def _grid_dijkstra(free, seed_i, seed_j, seed_m, need_i, need_j, resolution):
     """Metres from the seeds (cells, each at its own starting distance) to each cell
@@ -1112,6 +1123,13 @@ class PlanningNode(Node):
         self._speed_cap_stamp_ns = None
         self.create_subscription(Float32, '/planning/speed_cap', self.speed_cap_callback, 10)
 
+        # Strict follow, a per-map flag from map_node's prior tick: when the route to the
+        # carrot is blocked the robot stands still instead of going around. Off when the
+        # stream is stale; it shares the climb region's tick, so its TTL too.
+        self._strict_follow = False
+        self._strict_follow_stamp_ns = None
+        self.create_subscription(Bool, '/planning/strict_follow', self.strict_follow_callback, 10)
+
     # --- callbacks ---------------------------------------------------------
     def climb_region_callback(self, msg):
         # An empty cloud is a real answer ("no region here"), not a missed message:
@@ -1148,6 +1166,10 @@ class PlanningNode(Node):
     def speed_cap_callback(self, msg):
         self._speed_cap = float(msg.data)
         self._speed_cap_stamp_ns = self.get_clock().now().nanoseconds
+
+    def strict_follow_callback(self, msg):
+        self._strict_follow = bool(msg.data)
+        self._strict_follow_stamp_ns = self.get_clock().now().nanoseconds
 
     def _open_target_speed(self):
         """Open-space target forward speed: the capture-speed prior (scaled by
@@ -1542,6 +1564,19 @@ class PlanningNode(Node):
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
                 should_reverse, v_nom, float(ROBOT_CONFIG.max_angular_vel),
                 carrot_rem, durations, carry, self._last_yaw)
+            # Strict follow: an obstacle may stop the robot, never send it round. The
+            # standstill row is published rather than nothing, so cmd_vel_control stops
+            # at once instead of waiting out a stale path.
+            route_blocked = (
+                self._strict_follow and has_route
+                and self._signal_fresh(self._strict_follow_stamp_ns, self._climb_region_ttl_ns)
+                and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
+                                        rem_here, carrot_rem, half_w))
+            if route_blocked:
+                still = np.flatnonzero((np.abs(params[:, 0]) <= 1e-3) & (np.abs(yaws) < 1e-3))
+                if len(still) == 0:
+                    return
+                sel = int(still[0])
             self.last_param = params[sel]
             self._last_yaw = float(yaws[sel])
             self._turn_heading = float(heading_of_pose7(trajectories[sel][-1])) if is_turn[sel] else None
@@ -1554,7 +1589,7 @@ class PlanningNode(Node):
                 f'goal_err={np.rad2deg(_end_heading_error(trajectories[sel][0], target)):.0f}deg '
                 f'route_err={np.rad2deg(end_heading_errs[sel]):.0f}deg '
                 f'v_allow={v_allow:.2f} front_clr={front_clearance:.2f} '
-                f'should_reverse={should_reverse} '
+                f'should_reverse={should_reverse} route_blocked={route_blocked} '
                 f'climb_cells={0 if min_span_map is None else int((min_span_map > self.obstacle_config.min_wall_span_m).sum())}'
             )
 
@@ -1585,6 +1620,7 @@ class PlanningNode(Node):
                 'n_traj': int(len(trajectories)),
                 'sel_vx': round(sel_vx, 3),
                 'sel_omega': round(sel_omega, 3),
+                'route_blocked': bool(route_blocked),
             })))
 
             self.publish_selected_path(trajectories, [sel], depth_msg.header)
