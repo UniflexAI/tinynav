@@ -202,6 +202,9 @@ _LOOKAHEAD_MAX_M = 5.0
 # route (planning_node's route_blocked_ahead), at the same speed as the carrot. The
 # operator's number.
 _STOP_LOOKAHEAD_S = 1.0
+# The global route is a few thousand poses built in Python, and the nav timer ticks at
+# 10 Hz: sent every tick it was the timer's largest cost. It changes only on a replan.
+_PLAN_RESEND_S = 1.0
 
 
 def _driven_speed(speed_cap_mps: float, gain: float) -> float:
@@ -324,6 +327,10 @@ class MapNode(Node):
 
         self.current_pose_pub = self.create_publisher(Odometry, "/mapping/current_pose", 10)
         self.global_plan_pub = self.create_publisher(Path, '/mapping/global_plan', 10)
+        # The route last sent and when: it is sent when it changes, and again every
+        # _PLAN_RESEND_S for a reader that joined late or dropped it.
+        self._plan_sent = None
+        self._plan_sent_ns = 0
         self.target_pose_pub = self.create_publisher(Odometry, "/control/target_pose", 10)
         # Where strict follow stops judging the route: planning drives to the target pose
         # and stands only for an obstacle between here and this one.
@@ -918,7 +925,10 @@ class MapNode(Node):
                 return
 
         paths = self.cached_nav_path_in_map
-        self._publish_global_plan(paths)
+        now_ns = self.get_clock().now().nanoseconds
+        if paths is not self._plan_sent or now_ns - self._plan_sent_ns >= _PLAN_RESEND_S * 1e9:
+            self._publish_global_plan(paths)
+            self._plan_sent, self._plan_sent_ns = paths, now_ns
         closest_idx = int(np.argmin(np.linalg.norm(paths[:, :2] - pos[:2], axis=1)))
 
         remaining_length = float(np.linalg.norm(np.diff(paths[closest_idx:], axis=0), axis=1).sum())
