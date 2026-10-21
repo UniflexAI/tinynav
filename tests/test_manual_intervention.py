@@ -19,6 +19,7 @@ class ManualInterventionTests(unittest.TestCase):
         node._manual_received = 0.0
         node._cmd_vel_proc, node._planning_proc = object(), object()
         node._map_node_proc = object()
+        node.nav_progress_callbacks = []
         node._nav_progress = {'poi_index': 2, 'percent': 37}
         node._nav_nodes_running = True
         node._cmd_pois_pub = Mock()
@@ -30,23 +31,39 @@ class ManualInterventionTests(unittest.TestCase):
         node._launch_proc = Mock(return_value=object())
         return node
 
-    def test_task_and_map_survive_intervention(self):
+    def test_planner_and_task_tracking_continue_during_intervention(self):
         n = self.make_node(active=True)
-        map_process = n._map_node_proc
+        planner, mapper = n._planning_proc, n._map_node_proc
         n.cmd_manual_enter()
-        self.assertEqual(n._kill_proc.call_count, 2)
-        self.assertIsNone(n._planning_proc)
+        self.assertEqual(n._kill_proc.call_count, 1)
+        self.assertIs(n._planning_proc, planner)
         self.assertIsNone(n._cmd_vel_proc)
-        self.assertIs(n._map_node_proc, map_process)
-        n._on_nav_done(type('Done', (), {'data': True})())
-        self.assertEqual(n.state, 'navigation')
-        self.assertEqual(n._nav_progress['poi_index'], 2)
-        with self.assertRaises(ValueError): n.cmd_nav_resume()
+        self.assertIs(n._map_node_proc, mapper)
+        self.assertFalse(n._nav_paused)
+        n._on_nav_progress(type('Progress', (), {'data': '{"poi_index": 3, "percent": 15}'})())
+        self.assertEqual(n._nav_progress['poi_index'], 3)
         n.cmd_manual_exit()
         self.assertTrue(n._nav_active)
-        self.assertTrue(n._nav_paused)
-        self.assertEqual(n._launch_proc.call_count, 2)
-        n.cmd_nav_resume()
+        self.assertFalse(n._nav_paused)
+        self.assertEqual(n._launch_proc.call_count, 1)
+
+    def test_manual_arrival_can_complete_task(self):
+        n = self.make_node(active=True)
+        n.cmd_manual_enter()
+        n._on_nav_done(type('Done', (), {'data': True})())
+        self.assertEqual(n.state, 'idle')
+        self.assertFalse(n._nav_active)
+        self.assertTrue(n._manual_intervention)
+        n.cmd_manual_exit()
+        self.assertEqual(n.state, 'idle')
+        self.assertFalse(n._nav_active)
+
+    def test_takeover_clears_a_previous_pause(self):
+        n = self.make_node(active=True)
+        n._nav_paused = True
+        n.cmd_manual_enter()
+        self.assertFalse(n._nav_paused)
+        n.cmd_manual_exit()
         self.assertFalse(n._nav_paused)
 
     def test_idle_exit_does_not_create_task(self):

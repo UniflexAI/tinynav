@@ -127,7 +127,7 @@ def _serialized_command(method):
     @wraps(method)
     def command(self, *args, **kwargs):
         with self._lock:
-            allowed = {'cmd_manual_enter', 'cmd_manual_exit', 'cmd_nav_cancel', 'cmd_nav_pause', 'cmd_action'}
+            allowed = {'cmd_manual_enter', 'cmd_manual_exit', 'cmd_nav_cancel', 'cmd_action'}
             if self._manual_intervention and method.__name__ not in allowed:
                 raise ValueError('Exit manual intervention first')
             return method(self, *args, **kwargs)
@@ -209,7 +209,6 @@ class BackendNode(Ros2NodeManager):
         self._manual_velocity = (0.0, 0.0, 0.0)
         self._manual_received = 0.0
         self._manual_had_controller = False
-        self._manual_had_planner = False
 
         # Publisher for robot action commands (sit / stand)
         self._action_pub = self.create_publisher(String, '/service/command', 10)
@@ -1200,17 +1199,13 @@ class BackendNode(Ros2NodeManager):
             self._manual_intervention = True
             self._manual_velocity = (0.0, 0.0, 0.0)
             self._manual_received = 0.0
-            self.cmd_nav_pause()
+            if self._nav_paused:
+                self._nav_paused = False
+                self._pause_pub.publish(Bool(data=False))
             self._write_velocity(0.0, 0.0, 0.0)
             self._manual_had_controller = self._cmd_vel_proc is not None
-            self._manual_had_planner = self._planning_proc is not None
             self._kill_proc(self._cmd_vel_proc)
             self._cmd_vel_proc = None
-            self._write_velocity(0.0, 0.0, 0.0)
-            self._kill_proc(self._planning_proc)
-            self._planning_proc = None
-            self._trajectory = []
-            self._global_path = []
             self._write_velocity(0.0, 0.0, 0.0)
 
     @_serialized_command
@@ -1221,15 +1216,10 @@ class BackendNode(Ros2NodeManager):
             self._manual_velocity = (0.0, 0.0, 0.0)
             self._write_velocity(0.0, 0.0, 0.0)
             env = os.environ.copy()
-            if self._manual_had_planner:
-                self._planning_proc = self._launch_proc(
-                    'planning', [sys.executable, '/tinynav/tinynav/core/planning_node.py'], env=env)
             if self._manual_had_controller:
                 self._cmd_vel_proc = self._launch_proc(
                     'cmd_vel_control', [sys.executable, '/tinynav/tinynav/platforms/cmd_vel_control.py'], env=env)
             self._manual_intervention = False
-            if not self._nav_active:
-                self.cmd_nav_resume()
 
     def _manual_tick(self):
         with self._lock:

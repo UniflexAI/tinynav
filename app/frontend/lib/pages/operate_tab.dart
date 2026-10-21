@@ -207,7 +207,7 @@ class _OperateTabState extends ConsumerState<OperateTab> with WidgetsBindingObse
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(children: [
             Expanded(child: Text(manual
-              ? (isNavigating ? 'Manual control | Task retained\nW/S forward/back | A/D strafe | Left/Right turn' : 'Manual control\nW/S forward/back | A/D strafe | Left/Right turn')
+              ? (isNavigating ? 'Manual control | POI tracking active\nW/S forward/back | A/D strafe | Left/Right turn' : 'Manual control\nW/S forward/back | A/D strafe | Left/Right turn')
               : (status?.navPaused ?? false) ? 'Task paused | Resume when ready' : 'Manual intervention available',
               style: TextStyle(color: manual ? Colors.white : const Color(0xFF17324D), fontSize: 12))),
             FilledButton(onPressed: _manualBusy ? null : () => _toggleManual(manual),
@@ -1524,7 +1524,9 @@ class _PauseButtonState extends ConsumerState<_PauseButton> {
   Widget build(BuildContext context) {
     final status = widget.statusAsync.valueOrNull;
     final running = status?.navNodesRunning ?? false;
-    if (!running) return const SizedBox.shrink();
+    if (!running || (status?.manualIntervention ?? false) || status?.rawState != 'navigation') {
+      return const SizedBox.shrink();
+    }
 
     final paused = status?.navPaused ?? false;
     return FilledButton.icon(

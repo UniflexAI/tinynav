@@ -48,7 +48,7 @@ app.include_router(ws.router)
 @app.middleware('http')
 async def protect_manual_mode(request, call_next):
     node = runner.node
-    allowed = {'/nav/manual/enter', '/nav/manual/exit', '/nav/cancel', '/nav/pause', '/action/command'}
+    allowed = {'/nav/manual/enter', '/nav/manual/exit', '/nav/cancel', '/action/command'}
     if (node is not None and node._manual_intervention
             and request.method in ('POST', 'PUT', 'DELETE', 'PATCH')
             and request.url.path not in allowed):
