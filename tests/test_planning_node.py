@@ -1018,7 +1018,7 @@ def test_a_target_walled_off_leaves_every_row_its_straight_distance():
     assert np.allclose(d, straight) and np.allclose(e, err)
 
 
-def _blocked_with_box_at(x, y):
+def _blocked_with_box_at(x, y, ahead_m=np.inf):
     """A 4m route along x at y=2.5, the robot at x=1 and the carrot at x=3, and one
     obstacle cell at (x, y)."""
     origin, res = np.array([0.0, 0.0]), 0.1
@@ -1026,7 +1026,8 @@ def _blocked_with_box_at(x, y):
     obstacle = np.zeros((50, 50), dtype=bool)
     obstacle[int(x / res), int(y / res)] = True
     esdf = distance_transform_edt(~obstacle) * res
-    return route_blocked_ahead(esdf, path_dist, remaining, rem_here=3.5, carrot_rem=1.5, half_w=0.25)
+    return route_blocked_ahead(esdf, path_dist, remaining, rem_here=3.5, carrot_rem=1.5, half_w=0.25,
+                               ahead_m=ahead_m)
 
 
 def test_an_obstacle_on_the_route_before_the_carrot_blocks_it():
@@ -1038,3 +1039,8 @@ def test_an_obstacle_beside_behind_or_past_the_carrot_does_not():
     assert not _blocked_with_box_at(2.0, 3.0)         # clears the body
     assert not _blocked_with_box_at(0.6, 2.5)         # behind the robot
     assert not _blocked_with_box_at(4.0, 2.5)         # past the carrot
+
+
+def test_an_obstacle_further_than_the_horizon_is_not_judged_yet():
+    assert _blocked_with_box_at(2.0, 2.5, ahead_m=1.5)    # 1 m ahead of the robot
+    assert not _blocked_with_box_at(2.0, 2.5, ahead_m=0.5)

@@ -716,14 +716,23 @@ def route_left_at(route_xy, xy):
     return float(np.linalg.norm(np.diff(route_xy[k:], axis=0), axis=1).sum())
 
 
-def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, carrot_rem, half_w):
-    """Whether an obstacle is on the route between the robot and the carrot: a route cell
-    whose remaining arc lies in [carrot_rem, rem_here] has ESDF under `half_w`, so the body
-    would not fit driving the route itself. `half_w`, not plus the safety radius: the
-    route is where the capture drove, often closer to a wall than that. Route cells are
-    the zeros of `path_dist_map` (build_route_fields); cells off the grid are not seen."""
+#: How far ahead strict follow looks for an obstacle on the route, in seconds of
+#: driving: one further away is not judged yet, so the robot keeps closing on it and
+#: stops as near as the shrinking horizon lets it -- near enough to a crossing by a
+#: wall to stand inside the link it switches on. The operator's number.
+STRICT_AHEAD_S = 1.0
+
+
+def route_blocked_ahead(ESDF_map, path_dist_map, remaining_map, rem_here, carrot_rem, half_w,
+                        ahead_m=np.inf):
+    """Whether an obstacle is on the route within `ahead_m` of the robot and before the
+    carrot: a route cell whose remaining arc lies in [max(carrot_rem, rem_here - ahead_m),
+    rem_here] has ESDF under `half_w`, so the body would not fit driving the route
+    itself. `half_w`, not plus the safety radius: the route is where the capture drove,
+    often closer to a wall than that. Route cells are the zeros of `path_dist_map`
+    (build_route_fields); cells off the grid are not seen."""
     ahead = ((path_dist_map == 0.0) & (remaining_map <= rem_here)
-             & (remaining_map >= carrot_rem))
+             & (remaining_map >= max(carrot_rem, rem_here - ahead_m)))
     return bool((ESDF_map[ahead] < half_w).any())
 
 
@@ -1573,7 +1582,8 @@ class PlanningNode(Node):
                 self._strict_follow and has_route
                 and self._signal_fresh(self._strict_follow_stamp_ns, self._strict_follow_ttl_ns)
                 and route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
-                                        rem_here, carrot_rem, half_w))
+                                        rem_here, carrot_rem, half_w,
+                                        ahead_m=v_nom * STRICT_AHEAD_S))
             sel = select_by_time(
                 params[:, 0], yaws, scores, arrive_ts, end_remainings, end_devs,
                 end_heading_errs, end_goal_errs, end_goal_dxys, here_arrived, has_route,
