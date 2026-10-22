@@ -1,6 +1,7 @@
 """Train BevNet on teacher BEV labels.
 
-  python -m tinynav.core.model.train.train --data ~/workspace/teachers/data/bags --out runs/bev_v1
+  python -m tinynav.core.model.train.pack <label_dir> <packed_dir>
+  python -m tinynav.core.model.train.train --data <packed_dir> --out runs/bev_v1
 """
 import argparse
 import json
@@ -17,7 +18,8 @@ from .cost import OBSTACLE, PRESETS, classify
 from .dataset import BevDataset
 from .model import BevNet, split_heads
 
-VAL_BAGS = ['bag_2026_09_19_12_05_36', 'bag_1970_01_01_08_07_55', 'bag_2026_07_15_17_59_07', 'bag_lijialin_gt']
+VAL_BAGS = ['bag_2026_09_19_12_04_41', 'bag_2026_09_19_12_05_36', 'bag_1970_01_01_08_07_55',
+            'bag_jd_back_2026_07_27_17_46_19', 'bag_lijialin_gt']
 X, Y = cell_centers()
 ROI = torch.from_numpy((X > 0.3) & (X < 4.0) & (np.abs(Y) < 2.0))
 W = dict(known=1.0, ground=1.0, span=2.0, step=2.0, rail=1.0)
@@ -88,7 +90,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    all_bags = sorted(p.name for p in Path(args.data).iterdir() if (p / 'bev' / 'info.json').exists())
+    all_bags = sorted(p.name for p in Path(args.data).iterdir() if p.is_dir() and any(p.glob('*.npz')))
     train_bags = [b for b in all_bags if b not in args.val_bags]
     val_bags = [b for b in all_bags if b in args.val_bags]
     tr = BevDataset(args.data, train_bags, augment=True)

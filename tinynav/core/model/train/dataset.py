@@ -1,12 +1,11 @@
 """Training samples: runtime inputs (infra1 + camera depth + camera tilt) -> teacher BEV labels.
 
-Expects bag folders produced by labels/extract_frames.py, labels/run_teachers.py and labels/make_bev_gt.py:
-  meta.json, poses.npy, {name}_left.png, {name}_depth.png, bev/{name}.npz, bev/info.json
+index_bags() reads label folders produced by labels/ (meta.json, poses.npy, {name}_left.png, {name}_depth.png,
+bev/{name}.npz, bev/info.json); pack.py turns them into the compact files BevDataset reads.
 """
 import json
 from pathlib import Path
 
-import cv2
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
@@ -48,37 +47,40 @@ def index_bags(root, bags=None):
 
 
 class BevDataset(Dataset):
-    def __init__(self, root, bags=None, augment=False):
-        self.items = index_bags(root, bags)
+    """Reads samples written by pack.py: <packed_dir>/<bag>/<frame>.npz"""
+
+    def __init__(self, root, bags, augment=False):
+        self.files = sorted(f for b in bags for f in (Path(root) / b).glob('*.npz'))
         self.augment = augment
 
     def __len__(self):
-        return len(self.items)
+        return len(self.files)
 
     def __getitem__(self, i):
-        d, name, R_cw, cam_h, K = self.items[i]
-        img = cv2.imread(str(d / f'{name}_left.png'), cv2.IMREAD_GRAYSCALE)
-        depth = cv2.imread(str(d / f'{name}_depth.png'), cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0
-        lab = np.load(d / 'bev' / f'{name}.npz')
-        R_cb = cam_to_bev_rotation(R_cw)
-        layers = {k: lab[k] for k in ('known', 'ground', 'span', 'step', 'rail', 'visible')}
+        z = np.load(self.files[i])
+        img, depth = z['img'], z['depth'].astype(np.float32) / 1000.0
+        H, W = z['img_hw']
+        K = scale_K(z['K'], IMG_HW[1] / W, IMG_HW[0] / H)
+        Kd = z['K_depth'].copy()
+        R_cb = cam_to_bev_rotation(z['R_cw'])
+        layers = {k: z[k] for k in ('known', 'ground', 'span', 'step', 'rail', 'visible')}
         if self.augment and np.random.rand() < 0.5:
             img, depth = img[:, ::-1], depth[:, ::-1]
             K = K.copy()
             K[0, 2] = img.shape[1] - 1 - K[0, 2]
+            Kd[0, 2] = depth.shape[1] - 1 - Kd[0, 2]
             R_cb = F_BEV @ R_cb @ F_CAM
             layers = {k: v[:, ::-1] for k, v in layers.items()}
-        raster = depth_raster(depth, K, R_cb, step=4)
-        Ks = scale_K(K, IMG_HW[1] / img.shape[1], IMG_HW[0] / img.shape[0])
-        img = cv2.resize(np.ascontiguousarray(img), IMG_HW[::-1], interpolation=cv2.INTER_AREA).astype(np.float32) / 255
+        raster = depth_raster(np.ascontiguousarray(depth), Kd, R_cb, step=1)
+        img = img.astype(np.float32) / 255
         if self.augment:
             img = np.clip(img * np.random.uniform(0.6, 1.4) + np.random.uniform(-0.1, 0.1), 0, 1) ** np.random.uniform(0.7, 1.4)
-        grid, valid = sampling_grid(Ks, R_cb, IMG_HW)
+        grid, valid = sampling_grid(K, R_cb, IMG_HW)
         f32 = lambda a: torch.from_numpy(np.ascontiguousarray(a, dtype=np.float32))
         known = layers['known'].astype(bool)
         return dict(
             img=f32(img[None]), raster=f32(raster), grid=f32(grid), valid=f32(valid),
             known=f32(known), visible=f32(layers['visible']),
-            ground=f32(np.where(known, layers['ground'].astype(np.float32) - cam_h, 0)),
+            ground=f32(np.where(known, layers['ground'].astype(np.float32) - float(z['cam_h']), 0)),
             span=f32(layers['span']), step=f32(layers['step']), rail=f32(layers['rail']),
         )
