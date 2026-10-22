@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from .bev_geometry import BEV_N, cam_to_bev_rotation, cell_centers, depth_to_points, to_grid
-from .cost import FREE, OBSTACLE, PRESETS, classify
+from .cost import FREE, OBSTACLE, PRESETS, classify, classify_prob
 from .dataset import BevDataset
 from .model import BevNet, split_heads
 from .train import VAL_BAGS
@@ -77,6 +77,7 @@ def main():
     ap.add_argument('--data', required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--bags', nargs='*', default=VAL_BAGS)
+    ap.add_argument('--thr', type=float, default=0.5, help='obstacle probability threshold')
     ap.add_argument('--examples', type=int, default=4, help='panels per bag (frames where the rule misses most)')
     args = ap.parse_args()
     out = Path(args.out)
@@ -96,12 +97,12 @@ def main():
             s = ds[i]
             z = np.load(ds.files[i])
             o = split_heads(model(*(s[k][None].to(dev) for k in ('img', 'raster', 'grid', 'valid'))).float().cpu())
-            o = {k: v[0].numpy() for k, v in o.items()}
+            o = {k: torch.sigmoid(v[0]).numpy() for k, v in o.items() if k != 'ground'}
             rule = planning_rule(z['depth'].astype(np.float32) / 1000.0, z['K_depth'], cam_to_bev_rotation(z['R_cw']))
             vis = z['visible'].astype(bool)
             for pname, p in PRESETS.items():
                 lab, causes = label_causes(z, p)
-                pred = classify(o['known'] > 0, np.maximum(o['span'], 0), np.maximum(o['step'], 0), o['rail'] > 0, p)
+                pred = classify_prob(o['known'], o['span'], o['step'], o['rail'], p, args.thr)
                 methods = dict(rule=rule == OBSTACLE, model=pred == OBSTACLE)
                 methods['union'] = methods['rule'] | methods['model']
                 lab_obs = (lab == OBSTACLE) & ROI

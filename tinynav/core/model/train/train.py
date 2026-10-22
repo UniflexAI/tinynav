@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .bev_geometry import cell_centers
-from .cost import OBSTACLE, PRESETS, classify
+from .cost import OBSTACLE, PRESETS, SPAN_T, STEP_T, classify, classify_prob
 from .dataset import BevDataset
 from .model import BevNet, split_heads
 
@@ -22,20 +22,28 @@ VAL_BAGS = ['bag_2026_09_19_12_04_41', 'bag_2026_09_19_12_05_36', 'bag_1970_01_0
             'bag_jd_back_2026_07_27_17_46_19', 'bag_lijialin_gt']
 X, Y = cell_centers()
 ROI = torch.from_numpy((X > 0.3) & (X < 4.0) & (np.abs(Y) < 2.0))
-W = dict(known=1.0, ground=1.0, span=2.0, step=2.0, rail=1.0)
+W = dict(known=1.0, ground=0.5, span=2.0, step=2.0, rail=1.0)
+POS_W = 3.0   # obstacles are rare; missing one costs more than a false alarm
+
+
+def exceed_bce(logits, value, thresholds, k, n, pos_weight):
+    """BCE of P(value >= t) for every threshold, on label-known cells."""
+    t = torch.tensor(thresholds, device=value.device)[None, :, None, None]
+    tgt = (value[:, None] >= t).float()
+    pw = torch.tensor(pos_weight, device=value.device)
+    return (F.binary_cross_entropy_with_logits(logits, tgt, pos_weight=pw, reduction='none') * k[:, None]).sum() / (n * len(thresholds))
 
 
 def losses(out, b):
     p = split_heads(out)
     k = b['known']
     n = k.sum().clamp(min=1)
-    masked_l1 = lambda pred, tgt, clip: (F.smooth_l1_loss(pred, tgt.clamp(max=clip), reduction='none', beta=0.05) * k).sum() / n
-    rail = F.binary_cross_entropy_with_logits(p['rail'], b['rail'], pos_weight=torch.tensor(4.0, device=k.device), reduction='none')
+    rail = F.binary_cross_entropy_with_logits(p['rail'], b['rail'], pos_weight=torch.tensor(POS_W, device=k.device), reduction='none')
     return dict(
         known=F.binary_cross_entropy_with_logits(p['known'], k),
-        ground=masked_l1(p['ground'], b['ground'], 3.0),
-        span=masked_l1(p['span'], b['span'], 1.5),
-        step=masked_l1(p['step'], b['step'], 1.0),
+        ground=(F.smooth_l1_loss(p['ground'], b['ground'].clamp(-3, 3), reduction='none', beta=0.05) * k).sum() / n,
+        span=exceed_bce(p['span'], b['span'], SPAN_T, k, n, POS_W),
+        step=exceed_bce(p['step'], b['step'], STEP_T, k, n, POS_W),
         rail=(rail * k).sum() / n,
     )
 
@@ -55,8 +63,8 @@ def evaluate(model, loader, dev):
         vis = b['visible'] > 0.5
         for preset in PRESETS:
             gt = to_classes(known, b['span'], b['step'], b['rail'] > 0.5, preset) == OBSTACLE
-            pr = to_classes(torch.sigmoid(out['known']) > 0.5, out['span'], out['step'],
-                            torch.sigmoid(out['rail']) > 0.5, preset) == OBSTACLE
+            pr = torch.from_numpy(np.stack([classify_prob(*(torch.sigmoid(out[k][j]).numpy() for k in ('known', 'span', 'step', 'rail')),
+                                                          PRESETS[preset]) for j in range(len(gt))])) == OBSTACLE
             s = stats[preset]
             s['tp'] += (gt & pr & roi).sum().item()
             s['fp'] += (~gt & pr & roi).sum().item()

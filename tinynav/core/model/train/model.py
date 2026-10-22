@@ -2,7 +2,7 @@
 
 Inputs  img (B,1,H,W) in [0,1], raster (B,4,N,N) from depth_raster, grid (B,Z*N,N,2) and valid (B,Z,N,N)
         from sampling_grid. Grids are computed outside the network so the export only needs grid_sample.
-Outputs (B,5,N,N): known logit, ground (m, rel. camera), span (m), step (m), rail logit.
+Outputs (B,C,N,N) logits: known, ground (m, rel. camera; regression), span >= SPAN_T[i], step >= STEP_T[i], rail.
 """
 import timm
 import torch
@@ -10,8 +10,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .bev_geometry import BEV_N, Z_SLICES
+from .cost import SPAN_T, STEP_T
 
-HEADS = ('known', 'ground', 'span', 'step', 'rail')
+# name -> channels
+HEADS = dict(known=1, ground=1, span=len(SPAN_T), step=len(STEP_T), rail=1)
 
 
 def conv_bn(cin, cout, k=3, s=1):
@@ -61,7 +63,7 @@ class BevNet(nn.Module):
         self.encoder = ImageEncoder(feat_ch, pretrained)
         self.squeeze = conv_bn(feat_ch * nz + nz, 96, k=1)
         self.unet = BevUNet(96 + 4)
-        self.head = nn.Conv2d(64, len(HEADS), 1)
+        self.head = nn.Conv2d(64, sum(HEADS.values()), 1)
 
     def forward(self, img, raster, grid, valid):
         feat = self.encoder(img)
@@ -74,4 +76,9 @@ class BevNet(nn.Module):
 
 
 def split_heads(out):
-    return {k: out[:, i] for i, k in enumerate(HEADS)}
+    """Single-channel heads come back as (B,N,N), threshold heads as (B,T,N,N)."""
+    res, i = {}, 0
+    for k, n in HEADS.items():
+        res[k] = out[:, i] if n == 1 else out[:, i:i + n]
+        i += n
+    return res
