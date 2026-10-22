@@ -286,10 +286,17 @@ def angle_between(a, b):
 
 
 #: How short the way forward has to be for the reverse family to be armed, and how
-#: far it has to open back up before it disengages. Upstream's pair is 0.30/0.45;
-#: the entry is 0.10 here, and the exit keeps upstream's 1.5x so the band is a band.
-REVERSE_ENTER_M = 0.10
-REVERSE_EXIT_M = 0.15
+#: far it has to open back up before it disengages (1.5x, so the band is a band).
+#: Upstream main's pair; a tighter entry (0.10) nosed the robot into the wall.
+REVERSE_ENTER_M = 0.30
+REVERSE_EXIT_M = 0.45
+
+#: Per unit of ESDF clearance score, nonzero only inside safety_radius (a collision
+#: is inf and no weight reaches it). Restores upstream main's 100000-vs-100/m
+#: balance on the zeroed score: the shallowest graze the grid can read, one cell
+#: inside the band (1/0.15 - 1/0.2 at 0.05 m ≈ 3e4), beats every other cost term
+#: of a rollout combined.
+W_CLEARANCE = 20000.0
 
 
 def reverse_armed(front_clearance, resolution, engaged=False):
@@ -779,14 +786,7 @@ class PlanningNode(Node):
             Path, '/mapping/global_plan', self._on_global_route, 1
         )
         self._global_route_map_xy = None
-        # Per unit of ESDF clearance score, which is nonzero only inside safety_radius
-        # (a collision is inf and no weight reaches it). 200 against w_route_progress's
-        # 100/m is upstream #246's balance carried over: it moved 100000/100 to
-        # 2000/1000, a 500x drop in the clearance term's weight relative to progress,
-        # and the same ratio here is 200 because this fork's progress term already
-        # weighs 100/m. Grazing at safety_radius now costs about 20 m of route
-        # progress, where it used to cost 9900 m.
-        self.w_clearance = 200.0
+        self.w_clearance = W_CLEARANCE
         # among survivors, progress drives speed and follow keeps the robot from
         # cutting across to a closer route point
         self.w_route_progress = 100.0
