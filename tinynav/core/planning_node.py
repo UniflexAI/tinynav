@@ -8,6 +8,7 @@ and a reverse gate. With no route available it falls back to distance-to-goal.
 """
 
 
+import array
 import json
 import rclpy
 from rclpy.node import Node
@@ -1080,7 +1081,7 @@ class PlanningNode(Node):
         msg.info.origin.position.y = self.origin[1]
         msg.info.origin.position.z = self.origin[2] + self.grid_shape[2] * self.resolution / 2
         msg.info.origin.orientation.w = 1.0
-        msg.data = np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tolist()
+        msg.data = array.array('b', np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tobytes())
         self.obstacle_mask_pub.publish(msg)
 
     def publish_height_map(self, origin, esdf_map, header):
@@ -1102,8 +1103,8 @@ class PlanningNode(Node):
         occupancy_grid_msg.info.origin.position.y = origin[1]
         occupancy_grid_msg.info.origin.position.z = origin[2] + z_offset
         occupancy_grid_msg.info.origin.orientation.w = 1.0
-        flat_data = np.where(ESDF_map <= 0.00, 100, np.clip(((1-ESDF_map/0.5) * 120).astype(int), 0, 120)).ravel(order="F").tolist()
-        occupancy_grid_msg.data = flat_data
+        flat_data = np.where(ESDF_map <= 0.00, 100, np.clip(((1-ESDF_map/0.5) * 120).astype(int), 0, 120)).astype(np.int8).ravel(order="F")
+        occupancy_grid_msg.data = array.array('b', flat_data.tobytes())
         self.occupancy_grid_pub.publish(occupancy_grid_msg)
 
     def publish_3d_occupancy_cloud(self, grid3d, resolution=0.1, origin=(0, 0, 0)):
