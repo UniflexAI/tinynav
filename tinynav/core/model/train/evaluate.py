@@ -6,6 +6,8 @@ Counted in the box 0.3-4 m ahead, |y| < 2 m. Per robot preset, per bag:
   miss         label obstacle the method does not mark (one-cell tolerance), split by cause and by
                seen-now (visible in the current frame) vs filled-in cells
   false alarm  label free cell the method marks as obstacle
+  area         share of the box the method marks as obstacle (label: share that is obstacle); 'area_unknown' is
+               the part marked where the label has no data, which false alarm cannot see
 Writes metrics.json and example panels (image | planning rule | model | label).
 """
 import argparse
@@ -67,6 +69,8 @@ def new_counts():
         for k in ('wall', 'rail', 'step', 'seen', 'unseen', 'all'):
             c[f'{m}.{k}.n'] = c[f'{m}.{k}.miss'] = 0
         c[f'{m}.free.n'] = c[f'{m}.free.alarm'] = 0
+        c[f'{m}.area'] = c[f'{m}.area_unknown'] = 0
+    c['roi'] = c['label.area'] = 0
     return c
 
 
@@ -116,6 +120,10 @@ def main():
                         c[f'{m}.{k}.miss'] += int((mask & ~hit).sum())
                     c[f'{m}.free.n'] += int(lab_free.sum())
                     c[f'{m}.free.alarm'] += int((lab_free & mo).sum())
+                    c[f'{m}.area'] += int((mo & ROI).sum())
+                    c[f'{m}.area_unknown'] += int((mo & ROI & (lab == 0)).sum())
+                c['roi'] += int(ROI.sum())
+                c['label.area'] += int(lab_obs.sum())
                 if pname == 'quadruped':
                     miss_rule = int((lab_obs & ~cv2.dilate(methods['rule'].astype(np.uint8), KER).astype(bool)).sum())
                     ranked.append((miss_rule, i, rule, pred, lab))
@@ -124,9 +132,12 @@ def main():
             res[pname] = {m: {k: round(c[f'{m}.{k}.miss'] / max(c[f'{m}.{k}.n'], 1), 4)
                               for k in ('all', 'seen', 'unseen', 'wall', 'rail', 'step')}
                           | {'false_alarm': round(c[f'{m}.free.alarm'] / max(c[f'{m}.free.n'], 1), 4),
-                             'n_obstacle': c[f'{m}.all.n']}
+                             'n_obstacle': c[f'{m}.all.n'], 'area': round(c[f'{m}.area'] / c['roi'], 4),
+                             'area_unknown': round(c[f'{m}.area_unknown'] / c['roi'], 4)}
                           for m in ('rule', 'model', 'union')}
-        results[bag] = dict(frames=len(ds), **res)
+        for pname, c in counts.items():
+            res[pname]['label_area'] = round(c['label.area'] / c['roi'], 4)
+        results[bag] = dict(frames=len(ds), counts=counts, **res)
         print(bag, json.dumps(res['quadruped']['rule']), json.dumps(res['quadruped']['model']), flush=True)
 
         # examples: spread over the bag, preferring frames where the rule misses most

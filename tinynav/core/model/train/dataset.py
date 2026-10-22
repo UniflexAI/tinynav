@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.ndimage import binary_closing, grey_dilation
 from scipy.spatial.transform import Rotation as R
 from torch.utils.data import Dataset
 
@@ -25,6 +26,22 @@ def scale_K(K, sx, sy):
     K[1, 1] *= sy
     K[1, 2] = (K[1, 2] + 0.5) * sy - 0.5
     return K
+
+
+GAP_KERNEL = (5, 3)  # rows x cols; far teacher depth leaves gaps between rows of observed cells
+
+
+def fill_gaps(layers):
+    """Close small holes in the label (stripes between far depth rows) so 'known' is learnable."""
+    known = layers['known'].astype(bool)
+    closed = binary_closing(known, structure=np.ones(GAP_KERNEL, bool))
+    new = closed & ~known
+    out = dict(layers, known=closed)
+    for k in ('ground', 'span', 'step'):
+        v = layers[k].astype(np.float32)
+        out[k] = np.where(new, grey_dilation(np.where(known, v, -9.0), size=GAP_KERNEL), v)
+    out['rail'] = layers['rail'].astype(bool) | (new & grey_dilation(layers['rail'].astype(np.uint8), size=GAP_KERNEL).astype(bool))
+    return out
 
 
 def index_bags(root, bags=None):
@@ -63,7 +80,7 @@ class BevDataset(Dataset):
         K = scale_K(z['K'], IMG_HW[1] / W, IMG_HW[0] / H)
         Kd = z['K_depth'].copy()
         R_cb = cam_to_bev_rotation(z['R_cw'])
-        layers = {k: z[k] for k in ('known', 'ground', 'span', 'step', 'rail', 'visible')}
+        layers = fill_gaps({k: z[k] for k in ('known', 'ground', 'span', 'step', 'rail', 'visible')})
         if self.augment and np.random.rand() < 0.5:
             img, depth = img[:, ::-1], depth[:, ::-1]
             K = K.copy()

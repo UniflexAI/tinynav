@@ -24,27 +24,32 @@ X, Y = cell_centers()
 ROI = torch.from_numpy((X > 0.3) & (X < 4.0) & (np.abs(Y) < 2.0))
 W = dict(known=1.0, ground=0.5, span=2.0, step=2.0, rail=1.0)
 POS_W = 3.0   # obstacles are rare; missing one costs more than a false alarm
+UNKNOWN_W = 0.3
 
 
-def exceed_bce(logits, value, thresholds, k, n, pos_weight):
-    """BCE of P(value >= t) for every threshold, on label-known cells."""
+def joint_bce(logits, target, k, pos_weight):
+    """BCE of P(cell observed and target): label-unknown cells are negatives with a small weight, so the
+    obstacle heads never output unsupervised values where nothing will be seen."""
+    w = k + UNKNOWN_W * (1 - k)
+    pw = torch.tensor(pos_weight, device=k.device)
+    return (F.binary_cross_entropy_with_logits(logits, target * k, pos_weight=pw, reduction='none') * w).sum() / w.sum()
+
+
+def exceed_bce(logits, value, thresholds, k, pos_weight):
     t = torch.tensor(thresholds, device=value.device)[None, :, None, None]
-    tgt = (value[:, None] >= t).float()
-    pw = torch.tensor(pos_weight, device=value.device)
-    return (F.binary_cross_entropy_with_logits(logits, tgt, pos_weight=pw, reduction='none') * k[:, None]).sum() / (n * len(thresholds))
+    return joint_bce(logits, (value[:, None] >= t).float(), k[:, None].expand_as(logits), pos_weight)
 
 
 def losses(out, b):
     p = split_heads(out)
     k = b['known']
     n = k.sum().clamp(min=1)
-    rail = F.binary_cross_entropy_with_logits(p['rail'], b['rail'], pos_weight=torch.tensor(POS_W, device=k.device), reduction='none')
     return dict(
         known=F.binary_cross_entropy_with_logits(p['known'], k),
         ground=(F.smooth_l1_loss(p['ground'], b['ground'].clamp(-3, 3), reduction='none', beta=0.05) * k).sum() / n,
-        span=exceed_bce(p['span'], b['span'], SPAN_T, k, n, POS_W),
-        step=exceed_bce(p['step'], b['step'], STEP_T, k, n, POS_W),
-        rail=(rail * k).sum() / n,
+        span=exceed_bce(p['span'], b['span'], SPAN_T, k, POS_W),
+        step=exceed_bce(p['step'], b['step'], STEP_T, k, POS_W),
+        rail=joint_bce(p['rail'], b['rail'], k, POS_W),
     )
 
 
