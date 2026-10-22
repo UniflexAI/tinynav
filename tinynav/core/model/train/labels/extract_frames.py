@@ -42,6 +42,7 @@ def main():
     ap.add_argument('out')
     ap.add_argument('--hz', type=float, default=2.0, help='saved frame rate')
     ap.add_argument('--baseline', type=float, default=0.0, help='override when infra2 camera_info has no baseline')
+    ap.add_argument('--no_right', action='store_true', help='left + depth only (frames labelled from other teacher frames)')
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -54,7 +55,8 @@ def main():
         topics = {c.topic for c in reader.connections}
         pose_topic = next((t for t in POSE_TOPICS if t in topics), None)
         anchor = DEPTH if DEPTH in topics else LEFT  # depth is the sparsest stream
-        conns = [c for c in reader.connections if c.topic in {LEFT, RIGHT, DEPTH, INFO1, INFO2, pose_topic}]
+        wanted = {LEFT, DEPTH, INFO1, INFO2, pose_topic} | (set() if args.no_right else {RIGHT})
+        conns = [c for c in reader.connections if c.topic in wanted]
         for conn, _, raw in reader.messages(connections=conns):
             if conn.topic in (INFO1, INFO2):
                 if conn.topic not in info:
@@ -72,11 +74,13 @@ def main():
                 pending[s] = True
                 last_anchor = s
             for a in list(pending):
-                l, r = nearest(bufs[LEFT], a), nearest(bufs[RIGHT], a)
+                l = nearest(bufs[LEFT], a)
+                r = l if args.no_right else nearest(bufs[RIGHT], a)
                 if l is not None and r is not None and stamp(l) == stamp(r):
                     name = f'{len(frames):06d}'
                     cv2.imwrite(str(out / f'{name}_left.png'), to_np(l))
-                    cv2.imwrite(str(out / f'{name}_right.png'), to_np(r))
+                    if not args.no_right:
+                        cv2.imwrite(str(out / f'{name}_right.png'), to_np(r))
                     if anchor == DEPTH:
                         cv2.imwrite(str(out / f'{name}_depth.png'), to_np(bufs[DEPTH][a]))
                     frames.append(dict(name=name, stamp=int(stamp(l))))

@@ -36,12 +36,12 @@ MAX_DIST = 10.0       # m, neighbour camera must be this close
 NZ = int(round((BAND[1] - BAND[0]) / RES))
 
 
-def load_frames(d):
+def load_frames(d, need_teacher=True):
     meta = json.loads((d / 'meta.json').read_text())
     poses = np.load(d / 'poses.npy')
     frames = []
     for f in meta['frames']:
-        if not (d / f"{f['name']}_fsdepth.npy").exists() or not len(poses):
+        if (need_teacher and not (d / f"{f['name']}_fsdepth.npy").exists()) or not len(poses):
             continue
         j = int(np.argmin(np.abs(poses[:, 0] - f['stamp'])))
         if abs(poses[j, 0] - f['stamp']) > 30e6:
@@ -66,6 +66,16 @@ def frame_points(d, f, K, rail_ids):
     _, idx = np.unique(np.floor(pw / RES).astype(np.int64), axis=0, return_index=True)
     full = np.load(d / f"{f['name']}_fsdepth.npy").astype(np.float32)
     return pw[idx].astype(np.float32), rail[idx], full[::FREE_DS, ::FREE_DS]
+
+
+def camera_points(d, f, K):
+    """World points from the camera's own depth (for frames without teacher depth)."""
+    depth = cv2.imread(str(d / f"{f['name']}_depth.png"), cv2.IMREAD_UNCHANGED)[::4, ::4].astype(np.float32) / 1000.0
+    v, u = np.mgrid[0:depth.shape[0], 0:depth.shape[1]] * 4
+    ok = (depth > 0.2) & (depth < ZMAX)
+    z = depth[ok]
+    pc = np.stack([(u[ok] - K[2]) / K[0] * z, (v[ok] - K[5]) / K[4] * z, z], 1)
+    return (pc @ f['T'][:3, :3].T + f['T'][:3, 3]).astype(np.float32)
 
 
 def heading_frame(T, cam_h):
@@ -131,7 +141,7 @@ def seen_through(occv, occ, near, Rb, origin, K):
     return out
 
 
-def label_for(f, window, poses_xyz, cam_h, K):
+def label_for(f, window, poses_xyz, cam_h, K, own_points=None):
     Rb, origin = heading_frame(f['T'], cam_h)
     occ = np.zeros((BEV_N, BEV_N, NZ), np.uint8)       # frames seeing each voxel (saturating)
     railv = np.zeros((BEV_N, BEV_N, NZ), bool)
@@ -145,6 +155,9 @@ def label_for(f, window, poses_xyz, cam_h, K):
         railv[r[rl], q[rl], k[rl]] = True
         if g is f:
             visible[r, q] = True
+    if own_points is not None:  # target frame has no teacher depth: 'visible' from its camera depth
+        r, q, k, ok = to_grid((own_points - origin) @ Rb.T)
+        visible[r[ok], q[ok]] = True
     occv = occ >= MIN_FRAMES
     occv &= ~seen_through(occv, occ, near, Rb, origin, K)
     known = occv.any(2)
@@ -176,15 +189,19 @@ def main():
     ap.add_argument('frames_dir')
     ap.add_argument('--out', default='bev')
     ap.add_argument('--max_frames', type=int, default=0)
+    ap.add_argument('--targets', default=None,
+                    help='folder of extra frames (left + camera depth, same bag) to label from the teacher frames in frames_dir')
     args = ap.parse_args()
     d = Path(args.frames_dir)
     meta, poses, frames = load_frames(d)
     if args.max_frames:
         frames = frames[:args.max_frames]
+    td = Path(args.targets) if args.targets else d
+    targets = load_frames(td, need_teacher=False)[2] if args.targets else frames
     labels = json.loads((d / 'seg_labels.json').read_text())
     rail_ids = [int(k) for k, v in labels.items() if any(w in v.lower() for w in RAIL_WORDS)]
     K = meta['K']
-    out = d / args.out
+    out = td / args.out
     out.mkdir(exist_ok=True)
 
     sample = frames[:: max(1, len(frames) // 50)]
@@ -192,7 +209,7 @@ def main():
     stamps = np.array([f['stamp'] for f in frames])
     window = deque()  # (frame, points) sorted by time
     nxt = 0
-    for i, f in enumerate(frames):
+    for f in targets:
         t = f['stamp']
         while nxt < len(frames) and frames[nxt]['stamp'] <= t + WINDOW_S * 1e9:
             window.append((frames[nxt], frame_points(d, frames[nxt], K, rail_ids)))
@@ -200,11 +217,12 @@ def main():
         while window and window[0][0]['stamp'] < t - WINDOW_S * 1e9:
             window.popleft()
         near = np.abs(poses[:, 0] - t) < WINDOW_S * 1e9
-        lab = label_for(f, window, poses[near, 1:4], cam_h, K)
+        own = camera_points(td, f, K) if args.targets else None
+        lab = label_for(f, window, poses[near, 1:4], cam_h, K, own)
         np.savez_compressed(out / f"{f['name']}.npz", **lab)
     (out / 'info.json').write_text(json.dumps(dict(cam_h=cam_h, res=RES, bev_x=BEV_X, bev_y=BEV_Y, n=BEV_N,
-                                                  window_s=WINDOW_S, frames=len(frames))))
-    print(f'{d.name}: {len(frames)} labels, cam_h={cam_h:.2f} m')
+                                                  window_s=WINDOW_S, frames=len(targets))))
+    print(f'{td.name}: {len(targets)} labels, cam_h={cam_h:.2f} m')
 
 
 if __name__ == '__main__':

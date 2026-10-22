@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from .bev_geometry import cell_centers
 from .cost import OBSTACLE, PRESETS, SPAN_T, STEP_T, classify, classify_prob
@@ -98,18 +98,21 @@ def main():
     ap.add_argument('--workers', type=int, default=6)
     ap.add_argument('--val_bags', nargs='*', default=VAL_BAGS)
     ap.add_argument('--max_steps', type=int, default=0, help='stop early (smoke test)')
+    ap.add_argument('--balance', type=float, default=0.0, help='oversample frames with obstacles (gain, 0 = off)')
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     all_bags = sorted(p.name for p in Path(args.data).iterdir() if p.is_dir() and any(p.glob('*.npz')))
-    train_bags = [b for b in all_bags if b not in args.val_bags]
+    train_bags = [b for b in all_bags if b not in args.val_bags and b.removesuffix('_dense') not in args.val_bags]
     val_bags = [b for b in all_bags if b in args.val_bags]
     tr = BevDataset(args.data, train_bags, augment=True)
     va = BevDataset(args.data, val_bags)
     print(f'train {len(tr)} samples / {len(train_bags)} bags, val {len(va)} / {val_bags}', flush=True)
-    tl = DataLoader(tr, args.bs, shuffle=True, num_workers=args.workers, drop_last=True, pin_memory=True, persistent_workers=True)
+    sampler = WeightedRandomSampler(tr.sample_weights(args.balance), len(tr)) if args.balance else None
+    tl = DataLoader(tr, args.bs, shuffle=sampler is None, sampler=sampler, num_workers=args.workers, drop_last=True,
+                    pin_memory=True, persistent_workers=True)
     vl = DataLoader(va, args.bs, num_workers=args.workers, pin_memory=True)
 
     model = BevNet().to(dev)

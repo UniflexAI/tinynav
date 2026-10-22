@@ -73,6 +73,17 @@ class BevDataset(Dataset):
     def __len__(self):
         return len(self.files)
 
+    def sample_weights(self, gain=4.0, full=0.02):
+        """1 for frames without obstacles up to 1 + gain once obstacles cover `full` of the near box."""
+        cache = {}
+        w = []
+        for f in self.files:
+            if f.parent not in cache:
+                p = f.parent / 'index.json'
+                cache[f.parent] = json.loads(p.read_text()) if p.exists() else {}
+            w.append(1.0 + gain * min(cache[f.parent].get(f.stem, 0.0) / full, 1.0))
+        return w
+
     def __getitem__(self, i):
         z = np.load(self.files[i])
         img, depth = z['img'], z['depth'].astype(np.float32) / 1000.0
