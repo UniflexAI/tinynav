@@ -65,24 +65,32 @@ def main():
     ap.add_argument('--ckpt', default=str(FS_DIR / 'pretrained_models/23-51-11/model_best_bp2.pth'))
     ap.add_argument('--seg', default='facebook/mask2former-swin-large-ade-semantic')
     ap.add_argument('--only', nargs='*', help='frame names to process (default: all)')
+    ap.add_argument('--camera_depth', action='store_true',
+                    help='no right image: use the camera depth as teacher depth (weaker labels), still run segmentation')
     args = ap.parse_args()
     d = Path(args.frames_dir)
     meta = json.loads((d / 'meta.json').read_text())
     frames = [f for f in meta['frames'] if not args.only or f['name'] in args.only]
 
-    stereo = load_stereo(args.ckpt)
+    stereo = None if args.camera_depth else load_stereo(args.ckpt)
     proc, seg = load_seg(args.seg)
     labels = seg.config.id2label
     (d / 'seg_labels.json').write_text(json.dumps({int(k): v for k, v in labels.items()}))
+    if stereo is None:
+        meta['teacher_depth'] = 'camera'
+        (d / 'meta.json').write_text(json.dumps(meta, indent=1))
     fb = meta['fx'] * meta['baseline']
     t0 = time.time()
     for i, f in enumerate(frames):
         if (d / f"{f['name']}_seg.png").exists():
             continue
         left = cv2.imread(str(d / f"{f['name']}_left.png"), cv2.IMREAD_GRAYSCALE)
-        right = cv2.imread(str(d / f"{f['name']}_right.png"), cv2.IMREAD_GRAYSCALE)
-        disp = run_stereo(stereo, left, right)
-        depth = np.where(disp > 0.5, fb / np.maximum(disp, 1e-3), 0).astype(np.float32)
+        if stereo is None:
+            depth = cv2.imread(str(d / f"{f['name']}_depth.png"), cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0
+        else:
+            right = cv2.imread(str(d / f"{f['name']}_right.png"), cv2.IMREAD_GRAYSCALE)
+            disp = run_stereo(stereo, left, right)
+            depth = np.where(disp > 0.5, fb / np.maximum(disp, 1e-3), 0).astype(np.float32)
         np.save(d / f"{f['name']}_fsdepth.npy", depth.astype(np.float16))
         cv2.imwrite(str(d / f"{f['name']}_seg.png"), run_seg(proc, seg, left))
         if i % 20 == 0:

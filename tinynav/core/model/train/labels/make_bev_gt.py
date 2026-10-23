@@ -189,6 +189,7 @@ def main():
     ap.add_argument('frames_dir')
     ap.add_argument('--out', default='bev')
     ap.add_argument('--max_frames', type=int, default=0)
+    ap.add_argument('--cam_h', type=float, default=0.0, help='camera height above ground; estimated when 0 (unreliable on stairs)')
     ap.add_argument('--targets', default=None,
                     help='folder of extra frames (left + camera depth, same bag) to label from the teacher frames in frames_dir')
     args = ap.parse_args()
@@ -205,7 +206,7 @@ def main():
     out.mkdir(exist_ok=True)
 
     sample = frames[:: max(1, len(frames) // 50)]
-    cam_h = estimate_cam_height(sample, [frame_points(d, f, K, rail_ids) for f in sample])
+    cam_h = args.cam_h or estimate_cam_height(sample, [frame_points(d, f, K, rail_ids) for f in sample])
     stamps = np.array([f['stamp'] for f in frames])
     window = deque()  # (frame, points) sorted by time
     nxt = 0

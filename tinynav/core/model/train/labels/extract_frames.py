@@ -16,7 +16,7 @@ from rosbags.typesys import Stores, get_typestore
 NS = '/camera/camera'
 LEFT, RIGHT, DEPTH = f'{NS}/infra1/image_rect_raw', f'{NS}/infra2/image_rect_raw', f'{NS}/depth/image_rect_raw'
 INFO1, INFO2 = f'{NS}/infra1/camera_info', f'{NS}/infra2/camera_info'
-POSE_TOPICS = (f'{NS}/vio_100hz', f'{NS}/vio_image')
+POSE_TOPICS = (f'{NS}/vio_100hz', f'{NS}/vio_image', '/slam/odometry', '/slam/odometry_visual')  # first available wins
 SYNC_NS = 20_000_000
 
 
@@ -66,7 +66,8 @@ def main():
             msg = reader.deserialize(raw, conn.msgtype)
             s = stamp(msg)
             if conn.topic == pose_topic:
-                p, q = msg.pose.position, msg.pose.orientation
+                pose = msg.pose.pose if hasattr(msg.pose, 'pose') else msg.pose  # Odometry vs PoseStamped
+                p, q = pose.position, pose.orientation
                 poses.append([s, p.x, p.y, p.z, q.x, q.y, q.z, q.w])
                 continue
             bufs[conn.topic][s] = msg

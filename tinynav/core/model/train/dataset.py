@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import cv2
 from scipy.ndimage import binary_closing, grey_dilation
 from scipy.spatial.transform import Rotation as R
 from torch.utils.data import Dataset
@@ -42,6 +43,35 @@ def fill_gaps(layers):
         out[k] = np.where(new, grey_dilation(np.where(known, v, -9.0), size=GAP_KERNEL), v)
     out['rail'] = layers['rail'].astype(bool) | (new & grey_dilation(layers['rail'].astype(np.uint8), size=GAP_KERNEL).astype(bool))
     return out
+
+
+def augment_image(img, K, rng):
+    """Random zoom-in crop (intrinsics follow), noise and blur. img float32 (H,W) in [0,1]."""
+    H, W = img.shape
+    s = rng.uniform(1.0, 1.15)
+    h, w = int(round(H / s)), int(round(W / s))
+    y0, x0 = rng.integers(0, H - h + 1), rng.integers(0, W - w + 1)
+    img = cv2.resize(img[y0:y0 + h, x0:x0 + w], (W, H), interpolation=cv2.INTER_LINEAR)
+    K = K.copy()
+    K[0, 2] -= x0
+    K[1, 2] -= y0
+    K = scale_K(K, W / w, H / h)
+    img = np.clip(img * rng.uniform(0.6, 1.4) + rng.uniform(-0.1, 0.1), 0, 1) ** rng.uniform(0.7, 1.4)
+    if rng.random() < 0.3:
+        img = cv2.GaussianBlur(img, (0, 0), rng.uniform(0.5, 1.5))
+    img = np.clip(img + rng.normal(0, rng.uniform(0, 0.03), img.shape), 0, 1)
+    return img.astype(np.float32), K
+
+
+def augment_depth(depth, rng):
+    """Holes and range-dependent noise like a real stereo camera (depth in meters, 0 = invalid)."""
+    depth = depth * (1 + rng.normal(0, 0.01, depth.shape) * np.minimum(depth, 6.0))
+    H, W = depth.shape
+    for _ in range(rng.integers(0, 4)):
+        h, w = rng.integers(H // 10, H // 3), rng.integers(W // 10, W // 3)
+        y, x = rng.integers(0, H - h), rng.integers(0, W - w)
+        depth[y:y + h, x:x + w] = 0
+    return depth.astype(np.float32)
 
 
 def index_bags(root, bags=None):
@@ -99,10 +129,12 @@ class BevDataset(Dataset):
             Kd[0, 2] = depth.shape[1] - 1 - Kd[0, 2]
             R_cb = F_BEV @ R_cb @ F_CAM
             layers = {k: v[:, ::-1] for k, v in layers.items()}
-        raster = depth_raster(np.ascontiguousarray(depth), Kd, R_cb, step=1)
-        img = img.astype(np.float32) / 255
+        img = np.ascontiguousarray(img, dtype=np.float32) / 255
         if self.augment:
-            img = np.clip(img * np.random.uniform(0.6, 1.4) + np.random.uniform(-0.1, 0.1), 0, 1) ** np.random.uniform(0.7, 1.4)
+            rng = np.random.default_rng()
+            img, K = augment_image(img, K, rng)
+            depth = augment_depth(np.ascontiguousarray(depth), rng)
+        raster = depth_raster(np.ascontiguousarray(depth), Kd, R_cb, step=1)
         grid, valid = sampling_grid(K, R_cb, IMG_HW)
         f32 = lambda a: torch.from_numpy(np.ascontiguousarray(a, dtype=np.float32))
         known = layers['known'].astype(bool)

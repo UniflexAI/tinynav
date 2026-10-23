@@ -99,6 +99,7 @@ def main():
     ap.add_argument('--val_bags', nargs='*', default=VAL_BAGS)
     ap.add_argument('--max_steps', type=int, default=0, help='stop early (smoke test)')
     ap.add_argument('--balance', type=float, default=0.0, help='oversample frames with obstacles (gain, 0 = off)')
+    ap.add_argument('--wd', type=float, default=1e-4)
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -118,11 +119,11 @@ def main():
     model = BevNet().to(dev)
     enc = list(model.encoder.parameters())
     rest = [p for n, p in model.named_parameters() if not n.startswith('encoder.')]
-    opt = torch.optim.AdamW([dict(params=enc, lr=args.lr * 0.3), dict(params=rest)], lr=args.lr, weight_decay=1e-4)
+    opt = torch.optim.AdamW([dict(params=enc, lr=args.lr * 0.3), dict(params=rest)], lr=args.lr, weight_decay=args.wd)
     total = args.epochs * len(tl)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=[args.lr * 0.3, args.lr], total_steps=total, pct_start=0.05)
     amp = torch.autocast(dev, dtype=torch.bfloat16, enabled=dev == 'cuda')
-    step, log = 0, []
+    step, log, best = 0, [], -1.0
     for ep in range(args.epochs):
         t0, acc = time.time(), {}
         for b in tl:
@@ -148,6 +149,10 @@ def main():
         log.append(msg)
         print(json.dumps(msg), flush=True)
         torch.save(dict(model=model.state_dict(), epoch=ep, args=vars(args)), out / 'last.pt')
+        score = msg.get('val', {}).get('quadruped', {}).get('iou', -1)
+        if score > best:  # early stopping by keeping the best validation epoch
+            best = score
+            torch.save(dict(model=model.state_dict(), epoch=ep, args=vars(args)), out / 'best.pt')
         (out / 'log.json').write_text(json.dumps(log, indent=1))
         if args.max_steps and step >= args.max_steps:
             break
