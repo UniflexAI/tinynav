@@ -207,6 +207,13 @@ def main():
 
     sample = frames[:: max(1, len(frames) // 50)]
     cam_h = args.cam_h or estimate_cam_height(sample, [frame_points(d, f, K, rail_ids) for f in sample])
+    # frames observing a cell ~ teacher rate * depth range / speed; fast, sparsely sampled bags lose most of
+    # the ground with the default MIN_FRAMES, so they accept two views
+    global MIN_FRAMES
+    dur = (frames[-1]['stamp'] - frames[0]['stamp']) / 1e9 if len(frames) > 1 else 1.0
+    speed = np.linalg.norm(np.diff(poses[:, 1:3], axis=0), axis=1).sum() / max((poses[-1, 0] - poses[0, 0]) / 1e9, 1e-3)
+    views = len(frames) / dur * ZMAX / max(speed, 0.05)
+    MIN_FRAMES = 3 if views >= 6 else 2
     stamps = np.array([f['stamp'] for f in frames])
     window = deque()  # (frame, points) sorted by time
     nxt = 0
@@ -222,8 +229,8 @@ def main():
         lab = label_for(f, window, poses[near, 1:4], cam_h, K, own)
         np.savez_compressed(out / f"{f['name']}.npz", **lab)
     (out / 'info.json').write_text(json.dumps(dict(cam_h=cam_h, res=RES, bev_x=BEV_X, bev_y=BEV_Y, n=BEV_N,
-                                                  window_s=WINDOW_S, frames=len(targets))))
-    print(f'{td.name}: {len(targets)} labels, cam_h={cam_h:.2f} m')
+                                                  window_s=WINDOW_S, frames=len(targets), min_frames=MIN_FRAMES)))
+    print(f'{td.name}: {len(targets)} labels, cam_h={cam_h:.2f} m, views~{views:.1f} -> MIN_FRAMES={MIN_FRAMES}')
 
 
 if __name__ == '__main__':

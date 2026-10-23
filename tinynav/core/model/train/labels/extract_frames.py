@@ -16,7 +16,8 @@ from rosbags.typesys import Stores, get_typestore
 NS = '/camera/camera'
 LEFT, RIGHT, DEPTH = f'{NS}/infra1/image_rect_raw', f'{NS}/infra2/image_rect_raw', f'{NS}/depth/image_rect_raw'
 INFO1, INFO2 = f'{NS}/infra1/camera_info', f'{NS}/infra2/camera_info'
-POSE_TOPICS = (f'{NS}/vio_100hz', f'{NS}/vio_image', '/slam/odometry', '/slam/odometry_visual')  # first available wins
+POSE_TOPICS = (f'{NS}/vio_100hz', f'{NS}/vio_image', '/insight/vio_100hz', '/insight/vio_20hz',
+               '/slam/odometry', '/slam/odometry_visual')  # first available wins
 SYNC_NS = 20_000_000
 
 
@@ -95,9 +96,9 @@ def main():
 
     poses = np.array(poses, dtype=np.float64).reshape(-1, 8)
     poses = poses[np.argsort(poses[:, 0])]
-    i1, i2 = info[INFO1], info[INFO2]
+    i1, i2 = info[INFO1], info.get(INFO2)
     meta = dict(bag=str(Path(args.bag).resolve()), K=i1['K'], width=i1['width'], height=i1['height'],
-                fx=i1['K'][0], baseline=args.baseline or -i2['P'][3] / i2['P'][0], pose_topic=pose_topic, hz=args.hz, frames=frames)
+                fx=i1['K'][0], baseline=args.baseline or (-i2['P'][3] / i2['P'][0] if i2 else 0.0), pose_topic=pose_topic, hz=args.hz, frames=frames)
     assert meta['baseline'] > 0.01, 'no stereo baseline in camera_info, pass --baseline'
     (out / 'meta.json').write_text(json.dumps(meta, indent=1))
     np.save(out / 'poses.npy', poses)
