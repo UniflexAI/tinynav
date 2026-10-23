@@ -60,7 +60,8 @@ def main():
             fr = (cls == 1) & ROI & (base > 0)
             c['free'] += fr.sum()
             c['free_alarm'] += (fr & (base == 2)).sum()
-        pct = lambda a, b: f'{100 * c[a] / max(c[b], 1):5.1f}%'
+        def pct(a, b):
+            return f'{100 * c[a] / max(c[b], 1):5.1f}%'
         rows.append((d.name, len(frames), pct('trav_obs', 'trav'), pct('trav_step', 'trav'), pct('obs_free', 'obs'),
                      pct('obs_unseen', 'obs'), pct('step_free', 'step'), pct('rail_free', 'rail'), pct('free_alarm', 'free')))
     hdr = ('bag', 'frames', 'trav->obs', 'trav->step', 'obs:base free', 'obs:base unseen', 'step:base free',

@@ -23,19 +23,15 @@ from tinynav.core.planning_node import (PlanningNode, build_obstacle_map, genera
                                         score_trajectories_by_ESDF)
 from tinynav.core.robot_specs import ROBOT_CONFIG
 
+from ..bev_runtime import BevObstacleFuser
 from .bev_geometry import BEV_N, BEV_X, BEV_Y, RES, heading_rotation
 from .cost import OBSTACLE, PRESETS, classify
-
-MODEL_THR = 0.5
-MODEL_DECAY = 0.98   # model evidence outside the current view fades like the occupancy grid
-SELF_CLEAR = 0.35    # m around the robot centre: the robot stands there, so it cannot be an obstacle
-
 
 class Planner:
     """Duck-typed stand-in for PlanningNode's state, so its methods can run without ROS."""
 
-    def __init__(self, use_model, fov_only=False, self_clear=False, hfov=None):
-        self.grid_shape = (100, 100, 10)
+    def __init__(self, fuser=None, grid=100):
+        self.grid_shape = (grid, grid, 10)
         self.resolution = 0.05
         self.origin = np.array(self.grid_shape) * self.resolution / -2.
         self.step = 10
@@ -44,62 +40,23 @@ class Planner:
         self.last_param = (0.0, 0.0)
         self.reverse_enter_threshold, self.reverse_exit_threshold = 0.30, 0.45
         self.reverse_engaged = False
-        self.use_model = use_model
-        self.fov_only, self.self_clear, self.hfov = fov_only, self_clear, hfov
-        self.model_prob = np.zeros(self.grid_shape[:2], np.float32)
+        self.fuser = fuser
 
     camera_to_robot_center = PlanningNode.camera_to_robot_center
     update_occupancy_grid = PlanningNode.update_occupancy_grid
     trajectory_cost = PlanningNode.trajectory_cost
     _front_obstacle_dist = PlanningNode._front_obstacle_dist
 
-    def cell_world_xy(self):
-        i, j = np.mgrid[0:self.grid_shape[0], 0:self.grid_shape[1]]
-        return self.origin[0] + (i + 0.5) * self.resolution, self.origin[1] + (j + 0.5) * self.resolution
-
-    def shift_model(self, old_origin):
-        d = np.round((self.origin[:2] - old_origin[:2]) / self.resolution).astype(int)
-        if not d.any():
-            return
-        out = np.zeros_like(self.model_prob)
-        H, W = out.shape
-        src = self.model_prob[max(d[0], 0):H + min(d[0], 0), max(d[1], 0):W + min(d[1], 0)]
-        out[max(-d[0], 0):max(-d[0], 0) + src.shape[0], max(-d[1], 0):max(-d[1], 0) + src.shape[1]] = src
-        self.model_prob = out
-
-    def fuse_model(self, obs_bev, T):
-        """Write the model's BEV prediction into the planner's world-aligned grid."""
-        X, Y = self.cell_world_xy()
-        Rh = heading_rotation(T[:3, :3])
-        dx, dy = X - T[0, 3], Y - T[1, 3]
-        xb = Rh[0, 0] * dx + Rh[0, 1] * dy
-        yb = Rh[1, 0] * dx + Rh[1, 1] * dy
-        r = np.floor((BEV_X[1] - xb) / RES).astype(int)
-        q = np.floor((BEV_Y[1] - yb) / RES).astype(int)
-        inside = (r >= 0) & (r < BEV_N) & (q >= 0) & (q < BEV_N)
-        if self.fov_only:  # outside the camera's view the model guesses; only trust what it can see
-            inside &= (xb > 0.3) & (np.abs(np.arctan2(yb, xb)) < self.hfov / 2)
-        self.model_prob *= MODEL_DECAY
-        self.model_prob[inside] = obs_bev[r[inside], q[inside]]
-
-    def step_frame(self, depth, T, K, obs_bev, target):
+    def step_frame(self, depth, T, K, obs_bev, target, hfov):
         fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
         old_origin = self.origin.copy()
         self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
-        self.shift_model(old_origin)
         mask = build_obstacle_map(self.occupancy_grid, self.origin, self.resolution, robot_z=T[2, 3],
                                   config=self.obstacle_config)
         base_mask = mask.copy()
-        if self.use_model:
-            self.fuse_model(obs_bev, T)
-            extra = self.model_prob >= MODEL_THR
-            if self.obstacle_config.dilation_cells > 0 and extra.any():
-                extra = binary_dilation(extra, iterations=self.obstacle_config.dilation_cells)
-            if self.self_clear:
-                X, Y = self.cell_world_xy()
-                c = self.camera_to_robot_center(T)
-                extra &= (X - c[0]) ** 2 + (Y - c[1]) ** 2 > SELF_CLEAR ** 2
-            mask = mask | extra
+        if self.fuser is not None:
+            self.fuser.shift(old_origin, self.origin)
+            mask = mask | self.fuser.update(obs_bev, T, self.origin, self.camera_to_robot_center(T)[:2], hfov)
         esdf = distance_transform_edt(~mask).astype(np.float32) * self.resolution
         init_p = self.camera_to_robot_center(T)
         init_q = R.from_matrix(T[:3, :3]).as_quat()
@@ -174,7 +131,8 @@ def project(points, T, K, img_shape):
 
 def draw_camera(img, T, K, cam_h, res_b, res_m, future, scale=0.75):
     vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    ground = lambda p: np.column_stack([p[:, 0], p[:, 1], np.full(len(p), T[2, 3] - cam_h)])
+    def ground(p):
+        return np.column_stack([p[:, 0], p[:, 1], np.full(len(p), T[2, 3] - cam_h)])
     for pts, col, th in ((future, COL_PATH, 1), (res_b['traj'][:, :3], COL_BASE, 3), (res_m['traj'][:, :3], COL_MODEL, 3)):
         uv = project(ground(pts), T, K, img.shape)
         if len(uv) > 1:
@@ -206,8 +164,8 @@ def draw_bev(planner, res_b, res_m, T, future, target):
 
     def to_px(p):
         d = p[:, :2] - T[:2, 3]
-        f, l = d @ Rh[0, :2], d @ Rh[1, :2]
-        return np.stack([(BEV_SPAN / 2 - l) / BEV_SPAN * BEV_PX, (BEV_SPAN * 0.7 - f) / BEV_SPAN * BEV_PX], 1).astype(np.int32)
+        fw, lt = d @ Rh[0, :2], d @ Rh[1, :2]
+        return np.stack([(BEV_SPAN / 2 - lt) / BEV_SPAN * BEV_PX, (BEV_SPAN * 0.7 - fw) / BEV_SPAN * BEV_PX], 1).astype(np.int32)
     cv2.polylines(img, [to_px(future)], False, COL_PATH, 1, cv2.LINE_AA)
     for res, col in ((res_b, COL_BASE), (res_m, COL_MODEL)):
         cv2.polylines(img, [to_px(res['traj'][:, :3])], False, col, 3, cv2.LINE_AA)
@@ -244,8 +202,12 @@ def main():
     ap.add_argument('--video', default=None)
     ap.add_argument('--start', type=float, default=0.0, help='seconds into the bag')
     ap.add_argument('--duration', type=float, default=1e9)
-    ap.add_argument('--fov_only', action='store_true', help='model may only add obstacles inside the camera view')
-    ap.add_argument('--self_clear', action='store_true', help='drop model obstacles under the robot')
+    ap.add_argument('--all_cells', action='store_true', help='also take model obstacles outside the camera view')
+    ap.add_argument('--no_self_clear', action='store_true', help='keep model obstacles under the robot')
+    ap.add_argument('--model_thr', type=float, default=0.7)
+    ap.add_argument('--model_dilate', type=int, default=0, help='cells')
+    ap.add_argument('--grid', type=int, default=100, help='planner grid cells per side (5 cm), planning_node uses 100')
+    ap.add_argument('--pred', default='pred', help='prediction folder name')
     args = ap.parse_args()
     d = Path(args.frames_dir)
     meta = json.loads((d / 'meta.json').read_text())
@@ -254,7 +216,9 @@ def main():
     labels, cam_h = label_index(Path(args.labels)) if args.labels else ([], 0.5)
     lab_stamps = np.array([s for s, _, _ in labels]) if labels else np.zeros(0)
     hfov = 2 * np.arctan(meta['width'] / 2 / K[0, 0])
-    planners = dict(base=Planner(False), model=Planner(True, args.fov_only, args.self_clear, hfov))
+    fuser = BevObstacleFuser((args.grid, args.grid), 0.05, thr=args.model_thr, dilate=args.model_dilate,
+                             self_clear=0.0 if args.no_self_clear else 0.35, fov_only=not args.all_cells)
+    planners = dict(base=Planner(grid=args.grid), model=Planner(fuser, args.grid))
     t0 = meta['frames'][0]['stamp']
     stats = dict(frames=0, labelled=0, hit_base=0, hit_model=0, stop_base=0, stop_model=0, differ=0, idle_base=0, idle_model=0)
     writer = None
@@ -265,9 +229,9 @@ def main():
         T[:3, :3] = R.from_quat(poses[j, 4:8]).as_matrix()
         T[:3, 3] = poses[j, 1:4]
         depth = cv2.imread(str(d / f"{f['name']}_depth.png"), cv2.IMREAD_UNCHANGED).astype(np.float32) / 1000.0
-        pred = np.load(d / 'pred' / f"{f['name']}.npz")['obs_quadruped'].astype(np.float32)
+        pred = np.load(d / args.pred / f"{f['name']}.npz")['obs_quadruped'].astype(np.float32)
         target = carrot(poses, f['stamp'])
-        res = {k: p.step_frame(depth, T, K, pred, target) for k, p in planners.items()}  # both keep warming up
+        res = {k: p.step_frame(depth, T, K, pred, target, hfov) for k, p in planners.items()}  # both keep warming up
         if not (args.start <= t <= args.start + args.duration):
             continue
         stats['frames'] += 1
@@ -303,7 +267,8 @@ def main():
     if writer:
         writer.stdin.close()
         writer.wait()
-    print(json.dumps(dict(bag=d.name, fov_only=args.fov_only, self_clear=args.self_clear, **{k: int(v) for k, v in stats.items()})))
+    print(json.dumps(dict(bag=d.name, thr=args.model_thr, dilate=args.model_dilate, grid=args.grid,
+                          **{k: int(v) for k, v in stats.items()})))
 
 
 if __name__ == '__main__':

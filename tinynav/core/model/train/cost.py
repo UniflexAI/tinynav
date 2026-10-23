@@ -15,6 +15,17 @@ import numpy as np
 UNKNOWN, FREE, OBSTACLE = 0, 1, 2
 SPAN_T = (0.10, 0.15, 0.25, 0.40, 0.60)
 STEP_T = (0.06, 0.10, 0.15, 0.22, 0.30)
+# network output channels: name -> count (known, ground and rail are single maps, span/step one per threshold)
+HEADS = dict(known=1, ground=1, span=len(SPAN_T), step=len(STEP_T), rail=1)
+
+
+def split_channels(out):
+    """(..., C, N, N) array/tensor -> dict; single-channel heads drop their channel axis."""
+    res, i = {}, 0
+    for k, n in HEADS.items():
+        res[k] = out[..., i, :, :] if n == 1 else out[..., i:i + n, :, :]
+        i += n
+    return res
 
 
 @dataclass

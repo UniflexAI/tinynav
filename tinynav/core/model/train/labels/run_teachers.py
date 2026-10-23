@@ -35,7 +35,8 @@ def load_stereo(ckpt):
 @torch.no_grad()
 def run_stereo(model, left, right, iters=32):
     from core.utils.utils import InputPadder
-    t = lambda im: torch.as_tensor(np.repeat(im[..., None], 3, -1)).cuda().float()[None].permute(0, 3, 1, 2)
+    def t(im):
+        return torch.as_tensor(np.repeat(im[..., None], 3, -1)).cuda().float()[None].permute(0, 3, 1, 2)
     a, b = t(left), t(right)
     padder = InputPadder(a.shape, divis_by=32, force_square=False)
     a, b = padder.pad(a, b)

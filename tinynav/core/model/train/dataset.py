@@ -13,20 +13,10 @@ from scipy.ndimage import binary_closing, grey_dilation
 from scipy.spatial.transform import Rotation as R
 from torch.utils.data import Dataset
 
-from .bev_geometry import cam_to_bev_rotation, depth_raster, sampling_grid
+from .bev_geometry import IMG_HW, cam_to_bev_rotation, depth_raster, sampling_grid, scale_K
 
-IMG_HW = (320, 272)          # network input, half of the 640x544 infra1 image
 F_CAM = np.diag([-1.0, 1.0, 1.0])
 F_BEV = np.diag([1.0, -1.0, 1.0])
-
-
-def scale_K(K, sx, sy):
-    K = K.copy()
-    K[0, 0] *= sx
-    K[0, 2] = (K[0, 2] + 0.5) * sx - 0.5
-    K[1, 1] *= sy
-    K[1, 2] = (K[1, 2] + 0.5) * sy - 0.5
-    return K
 
 
 GAP_KERNEL = (5, 3)  # rows x cols; far teacher depth leaves gaps between rows of observed cells
@@ -136,7 +126,8 @@ class BevDataset(Dataset):
             depth = augment_depth(np.ascontiguousarray(depth), rng)
         raster = depth_raster(np.ascontiguousarray(depth), Kd, R_cb, step=1)
         grid, valid = sampling_grid(K, R_cb, IMG_HW)
-        f32 = lambda a: torch.from_numpy(np.ascontiguousarray(a, dtype=np.float32))
+        def f32(a):
+            return torch.from_numpy(np.ascontiguousarray(a, dtype=np.float32))
         known = layers['known'].astype(bool)
         return dict(
             img=f32(img[None]), raster=f32(raster), grid=f32(grid), valid=f32(valid),

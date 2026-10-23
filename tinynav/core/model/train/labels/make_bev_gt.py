@@ -214,7 +214,6 @@ def main():
     speed = np.linalg.norm(np.diff(poses[:, 1:3], axis=0), axis=1).sum() / max((poses[-1, 0] - poses[0, 0]) / 1e9, 1e-3)
     views = len(frames) / dur * ZMAX / max(speed, 0.05)
     MIN_FRAMES = 3 if views >= 6 else 2
-    stamps = np.array([f['stamp'] for f in frames])
     window = deque()  # (frame, points) sorted by time
     nxt = 0
     for f in targets:

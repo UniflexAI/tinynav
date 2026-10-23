@@ -1,4 +1,6 @@
 import array
+import asyncio
+import os
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -366,6 +368,35 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
+        # Optional learned obstacles (BevNet, tinynav/core/model): set TINYNAV_BEV_ENGINE to its TensorRT plan.
+        # The model only adds obstacles; unset keeps planning unchanged.
+        self.bev = None
+        engine = os.environ.get('TINYNAV_BEV_ENGINE')
+        if engine:
+            from tinynav.core.model.bev_runtime import BevObstacleFuser, load_trt
+            self.bev_engine = load_trt(engine)
+            self.bev = BevObstacleFuser(self.grid_shape, self.resolution)
+            self.bev_images = {}
+            self.create_subscription(Image, '/camera/camera/infra1/image_rect_raw', self.bev_image_callback, 10)
+            self.bev_mask_pub = self.create_publisher(OccupancyGrid, '/planning/bev_obstacle_mask', 10)
+            self.get_logger().info(f"BevNet obstacles enabled: {engine}")
+
+    def bev_image_callback(self, msg):
+        # depth from perception carries the left image stamp, so keep a few recent images keyed by stamp
+        self.bev_images[Time.from_msg(msg.header.stamp).nanoseconds] = self.bridge.imgmsg_to_cv2(msg, 'mono8')
+        while len(self.bev_images) > 10:
+            self.bev_images.pop(next(iter(self.bev_images)))
+
+    def bev_obstacles(self, depth, T, stamp_ns, old_origin):
+        from tinynav.core.model.bev_runtime import obstacle_bev, preprocess
+        self.bev.shift(old_origin, self.origin)
+        img = self.bev_images.get(stamp_ns)
+        if img is None:
+            return None
+        inputs, hfov = preprocess(img, depth, self.K, T[:3, :3])
+        logits = asyncio.run(self.bev_engine.infer(inputs))
+        return self.bev.update(obstacle_bev(logits), T, self.origin, self.camera_to_robot_center(T)[:2], hfov)
+
     def poi_change_callback(self, msg):
         self.target_pose = None
 
@@ -433,7 +464,7 @@ class PlanningNode(Node):
                     return d_from_face
         return max_dist + 1.0
 
-    def publish_obstacle_mask(self, mask, stamp):
+    def publish_obstacle_mask(self, mask, stamp, pub=None):
         msg = OccupancyGrid()
         msg.header = Header()
         msg.header.stamp = stamp
@@ -446,7 +477,7 @@ class PlanningNode(Node):
         msg.info.origin.position.z = self.origin[2] + self.grid_shape[2] * self.resolution / 2
         msg.info.origin.orientation.w = 1.0
         msg.data = array.array('b', np.where(mask, 100, 0).astype(np.int8).ravel(order="F").tobytes())
-        self.obstacle_mask_pub.publish(msg)
+        (pub or self.obstacle_mask_pub).publish(msg)
 
     def publish_height_map(self, origin, esdf_map, header):
         height_normalized = np.clip(esdf_map / 2.0 * 255, 0, 255).astype(np.uint8)
@@ -597,6 +628,7 @@ class PlanningNode(Node):
             cx, cy = self.K[0, 2], self.K[1, 2]
 
         with Timer(name='raycasting', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):
+            old_origin = self.origin.copy()
             self.update_occupancy_grid(depth, T, fx, fy, cx, cy)
 
             self.publish_3d_occupancy_cloud(self.occupancy_grid, self.resolution, self.origin)
@@ -606,6 +638,11 @@ class PlanningNode(Node):
                 self.occupancy_grid, self.origin, self.resolution,
                 robot_z=T[2, 3], config=self.obstacle_config,
             )
+            if self.bev is not None:
+                extra = self.bev_obstacles(depth, T, Time.from_msg(depth_msg.header.stamp).nanoseconds, old_origin)
+                if extra is not None:
+                    obstacle_mask = obstacle_mask | extra
+                    self.publish_obstacle_mask(extra, depth_msg.header.stamp, self.bev_mask_pub)
             ESDF_map = distance_transform_edt(~obstacle_mask).astype(np.float32) * self.resolution
 
         with Timer(name='vis', text="[{name}] Elapsed time: {milliseconds:.0f} ms"):

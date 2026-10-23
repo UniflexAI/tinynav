@@ -45,7 +45,8 @@ def main():
         Ks = scale_K(K, IMG_HW[1] / img.shape[1], IMG_HW[0] / img.shape[0])
         x = cv2.resize(img, IMG_HW[::-1], interpolation=cv2.INTER_AREA).astype(np.float32) / 255
         grid, valid = sampling_grid(Ks, R_cb, IMG_HW)
-        t = lambda a: torch.from_numpy(np.ascontiguousarray(a, dtype=np.float32))[None].to(dev)
+        def t(a):
+            return torch.from_numpy(np.ascontiguousarray(a, dtype=np.float32))[None].to(dev)
         o = split_heads(model(t(x[None]), t(depth_raster(depth, Kd, R_cb, step=1)), t(grid), t(valid)))
         o = {k: torch.sigmoid(v[0]).float().cpu().numpy() for k, v in o.items() if k != 'ground'}
         np.savez_compressed(out / f"{f['name']}.npz", known=o['known'].astype(np.float16),

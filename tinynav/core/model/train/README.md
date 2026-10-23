@@ -38,3 +38,18 @@ python -m tinynav.core.model.train.train --data <data_dir> --out runs/bev_v1
 grids precomputed from intrinsics and camera tilt), concatenated with a camera-depth raster, and decoded by a
 small 2D U-Net into `known, ground, span, step, rail`. Validation reports obstacle recall / precision / IoU per
 robot preset, split into cells seen by the current frame and cells filled in from other frames.
+
+## 3. On the robot
+
+`planning_node` can add BevNet obstacles to its obstacle map; it is off unless `TINYNAV_BEV_ENGINE` is set.
+
+```bash
+python -m tinynav.core.model.train.export_onnx --ckpt runs/<run>/best.pt --out bevnet.onnx
+trtexec --onnx=bevnet.onnx --fp16 --saveEngine=bevnet_fp16_$(uname -m).plan   # on the target machine
+TINYNAV_BEV_ENGINE=$PWD/bevnet_fp16_$(uname -m).plan python tinynav/core/planning_node.py
+```
+
+It needs `/camera/camera/infra1/image_rect_raw` besides the usual planning inputs (images are matched to
+`/slam/depth` by stamp) and publishes the added cells on `/planning/bev_obstacle_mask`. `bev_runtime.py` holds
+the shared logic: model obstacles are only trusted inside the camera view, never under the robot (0.35 m),
+and need P >= 0.7. `replay_planning.py` runs the same code offline against recorded frames and writes videos.

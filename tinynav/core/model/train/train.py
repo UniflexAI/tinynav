@@ -27,10 +27,10 @@ POS_W = 3.0   # obstacles are rare; missing one costs more than a false alarm
 UNKNOWN_W = 0.3
 
 
-def joint_bce(logits, target, k, pos_weight):
+def joint_bce(logits, target, k, pos_weight, unknown_w=None):
     """BCE of P(cell observed and target): label-unknown cells are negatives with a small weight, so the
     obstacle heads never output unsupervised values where nothing will be seen."""
-    w = k + UNKNOWN_W * (1 - k)
+    w = k + (UNKNOWN_W if unknown_w is None else unknown_w) * (1 - k)
     pw = torch.tensor(pos_weight, device=k.device)
     return (F.binary_cross_entropy_with_logits(logits, target * k, pos_weight=pw, reduction='none') * w).sum() / w.sum()
 
@@ -80,7 +80,8 @@ def evaluate(model, loader, dev):
             s['fn_h'] += (gt & ~pr & roi & ~vis).sum().item()
     res = {}
     for preset, s in stats.items():
-        r = lambda tp, fn: tp / max(tp + fn, 1)
+        def r(tp, fn):
+            return tp / max(tp + fn, 1)
         res[preset] = dict(recall=r(s['tp'], s['fn']), precision=s['tp'] / max(s['tp'] + s['fp'], 1),
                            iou=s['tp'] / max(s['tp'] + s['fp'] + s['fn'], 1),
                            recall_seen=r(s['tp_v'], s['fn_v']), recall_unseen=r(s['tp_h'], s['fn_h']))
@@ -89,6 +90,7 @@ def evaluate(model, loader, dev):
 
 
 def main():
+    global UNKNOWN_W
     ap = argparse.ArgumentParser()
     ap.add_argument('--data', required=True)
     ap.add_argument('--out', required=True)
@@ -100,7 +102,9 @@ def main():
     ap.add_argument('--max_steps', type=int, default=0, help='stop early (smoke test)')
     ap.add_argument('--balance', type=float, default=0.0, help='oversample frames with obstacles (gain, 0 = off)')
     ap.add_argument('--wd', type=float, default=1e-4)
+    ap.add_argument('--unknown_w', type=float, default=UNKNOWN_W, help='weight of label-unknown cells as obstacle negatives')
     args = ap.parse_args()
+    UNKNOWN_W = args.unknown_w
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'

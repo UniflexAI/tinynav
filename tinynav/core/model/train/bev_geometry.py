@@ -11,6 +11,17 @@ BEV_Y = (-3.2, 3.2)
 BEV_N = 128
 # heights (m, relative to the camera) at which image features are sampled into the BEV
 Z_SLICES = np.linspace(-1.0, 0.4, 8).astype(np.float32)
+IMG_HW = (320, 272)   # network input, half of the 640x544 infra1 image
+
+
+def scale_K(K, sx, sy):
+    """Intrinsics after resizing an image by (sx, sy), pixel centres kept consistent."""
+    K = np.array(K, np.float64).copy()
+    K[0, 0] *= sx
+    K[0, 2] = (K[0, 2] + 0.5) * sx - 0.5
+    K[1, 1] *= sy
+    K[1, 2] = (K[1, 2] + 0.5) * sy - 0.5
+    return K
 
 
 def heading_rotation(R_cam_to_world):

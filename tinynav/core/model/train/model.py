@@ -10,10 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .bev_geometry import BEV_N, Z_SLICES
-from .cost import SPAN_T, STEP_T
-
-# name -> channels
-HEADS = dict(known=1, ground=1, span=len(SPAN_T), step=len(STEP_T), rail=1)
+from .cost import HEADS, split_channels
 
 
 def conv_bn(cin, cout, k=3, s=1):
@@ -51,7 +48,8 @@ class BevUNet(nn.Module):
         x1 = self.e1(x)
         x2 = self.e2(x1)
         x3 = self.e3(x2)
-        up = lambda a, b: F.interpolate(a, size=b.shape[-2:], mode='bilinear', align_corners=False)
+        def up(a, b):
+            return F.interpolate(a, size=b.shape[-2:], mode='bilinear', align_corners=False)
         y2 = self.d2(torch.cat([up(x3, x2), x2], 1))
         return self.d1(torch.cat([up(y2, x1), x1], 1))
 
@@ -77,8 +75,4 @@ class BevNet(nn.Module):
 
 def split_heads(out):
     """Single-channel heads come back as (B,N,N), threshold heads as (B,T,N,N)."""
-    res, i = {}, 0
-    for k, n in HEADS.items():
-        res[k] = out[:, i] if n == 1 else out[:, i:i + n]
-        i += n
-    return res
+    return split_channels(out)

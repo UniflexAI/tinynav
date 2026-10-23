@@ -76,16 +76,16 @@ def main():
                 pending[s] = True
                 last_anchor = s
             for a in list(pending):
-                l = nearest(bufs[LEFT], a)
-                r = l if args.no_right else nearest(bufs[RIGHT], a)
-                if l is not None and r is not None and stamp(l) == stamp(r):
+                lm = nearest(bufs[LEFT], a)
+                r = lm if args.no_right else nearest(bufs[RIGHT], a)
+                if lm is not None and r is not None and stamp(lm) == stamp(r):
                     name = f'{len(frames):06d}'
-                    cv2.imwrite(str(out / f'{name}_left.png'), to_np(l))
+                    cv2.imwrite(str(out / f'{name}_left.png'), to_np(lm))
                     if not args.no_right:
                         cv2.imwrite(str(out / f'{name}_right.png'), to_np(r))
                     if anchor == DEPTH:
                         cv2.imwrite(str(out / f'{name}_depth.png'), to_np(bufs[DEPTH][a]))
-                    frames.append(dict(name=name, stamp=int(stamp(l))))
+                    frames.append(dict(name=name, stamp=int(stamp(lm))))
                     pending.pop(a)
                 elif s - a > 500_000_000:
                     pending.pop(a)
