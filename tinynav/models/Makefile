@@ -18,6 +18,7 @@ RETINIFY_ONNX    := retinify_0_1_5_dynamic.onnx
 FOUNDATION_STEREO_ONNX := foundation_stereo_11-33-40_256x320_4.onnx
 SIGLIP_IMAGE_ONNX := siglip_vit_b_16_webli_image_fp16.onnx
 SIGLIP_TEXT_ONNX  := siglip_vit_b_16_webli_text_fp16.onnx
+BEVNET_ONNX       := bevnet_128x128.onnx
 
 
 DINO_ENGINE       := $(basename $(DINO_ONNX))_$(ARCH).plan
@@ -31,10 +32,11 @@ RETINIFY_ENGINE   := $(basename $(RETINIFY_ONNX))_$(ARCH).plan
 FOUNDATION_STEREO_ENGINE := $(basename $(FOUNDATION_STEREO_ONNX))_$(ARCH).plan
 SIGLIP_IMAGE_ENGINE := $(basename $(SIGLIP_IMAGE_ONNX))_$(ARCH).plan
 SIGLIP_TEXT_ENGINE  := $(basename $(SIGLIP_TEXT_ONNX))_$(ARCH).plan
+BEVNET_ENGINE       := $(basename $(BEVNET_ONNX))_$(ARCH).plan
 
-ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE)
+ENGINES := $(DINO_ENGINE) $(LIGHTGLUE_ENGINE) $(SUPERPOINT_ENGINE) $(RETINIFY_ENGINE) $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) $(BEVNET_ENGINE)
 
-.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip clean
+.PHONY: help all dinov2 superpoint lightglue retinify foundation_stereo siglip bevnet clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -48,6 +50,7 @@ lightglue: $(LIGHTGLUE_ENGINE) ## Build LightGlue engine
 retinify: $(RETINIFY_ENGINE) ## Build Retinify engine
 foundation_stereo: $(FOUNDATION_STEREO_ENGINE) ## Build FoundationStereo engine
 siglip: $(SIGLIP_IMAGE_ENGINE) $(SIGLIP_TEXT_ENGINE) ## Build SigLIP image/text engines
+bevnet: $(BEVNET_ENGINE) ## Build BevNet (learned BEV obstacles for planning) engine
 
 $(DINO_ENGINE): $(DINO_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
@@ -91,6 +94,10 @@ $(SIGLIP_IMAGE_ENGINE): $(SIGLIP_IMAGE_ONNX)
 $(SIGLIP_TEXT_ENGINE): $(SIGLIP_TEXT_ONNX)
 	$(TRTEXEC) --onnx=$< --saveEngine=$@ \
         $(if $(SIGLIP_TEXT_SHAPES),--shapes=$(SIGLIP_TEXT_SHAPES),) --fp16
+
+# BevNet: static shapes (infra1 320x272, 128x128 BEV), exported by tinynav/core/model/train/export_onnx.py.
+$(BEVNET_ENGINE): $(BEVNET_ONNX)
+	$(TRTEXEC) --onnx=$< --saveEngine=$@ --fp16
 
 
 clean: ## Remove generated TensorRT plans for this architecture

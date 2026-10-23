@@ -42,11 +42,13 @@ robot preset, split into cells seen by the current frame and cells filled in fro
 ## 3. On the robot
 
 `planning_node` can add BevNet obstacles to its obstacle map; it is off unless `TINYNAV_BEV_ENGINE` is set.
+The exported model lives in `tinynav/models/bevnet_128x128.onnx` (Git LFS); `make -C tinynav/models bevnet`
+(also part of `make all`) builds `bevnet_128x128_$(uname -m).plan` on the target machine.
 
 ```bash
-python -m tinynav.core.model.train.export_onnx --ckpt runs/<run>/best.pt --out bevnet.onnx
-trtexec --onnx=bevnet.onnx --fp16 --saveEngine=bevnet_fp16_$(uname -m).plan   # on the target machine
-TINYNAV_BEV_ENGINE=$PWD/bevnet_fp16_$(uname -m).plan python tinynav/core/planning_node.py
+python -m tinynav.core.model.train.export_onnx --ckpt runs/<run>/best.pt --out tinynav/models/bevnet_128x128.onnx
+make -C tinynav/models bevnet
+TINYNAV_BEV_ENGINE=1 python tinynav/core/planning_node.py      # or TINYNAV_BEV_ENGINE=/path/to/engine.plan
 ```
 
 It needs `/camera/camera/infra1/image_rect_raw` besides the usual planning inputs (images are matched to

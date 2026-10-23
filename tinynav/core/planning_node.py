@@ -1,6 +1,7 @@
 import array
 import asyncio
 import os
+import platform
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointField
@@ -368,10 +369,12 @@ class PlanningNode(Node):
 
         self.poi_change_sub = self.create_subscription(Odometry, "/mapping/poi_change", self.poi_change_callback, 10)
 
-        # Optional learned obstacles (BevNet, tinynav/core/model): set TINYNAV_BEV_ENGINE to its TensorRT plan.
-        # The model only adds obstacles; unset keeps planning unchanged.
+        # Optional learned obstacles (BevNet, tinynav/core/model): TINYNAV_BEV_ENGINE=1 uses the plan built by
+        # tinynav/models/Makefile, or give a plan path. The model only adds obstacles; unset keeps planning unchanged.
         self.bev = None
         engine = os.environ.get('TINYNAV_BEV_ENGINE')
+        if engine == '1':
+            engine = f"/tinynav/tinynav/models/bevnet_128x128_{platform.machine()}.plan"
         if engine:
             from tinynav.core.model.bev_runtime import BevObstacleFuser, load_trt
             self.bev_engine = load_trt(engine)
