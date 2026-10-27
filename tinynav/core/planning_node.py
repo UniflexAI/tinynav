@@ -1133,6 +1133,11 @@ class PlanningNode(Node):
         self._strict_follow = False
         self._strict_follow_stamp_ns = None
         self.create_subscription(Bool, '/planning/strict_follow', self.strict_follow_callback, 10)
+        # Whether strict follow stands when the route before the stop pose is blocked.
+        # Stale or never sent means it does; False keeps aiming at the stop pose.
+        self._strict_stand = True
+        self._strict_stand_stamp_ns = None
+        self.create_subscription(Bool, '/planning/strict_stand', self.strict_stand_callback, 10)
         # map_node's stop pose: where the strict-follow check ends (route_blocked_ahead).
         self._stop_xy = None
         self._stop_stamp_ns = None
@@ -1182,6 +1187,10 @@ class PlanningNode(Node):
     def strict_follow_callback(self, msg):
         self._strict_follow = bool(msg.data)
         self._strict_follow_stamp_ns = self.get_clock().now().nanoseconds
+
+    def strict_stand_callback(self, msg):
+        self._strict_stand = bool(msg.data)
+        self._strict_stand_stamp_ns = self.get_clock().now().nanoseconds
 
     def _open_target_speed(self):
         """Open-space target forward speed: the gained capture-speed prior when a
@@ -1516,8 +1525,11 @@ class PlanningNode(Node):
             route_blocked = False
             if aim_stop:
                 stop_rem = route_left_at(route_xy, self._stop_xy)
-                route_blocked = route_blocked_ahead(ESDF_map, path_dist_map, remaining_map,
-                                                    rem_here, stop_rem, half_w)
+                stands = (self._strict_stand
+                          or not self._signal_fresh(self._strict_stand_stamp_ns,
+                                                    self._strict_follow_ttl_ns))
+                route_blocked = stands and route_blocked_ahead(
+                    ESDF_map, path_dist_map, remaining_map, rem_here, stop_rem, half_w)
                 target = np.array([self._stop_xy[0], self._stop_xy[1], target[2]])
                 carrot_rem = stop_rem
             # One value for the log and the gate topic: 0 the carrot, 1 the stop pose,
