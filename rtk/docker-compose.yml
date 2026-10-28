@@ -1,0 +1,27 @@
+# RTK bridge beside navcore: navcore's own tinynav has no rtk/, so this runs this
+# checkout's bridge on navcore's DDS bus (host network, domain 0, fastdds_bind.py).
+name: navcore-rtk
+services:
+  navcore-rtk:
+    image: navcore-tinynav:local
+    container_name: navcore-rtk
+    network_mode: host
+    env_file: ${HOME}/workspace/navcore-deploy/pilot/deploy/fastdds.env
+    environment:
+      ROS_DOMAIN_ID: 0
+    volumes:
+      - ..:/tinynav
+      - ${HOME}/workspace/navcore-deploy/pilot/deploy:/workspace/deploy:ro
+      # /dev for the host's /dev/shm and a ttyUSB that may re-enumerate after a replug.
+      - /dev:/dev
+      - /etc/localtime:/etc/localtime:ro
+    # Only ttyUSB (char major 188) is accessible, not the whole /dev.
+    device_cgroup_rules:
+      - "c 188:* rmw"
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      python3 /workspace/deploy/fastdds_bind.py || exit 1;
+      exec /tinynav/scripts/run_rtk.sh
+      "

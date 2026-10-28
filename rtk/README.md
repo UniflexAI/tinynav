@@ -38,6 +38,16 @@ so it survives too. Manual run with logs:
 
 NTRIP credentials live in `/tinynav/rtk/.ntrip.env` (copy from `.ntrip.env.example`).
 
+### On a navcore rig
+
+navcore's containers run tinynav-pilot's tinynav, which has no `rtk/`, and there is no `tinynav-dev` container. The bridge runs in its own container instead, `navcore-rtk` (`rtk/docker-compose.yml`): navcore's image, this checkout mounted at `/tinynav`, and navcore's DDS setup (host network, domain 0, `deploy/fastdds_bind.py` with `deploy/fastdds.env`) so `/fix` and `/rtk/*` share one bus with navcore. `restart: unless-stopped` brings it up on boot; `run_rtk.sh` still restarts the bridge inside it.
+
+```bash
+cd ~/workspace/tinynav/rtk && docker compose up -d   # logs: docker logs -f navcore-rtk
+```
+
+It needs the host to expose `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`: L4T kernels ship without `ch341`, so build it out of tree and keep `brltty` off the CH340. navcore's `map_node` does not consume `/rtk/map_pose` yet, so this only provides the RTK topics.
+
 ---
 
 # Interface for the navigation node
