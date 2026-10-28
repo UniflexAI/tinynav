@@ -179,7 +179,7 @@ def search_within_sdf_map( start:tuple, goal:tuple, sdf_map:np.ndarray, occupanc
                             parent[neighbor] = current
     return []
 
-# Arrival radius of the two circles, on the camera and on the control centre.
+# Arrival radius of the circle on the control centre (RobotConfig.arrival_distance).
 _ARRIVE_M = ROBOT_CONFIG.arrival_radius
 # How many consecutive ticks must agree that the robot is inside that radius.
 # One. A second tick guards against a fix jumping the pose into the radius; raise
@@ -814,12 +814,10 @@ class MapNode(Node):
         self.global_plan_pub.publish(path_msg)
 
     def poi_reached(self, poi, pos):
-        """Arrival is the POI inside either of two `_ARRIVE_M` circles, one on the
-        camera and one on the control centre: the camera's fires early on a straight
-        approach, the control centre's when the planner has parked the body on a POI
-        the camera has passed. `pos` is the camera's; the control centre comes from
-        the pose the caller built it from. planning_node predicts arrival with the
-        same circles at a tighter radius (RobotConfig.planned_arrival_radius)."""
+        """Arrival is the POI inside the `_ARRIVE_M` circle on the control centre
+        (RobotConfig.arrival_distance). `pos` is the camera's; the control centre
+        comes from the pose the caller built it from. planning_node predicts arrival
+        with the same circle at a tighter radius (RobotConfig.planned_arrival_radius)."""
         pose = np.linalg.inv(self.T_from_map_to_odom) @ self.latest_odom_pose
         inside = (ROBOT_CONFIG.arrival_distance(pose, poi) < _ARRIVE_M
                   and abs(poi[2] - pos[2]) < 2.0)

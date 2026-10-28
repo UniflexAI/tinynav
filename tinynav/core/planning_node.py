@@ -434,8 +434,7 @@ def footprint_lattice(front_len, rear_len, half_w, safety_radius):
 def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_map,
                                 route_heading_map, origin, resolution, safety_radius=0.1,
                                 front_len=0.35, rear_len=0.35, half_w=0.15,
-                                target_x=0.0, target_y=0.0, cam_x=0.0, cam_y=0.0, cam_z=0.0,
-                                arrive_m=0.0, arrive_ticks=2, tick_steps=5, band=0.5,
+                                target_x=0.0, target_y=0.0, arrive_m=0.0, arrive_ticks=2, tick_steps=5, band=0.5,
                                 has_route=True, dt=0.1):
     """
     Score trajectories by ESDF clearance over the footprint, sampled on a lattice fine
@@ -449,9 +448,8 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
              then for the time cost: when map_node's arrival would fire (inf if it does
              not), and at the end the distance from the route, the heading off the bearing
              to the target, and the xy distance to it. Arrival is the target inside
-             `arrive_m` of the camera (`cam_*`, the body offset of
-             camera_to_robot_center) or of the control centre, where the route has run
-             out, for `arrive_ticks` samples `tick_steps` apart.
+             `arrive_m` of the control centre (RobotConfig.arrival_distance), where the
+             route has run out, for `arrive_ticks` samples `tick_steps` apart.
     """
     scores = []
     occ_points = []
@@ -526,15 +524,7 @@ def score_trajectories_by_ESDF(trajectories, ESDF_map, path_dist_map, remaining_
                     rem = float(remaining_map[xi, yi])
                 if start_remaining < 1e3:
                     rem = max(rem, start_remaining - traveled_arc)
-                cam_dx = (x_world + (1.0 - 2.0 * (qy * qy + qz * qz)) * cam_x
-                          + 2.0 * (qx * qy - qz * qw) * cam_y + 2.0 * (qx * qz + qy * qw) * cam_z
-                          - target_x)
-                cam_dy = (y_world + 2.0 * (qx * qy + qz * qw) * cam_x
-                          + (1.0 - 2.0 * (qx * qx + qz * qz)) * cam_y + 2.0 * (qy * qz - qx * qw) * cam_z
-                          - target_y)
-                r2 = arrive_m * arrive_m
-                if ((cam_dx * cam_dx + cam_dy * cam_dy < r2
-                     or (x_world - target_x) ** 2 + (y_world - target_y) ** 2 < r2)
+                if ((x_world - target_x) ** 2 + (y_world - target_y) ** 2 < arrive_m * arrive_m
                         and (not has_route or rem <= band)):
                     inside_n += 1
                     if inside_n >= arrive_ticks:
@@ -631,7 +621,7 @@ def footprint_cells(grid_xy_shape, origin, resolution, center_xy, fwd_xy, front_
     return (along >= -rear_len) & (along <= front_len) & (np.abs(across) <= half_w)
 
 
-#: map_node's arrival circles at a tighter radius, and its _ARRIVE_TICKS at its 0.1 s
+#: map_node's arrival circle at a tighter radius, and its _ARRIVE_TICKS at its 0.1 s
 #: nav tick: a row counts as arriving only well inside where map_node ends the leg.
 ARRIVE_M = ROBOT_CONFIG.planned_arrival_radius
 ARRIVE_TICKS = 1
@@ -1431,14 +1421,13 @@ class PlanningNode(Node):
                            route_heading_map, target, has_route):
         """score_trajectories_by_ESDF's columns, as arrays."""
         front_len, rear_len, half_w = ROBOT_CONFIG.footprint_from_control()
-        cam = ROBOT_CONFIG.cam_offset_3d
 
         def score(trajs):
             return score_trajectories_by_ESDF(
                 np.ascontiguousarray(trajs), ESDF_map, path_dist_map, remaining_map,
                 route_heading_map, self.origin, self.resolution, ROBOT_CONFIG.safety_radius,
                 front_len, rear_len, half_w, float(target[0]), float(target[1]),
-                float(cam[0]), float(cam[1]), float(cam[2]), ARRIVE_M, ARRIVE_TICKS,
+                ARRIVE_M, ARRIVE_TICKS,
                 int(round(ARRIVE_TICK_S / self._traj_dt)), self.route_terminal_band,
                 bool(has_route), self._traj_dt,
             )
@@ -1588,7 +1577,7 @@ class PlanningNode(Node):
                 dh = _world_heading(traj[1]) - _world_heading(traj[0])
                 return float(np.arctan2(np.sin(dh), np.cos(dh)) / self._traj_dt)
 
-            # map_node's arrival circles, from the camera pose; the route at the
+            # map_node's arrival circle, from the camera pose; the route at the
             # control centre is where scoring reads it.
             here_arrived = (ROBOT_CONFIG.arrival_distance(T, target) < ARRIVE_M
                             and (not has_route or rem_here <= self.route_terminal_band))

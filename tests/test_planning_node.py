@@ -866,9 +866,8 @@ def test_the_time_cost_arrives_where_map_node_does():
 
 def test_the_time_cost_arrives_on_the_tick_map_node_does():
     """Closing on a target, the scorer's arrival lands on the first sample whose
-    camera pose is inside map_node's circles (RobotConfig.arrival_distance) at ARRIVE_M: nose
-    first, where the camera's circle leads, and tail first, where the control
-    centre's does."""
+    camera pose is inside map_node's circle (RobotConfig.arrival_distance) at ARRIVE_M,
+    nose first and tail first alike: the circle is on the control centre."""
     origin, resolution, dt = np.array([0.0, 0.0]), 0.1, 0.1
     zeros = np.zeros((50, 50))
     target = np.array([3.0, 2.5])
@@ -879,7 +878,7 @@ def test_the_time_cost_arrives_on_the_tick_map_node_does():
         arrive_t = score_trajectories_by_ESDF(
             traj, np.full((50, 50), 5.0, dtype=np.float32), zeros, zeros, zeros, origin,
             resolution, 0.1, *ROBOT_CONFIG.footprint_from_control(), target[0], target[1],
-            float(cam[0]), float(cam[1]), float(cam[2]), ARRIVE_M, 1, 1, 0.5, False, dt)[5][0]
+            ARRIVE_M, 1, 1, 0.5, False, dt)[5][0]
         c, s = np.cos(heading), np.sin(heading)
         R = np.array([[s, 0.0, c], [-c, 0.0, s], [0.0, -1.0, 0.0]])
         first = None
