@@ -78,7 +78,7 @@ class RobotConfig:
 
     @property
     def arrival_radius(self):
-        """Radius of the arrival circle (arrival_distance): two half-widths."""
+        """Radius of the two arrival circles (arrival_distance): two half-widths."""
         return 2.0 * self.half_width
 
     @property
@@ -89,15 +89,13 @@ class RobotConfig:
         return 1.5 * self.half_width
 
     def arrival_distance(self, T_camera, target_xy):
-        """XY distance from `target_xy` to the control centre, for a camera pose.
-
-        Not the camera: an arrival that hands over to a turn in place (the dock
-        facing its view) turns about the control centre, and a camera arrival leaves
-        the body up to `camera_fwd` short of the target, so the turn swings the
-        camera away from what it was taught to see."""
-        control = T_camera[:3, 3] - T_camera[:3, :3] @ self.cam_offset_3d
+        """XY distance from `target_xy` to the nearer of the two arrival circle
+        centres, the camera and the control centre, for a camera pose."""
+        camera = T_camera[:3, 3]
+        control = camera - T_camera[:3, :3] @ self.cam_offset_3d
         target = np.asarray(target_xy, dtype=float)[:2]
-        return float(np.linalg.norm(control[:2] - target))
+        return min(float(np.linalg.norm(camera[:2] - target)),
+                   float(np.linalg.norm(control[:2] - target)))
 
 
 GO2_CONFIG = RobotConfig(
