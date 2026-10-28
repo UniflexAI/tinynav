@@ -1,0 +1,41 @@
+name: Path tracking controller
+
+on:
+  pull_request:
+    paths:
+      - 'tinynav/platforms/cmd_vel_control.py'
+      - 'tinynav/platforms/path_tracking.py'
+      - 'tinynav/core/robot_specs.py'
+      - 'tests/test_*tracking.py'
+      - '.github/workflows/path-tracking.yml'
+  push:
+    paths:
+      - 'tinynav/platforms/cmd_vel_control.py'
+      - 'tinynav/platforms/path_tracking.py'
+      - 'tinynav/core/robot_specs.py'
+      - 'tests/test_*tracking.py'
+      - '.github/workflows/path-tracking.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  controller:
+    runs-on: ubuntu-22.04
+    container: ros:humble-ros-base
+    timeout-minutes: 10
+    env:
+      ROS_DOMAIN_ID: '128'
+      ROS_LOCALHOST_ONLY: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install controller dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-pip
+          python3 -m pip install numpy==1.26.1 scipy==1.15.3
+      - name: Run controller tests
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          PYTHONPATH=. python3 -m unittest discover -s tests -p 'test_*tracking.py' -v
