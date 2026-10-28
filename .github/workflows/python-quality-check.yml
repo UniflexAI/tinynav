@@ -23,4 +23,4 @@ jobs:
 
     - name: Lint with ruff
       run: |
-        uvx ruff check ./tinynav
+        uvx ruff==0.15.9 check ./tinynav
