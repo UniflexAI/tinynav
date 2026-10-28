@@ -38,4 +38,4 @@ jobs:
         shell: bash
         run: |
           source /opt/ros/humble/setup.bash
-          PYTHONPATH=. python3 -m unittest discover -s tests -p 'test_*tracking.py' -v
+          PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" python3 -m unittest discover -s tests -p 'test_*tracking.py' -v

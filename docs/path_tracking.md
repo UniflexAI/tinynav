@@ -46,7 +46,7 @@ GPU are required for these tests. In an Ubuntu 22.04 ROS 2 environment:
 sudo apt-get install ros-humble-ros-base python3-pip
 python3 -m pip install numpy==1.26.1 scipy==1.15.3
 source /opt/ros/humble/setup.bash
-PYTHONPATH=. ROS_LOCALHOST_ONLY=1 python3 -m unittest discover \
+PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}" ROS_LOCALHOST_ONLY=1 python3 -m unittest discover \
   -s tests -p 'test_*tracking.py' -v
 ```
 
