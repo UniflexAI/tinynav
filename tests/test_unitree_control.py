@@ -104,7 +104,6 @@ def _node(sport=None, gait=None):
     node.logger = _Log()
     node.sport_client = sport or _Sport()
     node.is_quadruped = True
-    node.has_switch_gait = False
     node._gait_steps = {'classic': ('ClassicWalk', lambda: node.sport_client.ClassicWalk(True)),
                         'free': ('FreeWalk', lambda: node.sport_client.FreeWalk())}
     node.walk_gait = 'classic'
@@ -338,10 +337,11 @@ class TestGaitWorker(unittest.TestCase):
         uc.GaitWorker(lambda: time.sleep(uc._SLOW_RPC_S + 0.05) or 0, log).run_once()
         self.assertTrue(log.has('warning', '[sport] ClassicWalk'))
 
-    def test_fast_reply_is_not_logged(self):
+    def test_fast_reply_is_logged_as_info(self):
         log = _Log()
         uc.GaitWorker(lambda: 0, log).run_once()
         self.assertFalse(log.has('warning', '[sport]'))
+        self.assertTrue(log.has('info', '[sport] ClassicWalk code=0'))
 
     def test_nonzero_code_is_logged_however_fast(self):
         log = _Log()

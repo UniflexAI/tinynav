@@ -27,10 +27,6 @@ import time
 # client, lowstate IDL, and stand/sit mapping.
 _QUADRUPED_ROBOT_MODELS = ('go2', 'go2w', 'b2', 'b2w')
 _SUPPORTED_ROBOT_MODELS = _QUADRUPED_ROBOT_MODELS + ('g1',)
-# SportClient.SwitchGait exists only on b2; go2's client has no such method, so
-# calling it there raises AttributeError -- inside a DDS reader callback, which is
-# fatal for the whole subscription (see ActionMessageHandler).
-_SWITCH_GAIT_ROBOT_MODELS = ('b2', 'b2w')
 # rt/sportmodestate's error_code once ClassicWalk has taken, measured on go2 (it is
 # the state machine's mode, not an error). A sit and stand from outside this node,
 # e.g. the remote, leaves 100: Move walks there, but a slow turn in place does not.
@@ -150,6 +146,8 @@ class GaitWorker:
         took = time.monotonic() - t0
         if code is not None and (code != 0 or took > _SLOW_RPC_S):
             self._log.warning(f'[sport] {self._name} code={code} took {took:.2f}s')
+        elif code is not None:
+            self._log.info(f'[sport] {self._name} code=0 took {took:.2f}s')
         if self._on_result is not None:
             self._on_result(code)
 
@@ -323,7 +321,6 @@ class Ros2UnitreeManagerNode(Node):
             raise ValueError(f"Unsupported robot model: {robot_model!r}, expected one of {_SUPPORTED_ROBOT_MODELS}")
         self.robot_model = robot_model
         self.is_quadruped = robot_model in _QUADRUPED_ROBOT_MODELS
-        self.has_switch_gait = robot_model in _SWITCH_GAIT_ROBOT_MODELS
 
         self.channel = ChannelFactoryInitialize(0, networkInterface)
         self.sport_client = _build_sport_client(robot_model)
@@ -528,8 +525,6 @@ class Ros2UnitreeManagerNode(Node):
                 steps = [('StandUp', self.sport_client.StandUp),
                          ('BalanceStand', self.sport_client.BalanceStand)]
                 steps.append(self._gait_steps[self.walk_gait])
-                if self.has_switch_gait:
-                    steps.append(('SwitchGait', lambda: self.sport_client.SwitchGait(1)))
             else:
                 steps = [('Damp', self.sport_client.Damp),
                          ('Squat2StandUp', self._squat_to_stand)]
