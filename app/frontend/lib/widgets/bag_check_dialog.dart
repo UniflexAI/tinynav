@@ -42,10 +42,16 @@ class _BagCheckDialogState extends State<BagCheckDialog> {
       _error = null;
     });
     try {
-      final response = await widget.dio.post<Map<String, dynamic>>(
+      // The response headers only arrive when the check ends, and on the web
+      // Dio counts connectTimeout until headers arrive, so both must cover the
+      // backend's 15-minute limit.
+      const timeout = Duration(minutes: 16);
+      final dio = Dio(widget.dio.options
+          .copyWith(connectTimeout: timeout, receiveTimeout: timeout))
+        ..httpClientAdapter = widget.dio.httpClientAdapter;
+      final response = await dio.post<Map<String, dynamic>>(
         '/files/bags/${Uri.encodeComponent(widget.bagName)}/check',
         cancelToken: _cancel,
-        options: Options(receiveTimeout: const Duration(minutes: 16)),
       );
       if (!mounted) return;
       final data = response.data!;

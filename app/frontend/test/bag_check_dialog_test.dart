@@ -80,7 +80,8 @@ class CheckAdapter implements HttpClientAdapter {
 }
 
 Future<void> openDialog(WidgetTester tester, CheckAdapter adapter) async {
-  final dio = Dio(BaseOptions(baseUrl: 'http://robot'))
+  final dio = Dio(BaseOptions(
+      baseUrl: 'http://robot', connectTimeout: const Duration(seconds: 5)))
     ..httpClientAdapter = adapter;
   await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -100,6 +101,9 @@ void main() {
     await openDialog(tester, adapter);
     await tester.pumpAndSettle();
     expect(adapter.request?.path, '/files/bags/bag_example/check');
+    // The web adapter times out on connectTimeout until headers arrive.
+    expect(adapter.request?.connectTimeout, const Duration(minutes: 16));
+    expect(adapter.request?.baseUrl, 'http://robot');
     expect(find.text('Needs attention'), findsOneWidget);
     expect(find.text('Sensor: Looper'), findsOneWidget);
     expect(find.text('Map building needs: Colour'), findsOneWidget);
