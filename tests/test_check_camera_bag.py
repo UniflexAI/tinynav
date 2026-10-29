@@ -160,6 +160,15 @@ class CameraBagCheckTest(unittest.TestCase):
                                    port="2-1.2")
             self.assertEqual(result["gap_correlations"], [])
 
+    def test_malformed_header_at_same_receive_time_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = fixture(directory)
+            with sqlite3.connect(path / "bag_0.db3") as db:
+                db.execute("INSERT INTO messages VALUES (1, ?, ?)", (START, b"bad"))
+            report = inspect_bag(path)
+            self.assertEqual(report["topics"][f"{CAM}/infra1/image_rect_raw"]["invalid_headers"], 1)
+            self.assertTrue(any("malformed headers" in w for w in report["warnings"]))
+
     def test_missing_static_tf(self):
         with tempfile.TemporaryDirectory() as directory:
             report = inspect_bag(fixture(directory, tf=False))

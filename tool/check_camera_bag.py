@@ -143,7 +143,7 @@ def inspect_bag(path, gap_ms=250.0, dropout_seconds=1.0, mode=None):
         warnings.append(f"Checked as {mode}, but the topics look like {detected}: {reason}")
     streams = spec["streams"] if spec else []
     for name, values in topics.items():
-        records = sorted(values.pop("records"))
+        records = sorted(values.pop("records"), key=lambda r: r[0])
         info = dict(values)
         if values["empty"]:
             warnings.append(f"{name}: {values['empty']} empty messages")
