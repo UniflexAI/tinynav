@@ -100,7 +100,7 @@ class RobotConfig:
 
 GO2_CONFIG = RobotConfig(
     name='go2',
-    front_len=0.25, rear_len=0.35, half_width=0.15,
+    front_len=0.25, rear_len=0.40, half_width=0.15,
     camera_fwd=0.30, camera_left=0.0,
     safety_radius=0.1,
     # Measured on looper 2026-09-29, in place: 0.19 rad/s does not yaw at all, 0.20 does.
