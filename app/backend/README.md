@@ -96,13 +96,21 @@ The interactive API docs are available at `http://<host>:8000/docs`.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/files/bags/{bag_name}/check` | Read-only check of a recorded bag: SQLite integrity, camera stream gaps, synchronized depth coverage, `/tf_static`. Returns `{report, text}` |
+| `POST` | `/files/bags/{bag_name}/check` | Read-only check of a recorded bag against what map building needs. Returns `{report, text}` |
 
-The check runs `tool/check_camera_bag.py --skip-usb` in its own process group,
+The check detects the sensor from the topics (`/camera/camera/vio_image` means
+Looper; stereo infrared + IMU without it means RealSense), then checks what that
+sensor's map build reads: the required topics including colour and camera info,
+stream gaps, the frames the source node synchronizes (exact stamps for Looper,
+20 ms for RealSense), colour within 20 ms of infra1 (what `build_map_node.py`
+matches to keyframes), and `/tf_static` or `/tf`.
+
+It runs `tool/check_camera_bag.py --skip-usb` in its own process group,
 one at a time (409 while another runs). Closing the request cancels it; it times
 out after 15 minutes. A 23 GB bag takes about a minute. On the robot,
-`python3 tool/check_camera_bag.py <bag_name>` gives the same report and can
-also line up stream gaps with kernel USB events from `journalctl`.
+`python3 tool/check_camera_bag.py <bag_name>` gives the same report
+(`--mode looper|realsense` overrides the detection) and can also line up
+stream gaps with kernel USB events from `journalctl`.
 
 ## File structure
 

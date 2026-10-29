@@ -75,25 +75,53 @@ class _BagCheckDialogState extends State<BagCheckDialog> {
     super.dispose();
   }
 
-  Widget _camera(String name, Map data, Map topics) {
-    final pair =
-        (data['received_depth_pair_pct'] as num?)?.toStringAsFixed(1) ?? '0';
-    final names = data['topics'] as List? ?? [];
+  static const _modeNames = {
+    'looper': 'Looper',
+    'realsense': 'RealSense',
+    'unknown': 'Unknown sensor',
+  };
+
+  static String _label(String topic) {
+    const names = {
+      'infra1/image_rect_raw': 'Infrared left',
+      'infra2/image_rect_raw': 'Infrared right',
+      'depth/image_rect_raw': 'Depth',
+      'vio_image': 'Pose',
+      'imu': 'IMU',
+      'color/image_rect_raw/compressed': 'Colour',
+      'color/image_raw': 'Colour',
+    };
+    for (final entry in names.entries) {
+      if (topic.endsWith('/${entry.key}')) return entry.value;
+    }
+    return topic;
+  }
+
+  Widget _streams(Map<String, dynamic> report) {
+    final topics = report['topics'] as Map? ?? {};
+    final missing = (report['missing'] as List? ?? []).toSet();
+    final pairing = report['pairing'] as Map?;
+    final color = report['color'] as Map?;
     final lines = <Widget>[];
     double worstGap = 0;
-    for (var i = 0; i < names.length; i++) {
-      final topic = topics[names[i]] as Map? ?? {};
-      final label = i == 0
-          ? 'Infrared'
-          : i == 1
-              ? 'Depth'
-              : 'Pose';
-      lines.add(Text('$label: ${topic['count'] ?? 0} messages'));
+    for (final name in report['streams'] as List? ?? []) {
+      final topic = topics[name] as Map? ?? {};
+      final hz = (topic['hz'] as num?)?.toStringAsFixed(1) ?? '0';
+      lines.add(Text(
+        missing.contains(name)
+            ? '${_label('$name')}: missing'
+            : '${_label('$name')}: ${topic['count'] ?? 0} messages, $hz Hz',
+        style: missing.contains(name)
+            ? TextStyle(color: Theme.of(context).colorScheme.error)
+            : null,
+      ));
       for (final gap in topic['gaps'] as List? ?? []) {
+        if (gap['boundary'] == 'whole_bag') continue;
         final duration = (gap['duration_s'] as num).toDouble();
         if (duration > worstGap) worstGap = duration;
       }
     }
+    String pct(Object? v) => (v as num?)?.toStringAsFixed(1) ?? '0';
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 6),
       child: Padding(
@@ -101,17 +129,14 @@ class _BagCheckDialogState extends State<BagCheckDialog> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-                name == 'front'
-                    ? 'Front camera'
-                    : name == 'rear'
-                        ? 'Rear camera'
-                        : name,
-                style: const TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 6),
             ...lines,
-            Text(
-                'Received depth paired: ${data['paired']}/${data['received_unique_depth']} ($pair%)'),
+            const SizedBox(height: 6),
+            if (pairing != null)
+              Text('Synchronized frames: ${pairing['paired']}/'
+                  '${pairing['base_count']} (${pct(pairing['pct'])}%)'),
+            if (color != null)
+              Text('Colour within ${color['slop_ms']} ms of infrared: '
+                  '${color['matched']}/${color['base_count']} (${pct(color['pct'])}%)'),
             Text(worstGap > 0
                 ? 'Longest missing interval: ${worstGap.toStringAsFixed(2)} s'
                 : 'No receive gap over 250 ms'),
@@ -123,10 +148,11 @@ class _BagCheckDialogState extends State<BagCheckDialog> {
 
   List<Widget> _results(Map<String, dynamic> report) {
     final warnings = report['warnings'] as List? ?? [];
-    final cameras = report['cameras'] as Map? ?? {};
-    final topics = report['topics'] as Map? ?? {};
+    final missing = report['missing'] as List? ?? [];
+    final tf = report['tf_count'] as Map? ?? {};
     final seconds = (report['duration_s'] as num).toStringAsFixed(1);
     final size = ((report['bytes'] as num) / 1e9).toStringAsFixed(2);
+    final mode = '${report['mode']}';
     return [
       Row(
         children: [
@@ -143,14 +169,27 @@ class _BagCheckDialogState extends State<BagCheckDialog> {
         ],
       ),
       const SizedBox(height: 8),
-      Text('$seconds seconds · $size GB · Database integrity passed'),
-      for (final entry in cameras.entries)
-        _camera('${entry.key}', entry.value as Map, topics),
+      Text('Sensor: ${_modeNames[mode] ?? mode}',
+          style: const TextStyle(fontWeight: FontWeight.bold)),
+      Text('${report['mode_reason'] ?? ''}',
+          style: const TextStyle(fontSize: 12, color: Colors.grey)),
       const SizedBox(height: 8),
-      Text('Static transforms: ${report['tf_static_count']} messages'),
+      Text('$seconds seconds · $size GB · Database integrity passed'),
+      if (missing.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(
+              'Map building needs: ${missing.map((t) => _label('$t')).join(', ')}',
+              style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        ),
+      if (report['streams'] is List && (report['streams'] as List).isNotEmpty)
+        _streams(report),
+      const SizedBox(height: 8),
+      Text('Static transforms: ${tf['/tf_static'] ?? 0} messages'
+          '${(tf['/tf'] ?? 0) > 0 ? ' · /tf: ${tf['/tf']} messages' : ''}'),
       const SizedBox(height: 8),
       const Text(
-          'Pairing covers received depth only. Entirely missing intervals are checked separately.'),
+          'Pairing covers received frames only. Entirely missing intervals are checked separately.'),
       if (warnings.isNotEmpty)
         ExpansionTile(
           title: Text('Warnings (${warnings.length})'),

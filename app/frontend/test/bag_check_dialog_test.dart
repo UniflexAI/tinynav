@@ -14,35 +14,44 @@ class CheckAdapter implements HttpClientAdapter {
   RequestOptions? request;
   Map<String, dynamic> body = {
     'report': {
-      'warnings': ['front: data gap'],
+      'warnings': ['/camera/camera/infra1/image_rect_raw: data gap'],
       'duration_s': 60,
       'bytes': 1000000000,
-      'tf_static_count': 2,
-      'cameras': {
-        'front': {
-          'received_depth_pair_pct': 99.4,
-          'paired': 646,
-          'received_unique_depth': 650,
-          'topics': ['/ir', '/depth', '/pose'],
-        },
-      },
+      'mode': 'looper',
+      'mode_reason': 'has /camera/camera/vio_image (Looper VIO)',
+      'missing': ['/camera/camera/color/image_rect_raw/compressed'],
+      'streams': [
+        '/camera/camera/infra1/image_rect_raw',
+        '/camera/camera/depth/image_rect_raw',
+        '/camera/camera/vio_image',
+        '/camera/camera/color/image_rect_raw/compressed',
+      ],
+      'pairing': {'paired': 646, 'base_count': 650, 'pct': 99.4},
+      'color': {'slop_ms': 20, 'matched': 0, 'base_count': 1000, 'pct': 0},
+      'tf_count': {'/tf_static': 2, '/tf': 0},
       'topics': {
-        '/ir': {
+        '/camera/camera/infra1/image_rect_raw': {
           'count': 1000,
+          'hz': 20.0,
           'gaps': [
             {'duration_s': 9.5}
           ]
         },
-        '/depth': {'count': 650, 'gaps': []},
-        '/pose': {'count': 1000, 'gaps': []},
-      },
-      'usb': {
-        'status': 'available',
-        'gap_correlations': [{}],
-        'events': [{}]
+        '/camera/camera/depth/image_rect_raw': {
+          'count': 650,
+          'hz': 12.0,
+          'gaps': []
+        },
+        '/camera/camera/vio_image': {'count': 1000, 'hz': 20.0, 'gaps': []},
+        '/camera/camera/color/image_rect_raw/compressed': {
+          'count': 0,
+          'gaps': [
+            {'duration_s': 60, 'boundary': 'whole_bag'}
+          ]
+        },
       },
     },
-    'text': 'Bag integrity passed; front data gap',
+    'text': 'Bag integrity passed; infrared data gap',
   };
 
   @override
@@ -85,17 +94,58 @@ Future<void> openDialog(WidgetTester tester, CheckAdapter adapter) async {
 }
 
 void main() {
-  testWidgets('shows received-depth coverage and missing intervals',
+  testWidgets('shows sensor, pairing, colour and missing intervals',
       (tester) async {
     final adapter = CheckAdapter();
     await openDialog(tester, adapter);
     await tester.pumpAndSettle();
     expect(adapter.request?.path, '/files/bags/bag_example/check');
     expect(find.text('Needs attention'), findsOneWidget);
-    expect(find.text('Front camera'), findsOneWidget);
+    expect(find.text('Sensor: Looper'), findsOneWidget);
+    expect(find.text('Map building needs: Colour'), findsOneWidget);
+    expect(find.text('Colour: missing'), findsOneWidget);
     expect(find.textContaining('646/650'), findsOneWidget);
+    expect(find.textContaining('0/1000'), findsOneWidget);
     expect(find.text('Longest missing interval: 9.50 s'), findsOneWidget);
     expect(find.textContaining('USB incidents'), findsNothing);
+  });
+
+  testWidgets('a clean RealSense bag reads as healthy', (tester) async {
+    final adapter = CheckAdapter()
+      ..body = {
+        'report': {
+          'warnings': [],
+          'duration_s': 44,
+          'bytes': 2000000000,
+          'mode': 'realsense',
+          'mode_reason': 'has stereo infrared and IMU, no Looper VIO',
+          'missing': [],
+          'streams': ['/camera/camera/color/image_raw'],
+          'pairing': {'paired': 1317, 'base_count': 1317, 'pct': 100},
+          'color': {
+            'slop_ms': 20,
+            'matched': 1317,
+            'base_count': 1317,
+            'pct': 100
+          },
+          'tf_count': {'/tf_static': 0, '/tf': 44},
+          'topics': {
+            '/camera/camera/color/image_raw': {
+              'count': 1317,
+              'hz': 30.0,
+              'gaps': []
+            },
+          },
+        },
+        'text': '',
+      };
+    await openDialog(tester, adapter);
+    await tester.pumpAndSettle();
+    expect(find.text('No bag anomalies found'), findsOneWidget);
+    expect(find.text('Sensor: RealSense'), findsOneWidget);
+    expect(find.text('Colour: 1317 messages, 30.0 Hz'), findsOneWidget);
+    expect(find.text('No receive gap over 250 ms'), findsOneWidget);
+    expect(find.textContaining('Map building needs'), findsNothing);
   });
 
   testWidgets('closing a running check cancels the request', (tester) async {
